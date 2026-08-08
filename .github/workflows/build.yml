@@ -44,20 +44,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        shell: cmd
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        shell: cmd
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -108,6 +99,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         shell: cmd
         env:
@@ -133,20 +127,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        shell: cmd
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        shell: cmd
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -197,6 +182,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -218,18 +206,11 @@ jobs:
           sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev cmake
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -257,6 +238,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -276,18 +260,11 @@ jobs:
         run: |
           sudo apt-get update 
           sudo apt-get install -y build-essential make qemu-user-static
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -322,6 +299,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -341,18 +321,11 @@ jobs:
         run: |
           sudo apt-get update 
           sudo apt-get install -y build-essential make qemu-user-static
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -387,6 +360,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -406,18 +382,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -443,6 +412,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -461,18 +433,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
@@ -498,6 +463,9 @@ jobs:
           name: readme-pdf
           path: emu_binaries
       - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -515,18 +483,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-      - name: Fetch latest ROM
-        if: startsWith(github.ref, 'refs/tags/r') != true
-        run: |
-          gh run download -R X16Community/x16-rom -n "ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Fetch latest release ROM
-        if: startsWith(github.ref, 'refs/tags/r')
-        run: |
-          gh run download -R X16Community/x16-rom -n "Release ROM Image" --dir latest_rom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
           cp latest_rom/*.h src/.
