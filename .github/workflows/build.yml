@@ -1,5 +1,11 @@
 name: Build Binaries
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+    # Releases are cut by pushing an r* tag; see the publish job at the end.
+    tags: ['r*']
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   README:
@@ -552,4 +558,103 @@ jobs:
         with:
           name: x16emu_wasm
           path: emu_binaries/*
+
+  # Attach the platform builds to a GitHub release.
+  #
+  # Two kinds of release come out of here:
+  #
+  #   * pushing an r* tag produces a full release, created as a DRAFT so a
+  #     human reviews and publishes it deliberately;
+  #   * pushing to the default branch refreshes a rolling "dev" prerelease, so
+  #     there is always a current build to download without it ever looking
+  #     like an official one.
+  #
+  # Until now neither existed: the workflow only uploaded workflow artifacts,
+  # and publishing meant downloading each one by hand, renaming it and
+  # uploading it to a release. That is easy to get wrong and, because artifacts
+  # expire, impossible to redo later. Asset naming reproduces exactly what has
+  # been published to date, e.g. x16emu_win64 -> x16emu_win64-r49.zip.
+  publish:
+    if: >-
+      startsWith(github.ref, 'refs/tags/r') ||
+      github.ref_name == github.event.repository.default_branch ||
+      github.event_name == 'workflow_dispatch'
+    needs:
+      # Every build, not just the ones that produce assets: a red compile means
+      # the tree is broken, and nothing broken should reach a release. That
+      # matters most for the MSVC job, which builds the Windows binaries we
+      # point people at even though it uploads nothing itself.
+      - build-win-msvc
+      - build-win-x86_64
+      - build-win-i686
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-linux-armhf
+      - build-macos-x86_64
+      - build-macos-arm64
+      - build-wasm
+    runs-on: ubuntu-22.04
+    permissions:
+      # The default token is read-only, and creating a release needs to write.
+      contents: write
+    steps:
+      - name: Work out which kind of release this is
+        id: kind
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "dev=false"                >> "$GITHUB_OUTPUT"
+            echo "name=$GITHUB_REF_NAME"    >> "$GITHUB_OUTPUT"
+          else
+            echo "dev=true"                 >> "$GITHUB_OUTPUT"
+            echo "name=dev"                 >> "$GITHUB_OUTPUT"
+          fi
+      - name: Collect the platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # Everything the builds produced, but not the README PDF, which is
+          # bundled inside each platform zip rather than published on its own.
+          pattern: x16emu_*
+      - name: Zip each platform as <artifact>-<name>.zip
+        env:
+          RELEASE_NAME: ${{ steps.kind.outputs.name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          for dir in */; do
+            name="${dir%/}"
+            (cd "$name" && zip -qr "../${name}-${RELEASE_NAME}.zip" .)
+          done
+          ls -l ./*.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_DEV: ${{ steps.kind.outputs.dev }}
+          RELEASE_NAME: ${{ steps.kind.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_DEV" = "true" ]; then
+            # Rolling prerelease: replace it wholesale so stale assets from an
+            # earlier build can never linger alongside the current ones.
+            gh release delete "$RELEASE_NAME" --yes --cleanup-tag \
+              --repo "$GITHUB_REPOSITORY" || true
+            gh release create "$RELEASE_NAME" dist/*.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Development build (${GITHUB_SHA:0:7})" \
+              --notes "Automated build of ${GITHUB_SHA}. Not an official release." \
+              --prerelease
+          elif gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-running the workflow for a tag refreshes its assets rather
+            # than failing, and leaves the release's draft state alone.
+            gh release upload "$RELEASE_NAME" dist/*.zip \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_NAME" dist/*.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_NAME" \
+              --draft \
+              --generate-notes
+          fi
 
