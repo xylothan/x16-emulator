@@ -10,15 +10,17 @@
 // * main.c: IEEE KERNAL call hooks (high level)
 
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <sys/stat.h>
-#include <dirent.h>
-#include <unistd.h>
+#include "dirent_win32.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <SDL.h>
 #include <errno.h>
@@ -30,13 +32,19 @@
 #include "utf8_encode.h"
 #include "utf8.h"
 #include "iso_8859_15.h"
-#ifdef __MINGW32__
+#if defined(__MINGW32__) || defined(_MSC_VER)
 #include <direct.h>
-// Windows just has to be different
+#ifndef _MSC_VER
+// localtime_r and friends already defined in compat.h for MSVC
 #define localtime_r(S,D) !localtime_s(D,S)
+#endif
 #include <io.h>
+#ifndef F_OK
 #define F_OK 0
+#endif
+#ifndef access
 #define access _access
+#endif
 #endif
 
 extern SDL_RWops *prg_file;
@@ -108,6 +116,14 @@ realpath(const char *path, char *resolved_path) {
 
 	return ret;
 }
+#endif
+
+// Ensure S_ISDIR and S_ISREG macros are available on MSVC
+#ifndef S_ISDIR
+#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(mode) (((mode) & _S_IFMT) == _S_IFREG)
 #endif
 
 #define u8strchr(A,B) (uint8_t *)strchr((char *)A,B)
@@ -1335,7 +1351,7 @@ cmkdir(uint8_t *dir)
 	}
 
 	free(parsed);
-#ifdef __MINGW32__
+#if defined(__MINGW32__) || defined(_MSC_VER)
 	if (_mkdir((char *)resolved))
 #else
 	if (mkdir((char *)resolved,0777))
@@ -2004,7 +2020,7 @@ MACPTR(uint16_t addr, uint16_t *c, uint8_t stream_mode)
 {
 	if (talking) {
 		int ret = 0;
-		int count = *c ?: 256;
+		int count = *c ? *c : 256;
 		uint8_t ram_bank = read6502(0, 0);
 		int i = 0;
 
@@ -2057,7 +2073,7 @@ MCIOUT(uint16_t addr, uint16_t *c, uint8_t stream_mode)
 {
 	if (listening) {
 		int ret = 0;
-		int count = *c ?: 256;
+		int count = *c ? *c : 256;
 		uint8_t ram_bank = read6502(0, 0);
 		int i = 0;
 		if (channels[channel].f && channels[channel].write) {

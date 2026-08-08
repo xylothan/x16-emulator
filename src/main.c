@@ -3,15 +3,17 @@
 // All rights reserved. License: 2-clause BSD
 
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
+#include "compat.h"
 #include <limits.h>
 #ifdef __MINGW32__
 #include <ctype.h>
@@ -989,7 +991,7 @@ main(int argc, char **argv)
 		} else if (!strcmp(argv[0], "-widescreen")) {
 			argc--;
 			argv++;
-			screen_x_scale = 4.0/3;
+			screen_x_scale = 4.0f/3.0f;
 		} else if (!strcmp(argv[0], "-fullscreen")) {
 			argc--;
 			argv++;

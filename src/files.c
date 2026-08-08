@@ -1,6 +1,8 @@
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 
 #include "files.h"
@@ -8,7 +10,7 @@
 #include <limits.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include "compat.h"
 #include <stdio.h>
 #include <SDL.h>
 #include <zlib.h>

@@ -28,6 +28,31 @@ jobs:
         with:
           name: readme-pdf
           path: artifacts/*
+  # Compile-only check that the tree still builds with MSVC. This is additive:
+  # the MinGW jobs below remain the ones that produce the released Windows
+  # binaries. MSVC and GCC disagree about which conversions are worth an error,
+  # so keeping both is what makes the Windows coverage meaningful.
+  build-win-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure
+        shell: pwsh
+        # The generator has to be named explicitly: without it CMake falls back
+        # to "NMake Makefiles", which rejects -A. Dependencies come from the
+        # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest.
+        # ENABLE_TRACE=OFF keeps this job independent of the x16-rom headers.
+        run: >
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DENABLE_FLUIDSYNTH=OFF
+          -DENABLE_TRACE=OFF
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release
   build-win-x86_64:
     needs: [README]
     runs-on: windows-2022
