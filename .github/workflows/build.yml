@@ -28,12 +28,29 @@ jobs:
         with:
           name: readme-pdf
           path: artifacts/*
-  # Compile-only check that the tree still builds with MSVC. This is additive:
-  # the MinGW jobs below remain the ones that produce the released Windows
-  # binaries. MSVC and GCC disagree about which conversions are worth an error,
-  # so keeping both is what makes the Windows coverage meaningful.
+  # Compile-only check that the tree still builds with MSVC, across every
+  # architecture Visual Studio can target. This is additive: the MinGW jobs
+  # below remain the ones that produce the released Windows binaries. MSVC and
+  # GCC disagree about which conversions are worth an error, so keeping both is
+  # what makes the Windows coverage meaningful, and the 32-bit and ARM64 legs
+  # catch pointer/size_t assumptions an x86_64-only build hides.
   build-win-msvc:
+    name: build-win-msvc-${{ matrix.arch }}
     runs-on: windows-2022
+    strategy:
+      # One architecture failing should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: x64
+            triplet: x64-windows
+          - arch: i686
+            platform: Win32
+            triplet: x86-windows
+          - arch: arm64
+            platform: ARM64
+            triplet: arm64-windows
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,8 +63,9 @@ jobs:
         # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest.
         # ENABLE_TRACE=OFF keeps this job independent of the x16-rom headers.
         run: >
-          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake -B build -G "Visual Studio 17 2022" -A ${{ matrix.platform }}
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
           -DENABLE_FLUIDSYNTH=OFF
           -DENABLE_TRACE=OFF
       - name: Build
