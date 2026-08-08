@@ -1,0 +1,58 @@
+name: Fetch ROM
+description: >-
+  Download the Commander X16 ROM image from X16Community/x16-rom. Prefers the
+  artifact built by the latest workflow run and falls back to the newest release
+  asset when that artifact is unavailable.
+
+inputs:
+  release:
+    description: Fetch the "Release ROM Image" artifact instead of the development one.
+    required: false
+    default: 'false'
+  dir:
+    description: Directory the ROM files are written to.
+    required: false
+    default: latest_rom
+  token:
+    description: Token used for the cross-repository download.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        ROM_RELEASE: ${{ inputs.release }}
+        ROM_DIR: ${{ inputs.dir }}
+      run: |
+        set -euo pipefail
+
+        if [ "$ROM_RELEASE" = "true" ]; then
+          artifact="Release ROM Image"
+        else
+          artifact="ROM Image"
+        fi
+
+        mkdir -p "$ROM_DIR"
+
+        # Workflow artifacts are retained for a limited time (90 days by
+        # default), so a run that is merely old leaves nothing to download and
+        # every job needing the ROM fails. Fall back to the newest release,
+        # whose assets never expire. The release zip has the same flat layout as
+        # the artifact (rom.bin, *.h, *.sym), so later steps are unchanged.
+        if gh run download -R X16Community/x16-rom -n "$artifact" --dir "$ROM_DIR"; then
+          echo "Using artifact '$artifact' from the latest x16-rom workflow run."
+        else
+          echo "::warning::Artifact '$artifact' unavailable (artifacts expire); falling back to the latest x16-rom release."
+          staging="$(mktemp -d)"
+          gh release download -R X16Community/x16-rom --pattern '*.zip' --dir "$staging"
+          unzip -o "$staging"/*.zip -d "$ROM_DIR"
+          rm -rf "$staging"
+        fi
+
+        if [ ! -f "$ROM_DIR/rom.bin" ]; then
+          echo "::error::rom.bin missing from $ROM_DIR after fetch."
+          ls -la "$ROM_DIR" || true
+          exit 1
+        fi
