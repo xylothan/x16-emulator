@@ -90,7 +90,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
+#include "compat.h"
 
 // 6502 / 65816 registers
 
@@ -176,7 +176,7 @@ static uint16_t getvalue(bool use16Bit) {
     return read6502(ea, bank_byte(ea));
 }
 
-static uint16_t getvalue16() {
+static uint16_t MAYBE_UNUSED getvalue16() {
     return((uint16_t)read6502(ea, bank_byte(ea)) | ((uint16_t)read6502(ea+1, wrappedBankByte(ea)) << 8));
 }
 
