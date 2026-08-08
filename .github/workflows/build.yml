@@ -580,6 +580,11 @@ jobs:
       github.ref_name == github.event.repository.default_branch ||
       github.event_name == 'workflow_dispatch'
     needs:
+      # Every build, not just the ones that produce assets: a red compile means
+      # the tree is broken, and nothing broken should reach a release. That
+      # matters most for the MSVC job, which builds the Windows binaries we
+      # point people at even though it uploads nothing itself.
+      - build-win-msvc
       - build-win-x86_64
       - build-win-i686
       - build-linux-x86_64
