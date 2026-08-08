@@ -34,49 +34,99 @@ jobs:
         with:
           name: readme-pdf
           path: artifacts/*
-  # Compile-only check that the tree still builds with MSVC, across every
-  # architecture Visual Studio can target. This is additive: the MinGW jobs
-  # below remain the ones that produce the released Windows binaries. MSVC and
-  # GCC disagree about which conversions are worth an error, so keeping both is
-  # what makes the Windows coverage meaningful, and the 32-bit and ARM64 legs
-  # catch pointer/size_t assumptions an x86_64-only build hides.
+  # The Windows builds we point people at. Everything is linked statically,
+  # including the CRT, so each package is a single self-contained x16emu.exe
+  # with no redistributable to install. The MinGW jobs below still run, and
+  # still publish, as a fallback: they keep -trace, which MSVC cannot build.
+  #
+  # Each architecture is built twice, with and without FluidSynth. The MIDI
+  # build has the runtime loader compiled in and ships libfluidsynth-3.dll
+  # beside the executable; the plain build has neither, so it does not offer
+  # the MIDI options at all, which is the honest thing to hand someone who did
+  # not ask for MIDI. The 32-bit and ARM64 legs also catch pointer and size_t
+  # assumptions that an x86_64-only build hides.
   build-win-msvc:
-    name: build-win-msvc-${{ matrix.arch }}
+    name: build-win-msvc-${{ matrix.arch }}${{ matrix.suffix }}
+    needs: [README]
     runs-on: windows-2022
     strategy:
-      # One architecture failing should not hide the state of the others.
+      # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            platform: x64
-            triplet: x64-windows
-          - arch: i686
-            platform: Win32
-            triplet: x86-windows
-          - arch: arm64
-            platform: ARM64
-            triplet: arm64-windows
+          - { arch: x86_64, platform: x64,   triplet: x64-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win64 }
+          - { arch: x86_64, platform: x64,   triplet: x64-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win64-midi }
+          - { arch: i686,   platform: Win32, triplet: x86-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win32 }
+          - { arch: i686,   platform: Win32, triplet: x86-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win32-midi }
+          - { arch: arm64,  platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
+          - { arch: arm64,  platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure
         shell: pwsh
         # The generator has to be named explicitly: without it CMake falls back
         # to "NMake Makefiles", which rejects -A. Dependencies come from the
-        # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest.
-        # ENABLE_TRACE=OFF keeps this job independent of the x16-rom headers.
+        # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest
+        # and the packaging triplets in vcpkg-triplets/.
+        #
+        # ENABLE_TRACE stays off: the generated src/rom_lst.h contains a string
+        # literal of about 17 KB, and MSVC caps string literals at 16380 bytes
+        # (C2026), so a trace-enabled build cannot compile. GCC has no such
+        # limit, so the MinGW packages below still ship -trace.
+        #
+        # FluidSynth is a manifest feature, so only the MIDI legs pay for
+        # building it.
         run: >
           cmake -B build -G "Visual Studio 17 2022" -A ${{ matrix.platform }}
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          -DENABLE_FLUIDSYNTH=OFF
+          -DVCPKG_MANIFEST_FEATURES=${{ matrix.features }}
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DENABLE_FLUIDSYNTH=${{ matrix.midi }}
           -DENABLE_TRACE=OFF
       - name: Build
         shell: pwsh
         run: cmake --build build --config Release
+      - name: Package Emulator
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force emu_binaries | Out-Null
+          Copy-Item build/Release/x16emu.exe   emu_binaries/
+          Copy-Item build/Release/makecart.exe emu_binaries/
+          Copy-Item sdcard.img.zip             emu_binaries/
+          Copy-Item latest_rom/rom.bin         emu_binaries/
+          Copy-Item latest_rom/*.sym           emu_binaries/
+          # This leg was built with FluidSynth compiled in; ship the DLL its
+          # runtime loader looks for beside the executable.
+          if ('${{ matrix.midi }}' -eq 'ON') {
+            Copy-Item build/vcpkg_installed/${{ matrix.triplet }}/bin/libfluidsynth-3.dll emu_binaries/
+          }
+          Get-ChildItem emu_binaries
+      - uses: actions/download-artifact@v4
+        with:
+          name: readme-pdf
+          path: emu_binaries
+      - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail an emulator build because it is unavailable.
+        continue-on-error: true
+        shell: pwsh
+        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: emu_binaries/*
   build-win-x86_64:
     needs: [README]
     runs-on: windows-2022
@@ -157,7 +207,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
-          name: x16emu_win64
+          name: x16emu_win64-mingw
           path: emu_binaries/*
   build-win-i686:
     needs: [README]
@@ -239,7 +289,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
-          name: x16emu_win32
+          name: x16emu_win32-mingw
           path: emu_binaries/*
   build-linux-x86_64:
     needs: [README]
@@ -581,9 +631,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
     needs:
       # Every build, not just the ones that produce assets: a red compile means
-      # the tree is broken, and nothing broken should reach a release. That
-      # matters most for the MSVC job, which builds the Windows binaries we
-      # point people at even though it uploads nothing itself.
+      # the tree is broken, and nothing broken should reach a release.
       - build-win-msvc
       - build-win-x86_64
       - build-win-i686
@@ -643,7 +691,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "Development build (${GITHUB_SHA:0:7})" \
-              --notes "Automated build of ${GITHUB_SHA}. Not an official release." \
+              --notes "Automated build of ${GITHUB_SHA}. Not an official release. Windows: x16emu_win* is a single self-contained exe; take a -midi package for MIDI support, or a -mingw one for \`-trace\`." \
               --prerelease
           elif gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Re-running the workflow for a tag refreshes its assets rather

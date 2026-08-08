@@ -39,6 +39,24 @@ Binaries & Compiling
 
 Binary releases for macOS, Windows and Linux are available on the [releases page][releases].
 
+### Which Windows download?
+
+Windows ships in three flavours. Unless you have a reason to pick otherwise, take `x16emu_win64`.
+
+| Package | What it is |
+|---|---|
+| `x16emu_win64`, `x16emu_win32`, `x16emu_win-arm64` | A single self-contained `x16emu.exe`, statically linked. Nothing to install — no SDL2, zlib or Visual C++ redistributable. Built without FluidSynth, so it offers no MIDI options at all. |
+| `…-midi` | A separate build with FluidSynth compiled in, shipped with `libfluidsynth-3.dll` for the MIDI synth (`-midicard` / `-sf2`). Take this if you want MIDI. |
+| `x16emu_win64-mingw`, `x16emu_win32-mingw` | The older MinGW build, kept as a fallback. Ships MIDI support and the `-trace` option, at the cost of around 25 DLLs alongside the executable. |
+
+Two differences worth knowing about the default builds:
+
+- The non-`-midi` packages are built without FluidSynth, so they do not offer the MIDI options
+  at all — they will not appear in `-h`, and dropping the DLL next to one will not enable them.
+- The MSVC builds have no `-trace` option. The generated ROM listing contains a string literal
+  larger than MSVC's 16 KB limit, so a trace-enabled build cannot compile. Use the `-mingw`
+  package if you need `-trace`.
+
 The emulator itself is dependent only on SDL2. However, to run the emulated system you will also need a compatible `rom.bin` ROM image. This will be
 loaded from the directory containing the emulator binary, or you can use the `-rom .../path/to/rom.bin` option.
 

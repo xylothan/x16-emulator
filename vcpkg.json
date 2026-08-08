@@ -6,5 +6,13 @@
   "dependencies": [
     "sdl2",
     "zlib"
-  ]
+  ],
+  "features": {
+    "midi": {
+      "description": "MIDI synth support. The emulator loads libfluidsynth at runtime, so this only needs to be on for builds that ship the library.",
+      "dependencies": [
+        "fluidsynth"
+      ]
+    }
+  }
 }
