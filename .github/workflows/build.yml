@@ -40,7 +40,7 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: make git mingw-w64-x86_64-toolchain mingw-w64-x86_64-libelf mingw-w64-x86_64-SDL2 mingw-w64-x86_64-fluidsynth mingw-w64-x86_64-cmake
+          install: make git mingw-w64-x86_64-toolchain mingw-w64-x86_64-SDL2 mingw-w64-x86_64-fluidsynth mingw-w64-x86_64-cmake
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -122,7 +122,7 @@ jobs:
         with:
           msystem: MINGW32
           update: true
-          install: make git mingw-w64-i686-toolchain mingw-w64-i686-libelf mingw-w64-i686-SDL2 mingw-w64-i686-fluidsynth mingw-w64-i686-cmake
+          install: make git mingw-w64-i686-toolchain mingw-w64-i686-SDL2 mingw-w64-i686-fluidsynth mingw-w64-i686-cmake
           path-type: inherit
       - uses: actions/setup-python@v5
         with:
