@@ -538,6 +538,7 @@ usage()
 	printf("\tSuppress warning emitted when encountering a Rockwell extension on the 65C02\n");
 	printf("-longpwron\n");
 	printf("\tSimulate a long press of the power button at system power-on.\n");
+#ifdef HAS_FLUIDSYNTH
 	printf("-midicard [<address>]\n");
 	printf("\tInstall a serial MIDI card at the specified address, or at $9F60 by default.\n");
 	printf("\tThe -sf2 option must be specified along with this option.\n");
@@ -548,6 +549,7 @@ usage()
 	printf("\tConnect the system MIDI input devices to the input of the first UART\n");
 	printf("\tof the emulated MIDI card. The -midicard option is required for this\n");
 	printf("\toption to have any effect.\n");
+#endif
 #ifdef TRACE
 	printf("-trace [<address>]\n");
 	printf("\tPrint instruction trace. Optionally, a trigger address\n");
