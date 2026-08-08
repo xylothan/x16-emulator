@@ -90,7 +90,15 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
+
+// getvalue16() below is currently unused but kept for completeness. GCC and
+// Clang warn about unused statics under -Wall -Werror; MSVC has no equivalent
+// attribute and rejects __attribute__ outright.
+#ifdef _MSC_VER
+#define MAYBE_UNUSED
+#else
+#define MAYBE_UNUSED __attribute__((unused))
+#endif
 
 // 6502 / 65816 registers
 
@@ -176,7 +184,7 @@ static uint16_t getvalue(bool use16Bit) {
     return read6502(ea, bank_byte(ea));
 }
 
-__attribute__((unused)) static uint16_t getvalue16() {
+static uint16_t MAYBE_UNUSED getvalue16() {
     return((uint16_t)read6502(ea, bank_byte(ea)) | ((uint16_t)read6502(ea+1, wrappedBankByte(ea)) << 8));
 }
 

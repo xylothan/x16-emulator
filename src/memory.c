@@ -5,7 +5,7 @@
 #include <sys/types.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include "compat.h"
 #include <time.h>
 #include <inttypes.h>
 #include "glue.h"

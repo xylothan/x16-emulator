@@ -1,13 +1,15 @@
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 #include "glue.h"
 #include "video.h"
 #include "cpu/fake6502.h"
 #include <SDL.h>
 #include <stdio.h>
-#include <unistd.h>
+#include "compat.h"
 
 uint32_t frames;
 uint32_t sdlTicks_base;

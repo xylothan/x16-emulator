@@ -7,3 +7,12 @@ src/x16edit_E_labels.h
 .vscode/
 .idea/
 /build
+/out
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf

@@ -3,14 +3,17 @@
 // Copyright (c) 2020 Frank van den Hoef
 // All rights reserved. License: 2-clause BSD
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 
 #include <limits.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include "compat.h"
 #include "sdcard.h"
 #include "files.h"
 

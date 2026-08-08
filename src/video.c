@@ -4,8 +4,10 @@
 // All rights reserved. License: 2-clause BSD
 
 #ifndef __APPLE__
+#ifndef _MSC_VER
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
+#endif
 #endif
 
 #include "video.h"
@@ -27,6 +29,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <time.h>
+#include "compat.h"
 
 #ifdef __EMSCRIPTEN__
 #include "emscripten.h"
