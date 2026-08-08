@@ -7,15 +7,6 @@
 
 #include <limits.h>
 
-// Portable "this may legitimately go unused" marker. GCC and Clang warn about
-// unused statics under -Wunused-function; MSVC has no equivalent attribute and
-// rejects __attribute__ outright, so it needs to expand to nothing there.
-#ifdef _MSC_VER
-#define MAYBE_UNUSED
-#else
-#define MAYBE_UNUSED __attribute__((unused))
-#endif
-
 // Ensure PATH_MAX is defined
 #ifndef PATH_MAX
 #ifdef _MAX_PATH
