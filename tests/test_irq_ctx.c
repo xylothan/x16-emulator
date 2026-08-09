@@ -249,12 +249,24 @@ main(void)
 			cpu_irq_ctx_enter(VEC_IRQ, 0x1000, sp--);
 		check(cpu_irq_depth() == CPU_IRQ_CTX_MAX + 6, "nesting can pass the array");
 
-		// All of it is abandoned -- a warm start -- and an ordinary IRQ arrives
-		// at the top of the stack.
-		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x01FD);
-		check(cpu_irq_depth() == 1,
-		      "an interrupt above them all retires every level, recorded or not");
+		// An interrupt arrives partway down, at the level frames[8] recorded.
+		// Everything from there up is gone -- the six unrecorded levels and the
+		// seven recorded ones above frames[8] -- while frames[0..7] are still
+		// live and must survive. Landing between two recorded frames is what
+		// makes this test the difference between collapsing to the deepest
+		// surviving frame and simply wiping the depth.
+		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x01F5);   // == frames[8].sp
+		check(cpu_irq_depth() == 9,
+		      "levels above the array collapse onto the deepest surviving frame");
+		check(cpu_irq_return_pc() == 0x2000, "and the new frame is the innermost");
 
+		// The frames below it really are still there.
+		cpu_irq_ctx_leave(0x01F5);
+		check(cpu_irq_depth() == 8, "leaving it uncovers the frame beneath");
+
+		// And an interrupt above everything clears the lot.
+		cpu_irq_ctx_enter(VEC_IRQ, 0x3000, 0x01FD);
+		check(cpu_irq_depth() == 1, "an interrupt above them all retires the rest");
 		cpu_irq_ctx_leave(0x01FD);
 		check(cpu_irq_depth() == 0, "so the depth comes back to zero");
 	}
@@ -360,11 +372,11 @@ main(void)
 	}
 
 	// ── Runaway nesting stays safe ──────────────────────────────────────────
-	// A BRK handler that BRKs never returns. Each entry has to sit strictly
-	// below the last to count as nested, so the retirement rule already bounds
-	// how deep this can go -- the stack pointer runs out of room. The explicit
-	// saturation in the code is there so that a signed counter can never
-	// overflow, which would be undefined behaviour rather than a wrong number.
+	// A BRK handler that BRKs never returns. Once the depth passes the array
+	// the pointer that retirement judges against is frozen, so interrupts taken
+	// below it pile up with nothing able to retire them. The saturation in the
+	// code is what stops a signed counter overflowing, which would be undefined
+	// behaviour rather than a wrong number.
 	{
 		cpu_irq_ctx_reset();
 

@@ -9,11 +9,13 @@
 // only be unwound one at a time.
 
 // Nesting beyond this is a runaway loop, and the exact number stops meaning
-// anything. This is reachable, not merely defensive: retirement can only judge
-// frames it recorded, so above CPU_IRQ_CTX_MAX it stops happening and every
-// further entry adds one. A handler that BRKs on entry would otherwise climb
-// until a signed counter overflowed, which is undefined behaviour rather than
-// merely a wrong answer.
+// anything. This is reachable, not merely defensive. Once the depth passes the
+// array, frames[] stops being written, so the pointer everything above is
+// judged against -- frames[CPU_IRQ_CTX_MAX - 1] -- is frozen. Interrupts taken
+// strictly below it therefore add a level every time with nothing able to
+// retire any of them, and they need not even keep descending. A handler that
+// BRKs on entry would climb until a signed counter overflowed, which is
+// undefined behaviour rather than merely a wrong answer.
 #define CPU_IRQ_DEPTH_MAX 0x10000
 
 struct irq_frame {
