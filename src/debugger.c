@@ -123,7 +123,34 @@ uint32_t debugCPUClocks = 0;
 
 int dumpmode          = DDUMP_RAM;
 
-struct breakpoint breakPoint = { -1, 0, -1 };         // User Break
+// Where we resumed from, so the breakpoint we are parked on does not fire again
+// the instant we continue. Cleared once the CPU has actually moved on.
+//
+// Pressing F5 never needed this: the key is read inside DEBUGGetCurrentStatus,
+// after the breakpoint test, so by the next call the CPU has already stepped
+// off the address. Anything driving execution from outside -- which is the
+// point of the execution-control functions -- changes the mode between calls
+// instead, and would otherwise re-trigger the same breakpoint forever without
+// ever advancing.
+//
+// The clock is part of the test, not just the address: `JMP *` at a breakpoint
+// never changes the PC, and an address-only guard would then suppress that
+// breakpoint permanently. Conversely the clock alone is not enough, in two
+// ways: handle_ieee_intercept() can skip an iteration without executing
+// anything, and -- the sharp one -- step6502() ticks the clock and returns
+// immediately while the CPU is parked in WAI. A breakpoint on the instruction
+// after a WAI, which is the idiomatic frame-sync placement, would otherwise
+// clear the guard every poll and buy one emulated cycle per resume.
+static int      resumeSkipPC    = -1;
+static uint8_t  resumeSkipBank  = 0;
+static uint32_t resumeSkipClock = 0;
+
+static void DEBUGArmResumeSkip(void) {
+	resumeSkipPC    = regs.pc;
+	resumeSkipBank  = regs.k;
+	resumeSkipClock = clockticks6502;
+}
+
 struct breakpoint stepBreakPoint = { -1, 0, -1 };     // Single step break.
 char cmdLine[64]= "";                                 // command line buffer
 int currentPosInLine= 0;                              // cursor position in the buffer (NOT USED _YET_)
@@ -183,7 +210,26 @@ int  DEBUGGetCurrentStatus(void) {
 		}
 	}
 
-	if ((currentMode != DMODE_STOP) && (hitBreakpoint(regs.pc, regs.k, breakPoint) || hitBreakpoint(regs.pc, regs.k, stepBreakPoint))) {       // Hit a breakpoint.
+	// debug_bp_on_arrival() also counts the hit and spends the ignore budget,
+	// so the DMODE_STOP guard is load-bearing rather than an optimisation: while
+	// halted this function is polled continuously with the PC parked on the
+	// breakpoint, and counting each poll would burn through an ignore count
+	// while the machine is standing still.
+	//
+	// The resume guard covers the other half of the same problem: having just
+	// been told to continue from a breakpoint, the PC is still sitting on it,
+	// and testing it again would stop instantly and never make progress.
+	// Cycles only count as progress when the CPU is actually running them: in
+	// WAI it is parked, ticking the clock without retiring anything.
+	const bool cpuAdvanced = (clockticks6502 != resumeSkipClock) && !waiting;
+	if (resumeSkipPC >= 0
+	    && (regs.pc != resumeSkipPC || regs.k != resumeSkipBank || cpuAdvanced)) {
+		resumeSkipPC = -1;                                      // the CPU moved on; guard done
+	}
+	const bool stopped     = (currentMode == DMODE_STOP);
+	const bool justResumed = (resumeSkipPC >= 0);
+	if (!stopped && !justResumed
+	    && (debug_bp_on_arrival(regs.pc, regs.k) || hitBreakpoint(regs.pc, regs.k, stepBreakPoint))) {       // Hit a breakpoint.
 		currentPC = regs.pc;                                    // Update current PC
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
@@ -258,7 +304,13 @@ void DEBUGFreeUI() {
 // *******************************************************************************************
 
 void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
-	breakPoint = newBreakPoint;
+	// Kept for callers that only ever wanted "the" breakpoint. There is now a
+	// table, so replace its contents rather than tracking a separate single
+	// slot that the rest of the debugger would have to check as well.
+	debug_bp_clear_all();
+	if (newBreakPoint.pc >= 0) {
+		debug_bp_add(newBreakPoint);
+	}
 }
 
 // *******************************************************************************************
@@ -276,58 +328,181 @@ void DEBUGBreakToDebugger(void) {
 
 // *******************************************************************************************
 //
+//		Execution control.
+//
+//		One implementation, driven either by the debug window's function keys or
+//		by another front end. Previously this logic lived only inside the key
+//		handler, so anything else wanting to step had to synthesise key presses
+//		-- and would drift out of step with it. Each resume re-bases the timing
+//		so the emulator does not fast-forward to "catch up" on the time spent
+//		halted.
+//
+// *******************************************************************************************
+
+static void DEBUGClearStepBreakPoint(void) {
+	stepBreakPoint.pc = -1;
+	stepBreakPoint.bank = 0;
+	stepBreakPoint.x16Bank = -1;
+}
+
+// F5 — run until break.
+//
+// One deliberate difference from before: this abandons a pending step-over
+// target, which the old F5 left armed. That target only survives at all if the
+// step-over was interrupted by something other than reaching it -- F12, in
+// practice -- and resuming afterwards would then stop at a return address the
+// user had already broken out of and said nothing more about. Continuing means
+// continuing; ask for the step again if that is what you wanted.
+void DEBUGContinue(void) {
+	DEBUGClearStepBreakPoint();
+	DEBUGArmResumeSkip();
+	currentMode = DMODE_RUN;
+	debugCPUClocks = clockticks6502;
+	timing_init();
+}
+
+void DEBUGStepInto(void) {                              // F11 — single instruction
+	DEBUGArmResumeSkip();                               // step OFF a breakpoint, not into it again
+	currentMode = DMODE_STEP;                           // runs once, then DEBUGGetCurrentStatus stops us
+	currentPC = regs.pc;
+	currentPCBank = regs.k;
+	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+	debugCPUClocks = clockticks6502;
+}
+
+void DEBUGStepOver(void) {                              // F10 — step over calls
+	// Read the opcode through the bank live for the CURRENT pc. Using the
+	// stale currentPCX16Bank (set when we last stopped) misreads the opcode
+	// once the mapped bank has changed, so a JSR could be missed or invented.
+	int x16Bank = getCurrentBank(regs.pc, regs.k);
+	int opcode = debug_read6502(regs.pc, regs.k, x16Bank);
+	if (opcode == 0x20 || opcode == 0xFC || opcode == 0x22) {   // JSR abs / JSR (abs,X) / JSL
+		stepBreakPoint.pc = (regs.pc + 3 + (opcode == 0x22)) & 0xFFFF; // JSL is 4 bytes
+		stepBreakPoint.bank = regs.k;
+		stepBreakPoint.x16Bank = x16Bank;
+		DEBUGArmResumeSkip();
+		currentMode = DMODE_RUN;
+		debugCPUClocks = clockticks6502;
+		timing_init();
+	} else {                                            // not a call — same as step into
+		DEBUGArmResumeSkip();
+		currentMode = DMODE_STEP;
+		currentPC = regs.pc;
+		currentPCBank = regs.k;
+		currentPCX16Bank = x16Bank;
+		debugCPUClocks = clockticks6502;
+	}
+}
+
+void DEBUGStepOut(void) {                               // run to the return address
+	// The return address is not necessarily on top of the stack: by the time
+	// you want to step out, the routine has usually pushed registers or locals
+	// over it. So scan upward for the first plausible return frame, keyed on
+	// the call that must have created it -- a pushed 16-bit value V is a return
+	// address if the byte at V-2 is JSR abs / JSR (abs,X), or at V-3 is JSL.
+	// (Both push return-1, so execution resumes at V+1.)
+	bool     native = regs.is65c816 && !regs.e;
+	uint32_t sp     = regs.sp;
+	uint32_t start  = native ? (sp + 1) : (0x100 + (sp & 0xFF) + 1);
+	uint32_t end    = native ? (sp + 1 + 256) : 0x200;
+
+	int     retAddr = -1;
+	uint8_t retBank = regs.k;
+	for (uint32_t a = start; a + 1 < end; a++) {
+		uint8_t  lo     = debug_read6502((uint16_t)a, 0, -1);
+		uint8_t  hi     = debug_read6502((uint16_t)(a + 1), 0, -1);
+		uint16_t pushed = (uint16_t)(lo | (hi << 8));
+
+		uint8_t o2 = debug_read6502((uint16_t)(pushed - 2), regs.k, -1);
+		if (o2 == 0x20 || o2 == 0xFC) {                 // JSR abs / JSR (abs,X)
+			retAddr = (pushed + 1) & 0xFFFF;
+			break;
+		}
+
+		// A JSL pushes the caller's program bank below the return address, so
+		// the call it came from is in THAT bank, not the one we are stopped in.
+		// Reading the opcode through regs.k would inspect whatever happens to
+		// sit at that address in the callee's bank -- which for a long call is
+		// exactly the bank that is wrong.
+		if (a + 2 < end) {
+			uint8_t callerBank = debug_read6502((uint16_t)(a + 2), 0, -1);
+			if (debug_read6502((uint16_t)(pushed - 3), callerBank, -1) == 0x22) {   // JSL
+				retAddr = (pushed + 1) & 0xFFFF;
+				retBank = callerBank;
+				break;
+			}
+		}
+	}
+
+	if (retAddr < 0) {
+		// No recognisable frame — a hand-rolled stack, or we are not inside a
+		// call at all. Single-step so the caller still makes progress.
+		DEBUGStepInto();
+		return;
+	}
+
+	stepBreakPoint.pc = retAddr;
+	stepBreakPoint.bank = retBank;
+	stepBreakPoint.x16Bank = getCurrentBank(stepBreakPoint.pc, retBank);
+	DEBUGArmResumeSkip();
+	currentMode = DMODE_RUN;
+	debugCPUClocks = clockticks6502;
+	timing_init();
+}
+
+void DEBUGPause(void) {
+	DEBUGBreakToDebugger();
+}
+
+void DEBUGRunTo(uint16_t pc, uint8_t bank) {
+	stepBreakPoint.pc = pc;
+	stepBreakPoint.bank = bank;
+	stepBreakPoint.x16Bank = getCurrentBank(pc, bank);
+	DEBUGArmResumeSkip();
+	currentMode = DMODE_RUN;
+	debugCPUClocks = clockticks6502;
+	timing_init();
+}
+
+bool DEBUGIsRunning(void) {
+	return currentMode == DMODE_RUN;
+}
+
+bool DEBUGIsPaused(void) {
+	return currentMode == DMODE_STOP;
+}
+
+
+// *******************************************************************************************
+//
 //									Handle keyboard state.
 //
 // *******************************************************************************************
 
 static void DEBUGHandleKeyEvent(SDL_Keycode key, int isShift) {
-	int opcode;
 
 	switch(key) {
 
 		case DBGKEY_STEP:      // Single step (F11 by default)
-			currentMode = DMODE_STEP;  // Runs once, then switches back.
-			currentPC = regs.pc;
-			currentPCBank = regs.k;
-			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
-			debugCPUClocks = clockticks6502;
+			if (isShift) {
+				DEBUGStepOut();
+			} else {
+				DEBUGStepInto();
+			}
 			break;
 
 		case DBGKEY_STEPOVER:  // Step over (F10 by default)
-			opcode = debug_read6502(regs.pc, regs.k, currentPCX16Bank); // What opcode is it ?
-			if (opcode == 0x20 || opcode == 0xFC || opcode == 0x22) {   // Is it JSR or JSL ?
-				stepBreakPoint.pc = regs.pc + 3 + (opcode == 0x22);  // Then break 3 / 4 on.
-				stepBreakPoint.bank = regs.k;
-				stepBreakPoint.x16Bank = getCurrentBank(regs.pc, regs.k);
-				currentMode = DMODE_RUN;                // And run.
-				debugCPUClocks = clockticks6502;
-				timing_init();
-			} else {
-				currentMode = DMODE_STEP;               // Otherwise single step.
-				currentPC = regs.pc;
-				currentPCBank = regs.k;
-				currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
-				debugCPUClocks = clockticks6502;
-			}
+			DEBUGStepOver();
 			break;
 
 		case DBGKEY_RUN:                                // F5 Runs until Break.
-			currentMode = DMODE_RUN;
-			debugCPUClocks = clockticks6502;
-			timing_init();
+			DEBUGContinue();
 			break;
 
 		case DBGKEY_SETBRK:                             // F9 Set breakpoint to displayed.
-			if (breakPoint.pc == currentPC && breakPoint.bank == currentPCBank && breakPoint.x16Bank == currentPCX16Bank) {
-				// Clear (unset) breakpoint by pressing DBGKEY_SETBRK twice
-				breakPoint.pc = -1;
-				breakPoint.bank = 0;
-				breakPoint.x16Bank = -1;
-			} else {
-				breakPoint.pc = currentPC;
-				breakPoint.bank = currentPCBank;
-				breakPoint.x16Bank = currentPCX16Bank;
-			}
+			// Now a toggle over the table rather than over one slot, so F9 adds
+			// a breakpoint without silently discarding the previous one.
+			debug_bp_toggle(currentPC, (uint8_t)currentPCBank, currentPCX16Bank);
 			break;
 
 		case DBGKEY_HOME:                               // F1 sets the display PC to the actual one.
@@ -913,20 +1088,32 @@ static int DEBUGRenderRegisters(void) {
 
 	}
 
-	if (breakPoint.pc < 0) {
+	// The panel has room for one breakpoint but there can now be several, so
+	// show the first and how many more there are rather than pretending the
+	// others do not exist.
+	if (numBreakpoints == 0) {
 		DEBUGString(dbgRenderer, DBG_DATX, yc++, "--:----", col_data);
-	} else if (breakPoint.x16Bank < 0) {
-		if (is_gen2) {
-			DEBUGNumber(DBG_DATX, yc, breakPoint.bank, 2, col_data);
-			DEBUGNumber(DBG_DATX+3, yc++, breakPoint.pc, 4, col_data);
-		} else {
-			DEBUGString(dbgRenderer, DBG_DATX, yc, "--:", col_data);
-			DEBUGNumber(DBG_DATX+3, yc++, (uint16_t)breakPoint.pc, 4, col_data);
-		}
 	} else {
-		DEBUGNumber(DBG_DATX, yc, breakPoint.x16Bank, 2, col_data);
-		DEBUGString(dbgRenderer, DBG_DATX+2, yc, ":", col_data);
-		DEBUGNumber(DBG_DATX+3, yc++, breakPoint.pc, 4, col_data);
+		const struct breakpoint *bp = &breakPoints[0];
+		if (bp->x16Bank < 0) {
+			if (is_gen2) {
+				DEBUGNumber(DBG_DATX, yc, bp->bank, 2, col_data);
+				DEBUGNumber(DBG_DATX+3, yc, bp->pc, 4, col_data);
+			} else {
+				DEBUGString(dbgRenderer, DBG_DATX, yc, "--:", col_data);
+				DEBUGNumber(DBG_DATX+3, yc, (uint16_t)bp->pc, 4, col_data);
+			}
+		} else {
+			DEBUGNumber(DBG_DATX, yc, bp->x16Bank, 2, col_data);
+			DEBUGString(dbgRenderer, DBG_DATX+2, yc, ":", col_data);
+			DEBUGNumber(DBG_DATX+3, yc, bp->pc, 4, col_data);
+		}
+		if (numBreakpoints > 1) {
+			char more[16];
+			snprintf(more, sizeof(more), "+%d", numBreakpoints - 1);
+			DEBUGString(dbgRenderer, DBG_DATX+8, yc, more, col_data);
+		}
+		yc++;
 	}
 	yc++;
 

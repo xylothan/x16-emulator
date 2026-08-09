@@ -214,6 +214,7 @@ set(X16_SOURCES
     src/dbg_info.c
     src/source_view.c
     src/code_map.c
+    src/debug_core.c
     src/javascript_interface.c
     src/joystick.c
     src/rendertext.c
@@ -394,6 +395,19 @@ if(BUILD_CODE_MAP_TEST AND NOT EMSCRIPTEN)
         src/dbg_info.c
     )
     target_include_directories(code_map_test PRIVATE src ${SDL2_INCLUDE_DIRS})
+endif()
+
+# --- Optional: breakpoint core checks ---
+# Off by default, same as above. debug_core.c reaches for only the register file,
+# the bank registers and a debug memory read, so the test supplies its own and
+# links no emulator core.
+option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
+if(BUILD_DEBUG_CORE_TEST AND NOT EMSCRIPTEN)
+    add_executable(debug_core_test
+        tests/test_debug_core.c
+        src/debug_core.c
+    )
+    target_include_directories(debug_core_test PRIVATE src)
 endif()
 
 # Build summary
