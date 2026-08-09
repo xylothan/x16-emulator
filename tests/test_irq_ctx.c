@@ -36,9 +36,9 @@ check(bool cond, const char *what)
 #define VEC_NMI 1
 #define VEC_BRK 2
 
-// Matches the limit in irq_ctx.c: past this the depth still counts, but no
-// per-frame detail is recorded.
-#define CPU_IRQ_CTX_MAX 16
+// CPU_IRQ_CTX_MAX comes from the header rather than being restated here: a
+// private copy that drifted from the real limit would leave the boundary checks
+// below passing while no longer testing the boundary.
 
 int
 main(void)
@@ -257,6 +257,92 @@ main(void)
 			cpu_irq_ctx_leave(0x01FD);
 		}
 		check(ok, "reports back whichever vector was taken");
+	}
+
+	// ── A handler deep enough to wrap the stack ─────────────────────────────
+	// The 6502 stack is one page, and it wraps. A handler that pushes enough to
+	// carry the pointer past the bottom leaves it numerically ABOVE the frame
+	// of the interrupt it is running inside. Judging "has this unwound past the
+	// frame below?" by how far the pointer moved then reads a balanced inner
+	// return as having unwound the outer handler too, and reports depth zero
+	// while that handler is still running -- the one answer a debugger must
+	// never give. Matching the recorded pointer exactly is what avoids it.
+	{
+		cpu_irq_ctx_reset();
+
+		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x0180);   // outer: frame at $0180
+		// Its handler pushes 126 bytes on top of the 3-byte frame, carrying the
+		// pointer off the bottom of page 1 and round to $01FF.
+		cpu_irq_ctx_enter(VEC_NMI, 0x3000, 0x01FF);   // inner, wrapped round
+
+		check(cpu_irq_depth() == 2, "a wrapped nested handler still counts two");
+
+		cpu_irq_ctx_leave(0x01FF);                    // balanced inner return
+		check(cpu_irq_depth() == 1,
+		      "and a balanced inner return leaves the outer one open");
+		check(cpu_in_interrupt(),
+		      "so the machine is still reported as inside an interrupt");
+
+		cpu_irq_ctx_leave(0x0180);                    // balanced outer return
+		check(cpu_irq_depth() == 0, "until the outer handler returns too");
+	}
+
+	// ── A frame abandoned without an RTI ────────────────────────────────────
+	// A BRK reaching a warm start resets the stack instead of returning, so its
+	// entry never gets a matching RTI. Later interrupts must still be tracked
+	// correctly rather than being swallowed by the stale frame, and the depth
+	// must read HIGH rather than low: too high corrects itself at the next
+	// matching return, too low claims nothing is running when something is.
+	{
+		cpu_irq_ctx_reset();
+
+		cpu_irq_ctx_enter(VEC_BRK, 0x4000, 0x01F0);   // BRK, never returns
+		// Warm start resets the stack to the top; an ordinary IRQ then arrives.
+		cpu_irq_ctx_enter(VEC_IRQ, 0x5000, 0x01FD);
+
+		cpu_irq_ctx_leave(0x01FD);                    // balanced IRQ return
+		check(cpu_irq_depth() == 1,
+		      "an abandoned frame does not swallow a later return");
+		check(cpu_irq_depth() > 0,
+		      "and leaves the depth high rather than low");
+	}
+
+	// ── The program bank is part of the return address ──────────────────────
+	// Native-mode interrupts push the program bank, and the CPU zeroes it on
+	// entry, so a handler cannot recover it. Recording only the low 16 bits
+	// would send a step-over to the right offset in the wrong bank.
+	{
+		cpu_irq_ctx_reset();
+
+		cpu_irq_ctx_enter(VEC_IRQ, 0x123456, 0x01FD);
+		check(cpu_irq_return_pc() == 0x123456,
+		      "the return address keeps its program bank");
+
+		cpu_irq_ctx_enter(VEC_NMI, 0x008000, 0x01F9);
+		check(cpu_irq_return_pc() == 0x008000,
+		      "and a bank-zero address is unchanged");
+
+		cpu_irq_ctx_leave(0x01F9);
+		check(cpu_irq_return_pc() == 0x123456,
+		      "and the outer one is restored when the inner returns");
+	}
+
+	// ── Runaway nesting stays safe ──────────────────────────────────────────
+	// A BRK handler that BRKs never returns. The depth must not be incremented
+	// without limit: overflowing a signed counter is undefined behaviour, not
+	// merely a wrong number.
+	{
+		cpu_irq_ctx_reset();
+
+		for (int i = 0; i < 200000; i++)
+			cpu_irq_ctx_enter(VEC_BRK, 0x6000, 0x01FD);
+
+		check(cpu_irq_depth() > 0, "runaway nesting still reports an interrupt");
+		check(cpu_irq_depth() <= 0x10000, "but the depth saturates rather than overflowing");
+
+		// And it comes back down again.
+		cpu_irq_ctx_reset();
+		check(cpu_irq_depth() == 0, "and a reset clears it");
 	}
 
 	if (failures) {

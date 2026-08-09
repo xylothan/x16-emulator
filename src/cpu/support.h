@@ -177,7 +177,7 @@ void interrupt6502(enum InterruptType vector) {
     // Tell the debugger an interrupt is being taken, before anything is pushed:
     // regs.pc is still the interrupted address and regs.sp is what the matching
     // RTI will restore. See cpu/irq_ctx.h.
-    cpu_irq_ctx_enter((int)vector, regs.pc, regs.sp);
+    cpu_irq_ctx_enter((int)vector, regs.pc | ((uint32_t)regs.k << 16), regs.sp);
 
     if (!regs.e) {
         push8(regs.k);
