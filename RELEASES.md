@@ -5,6 +5,18 @@
 
 ## Releases
 
+This is a fork of the [official Commander X16 emulator](https://github.com/X16Community/x16-emulator).
+
+Our releases are named `R49.nnn`, where `R49` is the official release the build tracks and `nnn`
+counts our builds on top of it. They are published on
+[this fork's releases page](https://github.com/xylothan/x16-emulator/releases), and the notes for
+each one describe what changed in that build.
+
+The notes below are the **official upstream release notes**, reproduced unchanged. They describe
+the emulator core that each `R<n>.nnn` build is based on. For what this fork adds — the graphical
+debugger, source-level debugging and the DAP server — see the
+[README](README.md#why-you-might-want-this-fork).
+
 ### Release R49 ("Pyrite")
 
 * Features/Fixes

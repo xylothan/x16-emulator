@@ -2,15 +2,87 @@
   <img src="./.gh/logo.png" />
 </p>
 
-[![Build Status](https://github.com/x16community/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/x16community/x16-emulator/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/x16community/x16-emulator)](https://github.com/x16community/x16-emulator/releases)
-[![License: BSD-Clause](https://img.shields.io/github/license/x16community/x16-emulator)](./LICENSE)
-[![Contributors](https://img.shields.io/github/contributors/x16community/x16-emulator.svg)](https://github.com/x16community/x16-emulator/graphs/contributors)
+# Commander X16 Emulator with Advanced Debugging
 
-This is an emulator for the Commander X16 computer system. It only depends on SDL2 and should compile on all modern operating systems.
+[![Build Status](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/xylothan/x16-emulator)](https://github.com/xylothan/x16-emulator/releases)
+[![License: BSD-Clause](https://img.shields.io/github/license/xylothan/x16-emulator)](./LICENSE)
+[![Contributors](https://img.shields.io/github/contributors/xylothan/x16-emulator.svg)](https://github.com/xylothan/x16-emulator/graphs/contributors)
+
+This is a fork of the [official Commander X16 emulator][upstream] built for people who write
+software for the X16 rather than just run it. It is the upstream emulator with a real debugger
+bolted on: a dockable graphical debug UI, source-level debugging from cc65 `.dbg` files, and a
+Debug Adapter Protocol server so you can drive the machine from VS Code, Visual Studio, or any
+other DAP-speaking editor.
+
+Everything the official emulator does, this does too. It tracks upstream and merges its releases.
+
+> ### ⚠️ This is experimental software
+>
+> The emulator core is upstream's and is solid, but **the debugger, the DAP server and the
+> Windows-specific changes in this fork are experimental**. Expect rough edges, and expect
+> details to change between releases.
+>
+> That said, it is not a toy — it has been used successfully to carry several real
+> Commodore 64 to X16 porting projects through to completion, which is exactly the work it was
+> built for. If you are debugging assembly on the X16 today, it will very likely save you time.
+>
+> Please report anything you find on [this fork's issue tracker][issues]. Bug reports about
+> *this fork's* features belong here, not upstream.
+
+Why you might want this fork
+----------------------------
+
+| | |
+|---|---|
+| **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints and VERA/PSG/FM/PCM inspectors. |
+| **Source-level debugging** | Point it at a cc65 `.dbg` file and step through your original `.s`/`.c` source, with labels, equates and live values. `.dbg` files auto-load, including for overlays the program `LOAD`s at runtime. |
+| **Debug from your editor** | A built-in DAP server means breakpoints, stepping, watches, memory and disassembly in VS Code, Visual Studio, or any DAP-speaking client. |
+| **Conditional breakpoints** | Break on `A == $05`, `byte[$1234] != 0`, a specific RAM bank, or the Nth hit. |
+| **Watchpoints** | Break on writes to an address or a whole range, with up to 64 of them. |
+| **Scriptable input** | Inject keystrokes, typed text and joystick state over DAP, so you can automate regression runs of your game. |
+| **VERA inspectors** | Live palette, tile, sprite, bitmap and tilemap viewers plus fully decoded VERA registers — decoded per scanline, so raster splits are visible. |
+| **65C816 / GS aware** | 24-bit bank:address memory browsing, mode-correct register widths, and the X16 virtual registers R0–R15 broken out. |
+| **Real Windows builds** | Self-contained statically linked `x16emu.exe` for x64, x86 and ARM64. No SDL2, zlib or Visual C++ redistributable to install. |
+| **The window doesn't freeze** | On Windows the emulator keeps running and painting while you drag or resize its window. |
+| **Automated releases** | Every push is built for all platforms; tagged builds are published automatically. |
+
+The debugger is documented in full under [Advanced Debugging](#advanced-debugging) below.
+
+Relationship to the official emulator
+-------------------------------------
+
+This fork exists to add debugging tooling, not to diverge from the X16 platform. It follows
+upstream closely and merges each official release.
+
+**Everything about the Commander X16 itself — the KERNAL, BASIC, VERA, the hardware, the file
+formats — is documented officially, and those docs apply here unchanged:**
+
+* [Official X16 documentation][x16docs] — the reference for the machine, its KERNAL and BASIC
+* [x16-rom][x16rom] — the KERNAL/BASIC ROM sources
+* [Official emulator][upstream] — upstream, whose release notes are reproduced in [RELEASES.md](RELEASES.md)
+* [commanderx16.com][website] and the [community forum][forum]
+
+Use the official docs for the machine. Use this README for what this fork adds on top.
+
+### Version and release numbering
+
+Releases here are named **`R49.nnn`**:
+
+* `R49` is the official Commander X16 release the build tracks, so `R49.007` is compatible with
+  everything an official R49 build is compatible with — including the R49 `rom.bin`.
+* `nnn` counts our builds on top of it, and goes up as this fork's own features land.
+
+When upstream ships R50, our releases become `R50.001` and so on. Release branches and tags use
+the same `R49.nnn` name, so a tag maps unambiguously to the upstream release it is based on.
+
+> **Match your ROM to your emulator.** An `R49.nnn` build wants an R49 `rom.bin`, which is
+> included in each release package. Older ROMs may not work with newer emulators, and vice versa.
 
 Features
 --------
+
+Inherited from the official emulator:
 
 * CPU: 65C02 and 65C816 instruction sets, selected by command line switch
 * VERA
@@ -24,6 +96,7 @@ Features
 	* PCM
 	* PSG
 	* YM2151
+	* MIDI via FluidSynth
 * Real-Time-Clock
 * NVRAM
 * System Management Controller
@@ -34,10 +107,20 @@ Features
 	* mouse
 	* gamepads
 
+Added by this fork:
+
+* Dear ImGui graphical debugger (`-imgui`)
+* Debug Adapter Protocol server for editor-based debugging (`-debugport`)
+* cc65 source-level debugging (`-dbgfile`, `-srcpath`)
+* Conditional breakpoints, hit counts and memory watchpoints
+* Statically linked MSVC builds for Windows x64/x86/ARM64
+* Non-blocking window drag and resize on Windows
+
 Binaries & Compiling
 --------------------
 
-Binary releases for macOS, Windows and Linux are available on the [releases page][releases].
+Binary releases for macOS, Windows and Linux are available on [this fork's releases page][releases].
+Looking for the official builds instead? They are [over here][upstream-releases].
 
 ### Which Windows download?
 
@@ -48,6 +131,8 @@ Windows ships in three flavours. Unless you have a reason to pick otherwise, tak
 | `x16emu_win64`, `x16emu_win32`, `x16emu_win-arm64` | A single self-contained `x16emu.exe`, statically linked. Nothing to install — no SDL2, zlib or Visual C++ redistributable. Built without FluidSynth, so it offers no MIDI options at all. |
 | `…-midi` | A separate build with FluidSynth compiled in, shipped with `libfluidsynth-3.dll` for the MIDI synth (`-midicard` / `-sf2`). Take this if you want MIDI. |
 | `x16emu_win64-mingw`, `x16emu_win32-mingw` | The older MinGW build, kept as a fallback. Ships MIDI support and the `-trace` option, at the cost of around 25 DLLs alongside the executable. |
+
+All of them include the debugger and the DAP server.
 
 Two differences worth knowing about the default builds:
 
@@ -64,32 +149,67 @@ loaded from the directory containing the emulator binary, or you can use the `-r
 
 You can build a ROM image yourself using the [build instructions][x16rom-build] in the [x16-rom] repo. The `rom.bin` included in the [_latest_ release][releases] of the emulator may also work with the HEAD of this repo, but this is not guaranteed.
 
+### Building from source
+
+The emulator depends on SDL2. The debugger and DAP server add two more requirements:
+
+* a **C++17** compiler, because Dear ImGui and the debug UI are C++ (Dear ImGui itself is
+  vendored in `src/extern/imgui/`, so there is nothing to install for it), and
+* **cJSON**, used by the DAP server — `libcjson-dev` on Debian/Ubuntu, `cjson` on Homebrew,
+  or supplied by vcpkg on Windows.
+
+Both the ImGui debugger and the DAP server are always compiled in; `-imgui` and `-debugport`
+are runtime switches, so there is nothing to enable at build time.
+
 ### macOS Build
 
-Install SDL2 using `brew install sdl2`.
+Install SDL2 using `brew install sdl2`, and cJSON using `brew install cjson`.
 
 ### Linux Build
 
 The SDL2 development package is available as a distribution package with most major versions of Linux:
-- Red Hat: `yum install SDL2-devel`
-- Debian: `apt-get install libsdl2-dev`
+- Red Hat: `yum install SDL2-devel cjson-devel`
+- Debian: `apt-get install libsdl2-dev libcjson-dev`
 
 Type `make` to build the source. The output will be `x16emu` in the current directory. Remember you will also need a `rom.bin` as described above.
 
 ### WebAssembly Build
 
-Steps for compiling WebAssembly/HTML5 can be found [here][webassembly].
+Steps for compiling WebAssembly/HTML5 can be found [here][webassembly]. The WebAssembly build does
+not include the ImGui debugger or the DAP server.
 
 ### Windows Build
 
-Currently macOS/Linux/MSYS2 is needed to build for Windows. Install mingw-w64 toolchain and mingw32 version of SDL.
-Type the following command to build the source:
+The Windows releases are built with **MSVC and CMake**, using vcpkg for dependencies and custom
+triplets in `vcpkg-triplets/` that link everything statically. That is what produces the
+self-contained `x16emu.exe` in the release packages:
+
+```
+cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_TOOLCHAIN_FILE=%VCPKG_INSTALLATION_ROOT%/scripts/buildsystems/vcpkg.cmake ^
+  -DVCPKG_OVERLAY_TRIPLETS=vcpkg-triplets ^
+  -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu ^
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+  -DENABLE_TRACE=OFF
+cmake --build build --config Release
+```
+
+Use `-A Win32` with `x86-windows-x16emu`, or `-A ARM64` with `arm64-windows-x16emu`, for the other
+architectures. Add `-DENABLE_FLUIDSYNTH=ON -DVCPKG_MANIFEST_FEATURES=midi` for a MIDI build.
+`ENABLE_TRACE` must stay off under MSVC: the generated ROM listing contains a string literal
+larger than MSVC's 16 KB limit.
+
+The output is `build\Release\x16emu.exe` and `build\Release\makecart.exe`. Remember you will also
+need a `rom.bin` as described above.
+
+Cross-compiling from macOS/Linux/MSYS2 with mingw-w64 also still works. Install the mingw-w64
+toolchain and the mingw32 version of SDL, then:
 ```
 CROSS_COMPILE_WINDOWS=1 MINGW32=/usr/x86_64-w64-mingw32 WIN_SDL2=/usr/x86_64-w64-mingw32 make
 ```
 Paths to those libraries can be changed to your installation directory if they aren't located there.
 
-The output will be `x16emu.exe` in the current directory. Remember you will also need a `rom.bin` as described above and `SDL2.dll` in SDL2's binary folder.
+The output will be `x16emu.exe` in the current directory. You will also need `SDL2.dll` from SDL2's binary folder.
 
 
 Starting
@@ -136,8 +256,11 @@ When starting `x16emu` without arguments, it will pick up the system ROM (`rom.b
 	* `S`: speed (CPU load, frame misses)
 	* `V`: video I/O reads and writes
 * `-debug [<address>]` enables the debugger. Optionally, set a breakpoint
+* `-imgui` opens the graphical Dear ImGui debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics and the three audio sources (PSG, YM2151 and PCM). Additive: independent of, and combinable with, `-debug`. See [Advanced Debugging](#advanced-debugging).
+* `-bp <address>` sets a breakpoint at `<address>` (hex). Can be repeated. Implies `-debug`.
+* `-debugport [<port>]` starts the Debug Adapter Protocol server so an IDE can attach (default port 9009). See [Remote debugging with DAP](#remote-debugging-with-dap).
 * `-dbgfile <path>` loads a cc65 `.dbg` file, so addresses can be mapped back to source files and line numbers.
-* `-srcpath <dir>` adds a directory to search for the source files a `.dbg` file names. Can be repeated. Sources are looked for at the path recorded in the `.dbg` first, then by basename in each registered directory — most recently added first, so a `-srcpath` given after `-dbgfile` takes precedence over the `.dbg`'s own directory — and finally in the current directory.
+* `-srcpath <dir>` adds a directory to search for the source files a `.dbg` file names. Can be repeated. Sources are looked for at the path recorded in the `.dbg` first, then the directory of the `.dbg`, then each `-srcpath` directory (most recently added first), then the directory of the loaded program, and finally the current directory.
 * `-dump` configure system dump (e.g. `-dump CB`):
 	* `C`: CPU registers (7 B: A,X,Y,SP,STATUS,PC)
 	* `R`: RAM (40 KiB)
@@ -418,13 +541,305 @@ BASIC programs are encoded in a tokenized form when saved. They are not simply A
 Using the KERNAL/BASIC environment
 ----------------------------------
 
-Please see the [KERNAL/BASIC documentation](https://github.com/X16Community/x16-docs/).
+Please see the official [KERNAL/BASIC documentation][x16docs].
 
 
-Debugger
---------
+Advanced Debugging
+------------------
 
-The debugger requires `-debug`.  To start the debugger, press the F12 key. Without `-debug`, the debugger is disabled and won't start.  If you wish to set an initial breakpoint you can also include the memory address, in hexadecimal, of the breakpoint after the `-debug` switch. For example `-debug 080d`.
+This is the part of the emulator that this fork exists for. There are three ways to debug, and
+they are additive — you can turn on any combination of them:
+
+| You want | Use | Start with |
+|---|---|---|
+| A graphical debugger with panels, source view and VERA inspectors | **ImGui debugger** | `-imgui` |
+| To debug from VS Code / Visual Studio / a script | **DAP server** | `-debugport` |
+| The small, keyboard-driven debugger inherited from upstream | **Classic debugger** | `-debug` |
+
+A good default for day-to-day assembly work:
+
+```
+x16emu -imgui -prg myprog.prg -run
+```
+
+A good default when your source is built with cc65:
+
+```
+x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
+```
+
+> ⚠️ The ImGui debugger and the DAP server are **experimental**. They have been used to complete
+> several real C64→X16 porting projects, but you should expect rough edges and occasional
+> changes to keys, layouts and DAP details between releases.
+
+### The ImGui debugger
+
+`-imgui` opens a second, resizable OS window titled **"Commander X16 - ImGui Debugger"**,
+960×720, placed next to the emulator window. It is available on Windows, Linux and macOS. (It is
+not available in the WebAssembly build.)
+
+It does not require `-debug`, and it does not replace the emulator window — the machine keeps
+running in its own window while you inspect it.
+
+#### Panels
+
+Every panel is dockable, closable and reopenable from the **View** menu.
+
+| Panel | What it gives you |
+|---|---|
+| **Disassembly** | Live disassembly around the PC. Hovering an operand shows the effective address and the value there. Right-click for *Run to here* and *Toggle breakpoint*. |
+| **CPU** | Registers with 65C816-aware widths, decoded status flags, and the stack with the most recent push on top. A collapsible **Virtual Regs (R0–R15)** section shows the X16 pseudo-registers at `$02`–`$21`. A collapsible **Watch** section holds your own address watches — bank-qualified, up to 16 bytes each, editable, with hex/decimal/binary tooltips. |
+| **Memory** | A hex editor with three tabs: **CPU** (the CPU map), **Banked** (browse any RAM bank at `$A000`–`$BFFF`) and **VRAM** (VERA's full 17-bit address space). Drag to select a range, search by hex bytes or ASCII with Find Next/Prev, jump to an address, and watch changed bytes flash. Right-click to *Add to watch*, *Add range to watch*, *Copy address*, *Break on write* or *Clear selection*. Edits go through the normal write path, so I/O side effects happen and watchpoints fire. |
+| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
+| **VERA** | Six tabs: **Registers** (all 32 registers `$9F20`–`$9F3F`, fields decoded), **Palette**, **Tiles**, **Sprites**, **Bitmap** and **Tilemap**. Each view decodes using the registers that actually rendered each scanline, so raster splits show up correctly rather than being flattened to the end-of-frame state. |
+| **Breakpoints** | Every breakpoint, with its condition and hit count. Enable, disable or delete individually. |
+| **Symbols** | A filterable list of every label from your `.dbg`, with live values. Right-click to *Go to*, *Toggle breakpoint* or *Run to here*. |
+| **Call Stack** | A heuristic 65xx stack unwind. Frames are named after the nearest enclosing label, so even code without debug info gets a useful name. Click a frame to jump there in both source and disassembly. |
+| **PSG** | VERA PSG voices with live register values, plus scope traces. |
+| **YM2151** | FM channel state and scope traces. |
+| **PCM** | VERA PCM state and scope traces. |
+
+While the machine is paused, the audio panels keep drawing their scope traces by projecting from
+the current register state, so you can see what a voice *would* be doing at the moment you stopped.
+
+#### Toolbar
+
+Along the top, after the menus: **Continue**, **Pause**, **Step Into**, **Step Over**,
+**Step Out** (each greyed out when it does not apply and each showing its shortcut in the
+tooltip), then the speed control, then a status readout.
+
+The speed control shows the emulated clock as a real number — `1.75MHz`, `800kHz`, or `warp` —
+rather than a percentage, coloured blue below native speed, **red above it**, and orange in warp
+mode. `-` and `+` step the speed, `1x` returns to the machine's own clock, and `Warp` removes the
+limit entirely.
+
+The status readout shows `RUNNING`/`PAUSED`, an `IRQ` marker (with nesting depth) while the PC is
+inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle and instruction counts.
+
+#### Menus
+
+* **View** — show or hide any panel.
+* **Layout** — *Reset to Default Layout* reopens everything and rebuilds the default docking arrangement.
+* **System** — *Reset* (`Ctrl+Shift+F5`, keeps your breakpoints), *Trigger IRQ*, *Trigger NMI*, and *Settings…*.
+* **Help** — the keyboard shortcut table, so you never need this README for it.
+
+**Settings…** covers interrupt following, break-on-interrupt, whether a break auto-switches you to
+the Disassembly or Source panel, memory change highlighting and its duration, holding audio while
+paused, and the global interface scale. Settings and your window layout are saved to `imgui.ini`
+and restored next run.
+
+#### Keyboard shortcuts
+
+Active when the debugger window has focus and you are not typing into a search or goto box.
+
+| Key | Action |
+|---|---|
+| `F5` | Continue (while paused) |
+| `Break` / `Pause` | Pause (while running) |
+| `F11` | Step into |
+| `Shift`+`F11` | Step out |
+| `F10` | Step over |
+| `Ctrl`+`F10` | Run to cursor |
+| `F9` | Toggle a breakpoint at the PC |
+| `Ctrl`+`Shift`+`F5` | Reset the machine, keeping breakpoints |
+| `Ctrl`+`Mouse wheel` | Zoom the font of the panel under the cursor |
+
+On macOS these are the physical `Control` and `Shift` keys, not `Command`.
+
+These work in the emulator window and are handy while debugging graphics:
+
+| Key | Action |
+|---|---|
+| `Ctrl`+`F3` | Toggle VERA layer 0 |
+| `Alt`+`F3` | Toggle VERA layer 1 |
+| `Shift`+`F3` | Toggle sprites |
+| `Shift`+`F8` | Toggle KERNAL skip |
+
+#### Breakpoints and watchpoints
+
+Set breakpoints by clicking the gutter in the Disassembly or Source panel, pressing `F9`, using a
+right-click menu, or passing `-bp <address>` on the command line. Watchpoints break on writes to
+an address or a selected range — select bytes in the Memory panel and choose *Break on write*.
+Up to 64 watchpoints can be active at once.
+
+Conditional breakpoints and hit counts are set through a DAP client; the syntax is documented
+under [Remote debugging with DAP](#remote-debugging-with-dap), and the resulting conditions and
+hit counts are visible in the Breakpoints panel.
+
+### Source-level debugging with cc65
+
+Build with debug info, and the emulator will show you your own source instead of raw disassembly.
+
+Build:
+
+```
+ca65 --debug-info -o myprog.o myprog.s
+ld65 -C myprog.cfg --dbgfile myprog.dbg -o myprog.prg myprog.o
+```
+
+Run:
+
+```
+x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
+```
+
+There are three ways a `.dbg` gets loaded:
+
+* `-dbgfile <file.dbg>` loads one explicitly at start-up.
+* A `.dbg` next to a program is auto-loaded when that program is loaded, whether via `-prg` or a
+  KERNAL `LOAD`. The rule is simply to swap the extension: `myprog.prg` → `myprog.dbg`.
+* **Any file the running program `LOAD`s at runtime** gets its matching `.dbg` merged
+  automatically. Debug info for the address range being replaced is dropped first, so the Source
+  panel follows execution into overlays and dynamically loaded modules and switches to the right
+  file as the PC crosses module boundaries. Breakpoints in an unloaded range are invalidated and
+  re-resolved when a module loads back into it. This works with or without a DAP client attached.
+
+Because a `.dbg` only records source *file names*, the emulator locates the actual `.s`/`.c` files
+by searching, in order: the path stored in the `.dbg`, the directory of the `.dbg`, each
+`-srcpath <dir>` you passed (most recent first), the directory of the loaded program, and finally
+the current directory.
+
+**Banked code is handled.** A `.dbg` does not record which RAM bank a `$A000`–`$BFFF` segment
+belongs to, so the emulator works it out at runtime by watching the actual RAM bank register, and
+filters source mapping and breakpoints by the current bank. You do not have to do anything at
+build time. In a DAP breakpoint condition you can pin a breakpoint to a bank explicitly with
+`bank == N`.
+
+### Remote debugging with DAP
+
+`-debugport [<port>]` starts a [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
+server over TCP, on port **9009** by default, so an IDE such as VS Code or Visual Studio can
+attach for source-level debugging. It speaks standard `Content-Length`-framed JSON, so any
+compliant DAP client works.
+
+```
+x16emu -debugport -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
+x16emu -debugport 4711 ...           # pick your own port
+x16emu -debugport -debug ...         # also open the classic window, so F12 can pause manually
+```
+
+The emulator runs immediately on launch; it does not auto-pause waiting for a client.
+
+A minimal VS Code attach configuration looks like this — note that the `type` value depends on
+which DAP extension you wire it up to, as no editor extension is bundled with the emulator:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to X16 Emulator",
+      "request": "attach",
+      "type": "x16",
+      "host": "localhost",
+      "port": 9009
+    }
+  ]
+}
+```
+
+#### What the server supports
+
+Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threads`, `stackTrace`,
+`scopes`, `variables`, `setVariable`, `setBreakpoints`, `setFunctionBreakpoints`,
+`setInstructionBreakpoints`, `setDataBreakpoints`, `setExceptionBreakpoints`, `breakpointLocations`,
+`continue`, `next`, `stepIn`, `stepOut`, `pause`, `goto`, `gotoTargets`, `stepInTargets`,
+`evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
+`disconnect` and `terminate`.
+
+Four scopes are exposed on every stack frame: **Registers** (including the 65C816 extras and the
+current RAM/ROM bank), **Virtual Registers** (R0–R15), **Zero Page** and **Stack**. Memory reads
+and writes use 24-bit addresses, so the high byte selects the 65C816 program bank on a GS machine.
+
+#### Conditional breakpoints
+
+Put a condition string on a breakpoint in `setBreakpoints`. Terms are joined with `&&`.
+
+* **Pin to a bank:** `bank == 2`, `bank 2`, `rombank == 3`. Decimal or `$XX`/`0xXX`.
+* **Test a value:** operands `A`, `X`, `Y`, `SP`, `P`, `byte[$ADDR]`, `word[$ADDR]`, or a bare
+  `$ADDR` (which means `byte[$ADDR]`). Operators `==`, `!=`, `<`, `<=`, `>`, `>=`.
+
+```
+A == $05
+byte[$1234] != 0
+word[$0002] >= $0100
+bank == 0 && byte[$1234] != 0
+```
+
+A `hitCondition` of `"5"` stops on the fifth hit.
+
+#### Expressions you can evaluate
+
+These work in a watch or REPL window, in addition to plain registers and addresses:
+
+| Expression | Result |
+|---|---|
+| `$C000`, `$01C000`, `0xC000` | The byte at that CPU address (24-bit; high byte is the 65C816 bank) |
+| `A`, `X`, `Y`, `SP`, `PC`, `P` | Register values, sized for the current CPU mode |
+| `regs_all` | A one-line summary of every register |
+| `vram ADDR [COUNT]` | VERA VRAM bytes, from a 17-bit hex address |
+| `vera_reg` | All 32 VERA registers |
+| `vera_line LINE` | The layer registers that actually rendered that display scanline — the way to catch a raster split |
+| `bp_add ADDR`, `bp_remove ADDR`, `bp_list`, `bp_clear` | Manage breakpoints |
+| `watch_add ADDR [LEN]`, `watch_remove ADDR`, `watch_list`, `watch_clear` | Manage write watchpoints |
+| `reset` | Reset the machine |
+
+cc65 labels and equates from a loaded `.dbg` resolve too.
+
+#### Scripting input for automated tests
+
+Three custom requests let a script drive the machine, which is what makes automated regression
+runs of a game practical:
+
+| Command | Arguments | Effect |
+|---------|-----------|--------|
+| `x16/sendKey` | `key` (SDL key name like `"Return"`/`"A"`/`"Left"`, or a numeric scancode), `action` (`"press"` (default), `"down"`, `"up"`), optional `modifiers` (array of key names held around the key) | Injects a key event through the same path as a physical key press. |
+| `x16/type` | `text` (string) | Types a string into the KERNAL keyboard buffer, like a clipboard paste. Ideal for BASIC lines and filenames; supports the `\Xnn` hex escape. |
+| `x16/joystick` | `index` (slot 0–3), `buttons` (array of `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `start`, `select`, `l`, `r`), optional `mask` (raw 16-bit active-low), `enabled` (set `false` to release the slot back to a physical controller) | Holds or releases a virtual SNES controller. Buttons not listed are released. |
+
+There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state as JSON in one call.
+
+#### x16dbg, the bundled command-line client
+
+`tools/x16dbg` is a small .NET 8 console DAP client, useful for poking at a running emulator
+without an IDE and for scripting.
+
+```
+dotnet run --project tools/x16dbg                       # interactive
+dotnet run --project tools/x16dbg -- mem 1030-1040      # one-shot
+dotnet run --project tools/x16dbg -- -host 127.0.0.1 -port 9009
+```
+
+Options are `-host <ip>` (default `127.0.0.1`), `-port <port>` (default `9009`), `-i` to force
+interactive mode, and `-h` for help. With no command it drops into an interactive prompt.
+
+Commands, in both modes: `step`/`s`, `continue`/`c`, `break`/`b`, `status`/`t`, `reset`,
+`regs`/`r`, `setreg <reg> <hexval>`, `mem <addr>-<end>` or `mem <addr> <len>`,
+`setmem <addr> <hexdata>`, and `bp add|remove|list|clear <addr>`. Addresses are hex.
+
+```
+> b
+! STOPPED (pause)
+  PC=$C1C6  A=$02 (  2)  X=$FF (255)  Y=$0A ( 10)
+  SP=$F0  P=$24 [--B-DI--]  RAM Bank=$00  ROM Bank=$00
+> bp add 080D
+> mem C000-C00F
+  C000: A9 00 85 00 A9 01 85 01 A9 00 8D 00 02 A9 00 8D  |................|
+> c
+```
+
+### The classic debugger
+
+The original upstream debugger is still here, unchanged, and is a good choice when you want
+something small and keyboard-driven.
+
+The classic debugger requires `-debug`. To start it, press the F12 key. Without `-debug`, the debugger is disabled and won't start.  If you wish to set an initial breakpoint you can also include the memory address, in hexadecimal, of the breakpoint after the `-debug` switch. For example `-debug 080d`.
+
+The debugger runs in its own separate window ("X16 Debugger"). Function/debugger
+keys are routed by keyboard focus: when the **debugger** window is focused its
+keys (F1, F5, F9, F12, navigation, etc.) drive the debugger; when the **emulator**
+window is focused all keys — function keys included — go to the emulated machine.
+So to break into a running program with F12, click the debugger window first.
 
 There are 2 panels you can control. The code panel, the top left half, and the data panel, the bottom half of the screen. You can also edit the contents of the registers PC, A, B, C, D, K, DB, X, Y, and SP.
 
@@ -456,7 +871,7 @@ The debugger keys are similar to the Microsoft Debugger shortcut keys, and work 
 | F9                | sets the breakpoint to the currently code position.                                     |
 | F10               | steps 'over' routines - if the next instruction is JSR it will break on return.         |
 | F11               | steps 'into' routines.                                                                  |
-| F12               | is used to break back into the debugger. This does not happen if you do not have -debug |
+| F12               | breaks back into the debugger (when the debugger window is focused). This does not happen if you do not have -debug |
 | PAGE UP           | scrolls memory up by page.                                                              |
 | PAGE DOWN         | scrolls memory down by page.                                                            |
 | Shift + PAGE UP   | scrolls disassembly up by 16 bytes.                                                     |
@@ -470,6 +885,26 @@ The debugger keys are similar to the Microsoft Debugger shortcut keys, and work 
 When `-debug` is selected the STP instruction (opcode $DB) will break into the debugger automatically.
 
 Keyboard routines only work when the emulator is running normally. Single stepping through keyboard code will not work at present.
+
+#### The classic Source window
+
+With `-debug`, a second window, "X16 Source", opens alongside the classic debugger. It shows the
+source file the running code was compiled from and highlights the line at the current program
+counter, updating as you step. It uses the same `.dbg` loading and source search rules described
+in [Source-level debugging with cc65](#source-level-debugging-with-cc65).
+
+Give the Source window keyboard focus to interact with it:
+
+| Key / action        | Description                                              |
+|---------------------|----------------------------------------------------------|
+| Up / Down           | scroll one line                                          |
+| Page Up / Page Down | scroll one screen                                        |
+| Home / End          | jump to the top / bottom of the file                    |
+| Mouse wheel         | scroll                                                   |
+| Left-click a line   | toggle a breakpoint on that source line                 |
+| F9                  | toggle a breakpoint on the current (highlighted) line   |
+
+Execution keys (F5/F10/F11/F12) still work while the Source window is focused.
 
 CRT File Format
 ---------------
@@ -603,12 +1038,25 @@ Since the NVRAM bank is not initialized, it is not included in the file. This ma
 Web Site
 --------
 
-[https://commanderx16.com](https://commanderx16.com)
+Commander X16: [https://commanderx16.com](https://commanderx16.com)
+
+This fork: [https://github.com/xylothan/x16-emulator](https://github.com/xylothan/x16-emulator)
 
 Forum
 -----
 
 [https://cx16forum.com/forum](https://cx16forum.com/forum/)
+
+
+Contributing
+------------
+
+Issues and pull requests for **this fork's** features — the ImGui debugger, the DAP server,
+source-level debugging, and the Windows builds — belong on [this fork's tracker][issues].
+
+Anything that is really an upstream emulator or X16 platform issue is better reported
+[upstream][upstream-issues], so the whole community benefits from the fix. We merge upstream
+releases, so fixes there land here too.
 
 
 License
@@ -617,17 +1065,28 @@ License
 Copyright (c) 2019-2023 Michael Steil &lt;mist64@mac.com&gt;, [www.pagetable.com](https://www.pagetable.com/), et al.
 All rights reserved. License: 2-clause BSD
 
+Fork additions are released under the same 2-clause BSD license. Dear ImGui is vendored in
+`src/extern/imgui/` under its own MIT license.
+
 
 Release Notes
 -------------
-See [RELEASES](RELEASES.md#releases).
+Fork releases are listed on the [releases page][releases]. The upstream release notes are in
+[RELEASES](RELEASES.md#releases).
 
 
 <!-------------------------------------------------------------------->
-[releases]: https://github.com/X16Community/x16-emulator/releases
-[webassembly]: http://github.com/X16Community/x16-emulator/blob/master/webassembly/WebAssembly.md
+[releases]: https://github.com/xylothan/x16-emulator/releases
+[issues]: https://github.com/xylothan/x16-emulator/issues
+[upstream]: https://github.com/X16Community/x16-emulator
+[upstream-releases]: https://github.com/X16Community/x16-emulator/releases
+[upstream-issues]: https://github.com/X16Community/x16-emulator/issues
+[webassembly]: https://github.com/xylothan/x16-emulator/blob/main/webassembly/WebAssembly.md
+[x16docs]: https://github.com/X16Community/x16-docs
 [x16rom-build]: https://github.com/X16Community/x16-rom#releases-and-building
 [x16rom]: https://github.com/X16Community/x16-rom
+[website]: https://commanderx16.com
+[forum]: https://cx16forum.com/forum/
 
 <!-- For PDF formatting -->
 <div class="page-break"></div>

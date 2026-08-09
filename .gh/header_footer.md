@@ -13,7 +13,7 @@ pdf_options:
       }
     </style>
     <section>
-      <div>Commander X16 Emulator (x16emu)</div>
+      <div>Commander X16 Emulator with Advanced Debugging (x16emu)</div>
     </section>
   footerTemplate: |-
     <section>
