@@ -1741,6 +1741,12 @@ emulator_step_during_move(void)
 	if (headless || emulator_stop_requested) {
 		return;
 	}
+	// Presenting can dispatch messages, which can land back here. Emulating
+	// re-entrantly would corrupt the clock accounting.
+	static bool in_step = false;
+	if (in_step) {
+		return;
+	}
 	// Leave the machine alone whenever the debugger is in play. Breakpoints are
 	// honoured by DEBUGGetCurrentStatus(), which also drives the debugger's own
 	// window and event pump and so cannot be called from inside the OS modal
@@ -1750,12 +1756,14 @@ emulator_step_during_move(void)
 		return;
 	}
 
-	// Already ahead of real time: repaint, but don't run the machine faster
-	// than it would run outside a drag.
+	// Already ahead of real time: do nothing at all. This is the common case
+	// now that a fast drag calls us on every mouse message, and it has to stay
+	// cheap -- no emulation, and no present either.
 	if (!warp_mode && timing_lead_us() > 0) {
-		video_present_no_input();
 		return;
 	}
+
+	in_step = true;
 
 	bool new_frame = false;
 	uint32_t steps = 0;
@@ -1799,8 +1807,14 @@ emulator_step_during_move(void)
 		}
 	} while (!new_frame && steps < 4000000);
 
-	video_present_no_input();
+	// Only worth presenting once the frame is actually finished; a partial
+	// frame looks no different from the one already on screen.
+	if (new_frame) {
+		video_present_no_input();
+	}
 	timing_update_no_sleep();
+
+	in_step = false;
 }
 
 void *

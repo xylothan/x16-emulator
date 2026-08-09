@@ -45,11 +45,9 @@ video_win32_subclass_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message) {
 		case WM_ENTERSIZEMOVE:
 			win32_in_modal_move = true;
-			// 10 ms is the shortest interval Windows honours (USER_TIMER_MINIMUM).
-			// Short ticks with a small slice of emulation each keep the drag
-			// responsive; one long tick per frame makes the window jerk.
-			// WM_TIMER also fires while the mouse is held still, so emulation
-			// keeps running during a stationary hold.
+			// The timer covers the case the messages below cannot: a drag that
+			// is held perfectly still still needs the machine to keep running.
+			// 10 ms is the shortest interval Windows honours.
 			SetTimer(hWnd, X16_MOVE_TIMER_ID, 10, NULL);
 			break;
 		case WM_EXITSIZEMOVE:
@@ -60,13 +58,27 @@ video_win32_subclass_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			break;
 		case WM_TIMER:
 			if (win32_in_modal_move && wParam == X16_MOVE_TIMER_ID) {
-				// Advance the emulator one frame and repaint from inside the
-				// modal loop. video_present_no_input() renders without pumping
-				// events, so there is no recursion back into this proc.
 				emulator_step_during_move();
 				return 0; // handled; don't hand our private timer to SDL
 			}
 			break;
+		// WM_TIMER is the lowest-priority message there is: Windows only
+		// synthesises it when the queue has nothing else waiting. Drag the
+		// window quickly and the queue never empties, so the timer stops firing
+		// and the machine appears to pause -- the very case this is meant to
+		// fix. Drive emulation from the messages a drag actually produces as
+		// well; between the two, the machine keeps running whether the pointer
+		// is flying or sitting still. emulator_step_during_move() paces itself,
+		// so being called far more often than 100 Hz costs almost nothing.
+		case WM_MOVING:
+		case WM_SIZING:
+		case WM_WINDOWPOSCHANGED:
+		case WM_NCMOUSEMOVE:
+		case WM_MOUSEMOVE:
+			if (win32_in_modal_move) {
+				emulator_step_during_move();
+			}
+			break; // still needs its normal handling below
 	}
 	if (video_win32_orig_wndproc) {
 		return CallWindowProcW(video_win32_orig_wndproc, hWnd, message, wParam, lParam);
