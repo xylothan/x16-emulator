@@ -394,6 +394,64 @@ is_kernal()
 			debug_read6502(0xc00b, 0, USE_CURRENT_X16_BANK) == 'T');
 }
 
+// A breakpoint address as written on the command line: a plain address, or a
+// banked one as bb:aaaa. The bare bbaaaa form upstream accepted for -debug
+// still works, so existing command lines keep meaning what they did.
+// Returns false (and complains) rather than silently arming address 0 for
+// input that is not a valid address, which is what a bare strtol() would do
+// with a typo.
+static bool
+parse_breakpoint_arg(const char *arg, struct breakpoint *out)
+{
+	char         *end = NULL;
+	unsigned long first = strtoul(arg, &end, 16);
+
+	if (end == arg) {
+		fprintf(stderr, "Not a hex address: %s\n", arg);
+		return false;
+	}
+
+	if (*end == ':') {
+		const char   *addr_str = end + 1;
+		char         *end2     = NULL;
+		unsigned long addr     = strtoul(addr_str, &end2, 16);
+		if (end2 == addr_str || *end2 != '\0' || addr > 0xFFFF || first > 0xFF) {
+			fprintf(stderr, "Not a valid banked address (expected bb:aaaa): %s\n", arg);
+			return false;
+		}
+		if (addr < 0xA000) {
+			fprintf(stderr, "$%04lX is not in a banked window, so a bank is meaningless: %s\n",
+			        addr, arg);
+			return false;
+		}
+		out->pc      = (int)addr;
+		out->bank    = 0;
+		out->x16Bank = (int)first;
+		return true;
+	}
+
+	if (*end != '\0') {
+		fprintf(stderr, "Not a hex address: %s\n", arg);
+		return false;
+	}
+
+	if (first > 0xFFFFFF) {
+		fprintf(stderr, "Address out of range: %s\n", arg);
+		return false;
+	}
+
+	if (first < 0xA000) {
+		out->pc      = (int)first;
+		out->bank    = 0;
+		out->x16Bank = -1;
+	} else {
+		out->pc      = (int)(first & 0xFFFF);
+		out->bank    = 0;
+		out->x16Bank = (int)(first >> 16);
+	}
+	return true;
+}
+
 static void
 usage()
 {
@@ -494,6 +552,11 @@ usage()
 	printf("\tSet the opacity value (0.0 for transparent, 1.0 for opaque) of the window. (default: %.1f)\n", window_opacity);
 	printf("-debug [<address>]\n");
 	printf("\tEnable debugger. Optionally, set a breakpoint\n");
+	printf("-bp <address>\n");
+	printf("\tEnable the debugger and set a breakpoint. Unlike -debug's optional\n");
+	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
+	printf("\tbefore the machine starts. Banked addresses are written bb:aaaa,\n");
+	printf("\te.g. 05:A000 for $A000 in RAM bank 5.\n");
 	printf("-dbgfile <path>\n");
 	printf("\tLoad a cc65 .dbg file, so addresses can be mapped back to source\n");
 	printf("\tfiles and line numbers. Combine with -srcpath if the sources are not\n");
@@ -898,21 +961,32 @@ main(int argc, char **argv)
 			argv++;
 			debugger_enabled = true;
 			if (argc && argv[0][0] != '-') {
-				uint32_t bpVal = (uint32_t)strtol(argv[0], NULL, 16);
+				// Adds rather than replaces, so it composes with -bp instead of
+				// depending on which came first on the command line.
 				struct breakpoint bp;
-				if (bpVal < 0xA000) {
-					bp.pc = bpVal;
-					bp.bank = 0;
-					bp.x16Bank = -1;
-				} else {
-					bp.pc = bpVal & 0xffff;
-					bp.bank = 0;
-					bp.x16Bank = bpVal >> 16;
+				if (!parse_breakpoint_arg(argv[0], &bp)) {
+					usage();
 				}
-				DEBUGSetBreakPoint(bp);
+				debug_bp_add(bp);
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-bp")) {
+			argc--;
+			argv++;
+			debugger_enabled = true;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			{
+				struct breakpoint bp;
+				if (!parse_breakpoint_arg(argv[0], &bp)) {
+					usage();
+				}
+				debug_bp_add(bp);
+			}
+			argc--;
+			argv++;
 		} else if (!strcmp(argv[0], "-dbgfile")) {
 			argc--;
 			argv++;

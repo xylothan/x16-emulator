@@ -14,13 +14,12 @@
 
 #include <SDL.h>
 
-extern int showDebugOnRender;
+// struct breakpoint and the breakpoint table itself now live in debug_core,
+// which is the part a UI-less consumer (a debug server, another front end)
+// needs and which can be tested without standing up an SDL window.
+#include "debug_core.h"
 
-struct breakpoint {
-	int pc;
-	uint8_t bank;
-	int x16Bank;
-};
+extern int showDebugOnRender;
 
 void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
@@ -28,6 +27,18 @@ int  DEBUGGetCurrentStatus(void);
 void DEBUGSetBreakPoint(struct breakpoint newBreakPoint);
 void DEBUGInitUI(SDL_Renderer *pRenderer);
 void DEBUGFreeUI();
+
+// Execution control. These mirror the debug window's F5/F10/F11 handlers, and
+// are what a debug server or an alternative front end drives instead of
+// synthesising key presses. Safe to call whether or not the window exists.
+void DEBUGContinue(void);                   // resume free-run
+void DEBUGStepInto(void);                   // one instruction, then stop
+void DEBUGStepOver(void);                   // step over JSR/JSL; else single-step
+void DEBUGStepOut(void);                    // run to the current routine's return
+void DEBUGPause(void);                      // halt now
+void DEBUGRunTo(uint16_t pc, uint8_t bank); // run until (pc,bank), then stop
+bool DEBUGIsRunning(void);
+bool DEBUGIsPaused(void);
 
 #define DBG_WIDTH 		(60)									// Char cells across
 #define DBG_HEIGHT 		(60)
