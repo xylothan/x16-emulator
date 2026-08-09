@@ -461,6 +461,46 @@ main(void)
 		      "trusts the new code once it has actually run");
 	}
 
+	// ── A width guess cannot run on past the next anchor ────────────────────
+	// PLP restores a status byte from the stack, so what it does to the M/X
+	// widths is unknowable until it runs. The estimate after it is therefore
+	// wrong, and the point of anchoring is that it stays wrong only until the
+	// next piece of live evidence -- which re-establishes both the instruction
+	// boundary and the width. This pins that self-correction.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		//   $8000: PLP        (28)        recorded with 8-bit A
+		//   $8001: LDA #$A9EA (A9 EA A9)  really 3 bytes: PLP cleared M
+		//   $8004: NOP        (EA)        recorded with 16-bit A -- the anchor
+		const uint8_t code[] = { 0x28, 0xA9, 0xEA, 0xA9, 0xEA };
+		poke(0x8000, code, sizeof(code));
+		const uint8_t st_8bit  = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		const uint8_t st_16bit = FLAG_INDEX_WIDTH;
+		regs.status = st_8bit;
+		code_map_record(0x8000, 0, 0, 0, st_8bit);
+		code_map_record(0x8004, 0, 0, 0, st_16bit);
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+
+		// The guessed line is reported as a guess, so a UI can say so.
+		check(n >= 2 && lines[0].recorded, "reports the anchored line as recorded");
+		check(n >= 2 && !lines[1].recorded,
+		      "reports a line decoded from a guessed width as unrecorded");
+
+		// And the guess does not run on: the anchor at $8004 is reached rather
+		// than stepped over, so decoding is right again from there.
+		check(n == 4 && lines[3].addr == 0x8004,
+		      "re-syncs onto the next anchor after a bad width guess");
+		check(n == 4 && lines[3].recorded && lines[3].status == st_16bit,
+		      "recovers the real width from the anchor it landed on");
+
+		regs.is65c816 = false;
+	}
 	// ── Degenerate input ────────────────────────────────────────────────────
 	{
 		reset_all();

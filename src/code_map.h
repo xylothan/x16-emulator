@@ -18,12 +18,18 @@
 // A decode is never allowed to swallow a recorded start, so an over-wide guess
 // is corrected at the next piece of hard evidence rather than drifting on.
 //
-// WHAT THIS DOES NOT DO, so callers know what they are getting:
-//   - Where no coverage exists the 65C816 register widths are only estimated,
-//     from a deliberately small model of the opcodes that change them (CLC, SEC,
-//     REP, SEP, XCE). A width change made by PLP, RTI or an interrupt is not
-//     followed, so a gap between anchors can still be decoded at the wrong
-//     width. Recorded status always wins where it exists.
+// WHERE THE WIDTHS ARE STILL A GUESS, so callers know what they are getting:
+// only five instructions change the 65C816 register widths -- REP, SEP, XCE,
+// PLP and RTI. The first three are modelled exactly. The last two restore a
+// status byte pulled off the stack, so what they will do cannot be known until
+// they actually run; no amount of static analysis recovers it.
+//
+// This costs nothing in practice unless all of the following hold at once: the
+// machine is a 65C816 in native mode (in emulation mode the widths are forced
+// to 8-bit and always right), the code has never executed, and a PLP or RTI
+// sits between the last recorded anchor and the line being drawn. Every line
+// this could affect already reports `recorded = false`, and the next anchor
+// re-syncs both the boundary and the width, so a wrong guess cannot run on.
 //
 // Anchors do not outlive the code they describe: each one stores the opcode byte
 // that was executing, and is ignored once memory no longer matches. That covers

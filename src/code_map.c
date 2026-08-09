@@ -265,9 +265,16 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 }
 
 // Predict the implied status of the NEXT instruction from the current opcode.
-// Mirrors the intent of debugger.c's DEBUGRenderCode but with correct opcodes
-// and real fall-through control. Only used to fill gaps where live coverage is
-// missing; recorded status always takes precedence over this estimate.
+// Only used to fill gaps where live coverage is missing; recorded status always
+// takes precedence over this estimate.
+//
+// Just five instructions change the register widths -- REP, SEP, XCE, PLP and
+// RTI -- and the first three are handled exactly here (CLC/SEC are tracked only
+// because XCE swaps carry with the emulation flag). PLP and RTI restore a
+// status byte from the stack, which is unknowable until they run, so this
+// deliberately leaves the estimate alone for them rather than inventing a
+// value: the guess stays wrong only until the next recorded anchor, which
+// re-establishes both the boundary and the width.
 static uint8_t
 cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8_t *e_inout)
 {
