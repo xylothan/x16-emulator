@@ -317,6 +317,39 @@ video_reset()
 	pcm_reset();
 }
 
+// Repaint the emulator window straight from the last rendered frame. On
+// Windows a window drag/resize spins the OS in a modal message loop that
+// blocks our main loop, so no new frames are produced; without this the
+// window freezes or tears while being moved. Registered as an SDL event
+// watch, this fires synchronously from inside that modal loop and keeps the
+// last good frame on screen. (The matching timing re-base in timing.c stops
+// the post-drag fast-forward.)
+static int SDLCALL
+video_move_resize_watch(void *userdata, SDL_Event *event)
+{
+	(void)userdata;
+	static bool in_watch = false; // guard against present -> pump -> watch recursion
+	if (in_watch) {
+		return 1;
+	}
+	if (event->type == SDL_WINDOWEVENT && window && renderer && sdlTexture &&
+	    event->window.windowID == SDL_GetWindowID(window)) {
+		switch (event->window.event) {
+			case SDL_WINDOWEVENT_MOVED:
+			case SDL_WINDOWEVENT_RESIZED:
+			case SDL_WINDOWEVENT_SIZE_CHANGED:
+			case SDL_WINDOWEVENT_EXPOSED:
+				in_watch = true;
+				SDL_RenderClear(renderer);
+				SDL_RenderCopy(renderer, sdlTexture, NULL, NULL);
+				SDL_RenderPresent(renderer);
+				in_watch = false;
+				break;
+		}
+	}
+	return 1; // leave the event in the queue for normal handling
+}
+
 bool
 video_init(int window_scale, float screen_x_scale, char *quality, bool fullscreen, float opacity)
 {
@@ -342,6 +375,9 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 									SDL_TEXTUREACCESS_STREAMING,
 									SCREEN_WIDTH, SCREEN_HEIGHT);
 
+	// Keep the window painted while the OS holds us in a modal move/resize loop.
+	SDL_AddEventWatch(video_move_resize_watch, NULL);
+
 	SDL_SetWindowTitle(window, WINDOW_TITLE);
 	SDL_SetWindowIcon(window, CommanderX16Icon());
 	if (fullscreen) {
@@ -362,6 +398,10 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 #ifdef _WIN32
 	extern void video_win32_set_rounded_corners(SDL_Window *window);
 	video_win32_set_rounded_corners(window);
+	// Subclass the window proc so emulation keeps running during a drag; see
+	// video_win32.c for why the SDL message hook is not enough.
+	extern void video_win32_install_move_hook(SDL_Window *window);
+	video_win32_install_move_hook(window);
 #endif
 
 	if (record_gif != RECORD_GIF_DISABLED) {
@@ -1338,13 +1378,12 @@ video_save(SDL_RWops *f)
 	SDL_RWwrite(f, &sprite_data[0], sizeof(uint8_t), sizeof(sprite_data));
 }
 
-bool
-video_update()
+// Render the current framebuffer and present it. Shared by video_update() and
+// video_present_no_input(); deliberately does not touch the SDL event queue, so
+// it is safe to call from inside the OS modal move/resize loop.
+static void
+video_render_all(void)
 {
-	static bool cmd_down = false;
-	static bool alt_down = false;
-	bool mouse_changed = false;
-
 	// for activity LED, overlay red 8x4 square into top right of framebuffer
 	// for progressive modes, draw LED only on even scanlines
 	for (int y = 0; y < 4; y+=1+!!((reg_composer[0] & 0x0b) > 0x09)) {
@@ -1381,11 +1420,39 @@ video_update()
 
 	if (debugger_enabled && showDebugOnRender != 0) {
 		DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
-		SDL_RenderPresent(renderer);
-		return true;
 	}
 
 	SDL_RenderPresent(renderer);
+}
+
+// Present the current frame without pumping the event queue. Called from the
+// Windows modal move/resize loop, which owns the message queue for the duration
+// of a drag; polling events from there would re-enter SDL's own dispatch.
+void
+video_present_no_input(void)
+{
+	if (renderer == NULL || sdlTexture == NULL) {
+		return;
+	}
+	video_render_all();
+}
+
+bool
+video_update()
+{
+	static bool cmd_down = false;
+	static bool alt_down = false;
+	bool mouse_changed = false;
+
+	// The debug overlay path historically skipped input handling entirely; the
+	// debugger owns the keyboard while it is on screen.
+	bool debug_overlay = (debugger_enabled && showDebugOnRender != 0);
+
+	video_render_all();
+
+	if (debug_overlay) {
+		return true;
+	}
 
 	SDL_Event event;
 	while (SDL_PollEvent(&event)) {
@@ -1548,6 +1615,11 @@ video_end()
 
 	is_fullscreen = false;
 	SDL_SetWindowFullscreen(window, 0);
+	SDL_DelEventWatch(video_move_resize_watch, NULL);
+#ifdef _WIN32
+	extern void video_win32_remove_move_hook(SDL_Window *window);
+	video_win32_remove_move_hook(window);
+#endif
 	SDL_DestroyRenderer(renderer);
 	SDL_DestroyWindow(window);
 }

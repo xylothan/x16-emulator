@@ -94,6 +94,8 @@ extern void machine_toggle_warp();
 extern void init_audio();
 extern void main_shutdown();
 
+extern void emulator_step_during_move(void);
+
 extern bool video_is_tilemap_address(int addr);
 extern bool video_is_tiledata_address(int addr);
 extern bool video_is_special_address(int addr);
