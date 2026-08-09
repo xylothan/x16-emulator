@@ -87,6 +87,7 @@
  *****************************************************/
 
 #include "registers.h"
+#include "irq_ctx.h"
 
 #include <stdio.h>
 #include <stdint.h>

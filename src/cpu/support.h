@@ -138,6 +138,7 @@ uint8_t pull8() {
 }
 
 void reset6502(bool c816) {
+    cpu_irq_ctx_reset();   // any handler in flight is abandoned by a reset
     regs.pc = (uint16_t)read6502(0xFFFC, 0) | ((uint16_t)read6502(0xFFFD, 0) << 8);
     regs.c = 0;
     regs.x = 0;
@@ -173,6 +174,11 @@ enum InterruptType {
 };
 
 void interrupt6502(enum InterruptType vector) {
+    // Tell the debugger an interrupt is being taken, before anything is pushed:
+    // regs.pc is still the interrupted address and regs.sp is what the matching
+    // RTI will restore. See cpu/irq_ctx.h.
+    cpu_irq_ctx_enter((int)vector, regs.pc, regs.sp);
+
     if (!regs.e) {
         push8(regs.k);
     }
