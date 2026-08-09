@@ -213,6 +213,7 @@ set(X16_SOURCES
     src/debugger.c
     src/dbg_info.c
     src/source_view.c
+    src/code_map.c
     src/javascript_interface.c
     src/joystick.c
     src/rendertext.c
@@ -377,6 +378,22 @@ if(BUILD_DBG_INFO_TEST AND NOT EMSCRIPTEN)
         src/dbg_info.c
     )
     target_include_directories(dbg_info_test PRIVATE src)
+endif()
+
+# --- Optional: anchored disassembler checks ---
+# Off by default, same as above. code_map.c leans on only disasm(), dbg_info and
+# two core symbols, so the test supplies its own memory and register file rather
+# than linking the emulator core. disasm.c still includes SDL headers, hence the
+# SDL include directories.
+option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
+if(BUILD_CODE_MAP_TEST AND NOT EMSCRIPTEN)
+    add_executable(code_map_test
+        tests/test_code_map.c
+        src/code_map.c
+        src/disasm.c
+        src/dbg_info.c
+    )
+    target_include_directories(code_map_test PRIVATE src ${SDL2_INCLUDE_DIRS})
 endif()
 
 # Build summary

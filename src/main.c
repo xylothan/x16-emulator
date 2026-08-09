@@ -36,6 +36,7 @@
 #include "debugger.h"
 #include "dbg_info.h"
 #include "source_view.h"
+#include "code_map.h"
 #include "utf8.h"
 #include "iso_8859_15.h"
 #include "joystick.h"
@@ -349,6 +350,7 @@ machine_reset()
 	mouse_state_init();
 	reset6502(regs.is65c816);
 	midi_serial_init();
+	code_map_reset();  // discard stale disassembly anchors so post-reset code re-aligns
 }
 
 void
@@ -1761,6 +1763,24 @@ static bool emulator_stop_requested = false;
 // in time simply continues on the next tick.
 #define MOVE_SLICE_BUDGET_MS 6
 
+// Record the instruction about to execute into the disassembly code map. Call
+// immediately before step6502() at every execution site so coverage of real
+// instruction starts (and the M/X/E flag state that fixes 65C816 operand
+// widths) is complete. The emulation-mode width bits are folded into the stored
+// status so it can be fed straight into disasm()'s implied_status.
+static inline void
+code_map_record_current(void)
+{
+	uint8_t status = regs.status;
+	// step6502() forces 8-bit memory/index widths whenever the emulation flag
+	// is set (true for the 65C02 always, and the 65C816 in emulation mode), so
+	// mirror that here — otherwise a record taken just after a PLP/RTI that
+	// pulled the width bits clear would disassemble past addresses too wide.
+	if (regs.e)
+		status |= (uint8_t)(FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH);
+	code_map_record(regs.pc, regs.k, memory_get_ram_bank(), memory_get_rom_bank(), status);
+}
+
 // Advance the emulator from inside the OS modal window move/resize loop (see
 // video_win32.c). That loop blocks emulator_loop() entirely, so without this
 // the machine would freeze while the window is dragged.
@@ -1990,6 +2010,9 @@ emulator_loop(void *param)
 
 		instruction_counter += waiting ^ 0x1;
 
+		if (debugger_enabled && !waiting) {
+			code_map_record_current();
+		}
 		step6502();
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
