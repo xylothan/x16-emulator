@@ -2,23 +2,20 @@
   <img src="./.gh/logo.png" />
 </p>
 
-# X16Emu AD&D — the Advanced Disassembler and Debugger for the Commander X16
+# X16Emu ADD — the Advanced Disassembler and Debugger for the Commander X16
 
 [![Build Status](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/xylothan/x16-emulator)](https://github.com/xylothan/x16-emulator/releases)
 [![License: BSD-Clause](https://img.shields.io/github/license/xylothan/x16-emulator)](./LICENSE)
 [![Contributors](https://img.shields.io/github/contributors/xylothan/x16-emulator.svg)](https://github.com/xylothan/x16-emulator/graphs/contributors)
 
-**X16Emu AD&D** is a fork of the [official Commander X16 emulator][upstream] built for people who
-write software for the X16 rather than just run it. It is the upstream emulator with a real
-debugger bolted on: a dockable graphical debug UI, source-level debugging from cc65 `.dbg` files,
-and a Debug Adapter Protocol server so the machine can be driven from VS Code, Visual Studio, or
-any other DAP-speaking editor.
+**X16Emu ADD** — the **A**dvanced **D**isassembler and **D**ebugger — is a fork of the
+[official Commander X16 emulator][upstream] built for people who write software for the X16
+rather than just run it. It is the upstream emulator with a real debugger bolted on: a dockable
+graphical debug UI, source-level debugging from cc65 `.dbg` files, and a Debug Adapter Protocol
+server so the machine can be driven from VS Code, Visual Studio, or any other DAP-speaking editor.
 
-Yes, the name is a joke. Rolling for initiative against a stuck raster interrupt is, however,
-a genuinely accurate description of 6502 debugging.
-
-Everything the official emulator does, AD&D does too. It tracks upstream and merges its releases.
+Everything the official emulator does, ADD does too. It tracks upstream and merges its releases.
 
 > ### ⚠️ This is experimental software
 >
@@ -30,10 +27,10 @@ Everything the official emulator does, AD&D does too. It tracks upstream and mer
 > Commodore 64 to X16 porting projects through to completion, which is exactly the work it was
 > built for. Anyone debugging assembly on the X16 today will very likely save time with it.
 >
-> Please report anything you find on the [X16Emu AD&D issue tracker][issues]. Bug reports about
-> AD&D's own features belong here, not upstream.
+> Please report anything you find on the [X16Emu ADD issue tracker][issues]. Bug reports about
+> ADD's own features belong here, not upstream.
 
-Why X16Emu AD&D
+Why X16Emu ADD
 ---------------
 
 | | |
@@ -55,7 +52,7 @@ The debugger is documented in full under [Advanced Debugging](#advanced-debuggin
 Relationship to the official emulator
 -------------------------------------
 
-AD&D exists to add debugging tooling, not to diverge from the X16 platform. It follows upstream
+ADD exists to add debugging tooling, not to diverge from the X16 platform. It follows upstream
 closely and merges each official release.
 **Everything about the Commander X16 itself — the KERNAL, BASIC, VERA, the hardware, the file
 formats — is documented officially, and those docs apply here unchanged:**
@@ -65,7 +62,7 @@ formats — is documented officially, and those docs apply here unchanged:**
 * [Official emulator][upstream] — upstream, whose release notes are reproduced in [RELEASES.md](RELEASES.md)
 * [commanderx16.com][website] and the [community forum][forum]
 
-Use the official docs for the machine. Use this README for what AD&D adds on top.
+Use the official docs for the machine. Use this README for what ADD adds on top.
 
 ### Version and release numbering
 
@@ -73,9 +70,9 @@ Releases are named **`R49.nnn`**:
 
 * `R49` is the official Commander X16 release the build tracks, so `R49.007` is compatible with
   everything an official R49 build is compatible with — including the R49 `rom.bin`.
-* `nnn` counts the AD&D builds on top of it, and goes up as AD&D's own features land.
+* `nnn` counts the ADD builds on top of it, and goes up as ADD's own features land.
 
-When upstream ships R50, AD&D releases become `R50.001` and so on. Release branches and tags use
+When upstream ships R50, ADD releases become `R50.001` and so on. Release branches and tags use
 the same `R49.nnn` name, so a tag maps unambiguously to the upstream release it is based on.
 
 > **Match the ROM to the emulator.** An `R49.nnn` build wants an R49 `rom.bin`, which is
@@ -109,7 +106,7 @@ Inherited from the official emulator:
 	* mouse
 	* gamepads
 
-Added by AD&D:
+Added by ADD:
 
 * Dear ImGui graphical debugger (`-imgui`)
 * Debug Adapter Protocol server for editor-based debugging (`-debugport`)
@@ -121,7 +118,7 @@ Added by AD&D:
 Binaries & Compiling
 --------------------
 
-Binary releases for macOS, Windows and Linux are available on the [X16Emu AD&D releases page][releases].
+Binary releases for macOS, Windows and Linux are available on the [X16Emu ADD releases page][releases].
 The official builds, which have no debugger, are [over here][upstream-releases].
 
 ### Which Windows download?
@@ -549,7 +546,7 @@ Please see the official [KERNAL/BASIC documentation][x16docs].
 Advanced Debugging
 ------------------
 
-This is the part of the emulator AD&D exists for. There are three ways to debug, and
+This is the part of the emulator ADD exists for. There are three ways to debug, and
 they are additive — you can turn on any combination of them:
 
 | You want | Use | Start with |
@@ -1042,7 +1039,7 @@ Web Site
 
 Commander X16: [https://commanderx16.com](https://commanderx16.com)
 
-X16Emu AD&D: [https://github.com/xylothan/x16-emulator](https://github.com/xylothan/x16-emulator)
+X16Emu ADD: [https://github.com/xylothan/x16-emulator](https://github.com/xylothan/x16-emulator)
 
 Forum
 -----
@@ -1053,12 +1050,12 @@ Forum
 Contributing
 ------------
 
-Issues and pull requests for **AD&D's own** features — the ImGui debugger, the DAP server,
-source-level debugging, and the Windows builds — belong on the [X16Emu AD&D tracker][issues].
+Issues and pull requests for **ADD's own** features — the ImGui debugger, the DAP server,
+source-level debugging, and the Windows builds — belong on the [X16Emu ADD tracker][issues].
 
 Anything that is really an upstream emulator or X16 platform issue is better reported
 [upstream][upstream-issues], so the whole community benefits from the fix. Upstream releases are
-merged into AD&D, so fixes there land here too.
+merged into ADD, so fixes there land here too.
 
 
 License
@@ -1067,13 +1064,13 @@ License
 Copyright (c) 2019-2023 Michael Steil &lt;mist64@mac.com&gt;, [www.pagetable.com](https://www.pagetable.com/), et al.
 All rights reserved. License: 2-clause BSD
 
-AD&D's additions are released under the same 2-clause BSD license. Dear ImGui is vendored in
+ADD's additions are released under the same 2-clause BSD license. Dear ImGui is vendored in
 `src/extern/imgui/` under its own MIT license.
 
 
 Release Notes
 -------------
-X16Emu AD&D releases are listed on the [releases page][releases]. The upstream release notes are in
+X16Emu ADD releases are listed on the [releases page][releases]. The upstream release notes are in
 [RELEASES](RELEASES.md#releases).
 
 

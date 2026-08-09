@@ -6,12 +6,12 @@ Installing the emulator
 
 ### Getting the emulator
 
-Obtain the emulator by downloading the most recent version from the X16Emu AD&D releases page:
+Obtain the emulator by downloading the most recent version from the X16Emu ADD releases page:
 https://github.com/xylothan/x16-emulator/releases
 Choose the correct version for your CPU architecture.
 
 Releases are named `R49.nnn`, where `R49` is the official Commander X16 release the build tracks
-and `nnn` counts the AD&D builds on top of it. The official upstream emulator, which has no
+and `nnn` counts the ADD builds on top of it. The official upstream emulator, which has no
 debugger, lives at https://github.com/X16Community/x16-emulator/releases.
 
 

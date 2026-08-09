@@ -5,16 +5,16 @@
 
 ## Releases
 
-This is **X16Emu AD&D**, the Advanced Disassembler and Debugger — a fork of the
+This is **X16Emu ADD**, the Advanced Disassembler and Debugger — a fork of the
 [official Commander X16 emulator](https://github.com/X16Community/x16-emulator).
 
-AD&D releases are named `R49.nnn`, where `R49` is the official release the build tracks and `nnn`
-counts the AD&D builds on top of it. They are published on the
-[X16Emu AD&D releases page](https://github.com/xylothan/x16-emulator/releases), and the notes for
+ADD releases are named `R49.nnn`, where `R49` is the official release the build tracks and `nnn`
+counts the ADD builds on top of it. They are published on the
+[X16Emu ADD releases page](https://github.com/xylothan/x16-emulator/releases), and the notes for
 each one describe what changed in that build.
 
 The notes below are the **official upstream release notes**, reproduced unchanged. They describe
-the emulator core that each `R<n>.nnn` build is based on. For what AD&D adds — the graphical
+the emulator core that each `R<n>.nnn` build is based on. For what ADD adds — the graphical
 debugger, source-level debugging and the DAP server — see the
 [README](README.md#why-x16emu-add).
 
