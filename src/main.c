@@ -140,6 +140,11 @@ uint16_t midi_card_addr;
 
 bool using_hostfs = true;
 
+// Per-instruction clock reference. File-scope so emulator_step_during_move()
+// (run from the Windows modal move/resize loop) advances the peripheral clocks
+// in lock-step with emulator_loop() and neither double-counts the other's ticks.
+static uint32_t old_clockticks6502 = 0;
+
 uint8_t MHZ = 8;
 
 #ifdef TRACE
@@ -1584,11 +1589,243 @@ emscripten_main_loop(void) {
 }
 
 
+// Per-instruction KERNAL snooping and host-side plumbing: the $ffff
+// termination check, the -echo hook, mouse-cursor tracking, PRG auto-load and
+// feeding pasted text into the keyboard buffer. Shared by emulator_loop() and
+// emulator_step_during_move() so a window drag does not silently skip any of
+// it -- notably -echo output, which would otherwise be lost for good.
+// Returns false when the caller should stop emulating.
+static bool
+emulator_post_step(void)
+{
+	if (regs.pc == 0xffff) {
+		if (save_on_exit) {
+			machine_dump("CPU program counter reached $ffff");
+		}
+		return false;
+	}
+
+	// Change this comparison value if ever additional KERNAL
+	// API calls are snooped in this routine.
+
+	if (regs.pc >= 0xff68 && (!is_gen2 || regs.k == 0) && is_kernal()) {
+		if (regs.pc == 0xff68) {
+			kernal_mouse_enabled = !!regs.a;
+			SDL_ShowCursor((mouse_grabbed || kernal_mouse_enabled) ? SDL_DISABLE : SDL_ENABLE);
+		}
+
+		if (echo_mode != ECHO_MODE_NONE && regs.pc == 0xffd2) {
+			uint8_t c = regs.a;
+			if (echo_mode == ECHO_MODE_COOKED) {
+				if (c == 0x0d) {
+					printf("\n");
+				} else if (c == 0x0a) {
+					// skip
+				} else if (c < 0x20 || c >= 0x80) {
+					printf("\\X%02X", c);
+				} else {
+					printf("%c", c);
+				}
+			} else if (echo_mode == ECHO_MODE_ISO) {
+				if (c == 0x0d) {
+					printf("\n");
+				} else if (c == 0x0a) {
+					// skip
+				} else if (c < 0x20 || (c >= 0x80 && c < 0xa0)) {
+					printf("\\X%02X", c);
+				} else {
+					print_iso8859_15_char(c);
+				}
+			} else {
+				printf("%c", c);
+			}
+			fflush(stdout);
+		}
+
+		if (regs.pc == 0xffcf) {
+			// as soon as BASIC starts reading a line...
+			static bool prg_done = false;
+
+			if (prg_file && !prg_done) {
+				int loadlen = 0;
+				// LOAD":*" will cause the IEEE library
+				// to load from "prg_file"
+				if (prg_override_start >= 0) {
+					loadlen = snprintf(paste_text_data, sizeof(paste_text_data), "LOAD\":*\",%d,1,$%04X\r", ieee_unit, prg_override_start);
+				} else {
+					loadlen = snprintf(paste_text_data, sizeof(paste_text_data), "LOAD\":*\",%d,1\r", ieee_unit);
+				}
+				paste_text = paste_text_data;
+				prg_done = true;
+
+				if (run_after_load) {
+					if (prg_override_start >= 0) {
+						snprintf(paste_text_data + loadlen, sizeof(paste_text_data) - loadlen, "SYS$%04X\r", prg_override_start);
+					} else {
+						snprintf(paste_text_data + loadlen, sizeof(paste_text_data) - loadlen, "RUN\r");
+					}
+				}
+			}
+			else if (testbench && !test_init_complete){
+				snprintf(paste_text_data, sizeof(paste_text_data), "SYS65533\r");
+				paste_text = paste_text_data;
+				test_init_complete=true;
+			}
+
+			if (paste_text) {
+				// ...paste BASIC code into the keyboard buffer
+				pasting_bas = true;
+				if (warp_pastes) warp_mode = true;
+			}
+		}
+
+	}
+#if 0 // enable this for slow pasting
+	if (!(instruction_counter % 100000))
+#endif
+	while (pasting_bas && BRAM[NDX - 0xa000] < 10 && !(regs.status & 0x04)) {
+		uint32_t c;
+		int e = 0;
+
+		if (paste_text[0] == '\\' && paste_text[1] == 'X' && paste_text[2] && paste_text[3]) {
+			uint8_t hi = strtol((char[]){paste_text[2], 0}, NULL, 16);
+			uint8_t lo = strtol((char[]){paste_text[3], 0}, NULL, 16);
+			c = hi << 4 | lo;
+			paste_text += 4;
+		} else {
+			paste_text = utf8_decode(paste_text, &c, &e);
+			c = iso8859_15_from_unicode(c);
+		}
+		if (c && !e) {
+			BRAM[KEYD - 0xa000 + BRAM[NDX - 0xa000]] = c;
+			BRAM[NDX - 0xa000]++;
+		} else {
+			pasting_bas = false;
+			if (warp_pastes) warp_mode = false;
+			paste_text = NULL;
+			if (clipboard_buffer) {
+				SDL_free(clipboard_buffer);
+				clipboard_buffer = NULL;
+			}
+		}
+	}
+
+	return true;
+}
+
+// Set when emulator_post_step() reports that emulation should stop (the guest
+// reached $ffff). The drag loop cannot exit the program from inside the OS
+// modal loop, so it latches this and stops stepping; emulator_loop() unwinds
+// once the drag is over.
+static bool emulator_stop_requested = false;
+
+// Longest we will spend emulating inside a single timer tick. The OS cannot
+// deliver mouse input to the drag while we are in the window procedure, so a
+// long slice is felt directly as a jerky window. A frame that does not finish
+// in time simply continues on the next tick.
+#define MOVE_SLICE_BUDGET_MS 6
+
+// Advance the emulator from inside the OS modal window move/resize loop (see
+// video_win32.c). That loop blocks emulator_loop() entirely, so without this
+// the machine would freeze while the window is dragged.
+//
+// Two things matter for the drag to stay smooth: never sleep here, and never
+// run for long. We pace by checking how far ahead of the wall clock we are and
+// skipping the tick if we are ahead, rather than sleeping the deficit away, and
+// we cap how much emulation one tick may do. Shares old_clockticks6502 and the
+// timing accumulators with emulator_loop(), so emulation resumes seamlessly
+// when the drag ends.
+void
+emulator_step_during_move(void)
+{
+	if (headless || emulator_stop_requested) {
+		return;
+	}
+	// Presenting can dispatch messages, which can land back here. Emulating
+	// re-entrantly would corrupt the clock accounting.
+	static bool in_step = false;
+	if (in_step) {
+		return;
+	}
+	// Leave the machine alone whenever the debugger is in play. Breakpoints are
+	// honoured by DEBUGGetCurrentStatus(), which also drives the debugger's own
+	// window and event pump and so cannot be called from inside the OS modal
+	// loop; stepping here without it would run straight through breakpoints.
+	// Dragging with -debug therefore behaves as it always has.
+	if (debugger_enabled) {
+		return;
+	}
+
+	// Already ahead of real time: do nothing at all. This is the common case
+	// now that a fast drag calls us on every mouse message, and it has to stay
+	// cheap -- no emulation, and no present either.
+	if (!warp_mode && timing_lead_us() > 0) {
+		return;
+	}
+
+	in_step = true;
+
+	bool new_frame = false;
+	uint32_t steps = 0;
+	const uint32_t slice_start = SDL_GetTicks();
+	do {
+		if (handle_ieee_intercept()) {
+			continue;
+		}
+		instruction_counter += waiting ^ 0x1;
+		step6502();
+		uint32_t clocks = clockticks6502 - old_clockticks6502;
+		old_clockticks6502 = clockticks6502;
+		via1_step(clocks);
+		vera_spi_step(MHZ, clocks);
+		if (has_serial) {
+			serial_step(clocks);
+		}
+		if (has_via2) {
+			via2_step(clocks);
+		}
+		new_frame |= video_step(MHZ, clocks, false);
+		for (uint32_t i = 0; i < clocks; i++) {
+			i2c_step();
+		}
+		rtc_step(clocks);
+		audio_step(clocks);
+		midi_serial_step(clocks);
+		if (ym2151_irq_support) {
+			audio_render();
+		}
+		if (video_get_irq_out() || via1_irq() || (has_via2 && via2_irq()) || (ym2151_irq_support && YM_irq()) || (has_midi_card && midi_serial_irq())) {
+			irq6502();
+		}
+		if (!emulator_post_step()) {
+			emulator_stop_requested = true;
+			break;
+		}
+		// Reading the clock every instruction would cost more than it saves.
+		if ((++steps & 0x3FF) == 0 && SDL_GetTicks() - slice_start >= MOVE_SLICE_BUDGET_MS) {
+			break;
+		}
+	} while (!new_frame && steps < 4000000);
+
+	// Only worth presenting once the frame is actually finished; a partial
+	// frame looks no different from the one already on screen.
+	if (new_frame) {
+		video_present_no_input();
+	}
+	timing_update_no_sleep();
+
+	in_step = false;
+}
+
 void *
 emulator_loop(void *param)
 {
-	uint32_t old_clockticks6502 = clockticks6502;
+	old_clockticks6502 = clockticks6502;
 	for (;;) {
+		// A drag may have run the guest to $ffff while the OS held us in its
+		// modal loop; finish unwinding now that we are back in control.
+		if (emulator_stop_requested) break;
+
 		if (smc_requested_reset) machine_reset();
 
 		if (testbench && regs.pc == 0xfffd){
@@ -1777,116 +2014,8 @@ emulator_loop(void *param)
 			irq6502();
 		}
 
-		if (regs.pc == 0xffff) {
-			if (save_on_exit) {
-				machine_dump("CPU program counter reached $ffff");
-			}
+		if (!emulator_post_step()) {
 			break;
-		}
-
-		// Change this comparison value if ever additional KERNAL
-		// API calls are snooped in this routine.
-
-		if (regs.pc >= 0xff68 && (!is_gen2 || regs.k == 0) && is_kernal()) {
-			if (regs.pc == 0xff68) {
-				kernal_mouse_enabled = !!regs.a;
-				SDL_ShowCursor((mouse_grabbed || kernal_mouse_enabled) ? SDL_DISABLE : SDL_ENABLE);
-			}
-
-			if (echo_mode != ECHO_MODE_NONE && regs.pc == 0xffd2) {
-				uint8_t c = regs.a;
-				if (echo_mode == ECHO_MODE_COOKED) {
-					if (c == 0x0d) {
-						printf("\n");
-					} else if (c == 0x0a) {
-						// skip
-					} else if (c < 0x20 || c >= 0x80) {
-						printf("\\X%02X", c);
-					} else {
-						printf("%c", c);
-					}
-				} else if (echo_mode == ECHO_MODE_ISO) {
-					if (c == 0x0d) {
-						printf("\n");
-					} else if (c == 0x0a) {
-						// skip
-					} else if (c < 0x20 || (c >= 0x80 && c < 0xa0)) {
-						printf("\\X%02X", c);
-					} else {
-						print_iso8859_15_char(c);
-					}
-				} else {
-					printf("%c", c);
-				}
-				fflush(stdout);
-			}
-
-			if (regs.pc == 0xffcf) {
-				// as soon as BASIC starts reading a line...
-				static bool prg_done = false;
-
-				if (prg_file && !prg_done) {
-					int loadlen = 0;
-					// LOAD":*" will cause the IEEE library
-					// to load from "prg_file"
-					if (prg_override_start >= 0) {
-						loadlen = snprintf(paste_text_data, sizeof(paste_text_data), "LOAD\":*\",%d,1,$%04X\r", ieee_unit, prg_override_start);
-					} else {
-						loadlen = snprintf(paste_text_data, sizeof(paste_text_data), "LOAD\":*\",%d,1\r", ieee_unit);
-					}
-					paste_text = paste_text_data;
-					prg_done = true;
-
-					if (run_after_load) {
-						if (prg_override_start >= 0) {
-							snprintf(paste_text_data + loadlen, sizeof(paste_text_data) - loadlen, "SYS$%04X\r", prg_override_start);
-						} else {
-							snprintf(paste_text_data + loadlen, sizeof(paste_text_data) - loadlen, "RUN\r");
-						}
-					}
-				}
-				else if (testbench && !test_init_complete){
-					snprintf(paste_text_data, sizeof(paste_text_data), "SYS65533\r");
-					paste_text = paste_text_data;
-					test_init_complete=true;
-				}
-
-				if (paste_text) {
-					// ...paste BASIC code into the keyboard buffer
-					pasting_bas = true;
-					if (warp_pastes) warp_mode = true;
-				}
-			}
-
-		}
-#if 0 // enable this for slow pasting
-		if (!(instruction_counter % 100000))
-#endif
-		while (pasting_bas && BRAM[NDX - 0xa000] < 10 && !(regs.status & 0x04)) {
-			uint32_t c;
-			int e = 0;
-
-			if (paste_text[0] == '\\' && paste_text[1] == 'X' && paste_text[2] && paste_text[3]) {
-				uint8_t hi = strtol((char[]){paste_text[2], 0}, NULL, 16);
-				uint8_t lo = strtol((char[]){paste_text[3], 0}, NULL, 16);
-				c = hi << 4 | lo;
-				paste_text += 4;
-			} else {
-				paste_text = utf8_decode(paste_text, &c, &e);
-				c = iso8859_15_from_unicode(c);
-			}
-			if (c && !e) {
-				BRAM[KEYD - 0xa000 + BRAM[NDX - 0xa000]] = c;
-				BRAM[NDX - 0xa000]++;
-			} else {
-				pasting_bas = false;
-				if (warp_pastes) warp_mode = false;
-				paste_text = NULL;
-				if (clipboard_buffer) {
-					SDL_free(clipboard_buffer);
-					clipboard_buffer = NULL;
-				}
-			}
 		}
 	}
 
