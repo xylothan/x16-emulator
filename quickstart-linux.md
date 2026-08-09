@@ -6,18 +6,18 @@ Installing the emulator
 
 ### Getting the emulator
 
-Obtain the emulator by downloading the most recent version from the 'releases' page of this fork:
+Obtain the emulator by downloading the most recent version from the X16Emu AD&D releases page:
 https://github.com/xylothan/x16-emulator/releases
 Choose the correct version for your CPU architecture.
 
-Releases are named `R49.nnn`, where `R49` is the official Commander X16 release this build tracks
-and `nnn` counts our own builds on top of it. If you want the official upstream emulator instead,
-it lives at https://github.com/X16Community/x16-emulator/releases.
+Releases are named `R49.nnn`, where `R49` is the official Commander X16 release the build tracks
+and `nnn` counts the AD&D builds on top of it. The official upstream emulator, which has no
+debugger, lives at https://github.com/X16Community/x16-emulator/releases.
 
 
 #### Alternative builds or other platform
 
-If for any reason you cannot run our release of the emulator, the official emulator has a Snap package
+If for any reason you cannot run these builds, the official emulator has a Snap package
 that you could try instead, available at https://snapcraft.io/x16emu
 
 It should avoid any shared library version incompatibilities that you could potentially run into with the

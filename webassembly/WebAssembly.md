@@ -1,8 +1,8 @@
 ## WebAssembly/HTML5 Support
 The Commander X16 emulator supports a HTML/WebAssembly build target using the [Emscripten compiler](https://emscripten.org/).
 
-> Note: the WebAssembly target does not include this fork's ImGui debugger or DAP debug
-> server. Use a native build if you want the advanced debugging features.
+> Note: the WebAssembly target does not include the X16Emu AD&D ImGui debugger or DAP debug
+> server. Use a native build for the advanced debugging features.
 
 ## Demo
 [HTML X16 Emulator Demo](https://sebastianvog.github.io/x16-emulator/x16emu.html)

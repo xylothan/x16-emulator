@@ -2,8 +2,8 @@ name: Build Binaries
 on:
   push:
     branches: ['**']
-    # Releases are cut by pushing a tag; see the publish job at the end. Our
-    # tags are R<upstream release>.<fork build>, e.g. R49.001. The lowercase
+    # Releases are cut by pushing a tag; see the publish job at the end. AD&D
+    # tags are R<upstream release>.<AD&D build>, e.g. R49.001. The lowercase
     # form is matched too, both for upstream's own r49-style tags and so a
     # mistyped tag still builds.
     tags: ['[rR]*']
@@ -31,9 +31,8 @@ jobs:
           mkdir artifacts
       - name: Create README
         run: |
-          set -euo pipefail
           export PATH=$(pwd)/node_modules/.bin:$PATH
-          cat .gh/header_footer.md README.md RELEASES.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
+          cat header_footer.md README.md RELEASES.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
       - uses: actions/upload-artifact@v4
         with:
           name: readme-pdf
