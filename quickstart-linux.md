@@ -10,9 +10,10 @@ Obtain the emulator by downloading the most recent version from the X16Emu ADD r
 https://github.com/xylothan/x16-emulator/releases
 Choose the correct version for your CPU architecture.
 
-Releases are named `R49.nnn`, where `R49` is the official Commander X16 release the build tracks
-and `nnn` counts the ADD builds on top of it. The official upstream emulator, which has no
-debugger, lives at https://github.com/X16Community/x16-emulator/releases.
+Releases are named `R49.nnn`, where `R49` names the official Commander X16 release line the build
+follows and `nnn` counts the ADD builds on top of it. The official upstream emulator, which has
+upstream's keyboard-driven debugger but none of ADD's tooling, lives at
+https://github.com/X16Community/x16-emulator/releases.
 
 
 #### Alternative builds or other platform

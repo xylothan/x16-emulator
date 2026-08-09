@@ -10,18 +10,21 @@
 
 Releases are named `R<major>.<nnn>`:
 
-* **`R<major>`** is the official Commander X16 release the build tracks. That half of the number
-  is upstream's, and so are its release notes — they are not reproduced here. Read them at
+* **`R<major>`** names the official Commander X16 release line the build follows. That half of the
+  number is upstream's, and so are its release notes — they are not reproduced here. Read them at
   [X16Community/x16-emulator/releases](https://github.com/X16Community/x16-emulator/releases),
   e.g. [r49 ("Pyrite")](https://github.com/X16Community/x16-emulator/releases/tag/r49).
-* **`nnn`** counts the ADD builds on top of that release. Those are the changes listed below.
+* **`nnn`** counts the ADD builds on top of that line. Those are the changes listed below.
 
-An `R49.nnn` build is the upstream R49 emulator plus everything in the entries below, and it
-wants an R49 `rom.bin` — which ships in the release package.
+`R49` means the build follows the R49 line, not that it is byte-for-byte official R49: the emulator
+core tracks upstream's ongoing development after that release, so a build may include upstream
+fixes made since R49 was cut. Each release package ships the `rom.bin` it was built and tested
+against — use that one.
 
 ### R49.001
 
-The first ADD release. Everything here is new relative to the official R49 emulator.
+The first ADD release, following the upstream R49 line. Everything here is new relative to the
+official emulator.
 
 **Graphical debugger (`-imgui`)**
 
@@ -65,7 +68,7 @@ The first ADD release. Everything here is new relative to the official R49 emula
 
 **Debugger capacity**
 
-* Memory write watchpoints raised from 16 to 64
+* Memory write watchpoints, up to 64 of them
 * 65C816 / GS support throughout: 24-bit bank:address browsing and mode-correct register widths
 
 **Windows**
@@ -78,14 +81,15 @@ The first ADD release. Everything here is new relative to the official R49 emula
 
 **Build and release**
 
-* Every push is built for all platforms; pushing an `R<major>.<nnn>` tag publishes the release
-  automatically, and the default branch keeps a rolling `dev` prerelease
+* Every push is built for all platforms; pushing an `R<major>.<nnn>` tag stages a draft release
+  with every platform asset attached, ready for a human to publish, and the default branch keeps a
+  rolling `dev` prerelease
 * ROM images are fetched with a fallback to the latest release when the upstream build artifact
   has expired
 
 **Known limitations**
 
 * The debugger and DAP server are experimental — expect keys, layouts and DAP details to change
-* The WebAssembly build includes neither the ImGui debugger nor the DAP server
+* The WebAssembly build is not tested with the debugger or the DAP server
 * MSVC builds have no `-trace`; use a `-mingw` package if you need it
 * Upstream's original `-debug` debugger is still present but is not extended by ADD

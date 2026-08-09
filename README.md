@@ -44,7 +44,7 @@ Why X16Emu ADD
 | **65C816 / GS aware** | 24-bit bank:address memory browsing, mode-correct register widths, and the X16 virtual registers R0–R15 broken out. |
 | **Real Windows builds** | Self-contained statically linked `x16emu.exe` for x64, x86 and ARM64. No SDL2, zlib or Visual C++ redistributable to install. |
 | **The window doesn't freeze** | On Windows the emulator keeps running and painting while its window is dragged or resized. |
-| **Automated releases** | Every push is built for all platforms; tagged builds are published automatically. |
+| **Automated releases** | Every push is built for all platforms; tagging stages a draft release with all the assets attached, ready for a human to publish. |
 
 The debugger is documented in full under [Advanced Debugging](#advanced-debugging) below.
 
@@ -67,15 +67,18 @@ Use the official docs for the machine. Use this README for what ADD adds on top.
 
 Releases are named **`R49.nnn`**:
 
-* `R49` is the official Commander X16 release the build tracks, so `R49.007` is compatible with
-  everything an official R49 build is compatible with — including the R49 `rom.bin`.
+* `R49` names the official Commander X16 release line the build follows. It is not a promise of
+  byte-for-byte equivalence with official R49: the emulator core tracks upstream's ongoing
+  development after that release, so a build may include upstream fixes made since R49 was cut.
 * `nnn` counts the ADD builds on top of it, and goes up as ADD's own features land.
 
-When upstream ships R50, ADD releases become `R50.001` and so on. Release branches and tags use
-the same `R49.nnn` name, so a tag maps unambiguously to the upstream release it is based on.
+When upstream cuts its next release, ADD releases move to `R50.001` and so on. A release is cut by
+pushing an `R49.nnn` **tag**, which is what the build workflow keys on; if you also want a branch
+for a release line, give it a distinct name such as `release/R49.001`, since a branch and a tag
+sharing one name makes `R49.001` ambiguous to git.
 
-> **Match the ROM to the emulator.** An `R49.nnn` build wants an R49 `rom.bin`, which is
-> included in each release package. Older ROMs may not work with newer emulators, and vice versa.
+Each release package ships the `rom.bin` it was built and tested against — use that one. Older ROMs
+may not work with newer emulators, and vice versa.
 
 Features
 --------
@@ -118,7 +121,8 @@ Binaries & Compiling
 --------------------
 
 Binary releases for macOS, Windows and Linux are available on the [X16Emu ADD releases page][releases].
-The official builds, which have no debugger, are [over here][upstream-releases].
+The official builds, which have upstream's keyboard-driven debugger but none of ADD's tooling, are
+[over here][upstream-releases].
 
 ### Which Windows download?
 
@@ -145,7 +149,7 @@ loaded from the directory containing the emulator binary, or you can use the `-r
 
 > **WARNING:** Older versions of the ROM might not work in newer versions of the emulator, and vice versa.
 
-You can build a ROM image yourself using the [build instructions][x16rom-build] in the [x16-rom] repo. The `rom.bin` included in the [*latest* release][releases] of the emulator may also work with the HEAD of this repo, but this is not guaranteed.
+You can build a ROM image yourself using the [build instructions][x16rom-build] in the [x16-rom][x16rom] repo. The `rom.bin` included in the [*latest* release][releases] of the emulator may also work with the HEAD of this repo, but this is not guaranteed.
 
 ### Building from source
 
@@ -173,8 +177,7 @@ Type `make` to build the source. The output will be `x16emu` in the current dire
 
 ### WebAssembly Build
 
-Steps for compiling WebAssembly/HTML5 can be found [here][webassembly]. The WebAssembly build does
-not include the ImGui debugger or the DAP server.
+Steps for compiling WebAssembly/HTML5 can be found [here][webassembly].
 
 ### Windows Build
 
@@ -217,10 +220,11 @@ You can start `x16emu`/`x16emu.exe` either by double-clicking it, or from the co
 latter allows you to specify additional arguments. When starting `x16emu` without arguments, it
 will pick up the system ROM (`rom.bin`) from the executable's directory.
 
-Every command line option of the official emulator works here unchanged — `-prg`, `-bas`, `-run`,
-`-scale`, `-sdcard`, `-fsroot`, `-warp`, `-gif`, `-wav`, `-ram`, `-c816` and the rest. They are
-documented in the [official emulator's README][upstream-readme], which is the authoritative list.
-`x16emu -h` prints them all for the build you actually have.
+The command line options of the official emulator work here too — `-prg`, `-bas`, `-run`, `-scale`,
+`-sdcard`, `-fsroot`, `-warp`, `-gif`, `-wav`, `-ram`, `-c816` and the rest. They are documented in
+the [official emulator's README][upstream-readme]. Two caveats, both from the packaging rather than
+from ADD itself: the MSVC builds have no `-trace`, and the non-`-midi` packages have no MIDI
+options at all. `x16emu -h` is the authoritative list for the build you actually have.
 
 The options below are the ones ADD adds on top. They all concern debugging.
 
@@ -248,8 +252,7 @@ to the official emulator and is documented there. ADD changes none of it.
 * [Official emulator README][upstream-readme] — command line options, recording, I/O registers,
   SD card images, HostFS, the CRT format and `makecart`
 * [Official X16 documentation][x16docs] — the machine itself, its KERNAL and BASIC
-* [WebAssembly notes](webassembly/WebAssembly.md) — building the web target, which does not
-  include ADD's debugger
+* [WebAssembly notes][webassembly] — building the web target
 
 The emulator hotkeys (`Ctrl`+`F` for fullscreen, `Ctrl`+`M` for mouse capture, `Ctrl`+`R` to
 reset, `Ctrl`+`V` to paste, and so on, or their command-key equivalents on macOS) are upstream's
@@ -291,8 +294,8 @@ x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 ### The ImGui debugger
 
 `-imgui` opens a second, resizable OS window titled **"Commander X16 - ImGui Debugger"**,
-960×720, placed next to the emulator window. It is available on Windows, Linux and macOS. (It is
-not available in the WebAssembly build.)
+960×720, placed next to the emulator window. It is available in the native Windows, Linux and
+macOS builds.
 
 It does not require `-debug`, and it does not replace the emulator window — the machine keeps
 running in its own window while you inspect it.
