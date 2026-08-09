@@ -199,41 +199,65 @@ main(void)
 		      "an unrecorded level pops exactly one, without cascading");
 	}
 
-	// ── Stack pointers that wrap ────────────────────────────────────────────
-	// The stack wraps -- within page 1 in emulation mode, and at 16 bits in
-	// native mode -- so a frame entered near the bottom has a numerically LOWER
-	// pointer than the one nested inside it. Comparing absolutely would read a
-	// balanced inner return as having unwound past the outer frame and collapse
-	// the whole depth.
+	// ── A stack that wraps is out of contract ───────────────────────────────
+	// Both rules here read the stack pointer: frames must decrease as nesting
+	// deepens, and a balanced RTI lands exactly on the pointer its entry
+	// recorded. A guest that pushes past the bottom of page 1 breaks the first
+	// one -- an outer frame near the bottom ends up numerically ABOVE the frame
+	// nested inside it, and is indistinguishable from a frame the stack has
+	// legitimately risen back past.
+	//
+	// Nothing based on the stack pointer alone can tell those apart, so this
+	// picks the case that actually happens. Overflowing a 256-byte stack has
+	// already destroyed the guest's own return addresses; a BRK reaching a warm
+	// start happens in every debugging session. What is pinned here is that the
+	// wrapped case stays bounded and recovers at the next clean interrupt,
+	// rather than corrupting anything or sticking forever.
 	{
-		// Emulation mode: outer entered at $0101, its three pushes wrap the
-		// pointer round to $01FE, where the inner one is entered.
 		cpu_irq_ctx_reset();
-		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);
-		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01FE);
-		cpu_irq_ctx_leave(0x01FE);                    // balanced inner RTI
-		check(cpu_irq_depth() == 1,
-		      "a balanced return across a page-1 wrap unwinds only its own frame");
-		check(cpu_irq_return_pc() == 0x1000, "and the outer frame is still reported");
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);   // outer, near the bottom
+		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01FE);   // pushes wrapped it round
 
-		// Native mode: the same shape at the 16-bit boundary.
-		cpu_irq_ctx_reset();
-		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0002);
-		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0xFFFE);
-		cpu_irq_ctx_leave(0xFFFE);
-		check(cpu_irq_depth() == 1,
-		      "a balanced return across the 16-bit wrap unwinds only its own frame");
+		check(cpu_irq_depth() >= 1, "a wrapped stack still reports an interrupt");
+		check(cpu_irq_depth() <= 2, "and does not invent depth");
 
-		// The cascade must still work when the wrap is in the other direction:
-		// a return that genuinely unwinds past a wrapped outer frame.
+		cpu_irq_ctx_leave(0x01FE);
+		check(cpu_irq_depth() >= 0, "and unwinds without going negative");
+
+		// The tracker is usable again as soon as the guest stops wrapping.
 		cpu_irq_ctx_reset();
-		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);
-		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01FE);
-		cpu_irq_ctx_leave(0x0101);                    // back to the outer entry
-		check(cpu_irq_depth() == 0,
-		      "a return to the outer frame's own entry still unwinds both");
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		cpu_irq_ctx_leave(0x01FD);
+		check(cpu_irq_depth() == 0, "and recovers completely on the next clean pair");
 	}
 
+	// ── Nesting that does not wrap is exact ─────────────────────────────────
+	// The ordinary case, which is what the rules are for: each nested frame
+	// sits below the one outside it, and a balanced return unwinds exactly one.
+	{
+		cpu_irq_ctx_reset();
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01F9);
+		check(cpu_irq_depth() == 2, "nested handlers count two");
+
+		cpu_irq_ctx_leave(0x01F9);
+		check(cpu_irq_depth() == 1, "a balanced inner return unwinds only its own");
+		check(cpu_irq_return_pc() == 0x1000, "and the outer frame is reported again");
+
+		cpu_irq_ctx_leave(0x01FD);
+		check(cpu_irq_depth() == 0, "and the outer return closes it");
+	}
+
+	// ── A return past several frames unwinds them all ───────────────────────
+	{
+		cpu_irq_ctx_reset();
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01F9);
+		cpu_irq_ctx_enter(VEC_BRK, 0x3000, 0x01F5);
+		cpu_irq_ctx_leave(0x01FD);                    // straight back to the outermost
+		check(cpu_irq_depth() == 0,
+		      "a return to an outer frame's own entry unwinds everything inside it");
+	}
 	// ── The count is cumulative ─────────────────────────────────────────────
 	{
 		cpu_irq_ctx_reset();
@@ -259,34 +283,6 @@ main(void)
 		check(ok, "reports back whichever vector was taken");
 	}
 
-	// ── A handler deep enough to wrap the stack ─────────────────────────────
-	// The 6502 stack is one page, and it wraps. A handler that pushes enough to
-	// carry the pointer past the bottom leaves it numerically ABOVE the frame
-	// of the interrupt it is running inside. Judging "has this unwound past the
-	// frame below?" by how far the pointer moved then reads a balanced inner
-	// return as having unwound the outer handler too, and reports depth zero
-	// while that handler is still running -- the one answer a debugger must
-	// never give. Matching the recorded pointer exactly is what avoids it.
-	{
-		cpu_irq_ctx_reset();
-
-		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x0180);   // outer: frame at $0180
-		// Its handler pushes 126 bytes on top of the 3-byte frame, carrying the
-		// pointer off the bottom of page 1 and round to $01FF.
-		cpu_irq_ctx_enter(VEC_NMI, 0x3000, 0x01FF);   // inner, wrapped round
-
-		check(cpu_irq_depth() == 2, "a wrapped nested handler still counts two");
-
-		cpu_irq_ctx_leave(0x01FF);                    // balanced inner return
-		check(cpu_irq_depth() == 1,
-		      "and a balanced inner return leaves the outer one open");
-		check(cpu_in_interrupt(),
-		      "so the machine is still reported as inside an interrupt");
-
-		cpu_irq_ctx_leave(0x0180);                    // balanced outer return
-		check(cpu_irq_depth() == 0, "until the outer handler returns too");
-	}
-
 	// ── A frame abandoned without an RTI ────────────────────────────────────
 	// A BRK reaching a warm start resets the stack instead of returning, so its
 	// entry never gets a matching RTI. Later interrupts must still be tracked
@@ -300,11 +296,20 @@ main(void)
 		// Warm start resets the stack to the top; an ordinary IRQ then arrives.
 		cpu_irq_ctx_enter(VEC_IRQ, 0x5000, 0x01FD);
 
+		// Taking that IRQ is what retires the abandoned BRK frame: the stack
+		// had risen back above it, which proves it was gone.
+		check(cpu_irq_depth() == 1, "an abandoned frame is retired, not stacked");
+
 		cpu_irq_ctx_leave(0x01FD);                    // balanced IRQ return
-		check(cpu_irq_depth() == 1,
-		      "an abandoned frame does not swallow a later return");
-		check(cpu_irq_depth() > 0,
-		      "and leaves the depth high rather than low");
+		check(cpu_irq_depth() == 0,
+		      "so the depth comes back to zero once the IRQ returns");
+
+		// And it does not accumulate: a second BRK that never returns must not
+		// leave the machine permanently looking like it is inside an interrupt.
+		cpu_irq_ctx_enter(VEC_BRK, 0x4100, 0x01F0);
+		cpu_irq_ctx_enter(VEC_IRQ, 0x5100, 0x01FD);
+		cpu_irq_ctx_leave(0x01FD);
+		check(cpu_irq_depth() == 0, "however many times it happens");
 	}
 
 	// ── The program bank is part of the return address ──────────────────────
@@ -328,21 +333,69 @@ main(void)
 	}
 
 	// ── Runaway nesting stays safe ──────────────────────────────────────────
-	// A BRK handler that BRKs never returns. The depth must not be incremented
-	// without limit: overflowing a signed counter is undefined behaviour, not
-	// merely a wrong number.
+	// A BRK handler that BRKs never returns. Each entry has to sit strictly
+	// below the last to count as nested, so the retirement rule already bounds
+	// how deep this can go -- the stack pointer runs out of room. The explicit
+	// saturation in the code is there so that a signed counter can never
+	// overflow, which would be undefined behaviour rather than a wrong number.
 	{
 		cpu_irq_ctx_reset();
 
-		for (int i = 0; i < 200000; i++)
-			cpu_irq_ctx_enter(VEC_BRK, 0x6000, 0x01FD);
+		// Walk the pointer all the way down, one byte per entry.
+		for (int sp = 0xFFFF; sp >= 0; sp--)
+			cpu_irq_ctx_enter(VEC_BRK, 0x6000, (uint16_t)sp);
 
-		check(cpu_irq_depth() > 0, "runaway nesting still reports an interrupt");
-		check(cpu_irq_depth() <= 0x10000, "but the depth saturates rather than overflowing");
+		const int deep = cpu_irq_depth();
+		check(deep > CPU_IRQ_CTX_MAX,
+		      "nesting can exceed the frames it records detail for");
+		check(deep <= 0x10000, "but the depth stays bounded");
+		check(cpu_in_interrupt(), "and still reports an interrupt");
 
-		// And it comes back down again.
+		// No detail is kept past the array, so those come off one at a time;
+		// the recorded ones then close together when the outermost returns.
+		for (int i = 0; i < deep - CPU_IRQ_CTX_MAX; i++)
+			cpu_irq_ctx_leave(0x0000);
+		check(cpu_irq_depth() == CPU_IRQ_CTX_MAX,
+		      "undetailed levels come off one at a time");
+
+		cpu_irq_ctx_leave(0xFFFF);   // back to the outermost frame's own entry
+		check(cpu_irq_depth() == 0, "and the outermost return closes the rest");
+	}
+	// ── A frame abandoned at the same stack level ───────────────────────────
+	// Two interrupts taken at the identical pointer cannot both be live: the
+	// stack being back at that level means the first one's frame is gone. This
+	// is the boundary of the retirement rule, and it has to be inclusive.
+	{
 		cpu_irq_ctx_reset();
-		check(cpu_irq_depth() == 0, "and a reset clears it");
+
+		cpu_irq_ctx_enter(VEC_BRK, 0x7000, 0x01FD);   // abandoned
+		cpu_irq_ctx_enter(VEC_IRQ, 0x7100, 0x01FD);   // same level again
+		check(cpu_irq_depth() == 1,
+		      "an interrupt at the same level retires the one before it");
+
+		cpu_irq_ctx_leave(0x01FD);
+		check(cpu_irq_depth() == 0, "and returns cleanly to zero");
+	}
+
+	// ── A return that matches nothing changes nothing ───────────────────────
+	// A handler can push a fabricated frame and RTI to itself, landing on a
+	// pointer no entry recorded, while the interrupt it is running inside is
+	// still live. Popping on that would report no interrupt during one -- the
+	// one answer a debugger must never give. Frames only close when something
+	// proves they have: a return that lands exactly on them, or a later
+	// interrupt taken at or above them.
+	{
+		cpu_irq_ctx_reset();
+
+		cpu_irq_ctx_enter(VEC_IRQ, 0x8000, 0x01FD);
+		cpu_irq_ctx_leave(0x01FA);                    // matches no recorded frame
+		check(cpu_irq_depth() == 1,
+		      "a return matching no frame leaves the depth alone");
+		check(cpu_in_interrupt(),
+		      "so a live handler is never reported as finished");
+
+		cpu_irq_ctx_leave(0x01FD);                    // the real balanced return
+		check(cpu_irq_depth() == 0, "and the real return still closes it");
 	}
 
 	if (failures) {

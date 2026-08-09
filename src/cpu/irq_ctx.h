@@ -13,10 +13,18 @@
 //
 // A handler that leaves by some other route -- discarding its frame and exiting
 // through RTS or JMP, or a BRK that lands in a warm start which resets the
-// stack -- has no matching RTI, so its entry stays open until a later return
-// matches an outer frame. The depth then reads high rather than low, which is
-// the safe direction: claiming no interrupt is running while one is would be
-// worse than being stale.
+// stack -- has no matching RTI. Those entries are retired the next time an
+// interrupt is taken at or above where they were recorded, since the stack
+// having risen back past a frame proves it is gone. Until then the depth reads
+// high rather than low, which is the safe direction: claiming no interrupt is
+// running while one is would be worse than being stale.
+//
+// The one thing this cannot survive is a guest that overflows its own stack.
+// Both rules -- frames decreasing in sp, and a balanced RTI landing exactly on
+// the recorded pointer -- assume the stack has not wrapped. A program that
+// pushes past the bottom of page 1 has destroyed its own return addresses
+// anyway; the depth reported here will be wrong until the next reset, and no
+// rule based on the stack pointer alone can do better.
 //
 // Kept apart from fake6502.c so that the CPU core carries only the two calls,
 // and so the bookkeeping can be tested without standing up a machine.
