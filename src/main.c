@@ -394,9 +394,13 @@ is_kernal()
 			debug_read6502(0xc00b, 0, USE_CURRENT_X16_BANK) == 'T');
 }
 
-// A breakpoint address as written on the command line: a plain address, or a
-// banked one as bb:aaaa. The bare bbaaaa form upstream accepted for -debug
-// still works, so existing command lines keep meaning what they did.
+// A breakpoint or watch address as written on the command line: a plain
+// address, or a banked one as bb:aaaa. The bare bbaaaa form upstream accepted
+// for -debug still works.
+//
+// An address written on its own carries no bank, so it applies to whichever
+// bank is mapped -- writing "A000" says nothing about banks, and should not
+// silently mean bank 0. Write "05:A000" to mean one particular bank.
 // Returns false (and complains) rather than silently arming address 0 for
 // input that is not a valid address, which is what a bare strtol() would do
 // with a typo.
@@ -415,8 +419,12 @@ parse_breakpoint_arg(const char *arg, struct breakpoint *out)
 		const char   *addr_str = end + 1;
 		char         *end2     = NULL;
 		unsigned long addr     = strtoul(addr_str, &end2, 16);
-		if (end2 == addr_str || *end2 != '\0' || addr > 0xFFFF || first > 0xFF) {
+		if (end2 == addr_str || *end2 != '\0' || addr > 0xFFFF) {
 			fprintf(stderr, "Not a valid banked address (expected bb:aaaa): %s\n", arg);
+			return false;
+		}
+		if (first > 0xFF) {
+			fprintf(stderr, "Bank out of range (00-FF): %s\n", arg);
 			return false;
 		}
 		if (addr < 0xA000) {
@@ -440,14 +448,13 @@ parse_breakpoint_arg(const char *arg, struct breakpoint *out)
 		return false;
 	}
 
-	if (first < 0xA000) {
-		out->pc      = (int)first;
-		out->bank    = 0;
-		out->x16Bank = -1;
-	} else {
+	out->bank = 0;
+	if (first > 0xFFFF) {
 		out->pc      = (int)(first & 0xFFFF);
-		out->bank    = 0;
 		out->x16Bank = (int)(first >> 16);
+	} else {
+		out->pc      = (int)first;
+		out->x16Bank = DEBUG_BANK_ANY;   // no bank given: whichever is mapped
 	}
 	return true;
 }
@@ -555,8 +562,15 @@ usage()
 	printf("-bp <address>\n");
 	printf("\tEnable the debugger and set a breakpoint. Unlike -debug's optional\n");
 	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
-	printf("\tbefore the machine starts. Banked addresses are written bb:aaaa,\n");
-	printf("\te.g. 05:A000 for $A000 in RAM bank 5.\n");
+	printf("\tbefore the machine starts.\n");
+	printf("\tAn address on its own applies whatever bank is mapped. To pin one\n");
+	printf("\tbank of the $A000-$FFFF windows, write bb:aaaa, e.g. 05:A000 for\n");
+	printf("\t$A000 in RAM bank 5. Below $A000 nothing is banked, so no bank may\n");
+	printf("\tbe given.\n");
+	printf("-wp <address>[,<length>]\n");
+	printf("\tEnable the debugger and watch memory: stop when the program writes\n");
+	printf("\tto this address, or anywhere in <length> bytes from it. Takes the\n");
+	printf("\tsame address forms as -bp, and can be repeated.\n");
 	printf("-dbgfile <path>\n");
 	printf("\tLoad a cc65 .dbg file, so addresses can be mapped back to source\n");
 	printf("\tfiles and line numbers. Combine with -srcpath if the sources are not\n");
@@ -984,6 +998,49 @@ main(int argc, char **argv)
 					usage();
 				}
 				debug_bp_add(bp);
+			}
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-wp")) {
+			argc--;
+			argv++;
+			debugger_enabled = true;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			{
+				// address[,length] -- the length is optional and defaults to a
+				// single byte.
+				char spec[64];
+				if (strlen(argv[0]) >= sizeof(spec)) {
+					// Truncating would parse a different address than the one
+					// that was typed, and say nothing about it.
+					fprintf(stderr, "Not a valid watch spec: %s\n", argv[0]);
+					usage();
+				}
+				strcpy(spec, argv[0]);
+
+				unsigned long len   = 1;
+				char         *comma = strchr(spec, ',');
+				if (comma) {
+					*comma = '\0';
+					char *lend = NULL;
+					len = strtoul(comma + 1, &lend, 0);
+					if (lend == comma + 1 || *lend != '\0' || len == 0 || len > 0xFFFF) {
+						fprintf(stderr, "Not a valid watch length (1-65535): %s\n", comma + 1);
+						usage();
+					}
+				}
+
+				struct breakpoint wp;
+				if (!parse_breakpoint_arg(spec, &wp)) {
+					usage();
+				}
+				if (debug_wp_add((uint16_t)wp.pc, (uint16_t)len, wp.x16Bank) < 0) {
+					fprintf(stderr, "Could not add watchpoint (duplicate, or more than %d): %s\n",
+					        MAX_WATCHPOINTS, argv[0]);
+					usage();
+				}
 			}
 			argc--;
 			argv++;

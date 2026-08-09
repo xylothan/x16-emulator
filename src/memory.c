@@ -19,6 +19,8 @@
 #include "cartridge.h"
 #include "iso_8859_15.h"
 #include "midi.h"
+#include "debug_core.h"
+#include "debugger.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -290,6 +292,14 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 			if (memory_get_ram_bank() < num_ram_banks)
 				BRAM_access_flags[(memory_get_ram_bank() << 13) + address - 0xa000] = true;
 		}
+	}
+
+	// Memory write watchpoints. The scan is skipped entirely while none are
+	// set, so this costs one comparison per store outside a debugging session.
+	// Only bank 0 is watched: a non-zero program bank on Gen2 is flat RAM in a
+	// separate address space, which a 16-bit watch address cannot name.
+	if (debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {
+		DEBUGBreakOnWatchpoint();
 	}
 
 	// Write to memory

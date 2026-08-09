@@ -22,9 +22,22 @@
 extern "C" {
 #endif
 
+// A bank selector, stored on a breakpoint or watchpoint.
+//
+// Banks only mean anything at $A000-$FFFF: the RAM window follows the RAM bank,
+// the ROM window the ROM bank, and everything below $A000 selects memory by
+// address alone. So there are exactly two things a selector can say --
+// "whichever bank is mapped" or "this specific bank" -- and for an address
+// outside a banked window it says nothing at all.
+//
+// A selector recorded for an unbanked address is normalised to DEBUG_BANK_ANY
+// on the way in, so it can never become a hidden field that distinguishes two
+// otherwise identical entries. (A UI should grey the field out for such an
+// address, for the same reason.)
+#define DEBUG_BANK_ANY (-1)
+
 // A breakpoint address. `bank` is the 65C816 program bank; `x16Bank` is the
-// RAM/ROM window bank for addresses at $A000 and above, or -1 where the address
-// is not banked. Breakpoints are keyed by (pc, bank).
+// bank selector described above. Breakpoints are identified by all three.
 struct breakpoint {
 	int     pc;
 	uint8_t bank;
@@ -55,6 +68,12 @@ enum {
 	BPCMP_GT,
 	BPCMP_GE,
 };
+
+// Does a recorded bank selector apply to `addr` right now? See DEBUG_BANK_ANY.
+// Public so that every matcher in the emulator uses one rule -- the step
+// breakpoint in debugger.c included -- rather than each re-deriving it and
+// disagreeing about what -1 means.
+bool debug_bank_selector_matches(int selector, int addr, uint8_t pbank);
 
 // ---- Table management ------------------------------------------------------
 // Breakpoints are identified by all three of (pc, bank, x16Bank), so the same
@@ -108,6 +127,52 @@ bool     debug_bp_get_condition(int pc, uint8_t bank, int x16Bank, int *has_cond
 
 // Release everything. Only needed at shutdown or in tests.
 void debug_core_free(void);
+
+// ---- Memory write watchpoints ----------------------------------------------
+// "Stop when something writes to this address" -- the counterpart to a
+// breakpoint for data rather than code, and the tool for finding what is
+// corrupting a variable when you have no idea which code is responsible.
+//
+// Checked by a linear scan on every CPU store, so the scan is skipped entirely
+// while none are set: the cost is only paid during an active debugging session.
+// The table is fixed-size because a scan per store has to stay small, and 64 is
+// roomy enough to watch a whole structure a field at a time.
+#define MAX_WATCHPOINTS 64
+
+struct watchpoint {
+	uint16_t addr;
+	uint16_t len;       // 1 = a single byte, >1 = a range starting at addr
+	int      x16Bank;   // bank selector, as for a breakpoint (see DEBUG_BANK_ANY)
+	bool     active;
+	bool     has_value; // when set, only fire if the written value compares true
+	uint8_t  value;
+	int      op;        // BPCMP_* comparison code
+};
+
+// Watch `len` bytes from `addr` in bank `x16Bank` (see DEBUG_BANK_ANY).
+// Identified by (addr, x16Bank), like a breakpoint, so the same address can be
+// watched in more than one bank. Returns the new index, or -1 if one already
+// covers that pair or the table is full.
+int  debug_wp_add(uint16_t addr, uint16_t len, int x16Bank);
+bool debug_wp_remove(uint16_t addr, int x16Bank);
+void debug_wp_clear_all(void);
+int  debug_wp_count(void);
+
+// Only fire when the value being written compares true against `value`, so
+// "stop when this becomes zero" does not stop on every other write to it.
+// Returns false if no watchpoint starts at (addr, x16Bank).
+bool debug_wp_set_value(uint16_t addr, int x16Bank, int op, uint8_t value);
+
+// Temporarily stop a watchpoint firing without forgetting how it was set up.
+bool debug_wp_set_active(uint16_t addr, int x16Bank, bool active);
+
+// Does any watchpoint cover `addr`? Read-only; for a UI marking watched bytes.
+bool debug_wp_covers(uint16_t addr);
+
+// The CPU is writing `value` to `addr`: should execution stop? Honours the
+// value filter. Called from the store path, so callers should test
+// debug_wp_count() first and skip this entirely when nothing is being watched.
+bool debug_wp_check_write(uint16_t addr, uint8_t value);
 
 #ifdef __cplusplus
 } // extern "C"

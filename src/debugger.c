@@ -145,6 +145,11 @@ static int      resumeSkipPC    = -1;
 static uint8_t  resumeSkipBank  = 0;
 static uint32_t resumeSkipClock = 0;
 
+// A watchpoint fired mid-instruction and the reported location still has to be
+// taken, once the instruction that did the write has finished. See
+// DEBUGBreakOnWatchpoint().
+static bool watchpointStopPending = false;
+
 static void DEBUGArmResumeSkip(void) {
 	resumeSkipPC    = regs.pc;
 	resumeSkipBank  = regs.k;
@@ -181,10 +186,10 @@ static inline int getCurrentBank(int pc, uint8_t bank) {
 // *******************************************************************************************
 
 static inline bool hitBreakpoint(int pc, uint8_t bank, struct breakpoint bp) {
-	if ((pc == bp.pc) && bank == bp.bank && getCurrentBank(pc, bank) == bp.x16Bank) {
-		return true;
-	}
-	return false;
+	// Uses the same bank rule as every other matcher, so this field cannot mean
+	// "any bank" in one place and "not banked" in another.
+	return pc == bp.pc && bank == bp.bank
+	       && debug_bank_selector_matches(bp.x16Bank, pc, bank);
 }
 
 // *******************************************************************************************
@@ -200,6 +205,16 @@ int  DEBUGGetCurrentStatus(void) {
 
 	SDL_Event event;
 	if (currentPC < 0) currentPC = regs.pc;                                      // Initialise current PC displayed.
+
+	// A watchpoint stopped us from inside a store. The instruction that did the
+	// write has now finished, so this is the first point at which regs.pc says
+	// where the CPU actually ended up.
+	if (watchpointStopPending) {
+		watchpointStopPending = false;
+		currentPC = regs.pc;
+		currentPCBank = regs.k;
+		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+	}
 
 	if (currentMode == DMODE_STEP) {                                // Single step before
 		if (currentPC != regs.pc || currentPCBank != regs.k || currentPCX16Bank != getCurrentBank(regs.pc, regs.k)) { // Ensure that the PC moved
@@ -324,6 +339,25 @@ void DEBUGBreakToDebugger(void) {
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
 	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+}
+
+// A watched address was written. Called from the CPU store path, so it does as
+// little as possible: memory.c has already established that a watchpoint
+// matched.
+//
+// The reported location is captured later, not here. At store time the CPU is
+// mid-instruction: the addressing mode has already advanced regs.pc past the
+// operands, but the instruction's own effect on the PC has not happened yet. An
+// ordinary STA lands where regs.pc already points, but a JSR pushing its return
+// address, an interrupt pushing its frame, or MVN/MVP rewinding to repeat do
+// not -- and those are exactly the writes a stack watchpoint is set to catch.
+// Deferring the snapshot to the next status poll reports where the CPU
+// actually ended up.
+void DEBUGBreakOnWatchpoint(void) {
+	if (currentMode != DMODE_STOP) {
+		currentMode          = DMODE_STOP;
+		watchpointStopPending = true;
+	}
 }
 
 // *******************************************************************************************
@@ -515,7 +549,11 @@ static void DEBUGHandleKeyEvent(SDL_Keycode key, int isShift) {
 			reset6502(regs.is65c816);
 			currentPC = regs.pc;
 			currentPCBank = regs.k;
-			currentPCX16Bank = -1;
+			// Derive the window bank like every other handler. The reset vector
+			// puts the PC in ROM, so hardcoding "no bank" here left the display
+			// disagreeing with the machine -- and F9 would then arm a
+			// breakpoint for every ROM bank rather than the one on screen.
+			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
 			break;
 
 		case DBGKEY_BANK_NEXT:
