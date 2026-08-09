@@ -7,6 +7,10 @@
 
 #include <stdint.h>
 
+// Interrupt context tracking, so a debugger can tell whether the machine is
+// inside a handler and where it will return to.
+#include "irq_ctx.h"
+
 extern void reset6502(bool c816);
 extern void step6502();
 extern void exec6502(uint32_t tickcount);

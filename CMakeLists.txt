@@ -215,6 +215,7 @@ set(X16_SOURCES
     src/source_view.c
     src/code_map.c
     src/debug_core.c
+    src/cpu/irq_ctx.c
     src/javascript_interface.c
     src/joystick.c
     src/rendertext.c
@@ -381,16 +382,21 @@ option(BUILD_TESTS "Build every unit test" OFF)
 option(BUILD_DBG_INFO_TEST "Build the cc65 debug-info parser test" OFF)
 option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
 option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
+option(BUILD_TIMING_SPEED_TEST "Build the emulation-speed control test" OFF)
+option(BUILD_IRQ_CTX_TEST "Build the interrupt context tracking test" OFF)
 
 if(BUILD_TESTS)
     set(BUILD_DBG_INFO_TEST ON)
     set(BUILD_CODE_MAP_TEST ON)
     set(BUILD_DEBUG_CORE_TEST ON)
+    set(BUILD_TIMING_SPEED_TEST ON)
+    set(BUILD_IRQ_CTX_TEST ON)
 endif()
 
 # add_test() only writes a CTestTestfile when testing is enabled, so this has to
 # come before the add_test() calls below.
-if((BUILD_DBG_INFO_TEST OR BUILD_CODE_MAP_TEST OR BUILD_DEBUG_CORE_TEST) AND NOT EMSCRIPTEN)
+if((BUILD_DBG_INFO_TEST OR BUILD_CODE_MAP_TEST OR BUILD_DEBUG_CORE_TEST
+    OR BUILD_TIMING_SPEED_TEST OR BUILD_IRQ_CTX_TEST) AND NOT EMSCRIPTEN)
     enable_testing()
 endif()
 
@@ -436,17 +442,27 @@ if(BUILD_DEBUG_CORE_TEST AND NOT EMSCRIPTEN)
     add_test(NAME debug_core COMMAND debug_core_test)
 endif()
 
-# --- Optional: emulation-speed control checks ---
-# Off by default, same as above. The speed arithmetic in timing.c depends only
-# on the machine's configured clock, so the test supplies the few emulator
-# globals it touches and links nothing else.
-option(BUILD_TIMING_SPEED_TEST "Build the emulation-speed control test" OFF)
+# --- Emulation-speed control checks ---
+# The speed arithmetic in timing.c depends only on the machine's configured
+# clock, so the test supplies the few emulator globals it touches.
 if(BUILD_TIMING_SPEED_TEST AND NOT EMSCRIPTEN)
     add_executable(timing_speed_test
         tests/test_timing_speed.c
         src/timing.c
     )
     target_include_directories(timing_speed_test PRIVATE src ${SDL2_INCLUDE_DIRS})
+    add_test(NAME timing_speed COMMAND timing_speed_test)
+endif()
+
+# --- Interrupt context tracking checks ---
+# irq_ctx.c is pure bookkeeping with no dependencies, so the test links it alone.
+if(BUILD_IRQ_CTX_TEST AND NOT EMSCRIPTEN)
+    add_executable(irq_ctx_test
+        tests/test_irq_ctx.c
+        src/cpu/irq_ctx.c
+    )
+    target_include_directories(irq_ctx_test PRIVATE src)
+    add_test(NAME irq_ctx COMMAND irq_ctx_test)
 endif()
 
 # Build summary

@@ -558,6 +558,11 @@ static void rti() {
         }
         regs.k = pull8();
     }
+
+    // Pair this with the interrupt entry that set the stack up. Reported after
+    // every pull, so regs.sp is back to what it was when the interrupt was
+    // taken. See cpu/irq_ctx.h.
+    cpu_irq_ctx_leave(regs.sp);
 }
 
 static void rtl() {
