@@ -5,602 +5,87 @@
 
 ## Releases
 
-This is **X16Emu ADD**, the Advanced Disassembler and Debugger — a fork of the
+**X16Emu ADD** is the Advanced Disassembler and Debugger, a fork of the
 [official Commander X16 emulator](https://github.com/X16Community/x16-emulator).
 
-ADD releases are named `R49.nnn`, where `R49` is the official release the build tracks and `nnn`
-counts the ADD builds on top of it. They are published on the
-[X16Emu ADD releases page](https://github.com/xylothan/x16-emulator/releases), and the notes for
-each one describe what changed in that build.
-
-The notes below are the **official upstream release notes**, reproduced unchanged. They describe
-the emulator core that each `R<n>.nnn` build is based on. For what ADD adds — the graphical
-debugger, source-level debugging and the DAP server — see the
-[README](README.md#why-x16emu-add).
-
-### Release R49 ("Pyrite")
-
-* Features/Fixes
-	* VERA: Add warnings when reading to write-only and when writing to read-only registers [irmen]
-	* VERA: Make SPI busy time more true to hardware
-	* VERA: Fix wrong behavior of 8bpp sprites when palette offset is nonzero
-	* VERA PSG: Fix noise frequency being double that of hardware
-	* SDCARD: add READ_MULTIPLE_BLOCK support [stople]
-	* VIA: Fix for IFR flag handling [catharinejm]
-	* Let emulator exit with Alt+F4 even if SDL does not handle it [JimmyDansbo]
-	* Only free clipboard memory buffer when it comes from SDL's paste handler
-	* Added serial MIDI emulation via FluidSynth
-	* Exclude threading (needed for FluidSynth) in wasm build
-	* Added `-gs` support, which implements a system with 24-bit addressable RAM and a 65C816 processor, in anticipation of the planned X16 GS with this feature. [Fulgen301]
-	* Vastly improved performance of the HostFS's implementation of MACPTR
-	* Added HostFS implementations of XMACPTR and XMCIOUT to mirror the CMDR-DOS implementations
-	* 65C816 emulation fixes for MVN, MVP [Fulgen301, cnelson20]
-	* Move from C99 to C11, some C syntax and header fixes [skeeto]
-	* Additional web emulator options, including those to support CPU type and speed [JimmyDansbo]
-	* Emulator debugger fixes, including support for GS, and pressing F9 a second time to clear the breakpoint
-	* More changes in the [ROM](https://github.com/X16Community/x16-rom/tree/r49#release-49-pyrite).
-
-### Release R48 ("Cadmium")
-
-* Features/Fixes
-	* Emulated VERA SPI clock has been updated to half of the VERA clock speed rather than the CPU clock.
-	* Trace for ROM banks 13-15 (x16edit and Basload) is now supported [stefan-b-jakobsson]
-	* Fixed debug reads from the stack and a few unbounded values in the debugger display
-	* VERA PSG: for the saw and triangle waves, the inverse of the pulse width value is XORed with the value of the wave. This is the behavior of VERA 47.0.2 on hardware. [m00dawg]
-	* Allow setting the amount of RAM in the web version of the emulator [JimmyDansbo]
-	* Windows 11: Rounded corners should no longer cut off the lower left and lower right of the emulator window.
-	* New memory statistics feature [irmen]
-	* HostFS: Implement DOS "T"ell command
-	* Debugger now includes elapsed cpu clocks since the last breakpoint or step
-	* 65C816: Fixed stack relative indirect address calulation wrongly using the direct page [Fulgen301]
-	* 65C816: high bytes of .X and .Y are now cleared when PLP or RTI set x=1 [cnelson20]
-	* 65C816: PEI no longer does improper page wraparound, `[dp]` indirect modes now properly read the address. [Fulgen301]
-	* More changes in the [ROM](https://github.com/X16Community/x16-rom/tree/r48#release-48-cadmium).
-
-### Release 47 ("Roswell")
-
-This is a major release with numerous bugfixes, as well as introducing 65C816 support.
-
-* Features/Fixes.
-	* Optionally emulate a 65C816 CPU, selectable via a new command line switch `-c816`. There is also a `-c02` command line switch to explicitly select 65C02 mode.  [Fulgen301]
-	* In order to make room for the full 65C816 vector table, the R47 ROM relocates the "MIST" KERNAL signature from 0xFFF6 to 0xC008. Emulator has been updated to check for the signature in the newer location. [Fulgen301]
-	* Made IEC device addressing more flexible by preventing the HostFS from consuming every device number [DragWx]
-	* Improved timing calculations for HostFS operations to translate wall clock time to elapsed CPU ticks
-	* If HostFS is in use, the default `-abufs` audio buffer count is 32, otherwise 8. This should reduce audio stuttering for games which load assets from disk while sound is playing.
-	* HostFS can be changed to respond to a non-default device number. New command line option `-hostfsdev`. Using this option in conjunction with `-sdcard` allows both devices to appear on the system.
-	* Matching the VERA hardware feature, the layer config T256 bit can be used as a palette switch in tile and bitmap modes. Most useful in 2bpp and 4bpp depths, setting this bit on the layer forces the resolved high bit of the palette entry index to 1. For instance, in 4bpp mode, a tile pixel with index 1, on a tile configured with palette offset 6 would normally resolve to palette entry 0x61 (or 97 decimal), having this layer bit set will cause this pixel to resolve to palette entry 0xE1 (or 225 decmial).
-	* Copying VERA hardware behavior, the LINE IRQ can happen in the non-visible vertical blanking area.
-	* HostFS: empty filename now returns an error as appropriate
-	* IO2, the YM2151 range, is partially decoded on hardware. Emulator behavior now matches this so that the YM2151 is mirrored throughout the $9F42-$9F5F range.
-	* New command line switch `-nokeyboardcapture` causes capture mode to operate without intercepting OS-level keystrokes such as Alt+Tab.
-	* Improvements to `-wuninit` warnings to show the appropriate opcode and location of uninitialized accesses.
-	* Recognize the INTL1 key code, which exists on some keyboard layouts such as pt-BR.
-	* Update the 65C02 opcode table to properly handle multi-byte NOPs and update cycle counts.
-	* `-trace` output has been updated and enhanced, showing banks for effective addresses. Add listings for new banks.
-	* new `-longpwron` option to match SMC 47 long power button press behavior at power on.
-	* VERA FX: fix address resolution bug with 4bpp unaligned cache filling.
-	* VERA: DC_VSTOP was taking effect one scanline too late.
-	* SMC: update activity light logic. Hardware was mistakenly documented as allowing 255 PWM intensity levels, while in fact it is binary on/off.
-	* VERA PSG: update PSG volume table from VERA 47.0.0. Prior to this change, there were multiple PSG volume values at the low end that resulted in the same output level.
-	* SDL2: Set the application name to "Commander X16 Emulator", which shows up in the audio mixer, and in the screensaver inhibit application list on Linux desktop environments. This should be a bit more informative than "My SDL application".
-	* New `-pastewarp` command line switch that warps the emulator when receiving paste data either from the clipboard or from the `-bas` command line switch.
-	* HostFS: improve path parsing with both CMD and unix path syntax, particularly with absolute path names.  DOS"MD//:TEST" now creates the directory in the FS root rather than erroneously in the current directory.
-	* VERA: DC_HSCALE and DC_VSCALE values > 0x80 now render as they do on hardware.
-	* SMC 47.0.0 fast PS/2 read support
-	* Now with native build for Apple Silicon (built on the GitHub MacOS ARM runner)
-	* More changes in the [ROM](https://github.com/X16Community/x16-rom/tree/r47#release-47-roswell).
-
-
-### Release 46 ("Winnipeg")
-
-This is mainly a bugfix release.
-
-* Features/Fixes
-	* A change in the ROM caused controllers to have their buttons offset due to how the emulated VIA responds to polling. The issue was fixed in the ROM and while it was not technically an emulator bug and no changes were made to the emulator's joystick routines, it gets a mention here.
-	* HostFS: UNLSN was incorrectly setting the KERNAL status byte based on whether a file existed upon open. It has been changed to behave like CMDR-DOS. (discovered by [voidstar78])
-	* HostFS: Opening a file in Modify mode now properly creates file if it doesn't yet exist (discovered by [m00dawg])
-	* Audio: prevent `-sound none` from trying to use the uninitialized ymfm YM2151 library. The YM status register was also modified to always return 0 in this case. (discovered by [jestin])
-	* WebAssembly: improve handling of zip files without `manifest.json` [Cyber-Ex]
-	* GUI: If emulator launches in a window with the titlebar offscreen, move the window so that it is visible. (with help from [irmen])
-	* GUI: Mouse movement now uses relative motion in capture mode, which makes the position of the host mouse irrelevant while in capture mode.
-	* GUI: new `-capture` command line option to start emulator with mouse captured
-	* Testbench: miscellaneous fixes [irmen]
-	* More changes in the [ROM](https://github.com/X16Community/x16-rom/tree/r46#release-46-winnipeg).
-
-### Release 45 ("Nuuk")
-
-This is a minor release with respect to the emulator.  The bulk of the changes are in the [ROM](https://github.com/X16Community/x16-rom/tree/r45#release-45-nuuk).
-
-* Features/Fixes
-	* Revert VERA PSG amplitude resolution back to 6 bits. This was upped previously to match VERA firmware. It was subsequently reverted in VERA to make room for the FX feature. [akumanatt]
-	* Intellimouse support added to the emulated SMC, partially implementing the new feature in hardware SMC firmware 45.1.0. [stefan-b-jakobsson]
-		* Scroll wheel is supported (mouse device ID 3)
-		* Not implemented: Extra buttons (mouse device ID 4)
-	* New emulator debug register behaviors
-		* Reading from \$9FB8-\$9FBB in this order returns the 32-bit CPU clock counter, snapshotted at the time \$9FB8 is read. Previously the clock counter would remain in motion and the upper counter bits could roll over unpredictably.
-		* Writing to \$9FB8-\$9FBB has new behaviors:
-			* \$9FB8: resets the cpu clock counter to 0.
-			* \$9FB9: prints a debug message to the console `User debug 1: $xx`.
-			* \$9FBA: prints a debug message to the console `User debug 2: $xx`.
-			* \$9FBB: prints the UTF-8 representation of the ISO character to the console. This can be treated like a debug STDOUT.
-		* Before using any of these emulator debug registers, it's recommended to test for emulator presence first.
-			* Read from `$9FBE` and `$9FBF`. When running under the emulator, the returned values should be `$31` and `$36` respectively. If any other values are returned, you can usually assume to be running on real hardware. While the stock machine doesn't have any I/O devices that listen to the emulator I/O range, an add-on card could choose to use that same address space in the future for its own functions.
-	* New MCIOUT (blockwise write) implementation for HostFS, mirroring the feature in the kernal for use on SD card.
-	* New command key and capture behavior:
-		* Ctrl+M/⇧⌘M is always processed by the emulator to toggle (mouse/keyboard) capture, regardless of the state of the "Disable Emulator Keys" flag.
-		* Turning capture mode on disables all other emulator keys until capture mode is toggled off. While capture is on, the emulator also routes most OS shortcut key combos to the X16: for instance, Alt+Tab.
-
-
-### Release 44 ("Milan")
-
-This is the third release of x16-emulator by the X16Community team
-
-* Features/Fixes
-	* Many changes to HostFS, including
-		* Fix regression for loading "`:*`" from HostFS while also using an SD card image
-		* Fix `-prg` and `-sdcard` options working together, which did not properly handle the case after emulator reset
-		* Proper wildcard behavior in dir filters and OPEN string
-		* Fix filetype directory filter command parsing
-		* Add `$=L` long mode directory listing to emulate the new feature in the ROM.
-		* Speed up directory filetype filter
-		* Add CMD/SD2IEC style directory navigation: `CD:←` to enter parent directory
-		* Partial emulation of case-insensitivity in filenames on case-sensitive host filesystems.
-			* This works in `OPEN` strings and directory names in commands (`CD:`, etc.) which do not contain a `/` character.
-			* It also works on the last path segment in relative or absolute paths in directory names or `OPEN` strings. In other words, if given a path specification containing one or more `/` characters, it will do only a case-insensitive search on the part after the final `/`.
-		* Proper translation between UTF-8 filenames and their ISO representations.
-	* Implement VPB behavior to match hardware [akumanatt]
-		* Fix BRK to have VPB behavior
-	* Support for additional keycodes (NumLock, Menu) [stefan-b-jakobsson]
-	* Fix debugger to set the correct bank for breakpoints [gaekwad]
-	* New `-fullscreen` CLI option
-	* Proper cleanup when the emulator exits when in full screen [irmen]
-	* FX emulation, which mirrors the features in the FX enhancement to the VERA firmware. See the [VERA FX Reference](https://github.com/X16Community/x16-docs/blob/master/VERA%20FX%20Reference.md) for details.
-	* Writing bit 6 and bit 7 together into VERA_AUDIO_CTRL now enables looping the PCM FIFO (and does not reset the FIFO). Any other write into VERA_AUDIO_CTRL disables looping.
-	* New `-opacity` CLI option for window transparency [tstibor]
-	* New support for screenshots (Ctrl+P/⌘P) [dressupgeekout]
-	* Fix small memory leak caused by pasting into the emulator
-	* Use relative mouse motion while in grabbed mode
-	* Remove `-geos` CLI option [dressupgeekout]
-	* New YM2151 audio core: remove old MAME core, replace with ymfm
-		* Allows for IRQs from the YM, requires specifying `-enable-ym2151-irq` on the command line
-	* Emulate hardware open bus behavior when reading from a device that doesn't exist in the `$9Fxx` space
-	* Reset via I2C command: defer machine reset to the main loop, which allows the I2C write routine to return cleanly.
-	* Fix 65C02 `BIT` immediate behavior [XarkLabs]
-	* New NMI trigger emulator hotkey, emulates Ctrl+Alt+Restore on hardware (Ctrl+Backspace/⌘Delete) [XarkLabs]
-	* Fix line artifact in application icon/logo
-	* Grabbing the mouse with (Ctrl+M/⇧⌘M) now grabs the keyboard as well. It allows the emulator to receive keystrokes and key combinations which would otherwise be intercepted by the operating system.
-	* Fix description of fill value in `makecart`
-	* New features implemented in the [ROM](https://github.com/X16Community/x16-rom/tree/r44#release-44-milan)
-* Build
-	* Link-time optimization is now enabled by default
-	* Portability enhancements [dressupgeekout]
-	* Suppress clang warnings due to deprecated sprintf usage in ymfm lib [XarkLabs]
-
-### Release 43 ("Stockholm")
-
-This is the second release of x16-emulator by the X16Community team
-
-* **BREAKING CHANGE**
-	* The keyboard protocol between the emulated SMC and the KERNAL has changed, thus x16-emulator version R43 requires x16-rom version R43.
-	* This change also affects how the custom keyboard handler vector works (keyhdl). For details, see [Chapter 2 of the Programmer's Reference Guide](https://github.com/X16Community/x16-docs/blob/master/X16%20Reference%20-%2002%20-%20Editor.md#custom-keyboard-keynum-code-handler)
-	* **Your Keyboard will not work unless** you are running
-		* R43 of both x16-rom and x16-emulator
-* Features
-	* Updates to support translation from SDL scancodes to new keynum encoding supported by KERNAL [stefan-b-jakobsson]
-	* More granular support for RAM amount as argument to `-ram`
-	* Minor HostFS bugfixes and enhancements, including tying the activity light to HostFS activity.
-	* VERA updates: new support for 240p in NTSC/RGB modes. Chroma disable only works on NTSC.
-	* Stepping the debugger now supports stepping over `WAI`
-	* Debugger now shows the correct bank in the disassembly by default. [gaekwad]
-	* Debugger breakpoints are now bank-specific [gaekwad]
-	* Randomized RAM is now the default. New option: `-zeroram` [irmen]
-	* Host's mouse cursor is now shown unless either the KERNAL mouse is enabled or the mouse cursor is captured (Ctrl+M/⇧⌘M).
-	* Esc key is now Esc rather than STOP.  Pause key sends STOP.  (Ctrl+C is also recognized by the KERNAL as STOP)
-	* SD card emulation now responds to CMD9
-	* Emulated SMC can now assert NMI.
-	* Add `-mhz` option to select a speed other than 8
-	* When built with `TRACE`, the `-trace` output now shows the effective address for indirect and indexed opcodes and VERA data0/data1 reads and writes.
-	* New comamnd line option `-midline-effects` that supports mid-line changes to the palette or tile/sprite data. R42 always had this behavior, which results in performance degradation for programs write to VERA heavily if the host CPU is not fast enough. This behavior is now disabled by default. `-midline-effects` restores this optional behavior.
-	* New features implemented in the [ROM](https://github.com/X16Community/x16-rom/tree/r43#release-43-stockholm)
-* Other
-	* Release builds have link-time optimization enabled which seems to help performance.
-	* Add git hash of build to `-version` string.
-	* WebAssembly enhancements in the supporting html/js [Cyber-EX]
-	* Fixed potential off-by one row with non-zero DC_VSTART.
-	* Prevent laggy hostfs reads from causing the emulator to warp to catch up by translating the wall clock time to elapsed 6502 clocks. This effectively makes HostFS MACPTR behave like a DMA card, including the possibility that it prevents the CPU from executing instructions while interrupt sources may have been waiting for service.
-	* Bugfix: Process multiple SDL events per frame. (Fixed choppy mouse movement if there were keystrokes in the keyboard buffer)
-	* Audio resampling and ring buffer fixes [DragWx]
-	* Build fixes on Mac
-### Release 42 ("Cambridge")
-
-This is the first release of x16-emulator by the X16Community team
-
-* Features
-	* Added testbench mode [stefan-b-jakobsson, indigodarkwolf]
-	* Added `-noemucmdkeys` option [jestin]
-	* New `FIFO_EMPTY` flag in `PCM_CTRL` to reflect new VERA feature [ZeroByteOrg]
-	* Added `-widescreen` option to simulate stretched 640x480 output at a 16:9 aspect ratio [jestin]
-	* New `SCANLINE` VERA register behavior to reflect updated VERA feature [mooinglemur]
-	* Added `-randram` and `-wuninit` command line arguments to randomize RAM at boot, and to emit a console warning when uninitialized RAM is read, respectively. [stefan-b-jakobsson]
-	* Allow specifying non-power-of-2 argument to `-ram`, in increments of 8k [JimmyDansbo]
-	* Added `-via2` option to selectively enable a VIA at $9F10. [akumanatt]
-	* Added ROM cart loading with `-cart` and `-cartbin` [indigodarkwolf]
-	* New `makecart` utility for building `.crt` cartridge files [indigodarkwolf]
-	* Compressed SD card image support [indigodarkwolf]
-	* Mouse grab mode, press Ctrl+M (Mac: ⇧⌘M) to toggle. [mooinglemur]
-	* New `-fsroot` and `-startin` options to specify the root of the emulated host fs, and the host directory to start in respectively. [mooinglemur]
-	* Many, many new features implemented in the [ROM](https://github.com/X16Community/x16-rom/tree/r42#release-42-cambridge)
-* Other
-	* PS/2 devices now connected via SMC via I2C, I2C pins have moved to match hardware [stefan-b-jakobsson]
-	* Recognize middle mouse button [ZeroByteOrg]
-	* Synchronized keymaps with ROM [megagrump]
-	* Build fixes [irmen]
-	* Show dialog when a `STP` instruction is encountered with debug turned off [akumanatt]
-	* Improved emulated behavior of `WAI` [LRFLEW]
-	* Clear D flag on interrupt entry [LRFLEW]
-	* Update BRK length in debugger [indigodarkwolf]
-	* IRQ/NMI entry clock cycles are now accounted for [mooinglemur]
-	* Add reason string to memory dump output [irmen]
-	* Clear sprite line buffer when disabling sprite layer [jestin]
-	* Improved audio balance between VERA and YM2151. Much improved mixing routines to reduce stutters and clicking. [akumanatt]
-	* To match hardware, VERA ISR bits are set at VSYNC, LINE, and SPRCOL regardless of whether their respective IEN bits are set [mooinglemur]
-	* Changes to match Proto 4, including moving VIA1 interrupt pin to IRQ [akumanatt]
-	* VERA mid-frame raster effects more closely match the timing of real hardware [mooinglemur]
-	* Enabled and built out CI/CD build workflows [maxgerhardt, indigodarkwolf, mooinglemur]
-	* Many host fs enhancements, bringing host fs very close to feature parity with SD card images [davidgiven, ZeroByteOrg, mooinglemur]
-	* Many documentation updates and fixes [veganaize, irmen, tomxp411]
-
-### Release 41 ("Marrakech")
-
-* allow apps to intercept Cmd/Win, Menu and Caps-Lock keys
-* fixed `-prg` with `-sdcard`
-* fixed loading from host filesystem (length reporting by `MACPTR` on EOI)
-* macOS: support for older versions like Catalina (10.15)
-
-### Release 40 ("Bonn")
-
-* Features
-	* improved VERA video timings [Natt Akuma]
-	* added Host FS bridging using IEEE API
-	* added Serial Bus emulation [experimental]
-	* added WAV file recording [Stephen Horn]
-	* possible to disable Ctrl/Cmd key interception ($9FB7) [mooinglemur] 
-* Other
-	* Fixed I2C (RTC, SMC)
-	* Fixed RAM/ROM bank for PC when entering break [mjallison42]
-	* LST support for -trace
-
-## Release 39 ("Buenos Aires")
-
-* Switch to Proto2 Hardware
-	* banking through zp addresses 0 and 1
-	* modified I/O layout
-	* modified VIA GPIO layout
-	* support for 4 controllers
-	* I2C bus with SMC and RTC/NVRAM
-* Features
-	* implemented VIA timers [Natt Akuma]
-	* added option to disable sound [Jimmy Dansbo]
-	* added support for Delete, Insert, End, PgUp and PgDn keys [Stefan B Jakobsson]
-	* debugger scroll up & down description [Matas Lesinskas]
-	* added anti-aliasing to VERA PSG waveforms [TaleTN]
-* Bugs
-	* fixed sending only one mouse update per frame [Elektron72]
-	* fixed VSYNC timing [Elektron72]
-	* switched front and back porches [Elektron72]
-	* fixed LOAD/SAVE hypercall so debugger doesn't break [Stephen Horn]
-	* fixed YM2151 frequency from 4MHz ->3.579545MHz [Stephen Horn]
-	* do not set compositor bypass hint for SDL Window [Stephen Horn]
-	* reset timing after exiting debugger [Elektron72]
-	* don't write nvram after every frame
-	* fixed write outside of line buffer [Stephen Horn]
-	* fixed BRA extra CPU cycle [LRFLEW]
-	* fix: clear layer line once layer is disabled
-	* fixed BBSx/BBRx timing [Natt Akuma]
-* Other
-	* misc speed optimizations [Stephen Horn]
-
-## Release 38 ("Kyoto")
-
-* CPU
-	* added WAI, BBS, BBR, SMB, and RMB instructions [Stephen Horn]
-* VERA
-	* VERA speed optimizations [Stephen Horn]
-	* fixed raster line interrupt [Stephen Horn]
-	* added sprite collision interrupt [Stephen Horn]
-	* fixed sprite wrapping [Stephen Horn]
-	* added VERA dump, fill commands to debugger [Stephen Horn]
-	* fixed VRAM memory dump [Stephen Horn]
-* SD card
-	* SD card write support
-	* Ctrl+D/Cmd+D detaches/attaches SD card (for debugging)
-	* improved/cleaned up SD card emulation [Frank van den Hoef]
-	* SD card activity/error LED support
-	* VERA-SPI: support Auto-TX mode
-* misc
-	* added warp mode (Ctrl+'+'/Cmd+'+' to toggle, or `-warp`)
-	* added '-version' shell option [Alice Trillian Osako]
-	* new app icon [Stephen Horn]
-	* expose 32 bit cycle counter (up to 500 sec) in emulator I/O area
-	* zero page register display in debugger [Mike Allison]
-	* Various WebAssembly improvements and fixes [Sebastian Voges]
-
-### Release 37 ("Geneva")
-
-* VERA 0.9 register layout [Frank van den Hoef]
-* audio [Frank van den Hoef]
-    * VERA PCM and PSG audio support
-    * YM2151 support is now enabled by default
-    * added `-abufs` to specify number of audio buffers
-* removed UART [Frank van den Hoef]
-* added window icon [Nigel Stewart]
-* fixed access to paths with non-ASCII characters on Windows [Serentty]
-* SDL HiDPI hint to fix mouse scaling [Edward Kmett]
-
-### Release 36 ("Berlin")
-
-* added VERA UART emulation (`-uart-in`, `-uart-out`)
-* correctly emulate missing SD card
-* moved host filesystem interface from device 1 to device 8, only available if no SD card is attached
-* require numeric argument for `-test` to auto-run test
-* fixed JMP (a,x) for 65c02
-* Fixed ESC as RUN/STOP [Ingo Hinterding]
-
-### Release 35
-
-* video optimization [Neil Forbes-Richardson]
-* added `-geos` to launch GEOS on startup
-* added `-test` to launch (graphics) unit test on startup
-* debugger
-	* switch viewed RAM/ROM bank with `numpad +` and `numpad -` [Kobrasadetin]
-	* optimized character printing [Kobrasadetin]
-* trace mode:
-	* prepend ROM bank to address in trace
-	* also prints 16 bit virtual regs (graph/GEOS)
-* fixes
-	* initialize memory to 0 [Kobrasadetin]
-	* fixed SYS hex argument
-	* disabled "buffer full, skipping" and SD card debug text, it was too noisy
-
-### Release 34
-
-* PS/2 mouse
-* support for text mode with tiles other than 8x8 [Serentty]
-* fix: programmatic echo mode control [Mikael O. Bonnier]
-
-### Release 33
-
-* significant performance optimizations
-* VERA
-	* enabled all 128 sprites
-	* correct sprite zdepth
-	* support for raster IRQs
-* SDL controller support using `-joy1` and `-joy2` [John J Bliss]
-* 65C02 BCD fixes [Norman B. Lancaster]
-* feature parity with new LOAD/VLOAD features [John-Paul Gignac]
-* default RAM and ROM banks are now 0, matching the hardware
-* GIF recording can now be controlled from inside the machine [Randall Bohn]
-* Debugging
-	* Major enhancements to the debugger [kktos]
-	* `-echo` will now encode non-printable characters like this: \X93 for CHR$(93), `-bas` as 	well as pasting accepts this convention again
-	* `-echo raw` for the original behavior
-	* `-echo iso` for correct character encoding in ISO mode
-	* `-ram` to specify RAM size; now defaults to 512
-
-### Release 32
-
-* correct ROM banking
-* VERA emulation optimizations [Stephen Horn]
-* added `-dump` option to allow writing RAM, CPU state or VERA state to disk [Nils Hasenbanck]
-* added `-quality` option to change scaling algorithm; now defaults to "best" [Maurizio Porrato]
-* output of `-echo` can now be fed into UNIX pipes [Anonymous Maarten]
-* relative speed of emulator is shown in the title if host can't keep up [Rien]
-* fix: 6502 BCD arithmetic [Rien]
-* fix: colors (white is now white) [Rien]
-* fix: sprite flipping [jjbliss]
-
-### Release 31
-
-* VERA 0.8 register layout
-* removed `-char` (character ROM is now part of `rom.bin`)
-* GIF recording using `-gif` [Neil Forbes-Richardson]
-* numpad support [Maurizio Porrato]
-* fake support of VIA timers to work around BASIC RND(0)
-* default ROM is taken from executable's directory [Michael Watters]
-* emulator window has a title [Michael Watters]
-* `-debug` allows specifying a breakpoint [Frank Buss]
-* package contains the ROM symbols in `rom.txt`
-* support for VERA SPI
-
-### Release 30
-
-Emulator:
-* VERA can now generate VSYNC interrupts
-* added `-keymap` for setting the keyboard layout
-* added `-scale` for integer scaling of the window [Stephen Horn]
-* added `-log` to enable various logging features (can also be enabled at runtime (POKE $9FB0+) [Randall Bohn])
-* changed `-run` to be an option to `-prg` and `-bas`
-* emulator detection: read $9FBE/$9FBF, must read 0x31 and 0x36
-* fix: `-prg` and `-run` no longer corrupt BASIC programs.
-* fix: `LOAD,1` into RAM bank [Stephen Horn]
-* fix: 2bpp and 4bpp drawing [Stephen Horn]
-* fix: 4bpp sprites [MonstersGoBoom]
-* fix: build on Linux/ARM
-
-### Release 29
-
-* better keyboard support: if you pretend you have a US keyboard layout when typing, all keys should now be reachable [Paul Robson]
-* `-debug` will enable the new debugger [Paul Robson]
-* runs at the correct speed (was way too slow on most machines)
-* keyboard shortcuts work on Windows/Linux: `Ctrl + F/R/S/V`
-* `Ctrl + V` pastes the clipboard as keypresses
-* `-bas file.txt` loads a BASIC program in ASCII encoding
-* `-echo` prints all BASIC/KERNAL output to the terminal, use it with LIST to convert a BASIC program to ASCII
-* `-run` acts like `-prg`, but also autostarts the program
-* `JMP $FFFF` and `SYS 65535` exit the emulator and save memory into the host's storage
-* the packages now contain the current version of the Programmer's Reference Guide (HTML)
-* fix: on Windows, some file load/saves may be been truncated
-
-### Release 28
-
-* support for 65C02 opcodes [Paul Robson]
-* keep aspect ratio when resizing window [Sebastian Voges]
-* updated sprite logic to VERA 0.7 – **the layout of the sprite data registers has changed, you need to change your code!**
-
-
-### Release 27
-
-* Command line overhaul. Supports `-rom`, `-char`, `-sdcard` and `-prg`.
-* ROM and char filename defaults, so x16emu can be started without arguments.
-* Host Filesystem Interface supports `LOAD"$"`
-* macOS and Windows packaging logic in Makefile
-
-### Release 26
-
-* better sprite support (clipping, palette offset, flipping)
-* better border support
-* KERNAL can set up interlaced NTSC mode with scaling and borders (compile time option)
-
-### Release 25
-
-* sdcard: fixed `LOAD,x,1` to load to the correct addressg
-* sdcard: all temp data will be on bank #255; current bank will remain unchanged
-* DOS: support for DOS commands ("UI", "I", "V", ...) and more status messages (e.g. 26,WRITE PROTECT ON,00,00)
-* BASIC: `DOS` command. Without argument: print disk status; with "$" argument: show directory; with "8" or "9" argument: switch default drive; otherwise: send DOS command; also accessible through F7/F8
-* Vera: cycle exact rendering, NTSC, interlacing, border
-
-### Release 24
-
-* SD card support
-	* pass path to SD card image as third argument
-	* access SD card as drive 8
-	* the local PC/Mac disk is still drive 1
-	* modulo debugging, this would work on a real X16 with the SD card (plus level shifters) hooked up to VIA#2PB as described in sdcard.c in the emulator surce
-
-### Release 23
-
-* Updated emulator and ROM to spec 0.6 – the ROM image should work on a real X16 with VERA 0.6 now.
-
-### Release 22
-
-SYS65375 (SWAPPER) now also clears the screen, avoid ing side effects.
-
-### Release 21
-
-* support for $ and % number prefixes in BASIC
-* support for C128 KERNAL APIs LKUPLA, LKUPSA and CLOSE_ALL
-
-### Release 20
-
-* Toggle fullscreen using `Cmd + F` or `Cmd + return`
-* new BASIC instructions and functions:
-	* `MON`: enter monitor; no more SYS65280 required
-	* `VPEEK(bank, address)`
-	* `VPOKE bank, address, value`
-example: `VPOKE4,0,VPEEK(4,0) OR 32` [for 256 color BASIC]
-
-### Release 19
-
-* fixed cursor trail bug
-* fixed f7 key in PS/2 driver
-* f keys are assigned with shortcuts now:
-F1: LIST
-F2: &lt;enter monitor&gt;
-F3: RUN
-F4: &lt;switch 40/80&gt;
-F5: LOAD
-F6: SAVE"
-F7: DOS"$ &lt;doesn't work yet&gt;
-F8: DOS &lt;doesn't work yet&gt;
-
-### Release 18
-
-* Fixed scrolling in 40x30 mode when there are double lines on the screen.
-
-### Release 17
-
-* video RAM support in the monitor (SYS65280)
-* 40x30 screen support (SYS65375 to toggle)
-
-### Release 16
-
-* Integrated monitor, start with SYS65280
-`rom.bin` is now 3*8 KB:
-	* 0: BASIC (bank 0 at $C000)
-	* 1: KERNAL ($E000)
-	* 2: UTIL (bank 1 at $C000)
-
-### Release 15
-
-* correct text mode video RAM layout both in emulator and KERNAL
-
-### Release 14
-
-* KERNAL: fast scrolling
-* KERNAL: upper/lower switching using CHR$($0E)/CHR$($8E)
-* KERNAL: banking init
-* KERNAL: new PS/2 driver
-* Emulator: VERA updates (more modes, second data port)
-* Emulator: RAM and ROM banks start out as all 1 bits
-
-### Release 13
-
-* Supports mode 7 (8bpp bitmap).
-
-### Release 12
-
-* Supports 8bpp tile mode (mode 4)
-
-### Release 11
-
-* The emulator and the KERNAL now speak the bit-level PS/2 protocol over VIA#2 PA0/PA1. The system behaves the same, but keyboard input in the ROM should work on a real device.
-
-### Release 10
-
-updated KERNAL with proper power-on message
-
-### Release 9
-
-* LOAD and SAVE commands are intercepted by the emulator, can be used to access local file system, like this:
-
-      LOAD"TETRIS.PRG
-      SAVE"TETRIS.PRG
-
-* No device number is necessary. Loading absolute works like this:
-
-      LOAD"FILE.PRG",1,1
-
-### Release 8
-
-* New optional override load address for PRG files:
-
-      ./x64emu rom.bin chargen.bin basic.prg,0401
-
-### Release 7
-
-* Now with banking. `POKE40801,n` to switch the RAM bank at $A000. `POKE40800,n` to switch the ROM bank at $C000. The ROM file at the command line can be up to 72 KB now (layout: 0: bank 0, 1: KERNAL, 2: bank 1, 3: bank 2 etc.), and the RAM that `Cmd + S` saves is 2088KB ($0000-$9F00: regular RAM, $9F00-$9FFF: unused, $A000+: extra banks)
-
-### Release 6
-
-* Vera emulation now matches the complete spec dated 2019-07-06: correct video address space layout, palette format, redefinable character set
-
-### Release 5
-
-* BASIC now starts at $0401 (39679 BASIC BYTES FREE)
-
-### Release 4
-
-* `Cmd + S` now saves all of memory (linear 64 KB for now, including ROM) to `memory.bin`, `memory-1.bin`, `memory-2.bin`, etc. You can extract parts of it with Unix "dd", like: `dd if=memory.bin of=basic.bin bs=1 skip=2049 count=38655`
-
-### Release 3
-
-* Supports PRG file as third argument, which is injected after "READY.", so BASIC programs work as well.
-
-### Release 2
-
-* STOP key support
-
-### Release 1
-
-* 6502 core, fake PS/2 keyboard emulation (PS/2 data bytes appear at VIA#1 PB) and text mode Vera emulation
-* KERNAL/BASIC modified for memory layout, missing VIC, Vera text mode and PS/2 keyboard
+Releases are named `R<major>.<nnn>`:
+
+* **`R<major>`** is the official Commander X16 release the build tracks. That half of the number
+  is upstream's, and so are its release notes — they are not reproduced here. Read them at
+  [X16Community/x16-emulator/releases](https://github.com/X16Community/x16-emulator/releases),
+  e.g. [r49 ("Pyrite")](https://github.com/X16Community/x16-emulator/releases/tag/r49).
+* **`nnn`** counts the ADD builds on top of that release. Those are the changes listed below.
+
+An `R49.nnn` build is the upstream R49 emulator plus everything in the entries below, and it
+wants an R49 `rom.bin` — which ships in the release package.
+
+### R49.001
+
+The first ADD release. Everything here is new relative to the official R49 emulator.
+
+**Graphical debugger (`-imgui`)**
+
+* New Dear ImGui debug window with a dockable, rearrangeable layout that is saved between runs
+* Disassembly panel with effective-address tooltips, run-to-here and breakpoint toggling
+* CPU panel: registers with 65C816-aware widths, decoded flags, the stack, the X16 virtual
+  registers R0–R15, and user-defined address watches
+* Memory panel: hex editor over CPU space, banked RAM and VRAM, with range selection, hex/ASCII
+  search, changed-byte highlighting, and break-on-write straight from a selection
+* Source panel: original cc65 source in tabs, current line highlighted and centred on each stop,
+  breakpoints settable before the PC ever reaches the code
+* VERA panel: palette, tile, sprite, bitmap and tilemap viewers, plus all 32 registers decoded
+  per scanline so raster splits are visible rather than flattened
+* PSG, YM2151 and PCM panels with scope traces that keep drawing while the machine is paused
+* Symbols, Call Stack and Breakpoints panels; the call stack names frames by nearest label, so
+  code without debug info still reads sensibly
+* Toolbar with run/step controls, an absolute clock-speed readout (red above native speed) and a
+  warp toggle; status line showing run state, IRQ nesting depth, 24-bit PC, cycles and instructions
+
+**Remote debugging (`-debugport`)**
+
+* New Debug Adapter Protocol server over TCP, default port 9009, for VS Code, Visual Studio or
+  any other DAP-compliant client
+* Breakpoints, stepping, stack traces, scopes, variables, memory read/write and disassembly
+* Conditional breakpoints on registers and memory (`A == $05`, `byte[$1234] != 0`), bank-pinned
+  conditions (`bank == 2`), and hit counts
+* Expression evaluation covering registers, memory, cc65 labels and equates, VRAM, and VERA
+  registers — including `vera_line`, which reports the registers that actually rendered a given
+  scanline
+* Scriptable keyboard, text and joystick input, making automated regression runs practical
+* `tools/x16dbg`, a .NET command-line DAP client with one-shot and interactive modes
+
+**Source-level debugging (`-dbgfile`, `-srcpath`)**
+
+* cc65 `.dbg` parsing: addresses map back to source files, lines, labels and equates
+* `.dbg` files auto-load alongside the program they belong to, including for modules the running
+  program `LOAD`s at runtime, so debugging follows execution into overlays
+* Breakpoints are invalidated when a module unloads and re-resolved when one loads back in
+* Banked code in `$A000`–`$BFFF` is attributed to the correct RAM bank at runtime, so source
+  mapping and breakpoints stay correct across bank switches
+
+**Debugger capacity**
+
+* Memory write watchpoints raised from 16 to 64
+* 65C816 / GS support throughout: 24-bit bank:address browsing and mode-correct register widths
+
+**Windows**
+
+* Statically linked MSVC builds for x64, x86 and ARM64 — a single self-contained `x16emu.exe`
+  with no SDL2, zlib or Visual C++ redistributable to install
+* Separate MIDI builds shipping FluidSynth, for those who want it
+* The emulator keeps running and painting while its window is dragged or resized, instead of
+  freezing for the duration
+
+**Build and release**
+
+* Every push is built for all platforms; pushing an `R<major>.<nnn>` tag publishes the release
+  automatically, and the default branch keeps a rolling `dev` prerelease
+* ROM images are fetched with a fallback to the latest release when the upstream build artifact
+  has expired
+
+**Known limitations**
+
+* The debugger and DAP server are experimental — expect keys, layouts and DAP details to change
+* The WebAssembly build includes neither the ImGui debugger nor the DAP server
+* MSVC builds have no `-trace`; use a `-mingw` package if you need it
+* Upstream's original `-debug` debugger is still present but is not extended by ADD
