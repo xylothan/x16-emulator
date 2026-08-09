@@ -436,6 +436,19 @@ if(BUILD_DEBUG_CORE_TEST AND NOT EMSCRIPTEN)
     add_test(NAME debug_core COMMAND debug_core_test)
 endif()
 
+# --- Optional: emulation-speed control checks ---
+# Off by default, same as above. The speed arithmetic in timing.c depends only
+# on the machine's configured clock, so the test supplies the few emulator
+# globals it touches and links nothing else.
+option(BUILD_TIMING_SPEED_TEST "Build the emulation-speed control test" OFF)
+if(BUILD_TIMING_SPEED_TEST AND NOT EMSCRIPTEN)
+    add_executable(timing_speed_test
+        tests/test_timing_speed.c
+        src/timing.c
+    )
+    target_include_directories(timing_speed_test PRIVATE src ${SDL2_INCLUDE_DIRS})
+endif()
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
