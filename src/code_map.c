@@ -303,6 +303,21 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 			e = carry ? 1 : 0;
 			break;
 		}
+
+		// TODO: PLP (0x28) and RTI (0x40) also change the widths, by restoring a
+		// status byte from the stack. Nothing is done for them because the byte
+		// is not knowable from the instruction stream -- see the header note on
+		// where the widths are still a guess. Two avenues if this is ever worth
+		// closing, both of which recover a real value rather than guessing:
+		//   - PLP is almost always the tail of a PHP/PLP save-restore pair. Walk
+		//     back to the matching PHP within the same routine; if the status
+		//     there is known, so is the status the PLP restores.
+		//   - RTI restores what the interrupt pushed, which is the status at the
+		//     moment the interrupt was taken. The emulator sees every interrupt,
+		//     so that value could simply be recorded when it happens.
+		// Both need a notion of "known vs unknown" per status bit so a failed
+		// attempt reports uncertainty instead of substituting another guess.
+
 		default:
 			break;
 	}
