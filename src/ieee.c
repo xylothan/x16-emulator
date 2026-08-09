@@ -28,6 +28,7 @@
 #include <limits.h>
 #include "memory.h"
 #include "ieee.h"
+#include "dbg_load.h"
 #include "glue.h"
 #include "utf8_encode.h"
 #include "utf8.h"
@@ -1598,6 +1599,13 @@ copen(int channel)
 		if (!u8strcmp(channels[channel].name, ":*") && prg_file && !prg_consumed) {
 			channels[channel].f = prg_file; // special case
 			prg_consumed = true;
+
+			// This branch never resolves a filename -- the handle was opened
+			// before the machine started -- so the path has to come from where
+			// -prg recorded it.
+			if (channels[channel].read) {
+				dbg_load_begin_prg(channel);
+			}
 		} else {
 			if ((parsed_filename = parse_dos_filename(channels[channel].name, false)) == NULL) {
 				set_error(0x32, 0, 0); // Didn't parse out properly
@@ -1630,6 +1638,14 @@ copen(int channel)
 				channels[channel].f = SDL_RWFromFile((char *)resolved_filename, channels[channel].write ? "wb" : "rb");
 			}
 
+			// Tell the debugger which host file this channel is reading, while
+			// the resolved path is still in hand. Recorded per channel: two can
+			// be open at once, and the one opened second must not overwrite
+			// what the first is still transferring.
+			if (channels[channel].read) {
+				dbg_load_begin(channel, (const char *)resolved_filename);
+			}
+
 			free(resolved_filename);
 		}
 
@@ -1657,6 +1673,9 @@ cclose(int channel)
 		SDL_RWclose(channels[channel].f);
 		channels[channel].f = NULL;
 	}
+	// Anything the channel had collected but not completed is abandoned. A
+	// completed load has already published itself, so this cannot discard one.
+	dbg_load_abandon(channel);
 }
 
 static void
@@ -1668,6 +1687,11 @@ cseek(int channel, uint32_t pos)
 	}
 
 	if (channels[channel].f) {
+		// A seek breaks the assumption that a transfer is one contiguous run
+		// into memory. Reading a fragment, seeking, and reading another leaves
+		// RAM holding disconnected pieces, which is not a program load however
+		// it reaches EOF.
+		dbg_load_abandon(channel);
 		SDL_RWseek(channels[channel].f, pos, RW_SEEK_SET);
 	} else {
 		set_error(0x70, 0, 0);
@@ -2037,7 +2061,23 @@ MACPTR(uint16_t addr, uint16_t *c, uint8_t stream_mode)
 					byte = 0;
 				} else {
 					curpos++;
-					if (curpos == endpos) {
+					bool last = (curpos == endpos);
+
+					// Reported before the close below, and as one call, because
+					// closing ends the transfer: counting the byte separately
+					// from finishing the load is what left every load a byte
+					// short.
+					//
+					// Stream mode is skipped: the destination does not advance
+					// (below), so every byte goes to the same address. That is
+					// data being pushed into a hardware register, not a program
+					// laid out in memory, and describing it as a load would
+					// attribute a whole file to one address.
+					if (!stream_mode) {
+						dbg_load_note_byte(channel, addr, ram_bank, last);
+					}
+
+					if (last) {
 						ret = 0x40;
 						channels[channel].read = false;
 						cclose(channel);
@@ -2131,6 +2171,13 @@ XMACPTR(uint8_t stream_mode) // stream_mode is only for passing into MACPTR fall
 
 		int i = 0;
 		if (channel != 15 && channels[channel].read && channels[channel].name[0] != '$' && channels[channel].f) {
+			// Not reported as a program load. This path writes to a 65816 bank,
+			// which is a different address space from the X16 RAM bank that
+			// debug info is keyed by, so there is no honest way to describe the
+			// destination. Dropping the record here makes that a decision
+			// rather than a side effect of the close below.
+			dbg_load_abandon(channel);
+
 			// find the end of the file so we know our EOF condition ahead of time
 			Sint64 curpos = SDL_RWtell(channels[channel].f);
 			Sint64 endpos = SDL_RWseek(channels[channel].f, 0, RW_SEEK_END);

@@ -58,6 +58,10 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 
 // Auto-load .dbg file matching a loaded binary. Unloads overlapping range first.
 // Returns 0 on success, -1 if no .dbg found.
+// NOTE: load_addr is currently ignored -- the debug info always describes the
+// program at its link-time addresses. A relocating load (secondary address 0)
+// therefore reports source lines for where the program was linked, not where it
+// actually landed.
 int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr);
 
 /* Address -> source, disambiguated by the X16 RAM bank currently mapped at

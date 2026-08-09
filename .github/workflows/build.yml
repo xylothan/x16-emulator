@@ -65,7 +65,7 @@ jobs:
       - name: Build Tests
         # Named targets rather than a bare --build, so a broken emulator build
         # is reported by the platform jobs and not duplicated here.
-        run: cmake --build build --target dbg_info_test code_map_test debug_core_test timing_speed_test irq_ctx_test
+        run: cmake --build build --target dbg_info_test code_map_test debug_core_test timing_speed_test irq_ctx_test dbg_load_test
       - name: Run Tests
         run: ctest --test-dir build --output-on-failure
   # The Windows builds we point people at. Everything is linked statically,

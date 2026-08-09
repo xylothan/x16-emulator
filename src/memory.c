@@ -9,6 +9,7 @@
 #include <time.h>
 #include <inttypes.h>
 #include "glue.h"
+#include "dbg_load.h"
 #include "via.h"
 #include "memory.h"
 #include "video.h"
@@ -531,7 +532,9 @@ emu_write(uint8_t reg, uint8_t value)
 {
 	bool v = value != 0;
 	switch (reg) {
-		case 0: debugger_enabled = v; break;
+		// Also told to dbg_load: it follows the debugger by default, and the
+		// machine can switch the debugger on here long after startup.
+		case 0: debugger_enabled = v; dbg_load_note_debugger(v); break;
 		case 1: log_video = v; break;
 		case 2: log_keyboard = v; break;
 		case 3: echo_mode = value; break;
