@@ -387,7 +387,13 @@ main(void)
 		const int deep = cpu_irq_depth();
 		check(deep > CPU_IRQ_CTX_MAX,
 		      "nesting can exceed the frames it records detail for");
-		check(deep <= 0x10000, "but the depth stays bounded");
+		check(deep == 0x10000, "up to the cap");
+
+		// Entering again while already at the cap must not move it. Without the
+		// clamp this simply keeps counting, and a long enough runaway would
+		// overflow the counter rather than merely report a silly number.
+		cpu_irq_ctx_enter(VEC_BRK, 0x6000, 0x0000);
+		check(cpu_irq_depth() == 0x10000, "and stays there when it is passed");
 		check(cpu_in_interrupt(), "and still reports an interrupt");
 
 		// No detail is kept past the array, so those come off one at a time;

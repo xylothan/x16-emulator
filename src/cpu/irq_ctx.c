@@ -5,8 +5,10 @@
 #include <string.h>
 
 // Past CPU_IRQ_CTX_MAX (see irq_ctx.h) the depth still counts, but there is no
-// room to record which stack pointer each of those entries had, so they can
-// only be unwound one at a time.
+// room to record which stack pointer each of those entries had. A return can
+// therefore only take them off one at a time, since it has nothing to match
+// against; an entry can still clear them wholesale, by judging them against the
+// deepest frame that does have a recorded pointer.
 
 // Nesting beyond this is a runaway loop, and the exact number stops meaning
 // anything. This is reachable, not merely defensive. Once the depth passes the

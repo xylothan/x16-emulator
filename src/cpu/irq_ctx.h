@@ -27,9 +27,9 @@
 // outer frame look like one the stack has passed, and it will be retired.
 //
 // No rule based on the stack pointer alone can tell those apart. What decides
-// it is not which case is commoner but how each fails: retiring wrongly costs
-// the remaining lifetime of one handler, because the next interrupt taken at a
-// sane stack level is tracked correctly again, whereas never retiring leaves a
+// it is not which case is commoner but how each fails: retiring wrongly drops
+// however many outer handlers the bad comparison covered, but only until the
+// next interrupt taken at a sane stack level, whereas never retiring leaves a
 // frame open for the rest of the session and adds another every time it
 // happens. A bounded, self-healing error beats an unbounded permanent one.
 //
