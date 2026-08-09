@@ -2,11 +2,11 @@
 // Copyright (c) 2019,2022 Michael Steil
 // All rights reserved. License: 2-clause BSD
 
-#ifndef __APPLE__
-#ifndef _MSC_VER
+// Feature-test macros for glibc-style libcs only. macOS hides BSD extensions
+// this code uses when they are set, and MSVC's CRT ignores them entirely.
+#if !defined(__APPLE__) && !defined(_MSC_VER)
 #define _XOPEN_SOURCE   600
 #define _POSIX_C_SOURCE 1
-#endif
 #endif
 #include <stdlib.h>
 #include <stdbool.h>
@@ -35,6 +35,7 @@
 #include "glue.h"
 #include "debugger.h"
 #include "dbg_info.h"
+#include "dbg_load.h"
 #include "source_view.h"
 #include "code_map.h"
 #include "utf8.h"
@@ -351,6 +352,7 @@ machine_reset()
 	reset6502(regs.is65c816);
 	midi_serial_init();
 	code_map_reset();  // discard stale disassembly anchors so post-reset code re-aligns
+	dbg_load_reset();  // and any load that was mid-flight
 }
 
 void
@@ -571,6 +573,13 @@ usage()
 	printf("\tEnable the debugger and watch memory: stop when the program writes\n");
 	printf("\tto this address, or anywhere in <length> bytes from it. Takes the\n");
 	printf("\tsame address forms as -bp, and can be repeated.\n");
+	printf("-dbgauto / -no-dbgauto\n");
+	printf("\tPick up debug info for programs the running machine loads, not\n");
+	printf("\tjust the one named by -dbgfile: when it LOADs a host file, read\n");
+	printf("\tthe .dbg sitting beside it. On whenever the debugger is enabled.\n");
+	printf("\tUse -no-dbgauto to suppress it: the file read is chosen by the\n");
+	printf("\temulated program, and a .dbg can name source paths anywhere on\n");
+	printf("\tthe host, so untrusted software is better run without it.\n");
 	printf("-dbgfile <path>\n");
 	printf("\tLoad a cc65 .dbg file, so addresses can be mapped back to source\n");
 	printf("\tfiles and line numbers. Combine with -srcpath if the sources are not\n");
@@ -725,6 +734,10 @@ main(int argc, char **argv)
 
 	argc--;
 	argv++;
+
+	// Unset until an explicit flag says otherwise, so the default below can
+	// follow the debugger rather than the order of the arguments.
+	int dbg_auto_opt = -1;
 
 	while (argc > 0) {
 		if (!strcmp(argv[0], "-rom")) {
@@ -1044,6 +1057,14 @@ main(int argc, char **argv)
 			}
 			argc--;
 			argv++;
+		} else if (!strcmp(argv[0], "-dbgauto")) {
+			argc--;
+			argv++;
+			dbg_auto_opt = 1;
+		} else if (!strcmp(argv[0], "-no-dbgauto")) {
+			argc--;
+			argv++;
+			dbg_auto_opt = 0;
 		} else if (!strcmp(argv[0], "-dbgfile")) {
 			argc--;
 			argv++;
@@ -1326,6 +1347,14 @@ main(int argc, char **argv)
 		}
 	}
 
+	// Follows the debugger unless asked otherwise, which is where it sat before
+	// it became a flag: someone debugging wants symbols for what they load, and
+	// someone just running a game gains nothing from reading .dbg files. A
+	// policy rather than a snapshot, because the running machine can switch the
+	// debugger on itself (emu_write register 0).
+	dbg_load_note_debugger(debugger_enabled);
+	dbg_load_set_policy(dbg_auto_opt);
+
 	if (is_gen2) {
 		num_banks = NUM_MAX_BANKS;
 		num_ram_banks = NUM_MAX_RAM_BANKS;
@@ -1395,6 +1424,10 @@ main(int argc, char **argv)
 			printf("Cannot open %s!\n", prg_path);
 			exit(1);
 		}
+		// Recorded here because the file layer never resolves a name for this
+		// one: it is handed the open handle instead. The comma-separated load
+		// address, if there was one, has already been stripped above.
+		dbg_load_set_prg_path(prg_path);
 	}
 
 	if (bas_path) {
@@ -1957,6 +1990,12 @@ emulator_step_during_move(void)
 	const uint32_t slice_start = SDL_GetTicks();
 	do {
 		if (handle_ieee_intercept()) {
+			// Polled here too: this loop can run many intercepts without ever
+			// returning to the main loop, and only one completed load is held
+			// at a time, so a second would overwrite the first. Reachable only
+			// via -dbgauto without -debug, since dragging bails out above when
+			// the debugger is enabled.
+			dbg_load_poll();
 			continue;
 		}
 		instruction_counter += waiting ^ 0x1;
@@ -2136,6 +2175,12 @@ emulator_loop(void *param)
 #endif
 
 		if (handle_ieee_intercept()) {
+			// The only place a load can complete, so the only place worth
+			// looking. Polling here rather than once per instruction also
+			// makes the single pending slot self-evidently safe: an intercept
+			// finishes at most one channel, and it is drained before the next
+			// one can run.
+			dbg_load_poll();
 			continue;
 		}
 

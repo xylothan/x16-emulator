@@ -234,6 +234,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-bp <address>` | Sets a breakpoint at `<address>` (hex). Can be repeated. Implies `-debug`. |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
+| `-dbgauto` / `-no-dbgauto` | Whether to merge the `.dbg` beside each program the machine loads. Follows the debugger unless forced either way. |
 | `-srcpath <dir>` | Adds a directory to search for the source files a `.dbg` names. Can be repeated. |
 
 Upstream's `-debug [<address>]` still works. ADD does not extend it; see the
@@ -402,27 +403,36 @@ Run:
 x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 ```
 
-There are three ways a `.dbg` gets loaded:
+There are two ways a `.dbg` gets loaded:
 
 * `-dbgfile <file.dbg>` loads one explicitly at start-up.
-* A `.dbg` next to a program is auto-loaded when that program is loaded, whether via `-prg` or a
-  KERNAL `LOAD`. The rule is simply to swap the extension: `myprog.prg` → `myprog.dbg`.
-* **Any file the running program `LOAD`s at runtime** gets its matching `.dbg` merged
-  automatically. Debug info for the address range being replaced is dropped first, so the Source
-  panel follows execution into overlays and dynamically loaded modules and switches to the right
-  file as the PC crosses module boundaries. Breakpoints in an unloaded range are invalidated and
-  re-resolved when a module loads back into it. This works with or without a DAP client attached.
+* Whenever the machine loads a program from the host filesystem — `-prg`, a BASIC `LOAD`, or a DOS
+  shortcut like `/PROG.PRG` — the `.dbg` sitting beside it is merged automatically. The rule is
+  simply to swap the extension: `myprog.prg` → `myprog.dbg`. Debug info describing the address
+  range being replaced is dropped first, so an overlay loading over another module takes over its
+  addresses, and swapping the first one back restores it.
+
+Runtime loading follows the debugger: it happens whenever the debugger is enabled. `-no-dbgauto`
+turns it off, and `-dbgauto` forces it on without the debugger. It is worth turning off for
+software you do not trust, because the file being read is chosen by the emulated program, and a
+`.dbg` can name source paths anywhere on the host.
+
+Two limits are worth knowing. Loads that do not use the KERNAL's block-transfer path are not
+noticed — `VERIFY`, loading into VRAM, and loading into `$9D00`–`$9FFF` all fall back to
+byte-at-a-time reads. And editing a `.dbg` while the emulator is running has no effect, because
+each file is merged once; restart the emulator after a rebuild.
 
 Because a `.dbg` only records source *file names*, the emulator locates the actual `.s`/`.c` files
 by searching, in order: the path stored in the `.dbg`, the directory of the `.dbg`, each
 `-srcpath <dir>` you passed (most recent first), the directory of the loaded program, and finally
 the current directory.
 
-**Banked code is handled.** A `.dbg` does not record which RAM bank a `$A000`–`$BFFF` segment
-belongs to, so the emulator works it out at runtime by watching the actual RAM bank register, and
-filters source mapping and breakpoints by the current bank. You do not have to do anything at
-build time. In a DAP breakpoint condition you can pin a breakpoint to a bank explicitly with
-`bank == N`.
+**Banked code is partly handled.** A `.dbg` does not record which RAM bank a `$A000`–`$BFFF`
+segment belongs to. When the running machine loads a program, the emulator notes which RAM bank was
+mapped as the first byte landed, and associates that bank with the segment — but only when the
+load's start address and size identify exactly one segment. A file containing several segments, or
+one whose size does not match a segment, leaves those segments bank-unknown. Nothing consumes that
+association yet; it is recorded for the debugger front-ends still to come.
 
 ### Remote debugging with DAP
 

@@ -212,6 +212,7 @@ set(X16_SOURCES
     src/main.c
     src/debugger.c
     src/dbg_info.c
+    src/dbg_load.c
     src/source_view.c
     src/code_map.c
     src/debug_core.c
@@ -384,6 +385,7 @@ option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
 option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
 option(BUILD_TIMING_SPEED_TEST "Build the emulation-speed control test" OFF)
 option(BUILD_IRQ_CTX_TEST "Build the interrupt context tracking test" OFF)
+option(BUILD_DBG_LOAD_TEST "Build the runtime debug-info load test" OFF)
 
 if(BUILD_TESTS)
     set(BUILD_DBG_INFO_TEST ON)
@@ -391,12 +393,14 @@ if(BUILD_TESTS)
     set(BUILD_DEBUG_CORE_TEST ON)
     set(BUILD_TIMING_SPEED_TEST ON)
     set(BUILD_IRQ_CTX_TEST ON)
+    set(BUILD_DBG_LOAD_TEST ON)
 endif()
 
 # add_test() only writes a CTestTestfile when testing is enabled, so this has to
 # come before the add_test() calls below.
 if((BUILD_DBG_INFO_TEST OR BUILD_CODE_MAP_TEST OR BUILD_DEBUG_CORE_TEST
-    OR BUILD_TIMING_SPEED_TEST OR BUILD_IRQ_CTX_TEST) AND NOT EMSCRIPTEN)
+    OR BUILD_TIMING_SPEED_TEST OR BUILD_IRQ_CTX_TEST OR BUILD_DBG_LOAD_TEST)
+    AND NOT EMSCRIPTEN)
     enable_testing()
 endif()
 
@@ -463,6 +467,20 @@ if(BUILD_IRQ_CTX_TEST AND NOT EMSCRIPTEN)
     )
     target_include_directories(irq_ctx_test PRIVATE src)
     add_test(NAME irq_ctx COMMAND irq_ctx_test)
+endif()
+
+# --- Runtime debug-info load checks ---
+# dbg_load.c reports loads to dbg_info and source_view, so the test links those
+# two alongside it. dbg_info.c has no dependency on the emulator core either.
+if(BUILD_DBG_LOAD_TEST AND NOT EMSCRIPTEN)
+    add_executable(dbg_load_test
+        tests/test_dbg_load.c
+        src/dbg_load.c
+        src/dbg_info.c
+        src/source_view.c
+    )
+    target_include_directories(dbg_load_test PRIVATE src)
+    add_test(NAME dbg_load COMMAND dbg_load_test)
 endif()
 
 # Build summary

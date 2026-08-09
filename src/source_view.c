@@ -17,10 +17,19 @@ void source_view_add_path(const char *dir)
 {
 	if (!dir || !dir[0])
 		return;
-	// De-dup.
+	// Already known: promote it rather than ignoring it. The insertion below
+	// only means "most recently added is searched first" if re-adding a path
+	// also counts as recent. Without this, loading A then B then A again leaves
+	// B's directory ahead of A's, and two modules naming the same relative
+	// source file would both resolve to B's copy.
 	for (int i = 0; i < search_path_count; i++) {
-		if (strcmp(search_paths[i], dir) == 0)
+		if (strcmp(search_paths[i], dir) == 0) {
+			char *existing = search_paths[i];
+			for (int j = i; j > 0; j--)
+				search_paths[j] = search_paths[j - 1];
+			search_paths[0] = existing;
 			return;
+		}
 	}
 	if (search_path_count >= MAX_SEARCH_PATHS)
 		return;
