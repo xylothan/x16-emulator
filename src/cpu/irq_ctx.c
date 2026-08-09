@@ -9,11 +9,11 @@
 // only be unwound one at a time.
 
 // Nesting beyond this is a runaway loop, and the exact number stops meaning
-// anything. In practice the retirement rule in cpu_irq_ctx_enter() already
-// bounds the depth -- each nested entry has to sit strictly below the last, and
-// the stack pointer runs out of room -- so this is defence in depth rather than
-// a reachable limit. It exists because overflowing a signed counter would be
-// undefined behaviour rather than merely a wrong answer.
+// anything. This is reachable, not merely defensive: retirement can only judge
+// frames it recorded, so above CPU_IRQ_CTX_MAX it stops happening and every
+// further entry adds one. A handler that BRKs on entry would otherwise climb
+// until a signed counter overflowed, which is undefined behaviour rather than
+// merely a wrong answer.
 #define CPU_IRQ_DEPTH_MAX 0x10000
 
 struct irq_frame {
@@ -49,8 +49,19 @@ cpu_irq_ctx_enter(int vector, uint32_t from_pc, uint16_t sp)
 	// Judged here rather than on return because entry is the moment the stack
 	// level is known to be real. A return only tells us where the stack ended
 	// up, which a handler is free to fake.
-	while (depth > 0 && depth <= CPU_IRQ_CTX_MAX && frames[depth - 1].sp <= sp)
-		depth--;
+	//
+	// Levels above the array have no recorded pointer of their own, so they are
+	// judged by the deepest one that has: an interrupt taken at or above
+	// frames[CPU_IRQ_CTX_MAX - 1] proves everything from there up is gone,
+	// unrecorded levels included. Skipping them instead would strand every frame
+	// underneath as soon as the depth passed the array, which is the same
+	// permanent staleness this rule exists to prevent.
+	while (depth > 0) {
+		const int top = (depth < CPU_IRQ_CTX_MAX ? depth : CPU_IRQ_CTX_MAX) - 1;
+		if (frames[top].sp > sp)
+			break;
+		depth = top;
+	}
 
 	if (depth >= 0 && depth < CPU_IRQ_CTX_MAX) {
 		frames[depth].vector  = (uint8_t)vector;

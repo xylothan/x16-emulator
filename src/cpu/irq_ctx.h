@@ -19,12 +19,24 @@
 // high rather than low, which is the safe direction: claiming no interrupt is
 // running while one is would be worse than being stale.
 //
-// The one thing this cannot survive is a guest that overflows its own stack.
-// Both rules -- frames decreasing in sp, and a balanced RTI landing exactly on
-// the recorded pointer -- assume the stack has not wrapped. A program that
-// pushes past the bottom of page 1 has destroyed its own return addresses
-// anyway; the depth reported here will be wrong until the next reset, and no
-// rule based on the stack pointer alone can do better.
+// What this cannot survive is the stack pointer moving for a reason other than
+// nesting. Both rules -- frames decreasing in sp, and a balanced RTI landing
+// exactly on the recorded pointer -- read position as evidence of depth. A
+// guest that pushes past the bottom of page 1 wraps, and a handler that
+// relocates the stack with TXS or TCS moves it outright; either can make a live
+// outer frame look like one the stack has passed, and it will be retired.
+//
+// No rule based on the stack pointer alone can tell those apart. What decides
+// it is not which case is commoner but how each fails: retiring wrongly costs
+// the remaining lifetime of one handler, because the next interrupt taken at a
+// sane stack level is tracked correctly again, whereas never retiring leaves a
+// frame open for the rest of the session and adds another every time it
+// happens. A bounded, self-healing error beats an unbounded permanent one.
+//
+// A consumer that acts on cpu_irq_return_pc() -- setting a breakpoint there to
+// step over a handler, say -- therefore wants an explicit validity signal, so
+// it can fall back to single-stepping rather than trusting a stale address.
+// That belongs with the consumer, which does not exist yet.
 //
 // Kept apart from fake6502.c so that the CPU core carries only the two calls,
 // and so the bookkeeping can be tested without standing up a machine.

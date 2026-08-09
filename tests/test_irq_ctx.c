@@ -208,29 +208,56 @@ main(void)
 	// legitimately risen back past.
 	//
 	// Nothing based on the stack pointer alone can tell those apart, so this
-	// picks the case that actually happens. Overflowing a 256-byte stack has
-	// already destroyed the guest's own return addresses; a BRK reaching a warm
-	// start happens in every debugging session. What is pinned here is that the
-	// wrapped case stays bounded and recovers at the next clean interrupt,
-	// rather than corrupting anything or sticking forever.
+	// picks the case that actually happens: overflowing a 256-byte stack has
+	// already destroyed the guest's own return addresses, while a BRK reaching a
+	// warm start happens in every debugging session. The exact behaviour is
+	// pinned rather than bounded, so changing that trade has to come here and
+	// edit it deliberately.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);   // outer, near the bottom
 		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01FE);   // pushes wrapped it round
 
-		check(cpu_irq_depth() >= 1, "a wrapped stack still reports an interrupt");
-		check(cpu_irq_depth() <= 2, "and does not invent depth");
+		// The wrapped outer frame is retired, because it cannot be told from one
+		// the stack has passed. This is the accepted false-low.
+		check(cpu_irq_depth() == 1, "a wrapped outer frame is retired, not kept");
 
 		cpu_irq_ctx_leave(0x01FE);
-		check(cpu_irq_depth() >= 0, "and unwinds without going negative");
+		check(cpu_irq_depth() == 0, "and the inner return closes what is left");
 
-		// The tracker is usable again as soon as the guest stops wrapping.
-		cpu_irq_ctx_reset();
-		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		// What makes this survivable, and better than the alternative: the very
+		// next clean pair reads correctly, so the damage is bounded by the
+		// wrapped handler's own lifetime rather than lasting until reset.
+		cpu_irq_ctx_enter(VEC_IRQ, 0x3000, 0x01FD);
+		check(cpu_irq_depth() == 1, "the next clean interrupt is tracked normally");
+		check(cpu_irq_return_pc() == 0x3000, "with its own return address");
 		cpu_irq_ctx_leave(0x01FD);
-		check(cpu_irq_depth() == 0, "and recovers completely on the next clean pair");
+		check(cpu_irq_depth() == 0, "and closes cleanly");
 	}
 
+	// ── Retirement still works above the recorded frames ────────────────────
+	// Only CPU_IRQ_CTX_MAX levels keep a pointer of their own. Judging the ones
+	// above by the deepest that does is what stops the depth passing the array
+	// and then never coming back down: an interrupt taken at or above the last
+	// recorded frame proves everything from there up is gone.
+	{
+		cpu_irq_ctx_reset();
+
+		// Nest past the array, each level below the last.
+		uint16_t sp = 0x01FD;
+		for (int i = 0; i < CPU_IRQ_CTX_MAX + 6; i++)
+			cpu_irq_ctx_enter(VEC_IRQ, 0x1000, sp--);
+		check(cpu_irq_depth() == CPU_IRQ_CTX_MAX + 6, "nesting can pass the array");
+
+		// All of it is abandoned -- a warm start -- and an ordinary IRQ arrives
+		// at the top of the stack.
+		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x01FD);
+		check(cpu_irq_depth() == 1,
+		      "an interrupt above them all retires every level, recorded or not");
+
+		cpu_irq_ctx_leave(0x01FD);
+		check(cpu_irq_depth() == 0, "so the depth comes back to zero");
+	}
 	// ── Nesting that does not wrap is exact ─────────────────────────────────
 	// The ordinary case, which is what the rules are for: each nested frame
 	// sits below the one outside it, and a balanced return unwinds exactly one.
