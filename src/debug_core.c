@@ -14,6 +14,7 @@
 // Declared directly rather than including memory.h/glue.h, which pull in SDL.
 // Signatures match memory.h exactly.
 extern struct regs regs;
+extern bool        is_gen2;
 uint8_t real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank);
 uint8_t memory_get_ram_bank(void);
 uint8_t memory_get_rom_bank(void);
@@ -24,22 +25,60 @@ struct breakpoint *breakPoints    = NULL;
 int                numBreakpoints = 0;
 static int         bpCapacity     = 0;
 
-// Which RAM/ROM window an address sits in, or -1 where it is not banked. A
-// breakpoint records the window it was set for so one set in RAM bank 5 does
-// not fire on the unrelated code that shares its address in bank 6.
+// Is `addr` inside a window whose contents depend on a bank register?
+//
+// Nothing below $A000 is banked. Above it, the answer depends on the machine:
+// a non-zero program bank on a Gen2 maps its own flat 64K, so the window
+// registers select nothing there, while on a gen1 the program bank selects
+// nothing at all (read6502 forces it to zero even with -c816) and the window
+// applies regardless.
+static bool
+addr_is_banked(int addr, uint8_t pbank)
+{
+	if (addr < 0xA000)
+		return false;
+	return !(is_gen2 && pbank != 0);
+}
+
+// Which RAM/ROM window an address sits in, or DEBUG_BANK_ANY where it is not
+// banked at all.
 static int
 current_x16_bank(int pc, uint8_t bank)
 {
-	if (pc >= 0xA000 && bank == 0) {
-		return pc < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
-	}
-	return -1;
+	if (!addr_is_banked(pc, bank))
+		return DEBUG_BANK_ANY;
+	return pc < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
+}
+
+// Does a recorded bank selector apply to `addr` right now? See DEBUG_BANK_ANY.
+static bool
+bank_selector_matches(int selector, int addr, uint8_t pbank)
+{
+	if (!addr_is_banked(addr, pbank))
+		return true;                     // banks select nothing here
+	if (selector == DEBUG_BANK_ANY)
+		return true;                     // whichever bank is mapped
+	return selector == current_x16_bank(addr, pbank);
+}
+
+bool
+debug_bank_selector_matches(int selector, int addr, uint8_t pbank)
+{
+	return bank_selector_matches(selector, addr, pbank);
+}
+
+// What to record for an address: outside a banked window there is nothing to
+// select, so store ANY rather than a number that would be silently ignored.
+static int
+normalise_bank(int selector, int addr, uint8_t pbank)
+{
+	return addr_is_banked(addr, pbank) ? selector : DEBUG_BANK_ANY;
 }
 
 static bool
 bp_matches(int pc, uint8_t bank, const struct breakpoint *bp)
 {
-	return pc == bp->pc && bank == bp->bank && current_x16_bank(pc, bank) == bp->x16Bank;
+	return pc == bp->pc && bank == bp->bank && bank_selector_matches(bp->x16Bank, pc, bank);
 }
 
 static void cond_forget_all(void);
@@ -51,6 +90,7 @@ static void cond_forget_all(void);
 int
 debug_bp_find(int pc, uint8_t bank, int x16Bank)
 {
+	x16Bank = normalise_bank(x16Bank, pc, bank);
 	for (int i = 0; i < numBreakpoints; i++) {
 		if (breakPoints[i].pc == pc && breakPoints[i].bank == bank
 		    && breakPoints[i].x16Bank == x16Bank)
@@ -62,6 +102,7 @@ debug_bp_find(int pc, uint8_t bank, int x16Bank)
 int
 debug_bp_add(struct breakpoint bp)
 {
+	bp.x16Bank = normalise_bank(bp.x16Bank, bp.pc, bp.bank);
 	if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0)
 		return -1;
 
@@ -157,6 +198,7 @@ cond_forget_all(void)
 
 static struct bp_cond *
 cond_find(int pc, uint8_t bank, int x16Bank){
+	x16Bank = normalise_bank(x16Bank, pc, bank);
 	for (int i = 0; i < bpCondCount; i++) {
 		if (bpConds[i].used && bpConds[i].pc == pc && bpConds[i].bank == bank
 		    && bpConds[i].x16Bank == x16Bank)
@@ -194,7 +236,7 @@ cond_ensure(int pc, uint8_t bank, int x16Bank)
 	c->used    = true;
 	c->pc      = pc;
 	c->bank    = bank;
-	c->x16Bank = x16Bank;
+	c->x16Bank = normalise_bank(x16Bank, pc, bank);
 	return c;
 }
 
@@ -373,4 +415,153 @@ debug_core_free(void)
 	bpConds     = NULL;
 	bpCondCount = 0;
 	bpCondCap   = 0;
+
+	debug_wp_clear_all();
+}
+
+// ---------------------------------------------------------------------------
+//  Memory write watchpoints
+// ---------------------------------------------------------------------------
+//  A fixed table scanned on every CPU store. Everything here is shaped by that:
+//  the scan is skipped entirely while the table is empty, each entry is a
+//  handful of integer compares, and there is no allocation on the path.
+
+static struct watchpoint watchPoints[MAX_WATCHPOINTS];
+static int               numWatchpoints = 0;
+
+// Watchpoints are identified by (addr, bank selector), exactly like
+// breakpoints. Keying on the address alone would silently throw away the
+// second of two watches on the same address in different banks -- the very
+// case bank awareness exists for.
+static int
+wp_find(uint16_t addr, int x16Bank)
+{
+	x16Bank = normalise_bank(x16Bank, addr, 0);
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (watchPoints[i].addr == addr && watchPoints[i].x16Bank == x16Bank)
+			return i;
+	}
+	return -1;
+}
+
+int
+debug_wp_count(void)
+{
+	return numWatchpoints;
+}
+
+int
+debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
+{
+	if (wp_find(addr, x16Bank) >= 0)
+		return -1;
+	if (numWatchpoints >= MAX_WATCHPOINTS)
+		return -1;
+
+	if (len == 0)
+		len = 1;
+
+	struct watchpoint *w = &watchPoints[numWatchpoints];
+	w->addr      = addr;
+	w->len       = len;
+	w->x16Bank   = normalise_bank(x16Bank, addr, 0);
+	w->active    = true;
+	w->has_value = false;
+	w->value     = 0;
+	w->op        = BPCMP_EQ;
+	return numWatchpoints++;
+}
+
+bool
+debug_wp_remove(uint16_t addr, int x16Bank)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	for (int i = idx; i < numWatchpoints - 1; i++) {
+		watchPoints[i] = watchPoints[i + 1];
+	}
+	numWatchpoints--;
+	return true;
+}
+
+void
+debug_wp_clear_all(void)
+{
+	numWatchpoints = 0;
+}
+
+bool
+debug_wp_set_value(uint16_t addr, int x16Bank, int op, uint8_t value)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	watchPoints[idx].has_value = true;
+	watchPoints[idx].op        = op;
+	watchPoints[idx].value     = value;
+	return true;
+}
+
+bool
+debug_wp_set_active(uint16_t addr, int x16Bank, bool active)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	watchPoints[idx].active = active;
+	return true;
+}
+
+// Whether this watchpoint applies to the bank mapped right now. The same rule
+// as breakpoints: $A100 holds a different variable in each bank, so a watch set
+// for one must not fire on the others -- unless it was recorded as
+// DEBUG_BANK_ANY, which asks for exactly that.
+//
+// Judged on the watchpoint's own start address rather than the address being
+// written, so a range keeps one meaning throughout. The selector changes
+// meaning at $C000 (RAM bank below, ROM bank above), and a range spanning that
+// line would otherwise have its two halves tested against unrelated registers.
+static bool
+wp_bank_ok(const struct watchpoint *w)
+{
+	return bank_selector_matches(w->x16Bank, w->addr, 0);
+}
+
+static bool
+wp_covers_addr(const struct watchpoint *w, uint16_t addr)
+{
+	return w->active && addr >= w->addr && (uint32_t)addr < (uint32_t)w->addr + w->len;
+}
+
+bool
+debug_wp_covers(uint16_t addr)
+{
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (wp_covers_addr(&watchPoints[i], addr) && wp_bank_ok(&watchPoints[i]))
+			return true;
+	}
+	return false;
+}
+
+bool
+debug_wp_check_write(uint16_t addr, uint8_t value)
+{
+	for (int i = 0; i < numWatchpoints; i++) {
+		const struct watchpoint *w = &watchPoints[i];
+		if (!wp_covers_addr(w, addr) || !wp_bank_ok(w))
+			continue;
+		if (!w->has_value)
+			return true;
+		switch (w->op) {
+			case BPCMP_EQ: if (value == w->value) return true; break;
+			case BPCMP_NE: if (value != w->value) return true; break;
+			case BPCMP_LT: if (value <  w->value) return true; break;
+			case BPCMP_LE: if (value <= w->value) return true; break;
+			case BPCMP_GT: if (value >  w->value) return true; break;
+			case BPCMP_GE: if (value >= w->value) return true; break;
+			default: return true;
+		}
+	}
+	return false;
 }

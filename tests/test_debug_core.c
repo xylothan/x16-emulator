@@ -20,10 +20,62 @@
 // ---- Stand-ins for the emulator core --------------------------------------
 
 struct regs regs;
+bool        is_gen2;
 
 static uint8_t g_mem[0x10000];
 static uint8_t g_ram_bank = 0;
 static uint8_t g_rom_bank = 0;
+
+// The four CPU configurations the emulator can be in, since three of them
+// change how wide a register comparison is.
+typedef enum { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8, CPU_816_NATIVE_16 } cpu_mode_t;
+
+static const char *
+cpu_mode_name(cpu_mode_t m)
+{
+	switch (m) {
+		case CPU_65C02:          return "65C02";
+		case CPU_816_EMU:        return "65C816 emulation";
+		case CPU_816_NATIVE_8:   return "65C816 native, 8-bit";
+		case CPU_816_NATIVE_16:  return "65C816 native, 16-bit";
+	}
+	return "?";
+}
+
+static void
+set_cpu_mode(cpu_mode_t m)
+{
+	switch (m) {
+		case CPU_65C02:
+			regs.is65c816 = false;
+			regs.e        = 1;
+			regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+			break;
+		case CPU_816_EMU:
+			regs.is65c816 = true;
+			regs.e        = 1;
+			// Emulation mode forces 8-bit whatever these bits say.
+			regs.status   = 0;
+			break;
+		case CPU_816_NATIVE_8:
+			regs.is65c816 = true;
+			regs.e        = 0;
+			regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+			break;
+		case CPU_816_NATIVE_16:
+			regs.is65c816 = true;
+			regs.e        = 0;
+			regs.status   = 0;
+			break;
+	}
+}
+
+// True where the CPU is treating A/X/Y as 16-bit.
+static bool
+mode_is_16bit(cpu_mode_t m)
+{
+	return m == CPU_816_NATIVE_16;
+}
 
 uint8_t
 real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
@@ -498,6 +550,578 @@ main(void)
 		check(!debug_bp_is_set(0x8000, 0) && !debug_bp_is_set(0x9000, 0),
 		      "nothing matches after clearing");
 		check(!debug_bp_on_arrival(0x8000, 0), "and nothing stops");
+	}
+
+	// ── Memory write watchpoints ────────────────────────────────────────────
+	// The counterpart to a breakpoint, for data rather than code: stop when
+	// something writes here. The tool for finding what is corrupting a variable
+	// when you have no idea which code is responsible.
+	{
+		reset_all();
+		check(debug_wp_count() == 0, "starts with no watchpoints");
+		check(!debug_wp_check_write(0x1234, 0x00), "nothing fires before anything is watched");
+
+		check(debug_wp_add(0x1234, 1, -1) == 0, "adds a watchpoint");
+		check(debug_wp_count() == 1, "counts it");
+		check(debug_wp_check_write(0x1234, 0x55), "fires on a write to the watched byte");
+		check(!debug_wp_check_write(0x1235, 0x55), "does not fire on the next byte");
+		check(!debug_wp_check_write(0x1233, 0x55), "does not fire on the previous byte");
+
+		// A second watchpoint on the same address in the same bank is a
+		// duplicate and is refused, rather than quietly reporting success while
+		// discarding whatever the caller asked for.
+		check(debug_wp_add(0x1234, 8, DEBUG_BANK_ANY) == -1 && debug_wp_count() == 1,
+		      "refuses a duplicate address in the same bank");
+
+		check(debug_wp_remove(0x1234, DEBUG_BANK_ANY), "removes a watchpoint");
+		check(debug_wp_count() == 0, "the table is empty again");
+		check(!debug_wp_check_write(0x1234, 0x55), "the removed one no longer fires");
+		check(!debug_wp_remove(0x1234, DEBUG_BANK_ANY), "removing a missing one reports nothing done");
+	}
+
+	// ── Watching a range ────────────────────────────────────────────────────
+	{
+		reset_all();
+		debug_wp_add(0x2000, 4, -1);
+		check(debug_wp_check_write(0x2000, 0) && debug_wp_check_write(0x2003, 0),
+		      "fires anywhere inside the range");
+		check(!debug_wp_check_write(0x1FFF, 0) && !debug_wp_check_write(0x2004, 0),
+		      "does not fire either side of it");
+
+		// A zero length is a single byte, not an empty range that never fires.
+		reset_all();
+		debug_wp_add(0x3000, 0, -1);
+		check(debug_wp_check_write(0x3000, 0), "a zero length watches one byte");
+
+		// A range running off the top of memory catches nothing beyond it: the
+		// coverage test is a half-open comparison in 32 bits, so the end cannot
+		// wrap round to the bottom of memory.
+		reset_all();
+		debug_wp_add(0xFFFE, 8, DEBUG_BANK_ANY);
+		check(debug_wp_check_write(0xFFFF, 0), "watches up to the last byte");
+		check(!debug_wp_check_write(0x0000, 0), "does not wrap past the end of memory");
+		check(!debug_wp_check_write(0x0005, 0), "really does not wrap");
+	}
+
+	// ── Value filters ───────────────────────────────────────────────────────
+	// "Stop when this becomes zero" is far more useful than stopping on every
+	// write to a variable that is written constantly.
+	{
+		reset_all();
+		debug_wp_add(0x1234, 1, -1);
+		check(debug_wp_set_value(0x1234, DEBUG_BANK_ANY, BPCMP_EQ, 0x00), "attaches a value filter");
+		check(debug_wp_check_write(0x1234, 0x00), "fires when the written value matches");
+		check(!debug_wp_check_write(0x1234, 0x01), "stays quiet when it does not");
+
+		check(!debug_wp_set_value(0x9999, DEBUG_BANK_ANY, BPCMP_EQ, 0),
+		      "declines a filter for an unwatched address");
+
+		// Every comparison, so none is quietly inverted.
+		struct { int op; uint8_t val; uint8_t written; bool want; const char *what; } wcases[] = {
+			{ BPCMP_EQ, 0x10, 0x10, true,  "== when equal" },
+			{ BPCMP_EQ, 0x10, 0x11, false, "== when not equal" },
+			{ BPCMP_NE, 0x10, 0x11, true,  "!= when different" },
+			{ BPCMP_NE, 0x10, 0x10, false, "!= when same" },
+			{ BPCMP_LT, 0x10, 0x0F, true,  "< when below" },
+			{ BPCMP_LT, 0x10, 0x10, false, "< when equal" },
+			{ BPCMP_LE, 0x10, 0x10, true,  "<= when equal" },
+			{ BPCMP_LE, 0x10, 0x11, false, "<= when above" },
+			{ BPCMP_GT, 0x10, 0x11, true,  "> when above" },
+			{ BPCMP_GT, 0x10, 0x10, false, "> when equal" },
+			{ BPCMP_GE, 0x10, 0x10, true,  ">= when equal" },
+			{ BPCMP_GE, 0x10, 0x0F, false, ">= when below" },
+		};
+		bool wp_ops_ok = true;
+		for (unsigned i = 0; i < sizeof(wcases) / sizeof(wcases[0]); i++) {
+			debug_wp_set_value(0x1234, DEBUG_BANK_ANY, wcases[i].op, wcases[i].val);
+			if (debug_wp_check_write(0x1234, wcases[i].written) != wcases[i].want) {
+				printf("      (watchpoint comparison wrong: %s)\n", wcases[i].what);
+				wp_ops_ok = false;
+			}
+		}
+		check(wp_ops_ok, "every watchpoint comparison behaves as named");
+	}
+
+	// ── Watchpoints follow the RAM bank ─────────────────────────────────────
+	// $A100 holds a different variable in every bank. A watchpoint that fired
+	// on all of them would bury the write it was set to find.
+	{
+		reset_all();
+		debug_wp_add(0xA100, 1, 5);
+
+		g_ram_bank = 5;
+		check(debug_wp_check_write(0xA100, 0x99), "fires in the bank it was set for");
+		g_ram_bank = 6;
+		check(!debug_wp_check_write(0xA100, 0x99), "stays quiet in a different bank");
+
+		// Below the banked window the bank is irrelevant and must be ignored.
+		reset_all();
+		debug_wp_add(0x0400, 1, -1);
+		g_ram_bank = 7;
+		check(debug_wp_check_write(0x0400, 0x01), "unbanked addresses ignore the RAM bank");
+
+		// -1 on a banked address means "any bank", for watching an address
+		// wherever it happens to live.
+		reset_all();
+		debug_wp_add(0xA100, 1, -1);
+		g_ram_bank = 2;
+		bool any_first = debug_wp_check_write(0xA100, 0x01);
+		g_ram_bank = 9;
+		check(any_first && debug_wp_check_write(0xA100, 0x01),
+		      "a bankless banked watchpoint fires in every bank");
+	}
+
+	// ── Enable and disable ──────────────────────────────────────────────────
+	{
+		reset_all();
+		debug_wp_add(0x1234, 1, -1);
+		debug_wp_set_value(0x1234, DEBUG_BANK_ANY, BPCMP_EQ, 0x42);
+
+		check(debug_wp_set_active(0x1234, DEBUG_BANK_ANY, false), "disables a watchpoint");
+		check(!debug_wp_check_write(0x1234, 0x42), "a disabled watchpoint does not fire");
+		check(debug_wp_count() == 1, "but it is still in the table");
+
+		check(debug_wp_set_active(0x1234, DEBUG_BANK_ANY, true), "re-enables it");
+		check(debug_wp_check_write(0x1234, 0x42), "and its value filter survived");
+		check(!debug_wp_set_active(0x9999, DEBUG_BANK_ANY, true), "declines to enable one that is not there");
+	}
+
+	// ── Coverage query, and a full table ────────────────────────────────────
+	{
+		reset_all();
+		debug_wp_add(0x2000, 4, -1);
+		check(debug_wp_covers(0x2002), "reports a watched address as covered");
+		check(!debug_wp_covers(0x2004), "reports an unwatched address as not covered");
+		debug_wp_set_active(0x2000, DEBUG_BANK_ANY, false);
+		check(!debug_wp_covers(0x2002), "a disabled watchpoint covers nothing");
+
+		reset_all();
+		int added = 0;
+		for (int i = 0; i < MAX_WATCHPOINTS + 10; i++) {
+			if (debug_wp_add((uint16_t)(0x4000 + i), 1, -1) >= 0) {
+				added++;
+			}
+		}
+		check(added == MAX_WATCHPOINTS, "fills the table and then refuses more");
+		check(debug_wp_count() == MAX_WATCHPOINTS, "does not overflow the table");
+		check(debug_wp_check_write(0x4000, 0) && debug_wp_check_write(0x403F, 0),
+		      "every entry that fit still works");
+
+		debug_wp_clear_all();
+		check(debug_wp_count() == 0, "clears them all");
+		check(!debug_wp_check_write(0x4000, 0), "and none fire afterwards");
+	}
+
+	// ── Removal keeps the survivors intact ──────────────────────────────────
+	{
+		reset_all();
+		for (int i = 0; i < 5; i++) {
+			debug_wp_add((uint16_t)(0x5000 + i * 0x10), 1, -1);
+		}
+		debug_wp_remove(0x5010, DEBUG_BANK_ANY);
+		debug_wp_remove(0x5030, DEBUG_BANK_ANY);
+		check(debug_wp_count() == 3, "removes from the middle");
+		check(debug_wp_check_write(0x5000, 0) && debug_wp_check_write(0x5020, 0)
+		          && debug_wp_check_write(0x5040, 0),
+		      "the survivors still fire");
+		check(!debug_wp_check_write(0x5010, 0) && !debug_wp_check_write(0x5030, 0),
+		      "the removed ones do not");
+	}
+
+	// ── One bank-selector rule, for breakpoints and watchpoints alike ───────
+	// A bank selector says one of two things: "whichever bank is mapped"
+	// (DEBUG_BANK_ANY) or "this specific bank". For an address outside a banked
+	// window it says nothing at all, so it is normalised away on the way in --
+	// otherwise it would be a hidden field distinguishing two entries that are
+	// really the same.
+	{
+		reset_all();
+
+		// Breakpoints: ANY fires in every bank.
+		debug_bp_add(bp_at(0xA000, 0, DEBUG_BANK_ANY));
+		g_ram_bank = 0;
+		bool any0 = debug_bp_is_set(0xA000, 0);
+		g_ram_bank = 5;
+		bool any5 = debug_bp_is_set(0xA000, 0);
+		g_ram_bank = 200;
+		check(any0 && any5 && debug_bp_is_set(0xA000, 0),
+		      "a bankless breakpoint fires in every RAM bank");
+
+		// The ROM window follows the ROM bank the same way.
+		reset_all();
+		debug_bp_add(bp_at(0xC000, 0, DEBUG_BANK_ANY));
+		g_rom_bank = 0;
+		bool rany0 = debug_bp_is_set(0xC000, 0);
+		g_rom_bank = 31;
+		check(rany0 && debug_bp_is_set(0xC000, 0),
+		      "a bankless breakpoint fires in every ROM bank");
+
+		// A specific bank still means only that bank.
+		reset_all();
+		debug_bp_add(bp_at(0xA000, 0, 5));
+		g_ram_bank = 5;
+		check(debug_bp_is_set(0xA000, 0), "a specific bank fires in that bank");
+		g_ram_bank = 6;
+		check(!debug_bp_is_set(0xA000, 0), "and not in another");
+
+		// Below the banked window the selector is meaningless, so a stored bank
+		// must not stop the breakpoint firing, and must not create a second
+		// distinct breakpoint either.
+		reset_all();
+		debug_bp_add(bp_at(0x0801, 0, 7));
+		g_ram_bank = 3;
+		check(debug_bp_is_set(0x0801, 0),
+		      "an unbanked address ignores a bank it was given");
+		check(debug_bp_add(bp_at(0x0801, 0, 9)) == -1,
+		      "the same unbanked address is one breakpoint whatever bank is named");
+		check(debug_bp_remove(0x0801, 0, DEBUG_BANK_ANY),
+		      "and it can be removed without naming that bank");
+
+		// Watchpoints follow exactly the same rule.
+		reset_all();
+		debug_wp_add(0xA100, 1, DEBUG_BANK_ANY);
+		g_ram_bank = 1;
+		bool wany1 = debug_wp_check_write(0xA100, 0);
+		g_ram_bank = 99;
+		check(wany1 && debug_wp_check_write(0xA100, 0),
+		      "a bankless watchpoint fires in every bank");
+
+		reset_all();
+		debug_wp_add(0x0400, 1, 7);
+		g_ram_bank = 2;
+		check(debug_wp_check_write(0x0400, 0),
+		      "an unbanked watch address ignores a bank it was given");
+
+		// And the ROM window is watched by ROM bank, not RAM bank.
+		reset_all();
+		debug_wp_add(0xC100, 1, 3);
+		g_rom_bank = 3;
+		g_ram_bank = 9;
+		check(debug_wp_check_write(0xC100, 0), "the ROM window follows the ROM bank");
+		g_rom_bank = 4;
+		check(!debug_wp_check_write(0xC100, 0), "and not a different ROM bank");
+
+		// The same address can be watched in two banks at once -- the whole
+		// reason the selector is part of a watchpoint's identity. Keying on the
+		// address alone silently kept only the first.
+		reset_all();
+		check(debug_wp_add(0xA100, 1, 5) == 0, "watches an address in bank 5");
+		check(debug_wp_add(0xA100, 1, 6) == 1, "watches the same address in bank 6");
+		check(debug_wp_count() == 2, "keeps both");
+		g_ram_bank = 5;
+		bool w5 = debug_wp_check_write(0xA100, 0);
+		g_ram_bank = 6;
+		check(w5 && debug_wp_check_write(0xA100, 0), "each fires in its own bank");
+		g_ram_bank = 7;
+		check(!debug_wp_check_write(0xA100, 0), "and neither fires in a third");
+
+		// Removing one leaves the other, and names which one.
+		check(debug_wp_remove(0xA100, 5) && debug_wp_count() == 1,
+		      "removes only the bank it names");
+		g_ram_bank = 6;
+		check(debug_wp_check_write(0xA100, 0), "the other bank's watchpoint survives");
+
+		// A value filter belongs to one of them, not to the address.
+		reset_all();
+		debug_wp_add(0xA100, 1, 5);
+		debug_wp_add(0xA100, 1, 6);
+		check(debug_wp_set_value(0xA100, 5, BPCMP_EQ, 0x11),
+		      "attaches a filter to one bank's watchpoint");
+		g_ram_bank = 5;
+		check(!debug_wp_check_write(0xA100, 0x22), "that bank honours its filter");
+		g_ram_bank = 6;
+		check(debug_wp_check_write(0xA100, 0x22), "the other bank is unaffected");
+	}
+
+	// ── Every condition operand, in every CPU mode ──────────────────────────
+	// A/X/Y are 8 or 16 bits depending on the CPU and the M/X status bits;
+	// SP and a memory word are always 16; P and a memory byte always 8. The
+	// comparison has to agree with whatever the CPU is actually doing, in all
+	// four configurations the emulator can be in.
+	{
+		const cpu_mode_t modes[] = { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8,
+			                         CPU_816_NATIVE_16 };
+		bool low_ok = true, wide_ok = true, narrow_ok = true;
+
+		for (unsigned mi = 0; mi < sizeof(modes) / sizeof(modes[0]); mi++) {
+			const cpu_mode_t m    = modes[mi];
+			const bool       wide = mode_is_16bit(m);
+
+			// -- A, X and Y, compared on their low byte. Always works.
+			const struct { int operand; const char *name; } regs8[] = {
+				{ BPOPERAND_A, "A" }, { BPOPERAND_X, "X" }, { BPOPERAND_Y, "Y" },
+			};
+			for (unsigned ri = 0; ri < 3; ri++) {
+				reset_all();
+				set_cpu_mode(m);
+				debug_bp_add(bp_at(0x8000, 0, DEBUG_BANK_ANY));
+				regs.c = regs.x = regs.y = 0x0042;
+				debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, regs8[ri].operand, 0,
+				                       BPCMP_EQ, 0x42);
+				if (!debug_bp_on_arrival(0x8000, 0)) {
+					printf("      (%s == $42 failed on %s)\n", regs8[ri].name, cpu_mode_name(m));
+					low_ok = false;
+				}
+				debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, regs8[ri].operand, 0,
+				                       BPCMP_NE, 0x42);
+				if (debug_bp_on_arrival(0x8000, 0)) {
+					printf("      (%s != $42 wrongly fired on %s)\n", regs8[ri].name,
+					       cpu_mode_name(m));
+					low_ok = false;
+				}
+
+				// -- The high byte. Only visible where the register is 16-bit,
+				// and a 16-bit value must never match an 8-bit register.
+				reset_all();
+				set_cpu_mode(m);
+				debug_bp_add(bp_at(0x8000, 0, DEBUG_BANK_ANY));
+				regs.c = regs.x = regs.y = 0x1234;
+				debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, regs8[ri].operand, 0,
+				                       BPCMP_EQ, 0x1234);
+				bool matched16 = debug_bp_on_arrival(0x8000, 0);
+				if (matched16 != wide) {
+					printf("      (%s == $1234 %s on %s)\n", regs8[ri].name,
+					       matched16 ? "wrongly matched" : "did not match", cpu_mode_name(m));
+					wide_ok = false;
+				}
+
+				// The low byte alone must satisfy an 8-bit register and must
+				// NOT satisfy a 16-bit one.
+				debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, regs8[ri].operand, 0,
+				                       BPCMP_EQ, 0x34);
+				bool matched8 = debug_bp_on_arrival(0x8000, 0);
+				if (matched8 == wide) {
+					printf("      (%s == $34 with A=$1234 %s on %s)\n", regs8[ri].name,
+					       matched8 ? "wrongly matched" : "did not match", cpu_mode_name(m));
+					narrow_ok = false;
+				}
+			}
+		}
+		check(low_ok, "A, X and Y compare their low byte in every CPU mode");
+		check(wide_ok, "A, X and Y compare 16 bits only where the CPU is 16-bit");
+		check(narrow_ok, "an 8-bit register is not matched by a 16-bit value, and vice versa");
+
+		// -- SP, P, and memory operands are the same width in every mode.
+		bool fixed_ok = true;
+		for (unsigned mi = 0; mi < sizeof(modes) / sizeof(modes[0]); mi++) {
+			const cpu_mode_t m = modes[mi];
+			reset_all();
+			set_cpu_mode(m);
+			debug_bp_add(bp_at(0x8000, 0, DEBUG_BANK_ANY));
+
+			regs.sp = 0x01F0;
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_SP, 0, BPCMP_EQ, 0x01F0);
+			if (!debug_bp_on_arrival(0x8000, 0)) { printf("      (SP full on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_SP, 0, BPCMP_EQ, 0x00F0);
+			if (debug_bp_on_arrival(0x8000, 0)) { printf("      (SP truncated on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+
+			// P is 8 bits wide on every CPU. Set it last: it is the mode.
+			uint8_t saved = regs.status;
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_P, 0, BPCMP_EQ, saved);
+			if (!debug_bp_on_arrival(0x8000, 0)) { printf("      (P on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+
+			g_mem[0x1234] = 0x99;
+			g_mem[0x1235] = 0xAB;
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_BYTE, 0x1234, BPCMP_EQ, 0x99);
+			if (!debug_bp_on_arrival(0x8000, 0)) { printf("      (BYTE on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_WORD, 0x1234, BPCMP_EQ, 0xAB99);
+			if (!debug_bp_on_arrival(0x8000, 0)) { printf("      (WORD on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+			debug_bp_set_condition(0x8000, 0, DEBUG_BANK_ANY, BPOPERAND_WORD, 0x1234, BPCMP_EQ, 0x99AB);
+			if (debug_bp_on_arrival(0x8000, 0)) { printf("      (WORD byte order on %s)\n", cpu_mode_name(m)); fixed_ok = false; }
+		}
+		check(fixed_ok, "SP, P, and memory operands keep their width in every CPU mode");
+
+		reset_all();
+	}
+
+
+	// ── PC matching across banks and machine types ──────────────────────────
+	// A breakpoint's address is (pc, program bank, bank selector). Which of
+	// those actually select memory depends on the machine, so the same
+	// breakpoint has to behave correctly on a stock X16, on one with a 65C816,
+	// and on a Gen2 where a non-zero program bank maps its own flat 64K.
+	{
+		// -- Unbanked low memory: neither bank means anything.
+		reset_all();
+		debug_bp_add(bp_at(0x0801, 0, DEBUG_BANK_ANY));
+		bool unbanked_ok = true;
+		for (int b = 0; b < 3; b++) {
+			g_ram_bank = (uint8_t)(b * 7);
+			g_rom_bank = (uint8_t)(b * 3);
+			if (!debug_bp_is_set(0x0801, 0))
+				unbanked_ok = false;
+		}
+		check(unbanked_ok, "an unbanked address matches whatever banks are mapped");
+
+		// -- RAM window, every bank a stock X16 can have.
+		reset_all();
+		debug_bp_add(bp_at(0xA000, 0, 5));
+		bool ram_exact_ok = true;
+		for (int b = 0; b < 256; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (debug_bp_is_set(0xA000, 0) != (b == 5))
+				ram_exact_ok = false;
+		}
+		check(ram_exact_ok, "a RAM-bank breakpoint matches exactly one of all 256 banks");
+
+		reset_all();
+		debug_bp_add(bp_at(0xA000, 0, DEBUG_BANK_ANY));
+		bool ram_any_ok = true;
+		for (int b = 0; b < 256; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (!debug_bp_is_set(0xA000, 0))
+				ram_any_ok = false;
+		}
+		check(ram_any_ok, "a bankless RAM breakpoint matches all 256 banks");
+
+		// -- ROM window, every bank the machine has.
+		reset_all();
+		debug_bp_add(bp_at(0xE000, 0, 7));
+		bool rom_exact_ok = true;
+		for (int b = 0; b < 32; b++) {
+			g_rom_bank = (uint8_t)b;
+			if (debug_bp_is_set(0xE000, 0) != (b == 7))
+				rom_exact_ok = false;
+		}
+		check(rom_exact_ok, "a ROM-bank breakpoint matches exactly one of all 32 banks");
+
+		reset_all();
+		debug_bp_add(bp_at(0xE000, 0, DEBUG_BANK_ANY));
+		bool rom_any_ok = true;
+		for (int b = 0; b < 32; b++) {
+			g_rom_bank = (uint8_t)b;
+			if (!debug_bp_is_set(0xE000, 0))
+				rom_any_ok = false;
+		}
+		check(rom_any_ok, "a bankless ROM breakpoint matches all 32 banks");
+
+		// -- The RAM bank must not be consulted for a ROM address, or vice
+		// versa: the two windows have independent bank registers.
+		reset_all();
+		debug_bp_add(bp_at(0xA000, 0, 4));
+		debug_bp_add(bp_at(0xE000, 0, 4));
+		g_ram_bank = 4;
+		g_rom_bank = 9;
+		bool ram_hit = debug_bp_is_set(0xA000, 0), rom_miss = debug_bp_is_set(0xE000, 0);
+		g_ram_bank = 9;
+		g_rom_bank = 4;
+		check(ram_hit && !rom_miss && !debug_bp_is_set(0xA000, 0) && debug_bp_is_set(0xE000, 0),
+		      "the two windows use their own bank registers");
+
+		// -- Gen1 with a 65C816: the program bank selects nothing, so the RAM
+		// window still applies at $A000 even from program bank 1.
+		reset_all();
+		is_gen2 = false;
+		debug_bp_add(bp_at(0xA000, 1, 5));
+		g_ram_bank = 5;
+		bool g1_hit = debug_bp_is_set(0xA000, 1);
+		g_ram_bank = 6;
+		check(g1_hit && !debug_bp_is_set(0xA000, 1),
+		      "on a gen1 65C816 the RAM window still applies inside a program bank");
+
+		// -- Gen2 (GS): a non-zero program bank is flat RAM, so the window
+		// registers select nothing and must not filter the breakpoint out.
+		reset_all();
+		is_gen2 = true;
+		debug_bp_add(bp_at(0xA000, 1, DEBUG_BANK_ANY));
+		bool gs_ok = true;
+		for (int b = 0; b < 8; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (!debug_bp_is_set(0xA000, 1))
+				gs_ok = false;
+		}
+		check(gs_ok, "in a Gen2 program bank the RAM bank does not apply");
+
+		// And a bank named for such an address is normalised away rather than
+		// silently making a second, unreachable breakpoint.
+		check(debug_bp_add(bp_at(0xA000, 1, 3)) == -1,
+		      "naming a bank inside a Gen2 program bank does not make a new breakpoint");
+
+		// -- Program bank 0 on a Gen2 is still the ordinary windowed map.
+		reset_all();
+		is_gen2 = true;
+		debug_bp_add(bp_at(0xA000, 0, 5));
+		g_ram_bank = 5;
+		bool gs0_hit = debug_bp_is_set(0xA000, 0);
+		g_ram_bank = 6;
+		check(gs0_hit && !debug_bp_is_set(0xA000, 0),
+		      "program bank 0 on a Gen2 is banked as usual");
+
+		// -- The program bank is part of the address: the same pc in two
+		// program banks is two different breakpoints.
+		reset_all();
+		is_gen2 = true;
+		check(debug_bp_add(bp_at(0x8000, 0, DEBUG_BANK_ANY)) == 0
+		          && debug_bp_add(bp_at(0x8000, 1, DEBUG_BANK_ANY)) == 1,
+		      "the same address in two program banks is two breakpoints");
+		check(debug_bp_is_set(0x8000, 0) && debug_bp_is_set(0x8000, 1)
+		          && !debug_bp_is_set(0x8000, 2),
+		      "each program bank matches only itself");
+
+		reset_all();
+	}
+
+
+	// ── Watchpoints, the same matrix ────────────────────────────────────────
+	{
+		reset_all();
+		debug_wp_add(0xA100, 1, 5);
+		bool wp_ram_ok = true;
+		for (int b = 0; b < 256; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (debug_wp_check_write(0xA100, 0) != (b == 5))
+				wp_ram_ok = false;
+		}
+		check(wp_ram_ok, "a RAM-bank watchpoint fires in exactly one of all 256 banks");
+
+		reset_all();
+		debug_wp_add(0xA100, 1, DEBUG_BANK_ANY);
+		bool wp_any_ok = true;
+		for (int b = 0; b < 256; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (!debug_wp_check_write(0xA100, 0))
+				wp_any_ok = false;
+		}
+		check(wp_any_ok, "a bankless watchpoint fires in all 256 banks");
+
+		reset_all();
+		debug_wp_add(0xE000, 1, 7);
+		bool wp_rom_ok = true;
+		for (int b = 0; b < 32; b++) {
+			g_rom_bank = (uint8_t)b;
+			if (debug_wp_check_write(0xE000, 0) != (b == 7))
+				wp_rom_ok = false;
+		}
+		check(wp_rom_ok, "a ROM-window watchpoint fires in exactly one of all 32 banks");
+
+		// A watchpoint address is only ever bank 0, so a Gen2 program bank
+		// cannot change what it means -- but the lookup still has to normalise
+		// consistently, or removal by a named bank would miss.
+		reset_all();
+		debug_wp_add(0x0400, 1, 7);       // bank named for an unbanked address
+		check(debug_wp_remove(0x0400, DEBUG_BANK_ANY),
+		      "an unbanked watchpoint can be removed without naming a bank");
+		reset_all();
+		debug_wp_add(0x0400, 1, DEBUG_BANK_ANY);
+		check(debug_wp_remove(0x0400, 7),
+		      "and can be removed while naming one, since it means nothing there");
+
+		// A watchpoint's bank means one thing for the whole range, judged on
+		// where the range starts. The selector's meaning changes at $C000 (RAM
+		// bank below, ROM bank above), so a range spanning that line would
+		// otherwise have its halves tested against unrelated registers.
+		reset_all();
+		debug_wp_add(0xBFFF, 2, 5);
+		g_ram_bank = 5;
+		g_rom_bank = 9;                   // deliberately not 5
+		bool lo_hit = debug_wp_check_write(0xBFFF, 0);
+		check(lo_hit && debug_wp_check_write(0xC000, 0),
+		      "a range crossing $C000 keeps its bank meaning throughout");
+		g_ram_bank = 6;
+		check(!debug_wp_check_write(0xBFFF, 0) && !debug_wp_check_write(0xC000, 0),
+		      "and the whole range stops matching when that bank is unmapped");
+
+		reset_all();
 	}
 
 	debug_core_free();

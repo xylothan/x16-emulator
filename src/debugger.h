@@ -23,6 +23,7 @@ extern int showDebugOnRender;
 
 void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
+void DEBUGBreakOnWatchpoint(void);
 int  DEBUGGetCurrentStatus(void);
 void DEBUGSetBreakPoint(struct breakpoint newBreakPoint);
 void DEBUGInitUI(SDL_Renderer *pRenderer);
