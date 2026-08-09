@@ -45,9 +45,12 @@ video_win32_subclass_proc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message) {
 		case WM_ENTERSIZEMOVE:
 			win32_in_modal_move = true;
-			// ~15 ms ≈ one video frame; WM_TIMER fires even when the mouse is
-			// held still, so emulation keeps ticking during a stationary hold.
-			SetTimer(hWnd, X16_MOVE_TIMER_ID, 15, NULL);
+			// 10 ms is the shortest interval Windows honours (USER_TIMER_MINIMUM).
+			// Short ticks with a small slice of emulation each keep the drag
+			// responsive; one long tick per frame makes the window jerk.
+			// WM_TIMER also fires while the mouse is held still, so emulation
+			// keeps running during a stationary hold.
+			SetTimer(hWnd, X16_MOVE_TIMER_ID, 10, NULL);
 			break;
 		case WM_EXITSIZEMOVE:
 			if (win32_in_modal_move) {

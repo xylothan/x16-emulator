@@ -18,6 +18,8 @@
 // stall ends. 250 ms comfortably exceeds normal per-frame scheduling jitter.
 #define MAX_CATCHUP_US (250 * 1000)
 
+static void timing_update_ex(bool may_sleep);
+
 uint32_t frames;
 uint32_t sdlTicks_base;
 uint32_t last_perf_update;
@@ -39,6 +41,32 @@ timing_init() {
 void
 timing_update()
 {
+	timing_update_ex(true);
+}
+
+// As timing_update(), but never sleeps. The window-drag path runs inside the
+// OS modal message loop, which cannot deliver mouse input while we are in the
+// window procedure; sleeping there shows up directly as a jerky drag. That
+// caller paces itself with timing_lead_us() instead.
+void
+timing_update_no_sleep()
+{
+	timing_update_ex(false);
+}
+
+// Microseconds of emulated time we are ahead of the wall clock; negative means
+// behind. Lets a caller pace itself without blocking.
+int64_t
+timing_lead_us()
+{
+	int64_t ticks = cpu_ticks + (int64_t)(clockticks6502 - clockticks6502_old);
+	uint32_t sdlTicks = SDL_GetTicks() - sdlTicks_base;
+	return ticks / MHZ - sdlTicks * 1000LL;
+}
+
+static void
+timing_update_ex(bool may_sleep)
+{
 	frames++;
 	cpu_ticks += clockticks6502 - clockticks6502_old;
 	clockticks6502_old = clockticks6502;
@@ -59,7 +87,7 @@ timing_update()
 		diff_time = cpu_ticks / MHZ - sdlTicks * 1000LL;
 	}
 
-	if (!warp_mode && diff_time > 0) {
+	if (may_sleep && !warp_mode && diff_time > 0) {
 		if (diff_time >= 1000000) {
 			sleep(diff_time / 1000000);
 			diff_time %= 1000000;

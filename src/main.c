@@ -1719,13 +1719,22 @@ emulator_post_step(void)
 // once the drag is over.
 static bool emulator_stop_requested = false;
 
-// Advance the emulator by one video frame from inside the OS modal window
-// move/resize loop (see video_win32.c). That loop blocks emulator_loop()
-// entirely, so without this the machine would freeze while the window is
-// dragged. We run exactly one frame, present it (without polling input — the
-// modal loop owns the message queue), then throttle via timing_update() so the
-// drag stays at real time. Shares old_clockticks6502 / the timing accumulators
-// with emulator_loop(), so emulation resumes seamlessly when the drag ends.
+// Longest we will spend emulating inside a single timer tick. The OS cannot
+// deliver mouse input to the drag while we are in the window procedure, so a
+// long slice is felt directly as a jerky window. A frame that does not finish
+// in time simply continues on the next tick.
+#define MOVE_SLICE_BUDGET_MS 6
+
+// Advance the emulator from inside the OS modal window move/resize loop (see
+// video_win32.c). That loop blocks emulator_loop() entirely, so without this
+// the machine would freeze while the window is dragged.
+//
+// Two things matter for the drag to stay smooth: never sleep here, and never
+// run for long. We pace by checking how far ahead of the wall clock we are and
+// skipping the tick if we are ahead, rather than sleeping the deficit away, and
+// we cap how much emulation one tick may do. Shares old_clockticks6502 and the
+// timing accumulators with emulator_loop(), so emulation resumes seamlessly
+// when the drag ends.
 void
 emulator_step_during_move(void)
 {
@@ -1741,8 +1750,16 @@ emulator_step_during_move(void)
 		return;
 	}
 
+	// Already ahead of real time: repaint, but don't run the machine faster
+	// than it would run outside a drag.
+	if (!warp_mode && timing_lead_us() > 0) {
+		video_present_no_input();
+		return;
+	}
+
 	bool new_frame = false;
-	uint32_t guard = 0;
+	uint32_t steps = 0;
+	const uint32_t slice_start = SDL_GetTicks();
 	do {
 		if (handle_ieee_intercept()) {
 			continue;
@@ -1776,10 +1793,14 @@ emulator_step_during_move(void)
 			emulator_stop_requested = true;
 			break;
 		}
-	} while (!new_frame && ++guard < 4000000);
+		// Reading the clock every instruction would cost more than it saves.
+		if ((++steps & 0x3FF) == 0 && SDL_GetTicks() - slice_start >= MOVE_SLICE_BUDGET_MS) {
+			break;
+		}
+	} while (!new_frame && steps < 4000000);
 
 	video_present_no_input();
-	timing_update();
+	timing_update_no_sleep();
 }
 
 void *
