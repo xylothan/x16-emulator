@@ -211,6 +211,8 @@ set(X16_SOURCES
     src/sdcard.c
     src/main.c
     src/debugger.c
+    src/dbg_info.c
+    src/source_view.c
     src/javascript_interface.c
     src/joystick.c
     src/rendertext.c
@@ -362,6 +364,19 @@ endif()
 if(EMSCRIPTEN)
     set_target_properties(makecart PROPERTIES SUFFIX ".html")
     target_link_options(makecart PRIVATE "SHELL:-s USE_ZLIB=1")
+endif()
+
+# --- Optional: cc65 debug-info parser checks ---
+# Off by default so it never affects the normal `x16emu` build. Enable with
+# -DBUILD_DBG_INFO_TEST=ON to build the standalone parser checks. dbg_info.c
+# has no dependency on the emulator core, so this links it on its own.
+option(BUILD_DBG_INFO_TEST "Build the cc65 debug-info parser test" OFF)
+if(BUILD_DBG_INFO_TEST AND NOT EMSCRIPTEN)
+    add_executable(dbg_info_test
+        tests/test_dbg_info.c
+        src/dbg_info.c
+    )
+    target_include_directories(dbg_info_test PRIVATE src)
 endif()
 
 # Build summary

@@ -34,6 +34,8 @@
 #include "ieee.h"
 #include "glue.h"
 #include "debugger.h"
+#include "dbg_info.h"
+#include "source_view.h"
 #include "utf8.h"
 #include "iso_8859_15.h"
 #include "joystick.h"
@@ -490,6 +492,13 @@ usage()
 	printf("\tSet the opacity value (0.0 for transparent, 1.0 for opaque) of the window. (default: %.1f)\n", window_opacity);
 	printf("-debug [<address>]\n");
 	printf("\tEnable debugger. Optionally, set a breakpoint\n");
+	printf("-dbgfile <path>\n");
+	printf("\tLoad a cc65 .dbg file, so addresses can be mapped back to source\n");
+	printf("\tfiles and line numbers. Combine with -srcpath if the sources are not\n");
+	printf("\tbeside the .dbg file.\n");
+	printf("-srcpath <dir>\n");
+	printf("\tAdd a directory to search for the source files a .dbg file names.\n");
+	printf("\tCan be repeated.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-zeroram\n");
@@ -902,6 +911,31 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-dbgfile")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				fprintf(stderr, "-dbgfile requires a file path\n");
+				return 1;
+			}
+			if (dbg_info_load(argv[0]) != 0) {
+				fprintf(stderr, "Warning: failed to load debug info from '%s'\n", argv[0]);
+			} else {
+				// Make the .dbg's own directory a source-search root.
+				source_view_add_path(dbg_info_get_dbg_dir());
+			}
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-srcpath")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				fprintf(stderr, "-srcpath requires a directory path\n");
+				return 1;
+			}
+			source_view_add_path(argv[0]);
+			argc--;
+			argv++;
 		} else if (!strcmp(argv[0], "-randram")) {
 			/* this operation has no effect anymore, randomizing the Ram is now default */
 			argc--;
@@ -1302,6 +1336,8 @@ main(int argc, char **argv)
 	emulator_loop(NULL);
 #endif
 
+	source_view_free();
+	dbg_info_free();
 	main_shutdown();
 	memory_dump_usage_counts();
 	return 0;

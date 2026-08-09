@@ -136,6 +136,8 @@ When starting `x16emu` without arguments, it will pick up the system ROM (`rom.b
 	* `S`: speed (CPU load, frame misses)
 	* `V`: video I/O reads and writes
 * `-debug [<address>]` enables the debugger. Optionally, set a breakpoint
+* `-dbgfile <path>` loads a cc65 `.dbg` file, so addresses can be mapped back to source files and line numbers.
+* `-srcpath <dir>` adds a directory to search for the source files a `.dbg` file names. Can be repeated. Sources are looked for at the path recorded in the `.dbg` first, then by basename in each registered directory — most recently added first, so a `-srcpath` given after `-dbgfile` takes precedence over the `.dbg`'s own directory — and finally in the current directory.
 * `-dump` configure system dump (e.g. `-dump CB`):
 	* `C`: CPU registers (7 B: A,X,Y,SP,STATUS,PC)
 	* `R`: RAM (40 KiB)
