@@ -49,9 +49,18 @@ uint8_t real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16B
 //      gen1, even with -c816), and the key is the RAM bank for $A000-$BFFF, the
 //      ROM bank for $C000-$FFFF, and nothing at all below $A000.
 
+//  Anchors are never deleted when the memory under them changes -- there is no
+//  write hook, and an overlay LOAD or a decompressor replaces code wholesale --
+//  so each anchor also stores the opcode byte that was executing. An anchor is
+//  only believed while that byte is still there. Without this, running a second
+//  program over the first leaves stale "instruction starts" mid-instruction in
+//  the new code, and they outrank the .dbg info that would have been right.
+
 #define CM_ADDR_SPACE   0x10000
 #define CM_COVER_BYTES  (CM_ADDR_SPACE / 8)   // 8 KB: one bit per address
-#define CM_MAX_CONTEXTS 32
+// Contexts cost ~136 KB each. Keying by backing memory (above) means a real ROM
+// boot settles at four, so a cap of 16 leaves ample headroom at ~2.2 MB total.
+#define CM_MAX_CONTEXTS 16
 
 typedef struct {
 	bool     used;
@@ -61,11 +70,25 @@ typedef struct {
 	uint64_t lru;
 	uint8_t  cover[CM_COVER_BYTES];
 	uint8_t  status[CM_ADDR_SPACE];       // valid only where the cover bit is set
+	uint8_t  opcode[CM_ADDR_SPACE];       // ditto: the byte that was executing
 } cm_context_t;
 
 static cm_context_t *g_ctx[CM_MAX_CONTEXTS];
 static uint64_t       g_lru_clock;
 static cm_context_t  *g_last_ctx;   // fast-path cache for the hot record loop
+
+// Which banked window a given address reads from, for the disasm/real_read6502
+// x16Bank argument. Low memory ($0000-$9FFF) is not banked (the CPU program
+// bank handles gen2), so it follows the current bank.
+static int16_t
+cm_x16bank_for(uint16_t addr, uint8_t rambank, uint8_t rombank)
+{
+	if (addr >= 0xC000)
+		return (int16_t)rombank;
+	if (addr >= 0xA000)
+		return (int16_t)rambank;
+	return CM_X16_CURRENT_BANK;
+}
 
 // Reduce the live bank state to the part that actually selects the memory
 // behind `addr`. See the note above.
@@ -138,6 +161,29 @@ cm_bit(const cm_context_t *c, uint16_t addr)
 	return c && (c->cover[addr >> 3] & (uint8_t)(1u << (addr & 7))) != 0;
 }
 
+// True if `addr` is a recorded instruction start AND the code it described is
+// still there.
+//
+// Anchors are only ever added; nothing removes them when memory changes, and on
+// this machine memory under code changes all the time -- an overlay LOAD, a
+// second program loaded over the first, a decompressor unpacking over its own
+// loader, self-modifying code. A stale anchor is worse than no anchor, because
+// live-execution evidence outranks the .dbg spans that would have been right,
+// so it can confidently place an instruction boundary in the middle of a real
+// instruction.
+//
+// Comparing the recorded opcode byte against memory catches all of those for
+// the price of one byte per address, and it costs nothing on the hot recording
+// path -- staleness is detected when an anchor is *used*, not when memory is
+// written, so no write hook is needed.
+static bool
+cm_anchor_ok(const cm_context_t *c, uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank)
+{
+	if (!cm_bit(c, addr))
+		return false;
+	return c->opcode[addr] == (uint8_t)CM_READ(addr, bank, cm_x16bank_for(addr, rambank, rombank));
+}
+
 // ---------------------------------------------------------------------------
 //  Recording
 // ---------------------------------------------------------------------------
@@ -161,6 +207,7 @@ code_map_record(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank, ui
 	}
 	c->cover[pc >> 3] |= (uint8_t)(1u << (pc & 7));
 	c->status[pc]      = status;
+	c->opcode[pc]      = (uint8_t)CM_READ(pc, pbank, cm_x16bank_for(pc, rambank, rombank));
 }
 
 // Locate the context holding coverage for `addr` under the given live banks.
@@ -175,14 +222,14 @@ cm_ctx_for_addr(uint16_t addr, uint8_t pbank, uint8_t rambank, uint8_t rombank)
 bool
 code_map_is_recorded_start(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank)
 {
-	return cm_bit(cm_ctx_for_addr(pc, pbank, rambank, rombank), pc);
+	return cm_anchor_ok(cm_ctx_for_addr(pc, pbank, rambank, rombank), pc, pbank, rambank, rombank);
 }
 
 uint8_t
 code_map_recorded_status(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank, uint8_t fallback)
 {
 	cm_context_t *c = cm_ctx_for_addr(pc, pbank, rambank, rombank);
-	if (cm_bit(c, pc))
+	if (cm_anchor_ok(c, pc, pbank, rambank, rombank))
 		return c->status[pc];
 	return fallback;
 }
@@ -203,19 +250,6 @@ code_map_reset(void)
 // ---------------------------------------------------------------------------
 //  Decoding helpers
 // ---------------------------------------------------------------------------
-
-// Which banked window a given address reads from, for the disasm/real_read6502
-// x16Bank argument. Low memory ($0000-$9FFF) is not banked (the CPU program
-// bank handles gen2), so it follows the current bank.
-static int16_t
-cm_x16bank_for(uint16_t addr, uint8_t rambank, uint8_t rombank)
-{
-	if (addr >= 0xC000)
-		return (int16_t)rombank;
-	if (addr >= 0xA000)
-		return (int16_t)rambank;
-	return CM_X16_CURRENT_BANK;
-}
 
 static int
 cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
@@ -290,7 +324,7 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 
 	for (int i = 1; i < sz; i++) {
 		uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
-		if (cm_bit(cm_ctx_for_addr(p, bank, rambank, rombank), p)) {
+		if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
 			sz = i;
 			break;
 		}
@@ -319,7 +353,7 @@ cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
         uint8_t *run_status, uint8_t *run_e, code_map_line_t *ln)
 {
 	cm_context_t *c  = cm_ctx_for_addr(addr, bank, rambank, rombank);
-	bool     recorded = cm_bit(c, addr);
+	bool     recorded = cm_anchor_ok(c, addr, bank, rambank, rombank);
 	uint8_t  st       = recorded ? c->status[addr] : *run_status;
 
 	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, ln);
@@ -346,7 +380,9 @@ static bool
 cm_prev_anchor(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank, cm_anchor_t *out)
 {
 	cm_context_t *ac            = cm_ctx_for_addr(addr, bank, rambank, rombank);
-	uint8_t       anchor_status = cm_bit(ac, addr) ? ac->status[addr] : regs.status;
+	uint8_t       anchor_status = cm_anchor_ok(ac, addr, bank, rambank, rombank)
+	                                  ? ac->status[addr]
+	                                  : regs.status;
 
 	cm_anchor_t best_recorded = { 0, 0, 0, false };
 	cm_anchor_t best_span     = { 0, 0, 0, false };
@@ -359,7 +395,7 @@ cm_prev_anchor(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank, cm
 		// A candidate may sit in a different window than the anchor (a window
 		// boundary can fall mid-instruction), so resolve its context itself.
 		cm_context_t *c        = cm_ctx_for_addr(p, bank, rambank, rombank);
-		bool          recorded = cm_bit(c, p);
+		bool          recorded = cm_anchor_ok(c, p, bank, rambank, rombank);
 		uint8_t       st       = recorded ? c->status[p] : anchor_status;
 
 		char    scratch[48];

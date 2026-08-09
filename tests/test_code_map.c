@@ -416,6 +416,51 @@ main(void)
 		regs.is65c816 = false;
 	}
 
+	// ── Anchors do not outlive the code they describe ───────────────────────
+	// Nothing removes an anchor when memory changes, and on this machine memory
+	// under code changes constantly: a second program is loaded over the first,
+	// an overlay is swapped in, a decompressor unpacks over its own loader. A
+	// stale anchor is worse than none, because live-execution evidence outranks
+	// the .dbg spans that would have been right -- it can confidently place a
+	// boundary in the middle of a real instruction.
+	{
+		reset_all();
+		// Program 1 runs: $8000 is genuinely an instruction start.
+		const uint8_t prog1[] = { 0xA9, 0x00, 0xEA };
+		poke(0x8000, prog1, sizeof(prog1));
+		code_map_record(0x8000, 0, 0, 0, regs.status);
+		code_map_record(0x8002, 0, 0, 0, regs.status);
+		check(code_map_is_recorded_start(0x8002, 0, 0, 0),
+		      "trusts an anchor while its code is still there");
+
+		// Program 2 is loaded over it. $8002 is now the middle of a 3-byte
+		// instruction, not a start.
+		const uint8_t prog2[] = { 0xEA, 0x8D, 0x34, 0x12 };
+		poke(0x8000, prog2, sizeof(prog2));
+		check(!code_map_is_recorded_start(0x8002, 0, 0, 0),
+		      "drops an anchor once the code under it changed");
+		check(code_map_recorded_status(0x8002, 0, 0, 0, 0xC3) == 0xC3,
+		      "does not report a stale anchor's status");
+
+		// $8000 still holds an instruction start, but a different instruction,
+		// so its anchor must go too rather than claim the old width.
+		check(!code_map_is_recorded_start(0x8000, 0, 0, 0),
+		      "drops an anchor whose opcode was replaced");
+
+		// A stale anchor must not truncate a correct instruction either: the
+		// STA at $8001 is 3 bytes and spans the dead anchor at $8002.
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8001, 0, 0, 0, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 3,
+		      "a stale anchor does not cut a real instruction short");
+
+		// Re-running the new code re-establishes trust.
+		code_map_record(0x8001, 0, 0, 0, regs.status);
+		check(code_map_is_recorded_start(0x8001, 0, 0, 0),
+		      "trusts the new code once it has actually run");
+	}
+
 	// ── Degenerate input ────────────────────────────────────────────────────
 	{
 		reset_all();

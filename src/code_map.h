@@ -19,15 +19,16 @@
 // is corrected at the next piece of hard evidence rather than drifting on.
 //
 // WHAT THIS DOES NOT DO, so callers know what they are getting:
-//   - Coverage is only as current as the memory it describes. Code that is
-//     overwritten in place -- an overlay LOAD, a decompressor, self-modifying
-//     code -- keeps its old anchors until the next code_map_reset(). Anchors are
-//     dropped wholesale on machine reset and never selectively invalidated.
 //   - Where no coverage exists the 65C816 register widths are only estimated,
 //     from a deliberately small model of the opcodes that change them (CLC, SEC,
 //     REP, SEP, XCE). A width change made by PLP, RTI or an interrupt is not
 //     followed, so a gap between anchors can still be decoded at the wrong
 //     width. Recorded status always wins where it exists.
+//
+// Anchors do not outlive the code they describe: each one stores the opcode byte
+// that was executing, and is ignored once memory no longer matches. That covers
+// overlay loads, a second program loaded over the first, and self-modifying
+// code, without needing a hook on every memory write.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and
 // the C++ ImGui panel (via debug_ui_bridge.h).
