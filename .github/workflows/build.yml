@@ -2,8 +2,11 @@ name: Build Binaries
 on:
   push:
     branches: ['**']
-    # Releases are cut by pushing an r* tag; see the publish job at the end.
-    tags: ['r*']
+    # Releases are cut by pushing a tag; see the publish job at the end. ADD
+    # tags are R<upstream release>.<ADD build>, e.g. R49.001. The lowercase
+    # form is matched too, both for upstream's own r49-style tags and so a
+    # mistyped tag still builds.
+    tags: ['[rR]*']
   pull_request:
   workflow_dispatch:
 
@@ -68,7 +71,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure
         shell: pwsh
@@ -146,7 +149,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -229,7 +232,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -308,7 +311,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -362,7 +365,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -423,7 +426,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -484,7 +487,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -535,7 +538,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -585,7 +588,7 @@ jobs:
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
-          release: ${{ startsWith(github.ref, 'refs/tags/r') }}
+          release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Copy ROM symbols
         run: |
@@ -613,7 +616,7 @@ jobs:
   #
   # Two kinds of release come out of here:
   #
-  #   * pushing an r* tag produces a full release, created as a DRAFT so a
+  #   * pushing an R49.nnn tag produces a full release, created as a DRAFT so a
   #     human reviews and publishes it deliberately;
   #   * pushing to the default branch refreshes a rolling "dev" prerelease, so
   #     there is always a current build to download without it ever looking
@@ -623,10 +626,10 @@ jobs:
   # and publishing meant downloading each one by hand, renaming it and
   # uploading it to a release. That is easy to get wrong and, because artifacts
   # expire, impossible to redo later. Asset naming reproduces exactly what has
-  # been published to date, e.g. x16emu_win64 -> x16emu_win64-r49.zip.
+  # been published to date, e.g. x16emu_win64 -> x16emu_win64-R49.001.zip.
   publish:
     if: >-
-      startsWith(github.ref, 'refs/tags/r') ||
+      github.ref_type == 'tag' ||
       github.ref_name == github.event.repository.default_branch ||
       github.event_name == 'workflow_dispatch'
     needs:

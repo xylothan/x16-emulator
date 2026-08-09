@@ -14,7 +14,7 @@ This outputs the following artifacts in the build directory, which can be upload
 
 	ex16mu.data x16emu.html x16emu.js x16mu.wasm webassembly/styles.css webassembly/main.js
 
-You will also need the system ROM (rom.bin) which you can build from the [X16 ROM source](https://github.com/commanderx16/x16-rom) or take from the latest [binary release](https://github.com/commanderx16/x16-emulator/releases).
+You will also need the system ROM (rom.bin) which you can build from the [X16 ROM source](https://github.com/X16Community/x16-rom) or take from the latest [binary release](https://github.com/xylothan/x16-emulator/releases).
 (It is not always guaranteed though that the latest binary release is compatible with the current state of the emulator source.)
 
 ### Testing

@@ -6,15 +6,20 @@ Installing the emulator
 
 ### Getting the emulator
 
-Obtain the X16 emulator by downloading the most recent version from the 'releases' page in Github:
-https://github.com/X16Community/x16-emulator/releases
+Obtain the emulator by downloading the most recent version from the X16Emu ADD releases page:
+https://github.com/xylothan/x16-emulator/releases
 Choose the correct version for your CPU architecture.
+
+Releases are named `R49.nnn`, where `R49` names the official Commander X16 release line the build
+follows and `nnn` counts the ADD builds on top of it. The official upstream emulator, which has
+upstream's keyboard-driven debugger but none of ADD's tooling, lives at
+https://github.com/X16Community/x16-emulator/releases.
 
 
 #### Alternative builds or other platform
 
-If for any reason you cannot run the official release of the emulator, there's a Snap package
-of it that you could try instead, available at https://snapcraft.io/x16emu
+If for any reason you cannot run these builds, the official emulator has a Snap package
+that you could try instead, available at https://snapcraft.io/x16emu
 
 It should avoid any shared library version incompatibilities that you could potentially run into with the
 official version, and is available for a broad range of platforms. Details and instructions on how to install
