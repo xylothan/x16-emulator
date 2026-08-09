@@ -368,25 +368,50 @@ if(EMSCRIPTEN)
     target_link_options(makecart PRIVATE "SHELL:-s USE_ZLIB=1")
 endif()
 
-# --- Optional: cc65 debug-info parser checks ---
-# Off by default so it never affects the normal `x16emu` build. Enable with
-# -DBUILD_DBG_INFO_TEST=ON to build the standalone parser checks. dbg_info.c
-# has no dependency on the emulator core, so this links it on its own.
+# --- Optional: unit tests ---
+# Every test is off by default so none of them affect the normal `x16emu` build.
+# -DBUILD_TESTS=ON turns the lot on at once, which is what CI does; the per-test
+# options remain for building a single one while working on it. Each test stubs
+# out whatever it needs from the emulator core, so none of them link x16emu, and
+# none of them need a ROM.
+#
+# Emscripten is excluded throughout: the output there is .js/.wasm, which ctest
+# cannot execute as a plain binary.
+option(BUILD_TESTS "Build every unit test" OFF)
 option(BUILD_DBG_INFO_TEST "Build the cc65 debug-info parser test" OFF)
+option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
+option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
+
+if(BUILD_TESTS)
+    set(BUILD_DBG_INFO_TEST ON)
+    set(BUILD_CODE_MAP_TEST ON)
+    set(BUILD_DEBUG_CORE_TEST ON)
+endif()
+
+# add_test() only writes a CTestTestfile when testing is enabled, so this has to
+# come before the add_test() calls below.
+if((BUILD_DBG_INFO_TEST OR BUILD_CODE_MAP_TEST OR BUILD_DEBUG_CORE_TEST) AND NOT EMSCRIPTEN)
+    enable_testing()
+endif()
+
+# --- cc65 debug-info parser checks ---
+# dbg_info.c has no dependency on the emulator core, so this links it on its own.
 if(BUILD_DBG_INFO_TEST AND NOT EMSCRIPTEN)
     add_executable(dbg_info_test
         tests/test_dbg_info.c
         src/dbg_info.c
     )
     target_include_directories(dbg_info_test PRIVATE src)
+    add_test(NAME dbg_info COMMAND dbg_info_test)
 endif()
 
-# --- Optional: anchored disassembler checks ---
-# Off by default, same as above. code_map.c leans on only disasm(), dbg_info and
-# two core symbols, so the test supplies its own memory and register file rather
-# than linking the emulator core. disasm.c still includes SDL headers, hence the
-# SDL include directories.
-option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
+# --- Anchored disassembler checks ---
+# code_map.c leans on only disasm(), dbg_info and two core symbols, so the test
+# supplies its own memory and register file rather than linking the emulator
+# core. disasm.c still includes SDL headers, hence the SDL include directories.
+# It also includes the generated cpu/mnemonics.h, so this depends on
+# gen_cpu_tables: a tests-only build never builds x16emu, which is what would
+# otherwise pull the generator in.
 if(BUILD_CODE_MAP_TEST AND NOT EMSCRIPTEN)
     add_executable(code_map_test
         tests/test_code_map.c
@@ -395,19 +420,20 @@ if(BUILD_CODE_MAP_TEST AND NOT EMSCRIPTEN)
         src/dbg_info.c
     )
     target_include_directories(code_map_test PRIVATE src ${SDL2_INCLUDE_DIRS})
+    add_dependencies(code_map_test gen_cpu_tables)
+    add_test(NAME code_map COMMAND code_map_test)
 endif()
 
-# --- Optional: breakpoint core checks ---
-# Off by default, same as above. debug_core.c reaches for only the register file,
-# the bank registers and a debug memory read, so the test supplies its own and
-# links no emulator core.
-option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
+# --- Breakpoint core checks ---
+# debug_core.c reaches for only the register file, the bank registers and a debug
+# memory read, so the test supplies its own and links no emulator core.
 if(BUILD_DEBUG_CORE_TEST AND NOT EMSCRIPTEN)
     add_executable(debug_core_test
         tests/test_debug_core.c
         src/debug_core.c
     )
     target_include_directories(debug_core_test PRIVATE src)
+    add_test(NAME debug_core COMMAND debug_core_test)
 endif()
 
 # Build summary

@@ -37,6 +37,37 @@ jobs:
         with:
           name: readme-pdf
           path: artifacts/*
+  # The unit tests: three standalone binaries covering the cc65 debug-info
+  # parser, the anchored disassembler and the debugger breakpoint core. Each one
+  # stubs out the emulator core, so this job needs no ROM, no FluidSynth and no
+  # packaging -- it is by far the cheapest job here and it is the only one that
+  # actually executes any code, so it runs unconditionally rather than hanging
+  # off README like the platform builds do.
+  unit-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      # buildtables.py generates cpu/tables.h and cpu/mnemonics.h; CMake looks
+      # for a Python 3 interpreter unconditionally.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Install Dependencies
+        # SDL2 and zlib are found by find_package() at configure time, and
+        # disasm.c pulls in SDL headers, so they are needed even though nothing
+        # here links the emulator.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+      - name: Configure
+        # LTO off: it buys nothing for three small binaries and costs link time.
+        run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
+      - name: Build Tests
+        # Named targets rather than a bare --build, so a broken emulator build
+        # is reported by the platform jobs and not duplicated here.
+        run: cmake --build build --target dbg_info_test code_map_test debug_core_test
+      - name: Run Tests
+        run: ctest --test-dir build --output-on-failure
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
   # with no redistributable to install. The MinGW jobs below still run, and
@@ -634,7 +665,9 @@ jobs:
       github.event_name == 'workflow_dispatch'
     needs:
       # Every build, not just the ones that produce assets: a red compile means
-      # the tree is broken, and nothing broken should reach a release.
+      # the tree is broken, and nothing broken should reach a release. The unit
+      # tests gate it for the same reason.
+      - unit-tests
       - build-win-msvc
       - build-win-x86_64
       - build-win-i686
