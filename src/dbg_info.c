@@ -1300,58 +1300,63 @@ static void seed_banks_from_equates(void)
 			continue;
 		size_t lh = strlen(have);
 
-		int  exact = -1, pref = -1;
-		bool exact_ambiguous = false, pref_ambiguous = false;
-
-		/* Two passes. A segment's own module is the authority on where it
-		 * lives, so its equates are considered alone first; only if that
-		 * module said nothing do we fall back to the whole table. Without this,
-		 * two overlays that each define RAM_BANK_CODE for their own CODE
-		 * segment -- an ordinary X16 arrangement -- would each see two equally
-		 * good candidates and both end up unknown.
+		/* Candidates are ranked by how good the name match is first and by who
+		 * declared the equate second: own-exact, other-exact, own-prefix,
+		 * other-prefix. Gating the whole search on the segment's own module
+		 * instead was wrong -- an own-module PREFIX match would end the search
+		 * before another module's EXACT match was ever looked at, which is the
+		 * same "claimed by a name it merely resembles" failure this ranking
+		 * exists to prevent, just across a module boundary.
 		 *
-		 * Nothing carries over between the passes: the second only runs when
-		 * the first matched nothing at all, which leaves every accumulator at
-		 * its initial value. */
-		for (int pass = 0; pass < 2 && exact < 0 && pref < 0; pass++) {
-			for (int b = 0; b < bank_equ_count; b++) {
-				if (pass == 0 && bank_equs[b].owner != segs[i].owner)
-					continue;
-				const char *want = targets + (size_t)b * 128;
-				if (!want[0])
-					continue;
-				if (!strcmp(have, want)) {
-					if (exact < 0)
-						exact = b;
-					else if (bank_equs[exact].bank != bank_equs[b].bank)
-						exact_ambiguous = true;
-					continue;
-				}
-				/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with
-				 * segment STORETILE, which is what these conventions produce. */
-				size_t lw = strlen(want);
-				size_t n  = lh < lw ? lh : lw;
-				if (n >= 4 && !strncmp(have, want, n)) {
-					if (pref < 0)
-						pref = b;
-					else if (bank_equs[pref].bank != bank_equs[b].bank)
-						pref_ambiguous = true;
-				}
-			}
+		 * Ownership still matters, because two overlays that each define
+		 * RAM_BANK_CODE for their own CODE segment -- an ordinary X16
+		 * arrangement -- would otherwise see two equally good candidates and
+		 * both end up unknown. */
+		enum { OWN_EXACT, ANY_EXACT, OWN_PREFIX, ANY_PREFIX, RANK_COUNT };
+		int  cand[RANK_COUNT];
+		bool ambiguous[RANK_COUNT];
+		for (int r = 0; r < RANK_COUNT; r++) {
+			cand[r]      = -1;
+			ambiguous[r] = false;
 		}
 
-		/* An exact match outranks a prefix one. Either is used only if every
-		 * candidate of that kind agreed on the bank; otherwise there is no
-		 * basis for choosing and the segment is left unknown, which callers
-		 * report honestly and a runtime observation can still resolve. */
-		if (exact >= 0) {
-			if (!exact_ambiguous) {
-				segs[i].bank          = bank_equs[exact].bank;
+		for (int b = 0; b < bank_equ_count; b++) {
+			const char *want = targets + (size_t)b * 128;
+			if (!want[0])
+				continue;
+			bool own = (bank_equs[b].owner == segs[i].owner);
+			int  rank;
+			if (!strcmp(have, want)) {
+				rank = own ? OWN_EXACT : ANY_EXACT;
+			} else {
+				/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with
+				 * segment STORETILE, which is what these conventions produce.
+				 * Four characters is the shortest overlap worth trusting. */
+				size_t lw = strlen(want);
+				size_t n  = lh < lw ? lh : lw;
+				if (n < 4 || strncmp(have, want, n) != 0)
+					continue;
+				rank = own ? OWN_PREFIX : ANY_PREFIX;
+			}
+			if (cand[rank] < 0)
+				cand[rank] = b;
+			else if (bank_equs[cand[rank]].bank != bank_equs[b].bank)
+				ambiguous[rank] = true;
+		}
+
+		/* The best kind of match available decides, and it decides alone: if
+		 * the candidates of that kind disagree there is no basis for choosing
+		 * between them, and falling through to a weaker kind would answer a
+		 * question the better evidence just said was undecidable. Unknown is
+		 * reported honestly and a runtime observation can still resolve it. */
+		for (int r = 0; r < RANK_COUNT; r++) {
+			if (cand[r] < 0)
+				continue;
+			if (!ambiguous[r]) {
+				segs[i].bank          = bank_equs[cand[r]].bank;
 				segs[i].bank_from_equ = true;
 			}
-		} else if (pref >= 0 && !pref_ambiguous) {
-			segs[i].bank          = bank_equs[pref].bank;
-			segs[i].bank_from_equ = true;
+			break;
 		}
 	}
 
@@ -1601,9 +1606,9 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 	// but would still be re-added, piling up on every overlay swap until an
 	// address could be described by a module that is no longer resident. The
 	// two jobs -- evicting other modules, and replacing this one's own records
-	// -- need different ranges. Records now carry an owner, but only the
-	// deduplicated ones (files and equates); finishing this means extending it
-	// to segs/spans/lines/syms and having unload consult it. See dbg_info.h.
+	// -- need different ranges. Files, equates and segments now carry an owner;
+	// finishing this means extending it to spans/lines/syms and having unload
+	// consult it. See dbg_info.h.
 	dbg_info_unload_range(seg_min, seg_max);
 	int result = dbg_info_load(dbg_path);
 	if (result == 0) {

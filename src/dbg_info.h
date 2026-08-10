@@ -72,9 +72,9 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 // replacing this one's own records want different ranges.
 //
 // Records do now carry the module they came from, but only the deduplicated
-// ones: dbg_file_t and the two equate tables. Finishing this means giving
-// dbg_seg_t/dbg_span_t/dbg_line_t/dbg_sym_t the same owner field and having
-// dbg_info_unload_range() drop by owner rather than purely by address.
+// ones and dbg_seg_t. Finishing this means giving dbg_span_t/dbg_line_t/
+// dbg_sym_t the same owner field and having dbg_info_unload_range() drop by
+// owner rather than purely by address.
 //
 // NOTE: load_addr is currently ignored -- the debug info always describes the
 // program at its link-time addresses. A relocating load (secondary address 0)

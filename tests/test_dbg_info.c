@@ -808,6 +808,113 @@ main(void)
 		}
 	}
 
+	// A module's own equate must not outrank a better match from elsewhere.
+	// An own-module prefix match used to end the search before another
+	// module's exact match was considered, which is the same "claimed by a name
+	// it resembles" failure the ranking exists to prevent.
+	{
+		dbg_info_free();
+		static const char *k_rank_main =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"rmain.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"OTHER\",start=0x000900,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE2\",addrsize=absolute,size=1,scope=0,def=0,val=0x000009,type=equ\n"
+			"mod\tid=0,name=\"rmain.o\",file=0\n";
+		static const char *k_rank_ovl =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"rovl.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE2\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000002,type=equ\n"
+			"mod\tid=0,name=\"rovl.o\",file=0\n";
+		char *rm = write_temp(k_rank_main, "x16_dbg_info_rankmain.dbg");
+		if (!rm) {
+			check(false, "could not write the ranking fixture");
+		} else {
+			check(dbg_info_load(rm) == 0, "loads a module declaring RAM_BANK_CODE2");
+			char *ro = write_temp(k_rank_ovl, "x16_dbg_info_rankovl.dbg");
+			if (ro) {
+				// Its own RAM_BANK_CODE only prefix-matches segment CODE2;
+				// the other module's RAM_BANK_CODE2 matches it exactly.
+				check(dbg_info_load(ro) == 0, "loads an overlay whose own equate only resembles it");
+				const char *f = NULL;
+				int         l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 9, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "an exact match elsewhere beats a resemblance at home");
+				f = NULL;
+				l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 2, &f, &l)
+				          != DBG_BANK_RESOLVED,
+				      "and the resemblance does not also answer");
+				remove(ro);
+			}
+			remove(rm);
+			dbg_info_free();
+		}
+	}
+
+	// Two equates in ONE module that both reduce to the segment's name, with
+	// different banks. The module contradicts itself, so there is nothing to
+	// choose between them.
+	{
+		dbg_info_free();
+		static const char *k_self_contradict =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"sc.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"sym\tid=1,name=\"CODE_BANK\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+			"mod\tid=0,name=\"sc.o\",file=0\n";
+		char *sp = write_temp(k_self_contradict, "x16_dbg_info_selfcon.dbg");
+		if (!sp) {
+			check(false, "could not write the self-contradiction fixture");
+		} else {
+			check(dbg_info_load(sp) == 0, "loads a module naming one segment twice");
+			const char *f = NULL;
+			int         l = 0;
+			dbg_bank_result_t r3 = dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l);
+			f = NULL;
+			l = 0;
+			dbg_bank_result_t r7 = dbg_info_addr_to_source_banked_ex(0xA000, 7, &f, &l);
+			check(r3 != DBG_BANK_RESOLVED && r7 != DBG_BANK_RESOLVED,
+			      "and two exact matches that disagree resolve to neither");
+			remove(sp);
+			dbg_info_free();
+		}
+	}
+
+	// A common prefix shorter than four characters is not evidence of anything.
+	{
+		dbg_info_free();
+		static const char *k_short_prefix =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"sp.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_COD\",addrsize=absolute,size=1,scope=0,def=0,val=0x000005,type=equ\n"
+			"mod\tid=0,name=\"sp.o\",file=0\n";
+		char *pp = write_temp(k_short_prefix, "x16_dbg_info_shortpfx.dbg");
+		if (!pp) {
+			check(false, "could not write the short-prefix fixture");
+		} else {
+			check(dbg_info_load(pp) == 0, "loads a segment with a near-miss equate");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 5, &f, &l)
+			          != DBG_BANK_RESOLVED,
+			      "and a three-character overlap does not claim it");
+			remove(pp);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
