@@ -41,11 +41,11 @@ static char prg_path[DBG_LOAD_PATH_MAX];
 // Which .dbg files are currently merged into dbg_info, and over what range.
 //
 // dbg_info_load() is additive and dbg_info_unload_range() prunes only some of
-// what it builds -- file and equate records are never pruned. Parsing the same
-// .dbg twice therefore appends a second copy of every equate, and lookups
-// return the FIRST match, so an overlay loader that swaps the same module in
-// and out repeatedly would grow memory without bound AND keep resolving symbols
-// to their first-seen values.
+// what it builds. File and equate records are never pruned by address; they are
+// instead reused or replaced when the same .dbg is parsed again, so those no
+// longer accumulate. Segment, span, line and label records still append, and
+// they are pruned only by the address range handed to the unload -- so tracking
+// which .dbg is live over which range is what keeps the two in step.
 //
 // But merging is also destructive: dbg_info_load_for_file() unloads everything
 // in the incoming file's address range before reading it. Re-parsing is

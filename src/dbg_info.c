@@ -21,6 +21,7 @@
 typedef struct {
 	int    id;
 	char  *name;
+	int    owner;     /* which .dbg declared it; see dbg_owner_intern() */
 } dbg_file_t;
 
 typedef struct {
@@ -29,6 +30,8 @@ typedef struct {
 	uint32_t size;
 	char    *name;    /* segment name, e.g. "BANKCODE" */
 	int      bank;    /* X16 RAM bank this segment lives in, -1 = unknown */
+	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
+	bool     bank_from_equ; /* bank was inferred from an equate, not observed */
 } dbg_seg_t;
 
 typedef struct {
@@ -95,6 +98,8 @@ static int              sym_cap;
 typedef struct {
 	char *name;
 	int   bank;
+	int   owner;      /* which .dbg declared it; see dbg_owner_intern() */
+	uint64_t gen;     /* which parse of that .dbg produced it */
 } dbg_bank_equ_t;
 
 static dbg_bank_equ_t  *bank_equs;
@@ -110,6 +115,8 @@ static int              bank_equ_cap;
 typedef struct {
 	char    *name;
 	dbg_addr_t val;
+	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
+	uint64_t gen;     /* which parse of that .dbg produced it */
 } dbg_equ_t;
 
 static dbg_equ_t       *equs;
@@ -314,6 +321,109 @@ static const char *basename_ptr(const char *path)
 /*  Record parsers                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Records are deduplicated so that reloading a module does not grow the tables
+ * without end. That is only correct WITHIN a module: two linked modules may
+ * legitimately both compile a file called "main.c", and may both define an
+ * equate called LIMIT with different values. Deduplicating those against each
+ * other would make one module's debug info describe the other's code. So every
+ * deduplicated record remembers which .dbg declared it, and a reused record has
+ * to come from the same one.
+ *
+ * The owner is the .dbg path, interned. Comparison is case-insensitive on
+ * Windows, where the same file reached by two spellings is still one file. */
+static char **owners      = NULL;
+static int    owner_count = 0;
+static int    owner_cap   = 0;
+static int    cur_owner   = -1;
+/* Bumped per parse, so records written by the parse in progress can be told
+ * from ones the same module left behind last time. */
+static uint64_t cur_gen   = 0;
+
+static int dbg_owner_intern(const char *path)
+{
+	if (!path)
+		return -1;
+	for (int i = 0; i < owner_count; i++) {
+#ifdef _WIN32
+		if (owners[i] && _stricmp(owners[i], path) == 0)
+#else
+		if (owners[i] && strcmp(owners[i], path) == 0)
+#endif
+			return i;
+	}
+	if (!GROW_ARRAY(owners, owner_count, owner_cap, char *))
+		return -1;
+	size_t n = strlen(path);
+	char  *copy = (char *)malloc(n + 1);
+	if (!copy)
+		return -1;
+	memcpy(copy, path, n + 1);
+	owners[owner_count] = copy;
+	return owner_count++;
+}
+
+/* Drop the equates a module declared in an earlier generation. Called once the
+ * file has been read, so a file that turned out to be unreadable or unparseable
+ * leaves the previous generation intact. Replacing them one by one as they are
+ * parsed is not enough on its own: an equate the rebuilt file no longer
+ * declares would never be visited, and would go on seeding banks and answering
+ * lookups on behalf of a module that has stopped defining it. */
+static void drop_stale_equates(int owner, uint64_t gen)
+{
+	if (owner < 0)
+		return;
+	int w = 0;
+	for (int i = 0; i < equ_count; i++) {
+		if (equs[i].owner == owner && equs[i].gen != gen) {
+			free(equs[i].name);
+			continue;
+		}
+		if (w != i)
+			equs[w] = equs[i];
+		w++;
+	}
+	equ_count = w;
+
+	w = 0;
+	for (int i = 0; i < bank_equ_count; i++) {
+		if (bank_equs[i].owner == owner && bank_equs[i].gen != gen) {
+			free(bank_equs[i].name);
+			continue;
+		}
+		if (w != i)
+			bank_equs[w] = bank_equs[i];
+		w++;
+	}
+	bank_equ_count = w;
+}
+
+/* Maps this load's `file` IDs onto the record that ends up describing them.
+ * Needed because a file already known from an earlier load is reused rather than
+ * appended, so its ID is not this load's ID plus the usual base. Reset per load.
+ */
+static int *file_alias      = NULL;
+static int  file_alias_count = 0;
+static int  file_alias_cap   = 0;
+
+static void file_alias_set(long incoming, int resolved)
+{
+	if (incoming < 0 || incoming > 0xFFFFF)
+		return;                     /* absurd ID; the record is unusable anyway */
+	while (file_alias_count <= (int)incoming) {
+		if (!GROW_ARRAY(file_alias, file_alias_count, file_alias_cap, int))
+			return;
+		file_alias[file_alias_count++] = -1;
+	}
+	file_alias[incoming] = resolved;
+}
+
+static int file_alias_get(long incoming)
+{
+	if (incoming >= 0 && incoming < file_alias_count && file_alias[incoming] >= 0)
+		return file_alias[incoming];
+	return (int)incoming + id_base_file;    /* no alias recorded; the usual rule */
+}
+
 static void parse_file_record(const char *p)
 {
 	long id = parse_int_key(p, "id");
@@ -323,10 +433,30 @@ static void parse_file_record(const char *p)
 		return;
 	}
 
+	/* Reuse a file this same .dbg already gave us. Unloading a range
+	 * deliberately leaves file records alone -- callers keep the path pointers
+	 * we handed them -- so appending here would add a copy of every file on
+	 * every reload, and an overlay swapped in and out repeatedly would grow the
+	 * table without end. Restricted to one owner because two modules that both
+	 * build a "main.c" have two different main.c's. Consumers currently resolve
+	 * a file by its name string, so merging them is not yet observable beyond
+	 * the record count; keeping them apart is what lets the ownership work
+	 * noted at dbg_info_load_for_file() tell them apart later. */
+	for (int i = 0; i < file_count; i++) {
+		if (files[i].owner == cur_owner && files[i].name &&
+		    strcmp(files[i].name, name) == 0) {
+			file_alias_set(id, files[i].id);
+			free(name);
+			return;
+		}
+	}
+
 	if (!GROW_ARRAY(files, file_count, file_cap, dbg_file_t)) { free(name); return; }
-	files[file_count].id   = (int)id + id_base_file;
+	files[file_count].id    = (int)id + id_base_file;
 	note_id(&next_id_file, files[file_count].id);
-	files[file_count].name = name;
+	files[file_count].name  = name;
+	files[file_count].owner = cur_owner;
+	file_alias_set(id, files[file_count].id);
 	file_count++;
 }
 
@@ -347,6 +477,8 @@ static void parse_seg_record(const char *p)
 	segs[seg_count].size  = (uint32_t)size;
 	segs[seg_count].name  = parse_str_key(p, "name"); /* may be NULL */
 	segs[seg_count].bank  = -1;                       /* learned later */
+	segs[seg_count].owner = cur_owner;
+	segs[seg_count].bank_from_equ = false;
 	seg_count++;
 }
 
@@ -392,7 +524,7 @@ static void parse_line_record(const char *p)
 	if (!GROW_ARRAY(lines, line_count, line_cap, dbg_line_t)) { free(span_ids); return; }
 	lines[line_count].id         = (int)id + id_base_line;
 	note_id(&next_id_line, lines[line_count].id);
-	lines[line_count].file       = (int)file + id_base_file;
+	lines[line_count].file       = (int)file;   /* raw; resolved after the load */
 	lines[line_count].line       = (int)line;
 	lines[line_count].spans      = span_ids;
 	lines[line_count].span_count = span_n;
@@ -403,16 +535,55 @@ static void parse_line_record(const char *p)
  * records with no explicit type) that carry a 16-bit `val` — i.e. named program
  * addresses. Equates/imports/constants (type=equ/imp/…) are skipped so the
  * label map stays a clean address→name mapping for the disassembler. */
-static void parse_sym_record(const char *p)
+/* Remove a name this parse already filed in the ordinary equate table. Used
+ * when the same name turns up again with a value that belongs in the other
+ * table, so that the later definition is the only one left. */
+static void forget_current_equate(dbg_equ_t *arr, int *count, const char *name)
+{
+	int w = 0;
+	for (int i = 0; i < *count; i++) {
+		if (arr[i].owner == cur_owner && arr[i].gen == cur_gen && arr[i].name &&
+		    !strcasecmp(arr[i].name, name)) {
+			free(arr[i].name);
+			continue;
+		}
+		if (w != i)
+			arr[w] = arr[i];
+		w++;
+	}
+	*count = w;
+}
+
+static void forget_current_bank_equate(const char *name)
+{
+	int w = 0;
+	for (int i = 0; i < bank_equ_count; i++) {
+		if (bank_equs[i].owner == cur_owner && bank_equs[i].gen == cur_gen &&
+		    bank_equs[i].name && !strcasecmp(bank_equs[i].name, name)) {
+			free(bank_equs[i].name);
+			continue;
+		}
+		if (w != i)
+			bank_equs[w] = bank_equs[i];
+		w++;
+	}
+	bank_equ_count = w;
+}
+
+/* Returns true if the record was structurally complete -- it had a name and a
+ * usable value -- whether or not we ended up keeping it. The caller counts
+ * those to tell a file that was written to the end from one still being
+ * written; it is not a measure of how many records we stored. */
+static bool parse_sym_record(const char *p)
 {
 	char *name = parse_str_key(p, "name");
 	if (!name)
-		return;
+		return false;
 
 	long val = parse_int_key(p, "val");
 	if (val < 0 || val > 0xFFFFFF) {   /* no usable address value */
 		free(name);
-		return;
+		return false;
 	}
 
 	/* Keep only labels. If a `type` field is present it must be "lab"; records
@@ -429,58 +600,117 @@ static void parse_sym_record(const char *p)
 			                  !strncmp(name, "BANK_", 5) ||
 			                  (l > 5 && !strcmp(name + l - 5, "_BANK"));
 			if (looks_bank) {
-				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return; }
-				bank_equs[bank_equ_count].name = name;   /* takes ownership */
-				bank_equs[bank_equ_count].bank = (int)val;
+				/* Same-owner only. Pooling these lets a second module's value
+				 * overwrite the first's, and since equate-derived banks are now
+				 * re-derived on every load, the first module's own segments
+				 * would then be re-seeded from a value it never declared. */
+				for (int i = 0; i < bank_equ_count; i++) {
+					if (bank_equs[i].owner == cur_owner &&
+					    bank_equs[i].gen == cur_gen &&
+					    bank_equs[i].name &&
+					    !strcasecmp(bank_equs[i].name, name)) {
+						free(bank_equs[i].name);
+						bank_equs[i].name = name;   /* takes ownership */
+						bank_equs[i].bank = (int)val;
+						return true;
+					}
+				}
+				/* The same name can land in either table depending on its
+				 * value -- RAM_BANK_CODE=3 is a bank constant, RAM_BANK_CODE
+				 * =$1234 is not -- so a redefinition can cross tables. Drop any
+				 * twin on the other side, or the superseded one goes on
+				 * answering for whichever question it was filed under. */
+				forget_current_equate(equs, &equ_count, name);
+				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return true; }
+				bank_equs[bank_equ_count].name  = name;   /* takes ownership */
+				bank_equs[bank_equ_count].bank  = (int)val;
+				bank_equs[bank_equ_count].owner = cur_owner;
+				bank_equs[bank_equ_count].gen   = cur_gen;
 				bank_equ_count++;
-				return;
+				return true;
 			}
 		}
 		/* Every other equate is still a name the user can hover in source
 		 * (KERNAL vectors, hardware registers, constants), so record it for
 		 * name→value lookups without polluting the label map. */
 		if (tlen == 3 && strncmp(tv, "equ", 3) == 0) {
-			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return; }
-			equs[equ_count].name = name;   /* takes ownership */
-			equs[equ_count].val  = (dbg_addr_t)val;
+			/* Replace rather than append, for the same reason as bank equates:
+			 * unloading a range never prunes these, and the lookup returns the
+			 * first match, so a stale value would win forever. Same-owner only:
+			 * two modules may each define LIMIT with different values, and
+			 * replacing across them would destroy one of the two outright,
+			 * since nothing restores it when the other module unloads. */
+			for (int i = 0; i < equ_count; i++) {
+				if (equs[i].owner == cur_owner && equs[i].gen == cur_gen &&
+				    equs[i].name &&
+				    !strcasecmp(equs[i].name, name)) {
+					free(equs[i].name);
+					equs[i].name = name;   /* takes ownership */
+					equs[i].val  = (dbg_addr_t)val;
+					return true;
+				}
+			}
+			forget_current_bank_equate(name);
+			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return true; }
+			equs[equ_count].name  = name;   /* takes ownership */
+			equs[equ_count].val   = (dbg_addr_t)val;
+			equs[equ_count].owner = cur_owner;
+			equs[equ_count].gen   = cur_gen;
 			equ_count++;
-			return;
+			return true;
 		}
 		free(name);
-		return;
+		return true;
 	}
 
-	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return; }
+	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return true; }
 	syms[sym_count].name = name;
 	syms[sym_count].addr = (dbg_addr_t)val;
 	sym_count++;
+	return true;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Segment / span / file lookups by id. IDs are normally dense and equal to
- *  the array index (they are emitted sequentially and merges offset them by
- *  the current count), so try the direct index first and fall back to a linear
- *  scan. With 28k+ spans the linear-only form made map rebuilds quadratic.   */
+/*  Segment / span / file lookups by id.                                */
 /* ------------------------------------------------------------------ */
+
+/* Records are normally appended with increasing IDs, and compaction preserves
+ * their order, so a binary search finds them in log time. The file supplies the
+ * IDs, though, and nothing obliges it to list them in order -- so a miss falls
+ * back to a linear scan, which is correct whatever order they arrive in.
+ *
+ * The index shortcut this replaces -- `arr[id].id == id` -- only held on the
+ * very first load. Unloading a range compacts the array without resetting the ID
+ * counter, so afterwards element 0 carries a nonzero ID and the shortcut missed
+ * on every lookup, leaving the linear scan alone. build_addr_map() does one span
+ * lookup per line, so a rebuild went quadratic exactly where it mattered: the
+ * auto-load path, which runs from the emulator's main loop. */
+#define DBG_FIND_BY_ID(arr, count, id)                                    \
+	do {                                                                  \
+		int lo_ = 0, hi_ = (count) - 1;                                   \
+		while (lo_ <= hi_) {                                              \
+			const int mid_ = lo_ + (hi_ - lo_) / 2;                       \
+			if ((arr)[mid_].id == (id))                                   \
+				return &(arr)[mid_];                                      \
+			if ((arr)[mid_].id < (id))                                    \
+				lo_ = mid_ + 1;                                           \
+			else                                                          \
+				hi_ = mid_ - 1;                                           \
+		}                                                                 \
+		for (int i_ = 0; i_ < (count); i_++)                              \
+			if ((arr)[i_].id == (id))                                     \
+				return &(arr)[i_];                                        \
+		return NULL;                                                      \
+	} while (0)
 
 static const dbg_seg_t *find_seg(int id)
 {
-	if (id >= 0 && id < seg_count && segs[id].id == id)
-		return &segs[id];
-	for (int i = 0; i < seg_count; i++)
-		if (segs[i].id == id)
-			return &segs[i];
-	return NULL;
+	DBG_FIND_BY_ID(segs, seg_count, id);
 }
 
 static const dbg_span_t *find_span(int id)
 {
-	if (id >= 0 && id < span_count && spans[id].id == id)
-		return &spans[id];
-	for (int i = 0; i < span_count; i++)
-		if (spans[i].id == id)
-			return &spans[i];
-	return NULL;
+	DBG_FIND_BY_ID(spans, span_count, id);
 }
 
 static const dbg_file_t *find_file(int id)
@@ -630,6 +860,39 @@ int dbg_info_load(const char *path)
 	id_base_span = next_id_span;
 	id_base_line = next_id_line;
 
+	// Per load: this file's `file` IDs mean nothing to the next one.
+	file_alias_count = 0;
+
+	// Records deduplicated below are pooled only with others from this same
+	// .dbg; see dbg_owner_intern(). Interning can only fail on allocation
+	// failure, and carrying on with -1 would pool this module with every other
+	// load that failed the same way -- and, worse, hand that shared identity to
+	// the generation sweep below, which would then discard all of them. Refuse
+	// the load instead; nothing here is destructive yet.
+	cur_owner = dbg_owner_intern(path);
+	if (cur_owner < 0) {
+		fclose(f);
+		fprintf(stderr, "dbg_info: out of memory loading '%s'\n", path);
+		return -1;
+	}
+
+	// Equates this module declared before are left in place while the file is
+	// read, and dropped only once it has been read to the end. Sweeping them
+	// first meant an empty or corrupt file -- one that opens fine and then
+	// parses to nothing -- silently deleted the previous generation and still
+	// reported success. Records from this parse are tagged with a new
+	// generation so the two can be told apart while both are present.
+	cur_gen++;
+
+	// `line` records are resolved through the alias only after the whole file
+	// is read, so a `line` that precedes its `file` still lands on the right
+	// record. cc65 emits them in the other order today, but nothing promises
+	// that, and getting it wrong silently drops source lines.
+	int line_first = line_count;
+	int records    = 0;
+	int syms       = 0;
+	long expect_syms = -1;   /* from the `info` record, -1 if it had none */
+
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
 
@@ -645,20 +908,75 @@ int dbg_info_load(const char *path)
 
 		if (strncmp(p, "file", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_file_record(p + 4);
+			records++;
 		} else if (strncmp(p, "seg", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
 			parse_seg_record(p + 3);
+			records++;
 		} else if (strncmp(p, "span", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_span_record(p + 4);
+			records++;
 		} else if (strncmp(p, "line", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_line_record(p + 4);
+			records++;
 		} else if (strncmp(p, "sym", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
-			parse_sym_record(p + 3);
+			if (parse_sym_record(p + 3))
+				syms++;
+			records++;
+		} else if (strncmp(p, "info", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+			/* ld65 states its own record counts up front. `sym=N` is what makes
+			 * a complete file distinguishable from one still being written. */
+			expect_syms = parse_int_key(p + 4, "sym");
 		}
 		/* Other record types (version, info, scope, …) are silently skipped. */
 	}
 
 	fclose(f);
 	free(buf);
+
+	// Decide what the file's own record counts say about it. ld65 states them
+	// in the `info` line, so a file that promised N symbols and delivered N
+	// structurally complete ones was written to the end; one that delivered
+	// fewer was not.
+	//
+	// Both directions require positive evidence, and a file with no `info` line
+	// supplies neither. It is merged, because refusing every .dbg that does not
+	// come from ld65 would be a far bigger change than the problem warrants,
+	// and nothing of its previous generation is dropped, because there is no
+	// reason to believe this reading is the whole of it.
+	//
+	// An incomplete file is a failed load, not a partial success. It must not
+	// report 0: dbg_load records a successful merge in its registry and then
+	// skips the whole peek/unload/parse path on every later LOAD of the same
+	// program, so a half-written .dbg latched there would stop the finished one
+	// from ever being read. Failing sends it back for another go.
+	//
+	// The address map is still rebuilt, because it was cleared on the way in
+	// and everything else that is loaded still needs it.
+	bool short_read = (expect_syms >= 0 && syms != (int)expect_syms);
+	if (records == 0 || short_read) {
+		if (short_read)
+			fprintf(stderr, "dbg_info: '%s' declares %ld symbols but has %d; not merging\n",
+			        path, expect_syms, syms);
+		else
+			fprintf(stderr, "dbg_info: no usable records in '%s'\n", path);
+		build_addr_map();
+		return -1;
+	}
+
+	// Read to the end as far as anything here can tell, so this generation is
+	// what the module declares now. Anything it declared last time and did not
+	// declare again goes. Without an `info` line the best available signal is
+	// whether the symbol block was reached at all -- weaker, but it has to be
+	// something: the per-name replacement above only matches within a
+	// generation, so without this a reload would leave the old value in front
+	// of the new one for every lookup.
+	if (expect_syms >= 0 || syms > 0)
+		drop_stale_equates(cur_owner, cur_gen);
+
+	// Now that every `file` record has been seen, turn this load's raw file IDs
+	// into the records that actually describe them.
+	for (int i = line_first; i < line_count; i++)
+		lines[i].file = file_alias_get(lines[i].file);
 
 	// Remember the directory this .dbg came from, for source-file discovery.
 	{
@@ -839,6 +1157,21 @@ static bool entry_bank_ok(int i, dbg_addr_t addr, int ram_bank)
 	return sg->bank == ram_bank;
 }
 
+/* How well an entry's segment matches the bank we are asking about. A confirmed
+ * match beats an unknown one, which beats a mismatch -- entry_bank_ok() treats
+ * unknown as eligible so a mapping is never lost, but eligible is not the same
+ * as equally good, and picking between two eligible entries on span size alone
+ * can swap a confirmed answer for a guess about a different segment. */
+static int entry_bank_rank(int i, dbg_addr_t addr, int ram_bank)
+{
+	if (ram_bank < 0 || addr < 0xA000 || addr > 0xBFFF)
+		return 2;
+	const dbg_seg_t *sg = find_seg(addr_map[i].seg_id);
+	if (!sg || sg->bank < 0)
+		return 1;               /* eligible, but only because we do not know */
+	return sg->bank == ram_bank ? 2 : 0;
+}
+
 bool dbg_info_addr_to_source_banked(dbg_addr_t addr, int ram_bank,
                                     const char **file_path, int *line_num)
 {
@@ -894,7 +1227,13 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 	 * enclosing block/function, macro and include spans). Among those that
 	 * cover addr, pick the SMALLEST — the innermost, most specific line — so
 	 * stepping highlights the actual statement rather than an arbitrary
-	 * enclosing span. Equal-start entries are contiguous after the sort. */
+	 * enclosing span. Equal-start entries are contiguous after the sort.
+	 *
+	 * Bank confidence outranks span size. Two segments commonly share $A000,
+	 * one per bank, and only the one that has been loaded has a known bank; if
+	 * the smaller happens to be the unknown one, preferring it reports the
+	 * OTHER segment's file and line and demotes a confirmed answer to a guess.
+	 * So narrow only within the same confidence. */
 	{
 		dbg_addr_t start = addr_map[found].addr;
 		int lo2 = found, hi2 = found;
@@ -902,10 +1241,18 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 			lo2--;
 		while (hi2 + 1 < addr_map_count && addr_map[hi2 + 1].addr == start)
 			hi2++;
+		int best_rank = entry_bank_rank(found, addr, ram_bank);
 		for (int i = lo2; i <= hi2; i++) {
-			if (addr <= addr_map[i].end && addr_map[i].end < addr_map[found].end &&
-			    entry_bank_ok(i, addr, ram_bank))
-				found = i;
+			if (addr > addr_map[i].end)
+				continue;
+			const int rank = entry_bank_rank(i, addr, ram_bank);
+			if (rank == 0)
+				continue;                       /* a bank we know it is not */
+			if (rank > best_rank
+			    || (rank == best_rank && addr_map[i].end < addr_map[found].end)) {
+				found     = i;
+				best_rank = rank;
+			}
 		}
 	}
 
@@ -1019,66 +1366,187 @@ bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *ad
 /*       while RAM bank B is mapped means that segment lives in bank B. */
 /* ------------------------------------------------------------------ */
 
-/* Squash a name for fuzzy comparison: uppercase, drop '_'. */
-static void squash_name(const char *src, char *dst, size_t dstsz)
+/* Squash a name for fuzzy comparison: uppercase, drop '_'. Returns false if the
+ * name did not fit, since a truncated name compares equal to anything sharing
+ * its head and would invent matches that the full names do not support. */
+static bool squash_name(const char *src, char *dst, size_t dstsz)
 {
 	size_t o = 0;
-	for (; src && *src && o + 1 < dstsz; src++) {
+	for (; src && *src; src++) {
 		if (*src == '_')
 			continue;
+		if (o + 1 >= dstsz) {
+			dst[0] = '\0';
+			return false;
+		}
 		char c = *src;
 		if (c >= 'a' && c <= 'z')
 			c = (char)(c - 'a' + 'A');
 		dst[o++] = c;
 	}
 	dst[o] = '\0';
+	return true;
 }
 
-/* Seed segment banks from `RAM_BANK_x` / `x_BANK` style equates parsed out of
- * the .dbg. Matching is on the squashed names, accepting a prefix match so
- * RAM_BANK_STORE_TILEMAP pairs with segment STORETILE. */
-static void seed_banks_from_equates(void)
+/* Reduce a `RAM_BANK_x` / `BANK_x` / `x_BANK` equate name to the squashed
+ * segment name it is talking about. Returns false if it is not one of those. */
+static bool bank_equ_target(const char *nm, char *out, size_t outsz)
 {
-	for (int b = 0; b < bank_equ_count; b++) {
-		const char *nm = bank_equs[b].name;
-		if (!nm)
-			continue;
-		/* Strip a leading "RAM_BANK_" / "BANK_", or a trailing "_BANK". */
-		char stripped[128];
-		if (!strncmp(nm, "RAM_BANK_", 9))
-			snprintf(stripped, sizeof stripped, "%s", nm + 9);
-		else if (!strncmp(nm, "BANK_", 5))
-			snprintf(stripped, sizeof stripped, "%s", nm + 5);
-		else {
-			size_t l = strlen(nm);
-			if (l > 5 && !strcmp(nm + l - 5, "_BANK"))
-				snprintf(stripped, sizeof stripped, "%.*s", (int)(l - 5), nm);
-			else
-				continue;
-		}
-
-		char want[128];
-		squash_name(stripped, want, sizeof want);
-		if (!want[0])
-			continue;
-
-		for (int i = 0; i < seg_count; i++) {
-			if (segs[i].bank >= 0 || !segs[i].name || !segs[i].size)
-				continue;
-			if (segs[i].start < 0xA000 || segs[i].start > 0xBFFF)
-				continue;
-			char have[128];
-			squash_name(segs[i].name, have, sizeof have);
-			if (!have[0])
-				continue;
-			/* Accept either direction of prefix match (STORETILE vs
-			 * STORETILEMAP), which is what these naming conventions produce. */
-			size_t lh = strlen(have), lw = strlen(want);
-			size_t n = lh < lw ? lh : lw;
-			if (n >= 4 && !strncmp(have, want, n))
-				segs[i].bank = bank_equs[b].bank;
+	if (!nm)
+		return false;
+	const char *body;
+	size_t      blen;
+	if (!strncmp(nm, "RAM_BANK_", 9)) {
+		body = nm + 9;
+		blen = strlen(body);
+	} else if (!strncmp(nm, "BANK_", 5)) {
+		body = nm + 5;
+		blen = strlen(body);
+	} else {
+		size_t l = strlen(nm);
+		if (l > 5 && !strcmp(nm + l - 5, "_BANK")) {
+			body = nm;
+			blen = l - 5;
+		} else {
+			return false;
 		}
 	}
+
+	/* Truncating here would silently invent matches: two names sharing a long
+	 * enough head would reduce to the same target and compare exactly equal.
+	 * A name this long is not one of these constants, so refuse it instead. */
+	char stripped[128];
+	if (blen >= sizeof stripped)
+		return false;
+	memcpy(stripped, body, blen);
+	stripped[blen] = '\0';
+
+	if (!squash_name(stripped, out, outsz))
+		return false;
+	return out[0] != '\0';
+}
+/* Seed segment banks from `RAM_BANK_x` / `x_BANK` style equates parsed out of
+ * the .dbg. Matching is on the squashed names.
+ *
+ * Driven from the segment rather than the equate. Walking the equates and
+ * claiming every segment that matched put the answer at the mercy of the order
+ * the equates happened to be parsed in: a prefix match is accepted in either
+ * direction, so RAM_BANK_CODE matches segment CODE2 as readily as CODE, and
+ * because a segment that already has a bank is skipped, whichever equate was
+ * seen first won -- leaving the exact RAM_BANK_CODE2 to be discarded and CODE2's
+ * code attributed to the wrong bank.
+ *
+ * Per segment, every equate is sorted into one of four ranks: own-exact,
+ * other-exact, own-prefix, other-prefix. The best non-empty rank decides, and
+ * decides alone -- if its candidates disagree about the bank the segment is
+ * left unknown rather than falling through to a weaker rank. Callers report
+ * unknown honestly and a runtime observation can still resolve it, whereas a
+ * confident wrong answer is not recoverable. */
+static void seed_banks_from_equates(void)
+{
+	/* Equate-derived banks are recomputed from scratch, because the equates
+	 * they came from may have changed. A module that reloads with a different
+	 * RAM_BANK_x value can have seeded segments belonging to OTHER modules
+	 * through the cross-module ranks, and those segments are not unloaded --
+	 * so without this they would keep a bank nobody declares any more. Banks
+	 * that were observed at runtime are left alone: an observation is evidence,
+	 * an equate is only an inference, and the observation must keep winning. */
+	for (int i = 0; i < seg_count; i++) {
+		if (segs[i].bank_from_equ) {
+			segs[i].bank          = -1;
+			segs[i].bank_from_equ = false;
+		}
+	}
+
+	/* Squash each equate's target once rather than once per segment. Matching
+	 * is O(segments x equates) either way, but this keeps the string work out
+	 * of the inner loop -- seeding runs from the emulator's main loop via the
+	 * auto-load path, so a large .dbg must not stall emulation. */
+	char *targets = NULL;
+	if (bank_equ_count > 0) {
+		if ((size_t)bank_equ_count > SIZE_MAX / 128)
+			return;   /* not reachable with real input; the product must not wrap */
+		targets = (char *)malloc((size_t)bank_equ_count * 128);
+		if (!targets)
+			return;   /* leaves banks unknown, which callers report honestly */
+		for (int b = 0; b < bank_equ_count; b++) {
+			if (!bank_equ_target(bank_equs[b].name, targets + (size_t)b * 128, 128))
+				targets[(size_t)b * 128] = '\0';
+		}
+	}
+
+	for (int i = 0; i < seg_count; i++) {
+		if (segs[i].bank >= 0 || !segs[i].name || !segs[i].size)
+			continue;
+		if (segs[i].start < 0xA000 || segs[i].start > 0xBFFF)
+			continue;
+
+		char have[128];
+		if (!squash_name(segs[i].name, have, sizeof have) || !have[0])
+			continue;   /* truncated names would match things they do not equal */
+		size_t lh = strlen(have);
+
+		/* Candidates are ranked by how good the name match is first and by who
+		 * declared the equate second: own-exact, other-exact, own-prefix,
+		 * other-prefix. Gating the whole search on the segment's own module
+		 * instead was wrong -- an own-module PREFIX match would end the search
+		 * before another module's EXACT match was ever looked at, which is the
+		 * same "claimed by a name it merely resembles" failure this ranking
+		 * exists to prevent, just across a module boundary.
+		 *
+		 * Ownership still matters, because two overlays that each define
+		 * RAM_BANK_CODE for their own CODE segment -- an ordinary X16
+		 * arrangement -- would otherwise see two equally good candidates and
+		 * both end up unknown. */
+		enum { OWN_EXACT, ANY_EXACT, OWN_PREFIX, ANY_PREFIX, RANK_COUNT };
+		int  cand[RANK_COUNT];
+		bool ambiguous[RANK_COUNT];
+		for (int r = 0; r < RANK_COUNT; r++) {
+			cand[r]      = -1;
+			ambiguous[r] = false;
+		}
+
+		for (int b = 0; b < bank_equ_count; b++) {
+			const char *want = targets + (size_t)b * 128;
+			if (!want[0])
+				continue;
+			bool own = (bank_equs[b].owner == segs[i].owner);
+			int  rank;
+			if (!strcmp(have, want)) {
+				rank = own ? OWN_EXACT : ANY_EXACT;
+			} else {
+				/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with
+				 * segment STORETILE, which is what these conventions produce.
+				 * Four characters is the shortest overlap worth trusting. */
+				size_t lw = strlen(want);
+				size_t n  = lh < lw ? lh : lw;
+				if (n < 4 || strncmp(have, want, n) != 0)
+					continue;
+				rank = own ? OWN_PREFIX : ANY_PREFIX;
+			}
+			if (cand[rank] < 0)
+				cand[rank] = b;
+			else if (bank_equs[cand[rank]].bank != bank_equs[b].bank)
+				ambiguous[rank] = true;
+		}
+
+		/* The best kind of match available decides, and it decides alone: if
+		 * the candidates of that kind disagree there is no basis for choosing
+		 * between them, and falling through to a weaker kind would answer a
+		 * question the better evidence just said was undecidable. Unknown is
+		 * reported honestly and a runtime observation can still resolve it. */
+		for (int r = 0; r < RANK_COUNT; r++) {
+			if (cand[r] < 0)
+				continue;
+			if (!ambiguous[r]) {
+				segs[i].bank          = bank_equs[cand[r]].bank;
+				segs[i].bank_from_equ = true;
+			}
+			break;
+		}
+	}
+
+	free(targets);
 }
 
 void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_bank)
@@ -1098,8 +1566,11 @@ void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_ba
 			hit = i;
 		}
 	}
-	if (hit >= 0)
+	if (hit >= 0) {
 		segs[hit].bank = ram_bank;
+		/* Observed, not inferred: re-seeding must not clear this. */
+		segs[hit].bank_from_equ = false;
+	}
 }
 
 bool dbg_info_is_loaded(void)
@@ -1266,6 +1737,7 @@ static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_ad
 	size_t   cap = 0;
 	while (read_line(f, &buf, &cap)) {
 		if (strncmp(buf, "seg", 3) != 0) continue;
+
 		const char *sp = strstr(buf, "start=0x");
 		const char *sz = strstr(buf, "size=0x");
 		if (!sp || !sz) continue;
@@ -1285,6 +1757,8 @@ static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_ad
 	return true;
 }
 
+
+
 bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, dbg_addr_t *out_end) {
 	if (!loaded_path) return false;
 	char dbg_path[1024];
@@ -1303,9 +1777,25 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 	if (!scan_dbg_seg_range(dbg_path, &seg_min, &seg_max))
 		return -1;
 
-	// Unload existing entries in this range, then load new .dbg
+	// Unload existing entries in this range, then load new .dbg.
+	//
+	// This range is the min/max across EVERY segment the file declares,
+	// including BSS and the zero page, which for a normal cc65 program runs from
+	// low RAM to the top of the program. That is wider than what the load
+	// actually overwrote, so it takes other modules in that window with it --
+	// including debug info the user named with -dbgfile, which nothing
+	// re-merges.
+	//
+	// Narrowing it to the stored segments alone was tried and is worse:
+	// segment, span, line and label records are still appended unconditionally,
+	// so this module's own BSS and zero-page records would no longer be pruned
+	// but would still be re-added, piling up on every overlay swap until an
+	// address could be described by a module that is no longer resident. The
+	// two jobs -- evicting other modules, and replacing this one's own records
+	// -- need different ranges. Files, equates and segments now carry an owner;
+	// finishing this means extending it to spans/lines/syms and having unload
+	// consult it. See dbg_info.h.
 	dbg_info_unload_range(seg_min, seg_max);
-
 	int result = dbg_info_load(dbg_path);
 	if (result == 0) {
 		printf("[dap] Auto-loaded debug info: %s ($%04X-$%04X)\n",
@@ -1316,6 +1806,20 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 
 void dbg_info_free(void)
 {
+	for (int i = 0; i < owner_count; i++)
+		free(owners[i]);
+	free(owners);
+	owners      = NULL;
+	owner_count = 0;
+	owner_cap   = 0;   /* GROW_ARRAY keys off this; leaving it set would append
+	                    * into a dangling pointer on the next load. */
+	cur_owner   = -1;
+
+	free(file_alias);
+	file_alias       = NULL;
+	file_alias_count = 0;
+	file_alias_cap   = 0;
+
 	for (int i = 0; i < file_count; i++)
 		free(files[i].name);
 	free(files);
