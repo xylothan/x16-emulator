@@ -252,19 +252,21 @@ mousegrab_toggle() {
 	video_update_title(window_title);
 }
 
+// Re-derive the layer properties from the raw layer registers and seed both
+// generations of the render pipeline from them. Called on reset: the derived
+// properties are otherwise refreshed only when the guest writes a layer
+// register, so clearing reg_layer alone left the derived state describing the
+// pre-reset machine while the registers read zero -- and a debug view
+// correlating the two would pair zeroed registers with stale geometry.
+static void video_reset_layer_pipeline(void);
+
 void
 video_reset()
 {
 	// Drop the per-scanline debug history: it describes a machine that no
-	// longer exists, and nothing else invalidates it, so without this a
-	// debug view would keep decoding rows against pre-reset registers
-	// indefinitely -- for any line the beam has not reached again yet.
-	//
-	// Only the validity flags. The raw-register pipeline is deliberately left
-	// alone so it stays in lockstep with prev_layer_properties, which reset
-	// does not clear either; zeroing one side would make the history describe
-	// registers the renderer is not using. No row is exposed until the beam
-	// refills both, so nothing stale can be read in the meantime.
+	// longer exists. Both pipeline generations are re-seeded from the cleared
+	// registers below, so raw and derived state stay matched rather than one
+	// side reading zero while the other still holds pre-reset geometry.
 	memset(line_state_valid, 0, sizeof(line_state_valid));
 
 	// init I/O registers
@@ -281,6 +283,7 @@ video_reset()
 
 	// init Layer registers
 	memset(reg_layer, 0, sizeof(reg_layer));
+	video_reset_layer_pipeline();
 
 	// init composer registers
 	memset(reg_composer, 0, sizeof(reg_composer));
@@ -669,6 +672,17 @@ refresh_layer_properties(const uint8_t layer)
 	props->first_color_pos  = 8 - props->bits_per_pixel;
 	props->color_mask       = (1 << props->bits_per_pixel) - 1;
 	props->color_fields_max = (8 >> props->color_depth) - 1;
+}
+
+// See the forward declaration above video_reset() for why this exists.
+static void
+video_reset_layer_pipeline(void)
+{
+	refresh_layer_properties(0);
+	refresh_layer_properties(1);
+	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
 }
 
 struct video_sprite_properties
@@ -1266,6 +1280,7 @@ render_line(uint16_t y, float scan_pos_x)
 		}
 	}
 
+
 	// clear layer_line if layer gets disabled
 	for (uint8_t layer = 0; layer < 2; layer++) {
 		if (!layer_line_enable[layer] && old_layer_line_enable[layer]) {
@@ -1299,6 +1314,43 @@ render_line(uint16_t y, float scan_pos_x)
 		// sprites were needed for the collision IRQ, but we can skip
 		// everything else if we're in warp mode, most of the time
 		return;
+	}
+
+	// Snapshot what this line actually displayed, for debug views. Placed after
+	// the warp guard above and immediately before the layer rendering, so it
+	// describes only lines that are really drawn: under -warp 63 frames in 64
+	// return early, and publishing there would hand the VERA panel state for
+	// scanlines whose pixels were never produced.
+	if (y < SCREEN_HEIGHT) {
+		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
+		line_eff_y[y]         = eff_y;
+		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
+		for (uint8_t l = 0; l < 2; l++) {
+			const struct video_layer_properties *p1 = &prev_layer_properties[1][l];
+			if (p1->bitmap_mode) {
+				// render_layer_line_bitmap() indexes with eff_y % tileh from
+				// generation [1] -- a different generation AND a different
+				// expression from the tile/text path, so the row has to be
+				// computed the same way the renderer chose to compute it.
+				line_layer_row[y][l] = p1->tileh ? (uint16_t)(eff_y % p1->tileh) : 0;
+				// It also takes the palette offset from the LIVE register
+				// rather than either delayed generation, so the delayed copy
+				// would report a raster palette change two lines late.
+				line_reg_layer[y][l][4] = (uint8_t)((line_reg_layer[y][l][4] & 0xF0)
+				                                    | (reg_layer[l][4] & 0x0F));
+			} else {
+				line_layer_row[y][l] =
+					(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+			}
+		}
+		line_state_valid[y]   = true;
+		// Progressive modes draw only the even line of each pair, so the odd
+		// one was never rendered. Marked invalid rather than filled in: the
+		// contract is "what this scanline showed", and inventing a row for a
+		// line the beam never drew is how a debug view starts lying.
+		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+			line_state_valid[y + 1] = false;
+		}
 	}
 
 	if (layer_line_enable[0]) {
@@ -2890,6 +2942,11 @@ void video_write(uint8_t reg, uint8_t value) {
 				if (((reg_composer[0] & 0x8) == 0 && (value & 0x8)) ||
 					((reg_composer[0] & 0x3) == 1 && (value & 0x3) > 1 && (value & 0x8))) {
 					memset(framebuffer, 0x00, SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+					// The picture is gone, so the per-scanline history no
+					// longer describes anything on screen. Dropped with it,
+					// or a debugger paused right after the mode change would
+					// decode rows for a blank framebuffer.
+					memset(line_state_valid, 0, sizeof(line_state_valid));
 				}
 
 				// interlace field bit is read-only
