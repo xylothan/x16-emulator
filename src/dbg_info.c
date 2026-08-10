@@ -99,7 +99,7 @@ typedef struct {
 	char *name;
 	int   bank;
 	int   owner;      /* which .dbg declared it; see dbg_owner_intern() */
-	unsigned gen;     /* which parse of that .dbg produced it */
+	uint64_t gen;     /* which parse of that .dbg produced it */
 } dbg_bank_equ_t;
 
 static dbg_bank_equ_t  *bank_equs;
@@ -116,7 +116,7 @@ typedef struct {
 	char    *name;
 	dbg_addr_t val;
 	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
-	unsigned gen;     /* which parse of that .dbg produced it */
+	uint64_t gen;     /* which parse of that .dbg produced it */
 } dbg_equ_t;
 
 static dbg_equ_t       *equs;
@@ -337,7 +337,7 @@ static int    owner_cap   = 0;
 static int    cur_owner   = -1;
 /* Bumped per parse, so records written by the parse in progress can be told
  * from ones the same module left behind last time. */
-static unsigned cur_gen   = 0;
+static uint64_t cur_gen   = 0;
 
 static int dbg_owner_intern(const char *path)
 {
@@ -368,7 +368,7 @@ static int dbg_owner_intern(const char *path)
  * parsed is not enough on its own: an equate the rebuilt file no longer
  * declares would never be visited, and would go on seeding banks and answering
  * lookups on behalf of a module that has stopped defining it. */
-static void drop_stale_equates(int owner, unsigned gen)
+static void drop_stale_equates(int owner, uint64_t gen)
 {
 	if (owner < 0)
 		return;
@@ -535,16 +535,55 @@ static void parse_line_record(const char *p)
  * records with no explicit type) that carry a 16-bit `val` — i.e. named program
  * addresses. Equates/imports/constants (type=equ/imp/…) are skipped so the
  * label map stays a clean address→name mapping for the disassembler. */
-static void parse_sym_record(const char *p)
+/* Remove a name this parse already filed in the ordinary equate table. Used
+ * when the same name turns up again with a value that belongs in the other
+ * table, so that the later definition is the only one left. */
+static void forget_current_equate(dbg_equ_t *arr, int *count, const char *name)
+{
+	int w = 0;
+	for (int i = 0; i < *count; i++) {
+		if (arr[i].owner == cur_owner && arr[i].gen == cur_gen && arr[i].name &&
+		    !strcasecmp(arr[i].name, name)) {
+			free(arr[i].name);
+			continue;
+		}
+		if (w != i)
+			arr[w] = arr[i];
+		w++;
+	}
+	*count = w;
+}
+
+static void forget_current_bank_equate(const char *name)
+{
+	int w = 0;
+	for (int i = 0; i < bank_equ_count; i++) {
+		if (bank_equs[i].owner == cur_owner && bank_equs[i].gen == cur_gen &&
+		    bank_equs[i].name && !strcasecmp(bank_equs[i].name, name)) {
+			free(bank_equs[i].name);
+			continue;
+		}
+		if (w != i)
+			bank_equs[w] = bank_equs[i];
+		w++;
+	}
+	bank_equ_count = w;
+}
+
+/* Returns true if the record was structurally complete -- it had a name and a
+ * usable value -- whether or not we ended up keeping it. The caller counts
+ * those to tell a file that was written to the end from one still being
+ * written; it is not a measure of how many records we stored. */
+static bool parse_sym_record(const char *p)
 {
 	char *name = parse_str_key(p, "name");
 	if (!name)
-		return;
+		return false;
 
 	long val = parse_int_key(p, "val");
 	if (val < 0 || val > 0xFFFFFF) {   /* no usable address value */
 		free(name);
-		return;
+		return false;
 	}
 
 	/* Keep only labels. If a `type` field is present it must be "lab"; records
@@ -573,16 +612,22 @@ static void parse_sym_record(const char *p)
 						free(bank_equs[i].name);
 						bank_equs[i].name = name;   /* takes ownership */
 						bank_equs[i].bank = (int)val;
-						return;
+						return true;
 					}
 				}
-				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return; }
+				/* The same name can land in either table depending on its
+				 * value -- RAM_BANK_CODE=3 is a bank constant, RAM_BANK_CODE
+				 * =$1234 is not -- so a redefinition can cross tables. Drop any
+				 * twin on the other side, or the superseded one goes on
+				 * answering for whichever question it was filed under. */
+				forget_current_equate(equs, &equ_count, name);
+				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return true; }
 				bank_equs[bank_equ_count].name  = name;   /* takes ownership */
 				bank_equs[bank_equ_count].bank  = (int)val;
 				bank_equs[bank_equ_count].owner = cur_owner;
 				bank_equs[bank_equ_count].gen   = cur_gen;
 				bank_equ_count++;
-				return;
+				return true;
 			}
 		}
 		/* Every other equate is still a name the user can hover in source
@@ -602,25 +647,27 @@ static void parse_sym_record(const char *p)
 					free(equs[i].name);
 					equs[i].name = name;   /* takes ownership */
 					equs[i].val  = (dbg_addr_t)val;
-					return;
+					return true;
 				}
 			}
-			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return; }
+			forget_current_bank_equate(name);
+			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return true; }
 			equs[equ_count].name  = name;   /* takes ownership */
 			equs[equ_count].val   = (dbg_addr_t)val;
 			equs[equ_count].owner = cur_owner;
 			equs[equ_count].gen   = cur_gen;
 			equ_count++;
-			return;
+			return true;
 		}
 		free(name);
-		return;
+		return true;
 	}
 
-	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return; }
+	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return true; }
 	syms[sym_count].name = name;
 	syms[sym_count].addr = (dbg_addr_t)val;
 	sym_count++;
+	return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -844,6 +891,7 @@ int dbg_info_load(const char *path)
 	int line_first = line_count;
 	int records    = 0;
 	int syms       = 0;
+	long expect_syms = -1;   /* from the `info` record, -1 if it had none */
 
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
@@ -871,9 +919,13 @@ int dbg_info_load(const char *path)
 			parse_line_record(p + 4);
 			records++;
 		} else if (strncmp(p, "sym", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
-			parse_sym_record(p + 3);
+			if (parse_sym_record(p + 3))
+				syms++;
 			records++;
-			syms++;
+		} else if (strncmp(p, "info", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+			/* ld65 states its own record counts up front. `sym=N` is what makes
+			 * a complete file distinguishable from one still being written. */
+			expect_syms = parse_int_key(p + 4, "sym");
 		}
 		/* Other record types (version, info, scope, …) are silently skipped. */
 	}
@@ -881,31 +933,44 @@ int dbg_info_load(const char *path)
 	fclose(f);
 	free(buf);
 
-	// A file that opened and then yielded nothing usable is not a description
-	// of this module -- it is most likely one being rewritten underneath us,
-	// since these are produced by the assembler while the emulator runs. Report
-	// the failure and leave the previous generation alone. The address map is
-	// still rebuilt below, because it was cleared on the way in and everything
-	// else that was loaded still needs it.
-	if (records == 0) {
-		fprintf(stderr, "dbg_info: no usable records in '%s'\n", path);
+	// Decide what the file's own record counts say about it. ld65 states them
+	// in the `info` line, so a file that promised N symbols and delivered N
+	// structurally complete ones was written to the end; one that delivered
+	// fewer was not.
+	//
+	// Both directions require positive evidence, and a file with no `info` line
+	// supplies neither. It is merged, because refusing every .dbg that does not
+	// come from ld65 would be a far bigger change than the problem warrants,
+	// and nothing of its previous generation is dropped, because there is no
+	// reason to believe this reading is the whole of it.
+	//
+	// An incomplete file is a failed load, not a partial success. It must not
+	// report 0: dbg_load records a successful merge in its registry and then
+	// skips the whole peek/unload/parse path on every later LOAD of the same
+	// program, so a half-written .dbg latched there would stop the finished one
+	// from ever being read. Failing sends it back for another go.
+	//
+	// The address map is still rebuilt, because it was cleared on the way in
+	// and everything else that is loaded still needs it.
+	bool short_read = (expect_syms >= 0 && syms != (int)expect_syms);
+	if (records == 0 || short_read) {
+		if (short_read)
+			fprintf(stderr, "dbg_info: '%s' declares %ld symbols but has %d; not merging\n",
+			        path, expect_syms, syms);
+		else
+			fprintf(stderr, "dbg_info: no usable records in '%s'\n", path);
 		build_addr_map();
 		return -1;
 	}
 
-	// The file has been read, so this generation is what the module declares
-	// now. Anything it declared last time and did not declare again goes.
-	//
-	// Only if the file actually got as far as its `sym` block, though. ld65
-	// emits file/seg/span/line before sym, so a write cut off partway through
-	// has records but no symbols, and is indistinguishable from a module that
-	// genuinely declares none -- except that the first is common and the second
-	// barely exists, since a linked module without a single label is degenerate.
-	// Keeping the previous generation in that case risks equates outliving a
-	// module that dropped all of them; sweeping risks a truncated write
-	// deleting every constant and un-seeding every bank it fed. The second is
-	// the worse failure and the likelier one.
-	if (syms > 0)
+	// Read to the end as far as anything here can tell, so this generation is
+	// what the module declares now. Anything it declared last time and did not
+	// declare again goes. Without an `info` line the best available signal is
+	// whether the symbol block was reached at all -- weaker, but it has to be
+	// something: the per-name replacement above only matches within a
+	// generation, so without this a reload would leave the old value in front
+	// of the new one for every lookup.
+	if (expect_syms >= 0 || syms > 0)
 		drop_stale_equates(cur_owner, cur_gen);
 
 	// Now that every `file` record has been seen, turn this load's raw file IDs

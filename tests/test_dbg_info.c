@@ -932,6 +932,7 @@ main(void)
 		dbg_info_free();
 		static const char *k_gone_v1 =
 			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
 			"file\tid=0,name=\"gone.s\",size=10,mtime=0x00000000,mod=0\n"
 			"seg\tid=0,name=\"GONE\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
 			"span\tid=0,seg=0,start=0,size=16,type=0\n"
@@ -944,6 +945,7 @@ main(void)
 		// a write that was cut off before the symbols.
 		static const char *k_gone_v2 =
 			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=1,type=0\n"
 			"file\tid=0,name=\"gone.s\",size=10,mtime=0x00000000,mod=0\n"
 			"seg\tid=0,name=\"GONE\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
 			"span\tid=0,seg=0,start=0,size=16,type=0\n"
@@ -1146,6 +1148,7 @@ main(void)
 		dbg_info_free();
 		static const char *k_tx_good =
 			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
 			"file\tid=0,name=\"tx.s\",size=10,mtime=0x00000000,mod=0\n"
 			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
 			"span\tid=0,seg=0,start=0,size=16,type=0\n"
@@ -1191,12 +1194,14 @@ main(void)
 			// but before the symbols. ld65 emits them in that order.
 			static const char *k_tx_partial =
 				"version\tmajor=2,minor=0\n"
+				"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
 				"file\tid=0,name=\"tx.s\",size=10,mtime=0x00000000,mod=0\n"
 				"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
 				"span\tid=0,seg=0,start=0,size=16,type=0\n"
 				"line\tid=0,file=0,line=1,span=0\n";
 			if (write_temp(k_tx_partial, "x16_dbg_info_tx.dbg")) {
-				dbg_info_load(txp);
+				check(dbg_info_load(txp) != 0,
+				      "a write cut off before the symbols is a failed load");
 				v = 0;
 				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
 				      "and a write cut off before the symbols keeps them too");
@@ -1242,6 +1247,232 @@ main(void)
 			          != DBG_BANK_RESOLVED,
 			      "and an oversized equate name is handled without incident");
 			remove(hpath);
+			dbg_info_free();
+		}
+	}
+
+	// ld65 states how many symbols it wrote. That is what separates a file cut
+	// off partway through its symbol block from one that genuinely declares
+	// fewer -- the two have the same shape and differ only in the promise.
+	{
+		dbg_info_free();
+		static const char *k_cnt_full =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=3,type=0\n"
+			"file\tid=0,name=\"cnt.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"_cnt_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x00a000,type=lab\n"
+			"sym\tid=1,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+			"sym\tid=2,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"mod\tid=0,name=\"cnt.o\",file=0\n";
+		// Promises three, delivers one: a write still in progress.
+		static const char *k_cnt_cut =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=3,type=0\n"
+			"file\tid=0,name=\"cnt.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"_cnt_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x00a000,type=lab\n";
+		// Same shape, but promises one and delivers it: a real rebuild that
+		// dropped the constants.
+		static const char *k_cnt_slim =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=1,type=0\n"
+			"file\tid=0,name=\"cnt.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"_cnt_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x00a000,type=lab\n"
+			"mod\tid=0,name=\"cnt.o\",file=0\n";
+		char cpath[512];
+		char *c1 = write_temp(k_cnt_full, "x16_dbg_info_cnt.dbg");
+		if (!c1) {
+			check(false, "could not write the record-count fixture");
+		} else {
+			snprintf(cpath, sizeof cpath, "%s", c1);
+			check(dbg_info_load(cpath) == 0, "loads a module that declares three symbols");
+			dbg_addr_t v = 0;
+			check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+			      "and reads a constant from it");
+
+			if (write_temp(k_cnt_cut, "x16_dbg_info_cnt.dbg")) {
+				check(dbg_info_load(cpath) != 0,
+				      "a file that promised three and gave one is a failed load");
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "a file that promised three and gave one keeps them");
+			}
+
+			// Cut inside the symbol block rather than before it. For a real
+			// program the symbols are the bulk of the file, so this is where a
+			// partial write is most likely to land -- and the shape the
+			// previous guard, which only asked whether any symbol was seen,
+			// could not tell from a finished file.
+			static const char *k_cnt_mid =
+				"version\tmajor=2,minor=0\n"
+				"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=3,type=0\n"
+				"file\tid=0,name=\"cnt.s\",size=10,mtime=0x00000000,mod=0\n"
+				"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16,type=0\n"
+				"line\tid=0,file=0,line=1,span=0\n"
+				"sym\tid=0,name=\"_cnt_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x00a000,type=lab\n"
+				"sym\tid=1,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n";
+			if (write_temp(k_cnt_full, "x16_dbg_info_cnt.dbg")) {
+				dbg_info_load(cpath);
+			}
+			if (write_temp(k_cnt_mid, "x16_dbg_info_cnt.dbg")) {
+				check(dbg_info_load(cpath) != 0,
+				      "a cut inside the symbol block is a failed load too");
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "and the bank equate that follows the cut survives");
+				const char *bf = NULL;
+				int         bl = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &bf, &bl)
+				          == DBG_BANK_RESOLVED,
+				      "so the bank it seeded is still known");
+			}
+
+			// A symbol line cut off mid-record is not a symbol. Counting it
+			// would let a file that stopped halfway look complete.
+			static const char *k_cnt_torn =
+				"version\tmajor=2,minor=0\n"
+				"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
+				"file\tid=0,name=\"cnt.s\",size=10,mtime=0x00000000,mod=0\n"
+				"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16,type=0\n"
+				"line\tid=0,file=0,line=1,span=0\n"
+				"sym\tid=0,name=\"_cnt_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x00a000,type=lab\n"
+				"sym\tid=1,name=\"SCO\n";
+			if (write_temp(k_cnt_full, "x16_dbg_info_cnt.dbg")) {
+				dbg_info_load(cpath);
+			}
+			if (write_temp(k_cnt_torn, "x16_dbg_info_cnt.dbg")) {
+				dbg_info_load(cpath);
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "and a torn final symbol does not count towards the promise");
+			}
+
+			// Restore, then the same shape with an honest count.
+			if (write_temp(k_cnt_full, "x16_dbg_info_cnt.dbg")) {
+				dbg_info_load(cpath);
+			}
+			if (write_temp(k_cnt_slim, "x16_dbg_info_cnt.dbg")) {
+				dbg_info_load(cpath);
+				v = 0;
+				check(!dbg_info_equate_to_value("SCORE", &v),
+				      "but one that promised one and gave one drops them");
+			}
+			remove(cpath);
+			dbg_info_free();
+		}
+	}
+
+	// The same name can be filed as a bank constant or an ordinary one
+	// depending on its value, so a redefinition can cross between the two
+	// tables. The later definition has to be the only one left.
+	{
+		dbg_info_free();
+		static const char *k_cross =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"cr.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+			"mod\tid=0,name=\"cr.o\",file=0\n";
+		char *xp = write_temp(k_cross, "x16_dbg_info_cross.dbg");
+		if (!xp) {
+			check(false, "could not write the cross-table fixture");
+		} else {
+			char xpath[512];
+			snprintf(xpath, sizeof xpath, "%s", xp);
+			check(dbg_info_load(xpath) == 0, "loads a name defined twice across tables");
+			dbg_addr_t v = 0;
+			check(dbg_info_equate_to_value("RAM_BANK_CODE", &v) && v == 0x1234,
+			      "the later definition answers name lookups");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+			          != DBG_BANK_RESOLVED,
+			      "and the superseded one no longer seeds a bank");
+			remove(xpath);
+			dbg_info_free();
+		}
+
+		// And the same collision in the other order: filed as an ordinary
+		// constant first, then redefined as a bank one.
+		dbg_info_free();
+		static const char *k_cross_rev =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"cr2.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+			"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"mod\tid=0,name=\"cr2.o\",file=0\n";
+		char *yp = write_temp(k_cross_rev, "x16_dbg_info_cross2.dbg");
+		if (!yp) {
+			check(false, "could not write the reverse cross-table fixture");
+		} else {
+			char ypath[512];
+			snprintf(ypath, sizeof ypath, "%s", yp);
+			check(dbg_info_load(ypath) == 0, "loads the same collision reversed");
+			dbg_addr_t v2 = 0;
+			check(!dbg_info_equate_to_value("RAM_BANK_CODE", &v2),
+			      "the superseded constant no longer answers name lookups");
+			const char *f2 = NULL;
+			int         l2 = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f2, &l2)
+			          == DBG_BANK_RESOLVED,
+			      "and the later definition seeds the bank");
+			remove(ypath);
+			dbg_info_free();
+		}
+	}
+
+	// A .dbg with no `info` line gives no record counts to check against, so a
+	// short read cannot be detected and the file is merged. It must still not
+	// be treated as a statement that the module declares nothing.
+	{
+		dbg_info_free();
+		static const char *k_ni_full =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ni.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"NILIMIT\",addrsize=absolute,size=2,scope=0,def=0,val=0x004321,type=equ\n"
+			"mod\tid=0,name=\"ni.o\",file=0\n";
+		static const char *k_ni_cut =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ni.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n";
+		char nipath[512];
+		char *n1 = write_temp(k_ni_full, "x16_dbg_info_noinfo.dbg");
+		if (!n1) {
+			check(false, "could not write the info-less fixture");
+		} else {
+			snprintf(nipath, sizeof nipath, "%s", n1);
+			check(dbg_info_load(nipath) == 0, "loads a .dbg with no info record");
+			dbg_addr_t v = 0;
+			check(dbg_info_equate_to_value("NILIMIT", &v) && v == 0x4321,
+			      "and reads a constant from it");
+			if (write_temp(k_ni_cut, "x16_dbg_info_noinfo.dbg")) {
+				dbg_info_load(nipath);
+				v = 0;
+				check(dbg_info_equate_to_value("NILIMIT", &v) && v == 0x4321,
+				      "a short read it cannot detect still keeps the constant");
+			}
+			remove(nipath);
 			dbg_info_free();
 		}
 	}
