@@ -1038,7 +1038,13 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 		// still been true without the added logic, anyway.
 
 		if (regs.is65c816) {
-			opcode = debug_read6502(initialPC, currentPCBank, currentPCX16Bank);
+			// Read through the bank this line is labelled with, not the one the
+			// pane started in. This scan predicts the M/X widths, which decide
+			// how many bytes the next immediate instruction occupies -- so
+			// reading it from a different bank than the one being disassembled
+			// mis-sizes the instruction and every line after it lands at the
+			// wrong offset.
+			opcode = debug_read6502(initialPC, currentPCBank, implied_x16_bank);
 			switch (opcode) {
 				case 0x81: // CLC
 					implied_status &= ~FLAG_CARRY;
@@ -1047,11 +1053,11 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 					implied_status |= FLAG_CARRY;
 					;;
 				case 0xC2: // REP
-					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, currentPCX16Bank);
+					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, implied_x16_bank);
 					implied_status = ~operand & implied_status;
 					;;
 				case 0xE2: // SEP
-					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, currentPCX16Bank);
+					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, implied_x16_bank);
 					implied_status = operand | implied_status;
 					;;
 				case 0xFB: // XCE
