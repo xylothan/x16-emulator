@@ -58,6 +58,19 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 
 // Auto-load .dbg file matching a loaded binary. Unloads overlapping range first.
 // Returns 0 on success, -1 if no .dbg found.
+// NOTE: this unloads the min/max span of every segment the .dbg declares before
+// re-parsing, which for a normal cc65 program runs from the zero page to the top
+// of the program. That is wider than what the load actually overwrote, so it
+// also drops other modules' records in that window -- including debug info
+// loaded with -dbgfile, which nothing re-merges.
+//
+// It cannot simply be narrowed. Parsing appends unconditionally, so a range that
+// misses this module's own BSS and zero-page records leaves them behind while
+// adding fresh copies, and they accumulate until an address can be described by
+// a module that is no longer resident. Evicting other modules and replacing this
+// one's own records want different ranges, and telling them apart needs records
+// to carry the module they came from.
+//
 // NOTE: load_addr is currently ignored -- the debug info always describes the
 // program at its link-time addresses. A relocating load (secondary address 0)
 // therefore reports source lines for where the program was linked, not where it

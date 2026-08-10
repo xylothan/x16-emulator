@@ -1366,14 +1366,7 @@ static bool build_dbg_path(const char *loaded_path, char *dbg_path, size_t dbg_p
 	return true;
 }
 
-// Helper: scan .dbg file for the address range the loaded file actually occupies
-//
-// Only segments the linker wrote INTO the file count. cc65 emits `oname=` for
-// exactly those; BSS and ZEROPAGE are allocated but stored nowhere, and folding
-// them in produced one envelope running from the zero page to the top of the
-// program -- most of low RAM. Unloading that range on every auto-load destroyed
-// the mappings of every other module in it, including debug info the user named
-// explicitly with -dbgfile, which nothing ever re-merges.
+// Helper: scan .dbg file for min/max segment addresses
 static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_addr_t *out_max) {
 	FILE *f;
 #ifdef _WIN32
@@ -1387,8 +1380,7 @@ static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_ad
 	size_t   cap = 0;
 	while (read_line(f, &buf, &cap)) {
 		if (strncmp(buf, "seg", 3) != 0) continue;
-		// Not stored in the file, so this load did not write over it.
-		if (!strstr(buf, "oname=")) continue;
+
 		const char *sp = strstr(buf, "start=0x");
 		const char *sz = strstr(buf, "size=0x");
 		if (!sp || !sz) continue;
@@ -1408,6 +1400,8 @@ static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_ad
 	return true;
 }
 
+
+
 bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, dbg_addr_t *out_end) {
 	if (!loaded_path) return false;
 	char dbg_path[1024];
@@ -1426,9 +1420,24 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 	if (!scan_dbg_seg_range(dbg_path, &seg_min, &seg_max))
 		return -1;
 
-	// Unload existing entries in this range, then load new .dbg
+	// Unload existing entries in this range, then load new .dbg.
+	//
+	// This range is the min/max across EVERY segment the file declares,
+	// including BSS and the zero page, which for a normal cc65 program runs from
+	// low RAM to the top of the program. That is wider than what the load
+	// actually overwrote, so it takes other modules in that window with it --
+	// including debug info the user named with -dbgfile, which nothing
+	// re-merges.
+	//
+	// Narrowing it to the stored segments alone was tried and is worse: the
+	// parse below appends unconditionally, so this module's own BSS and
+	// zero-page records would no longer be pruned but would still be re-added,
+	// piling up on every overlay swap until an address could be described by a
+	// module that is no longer resident. The two jobs -- evicting other modules,
+	// and replacing this one's own records -- need different ranges, and
+	// separating them properly needs records to know which module they came
+	// from. See the note in dbg_info.h.
 	dbg_info_unload_range(seg_min, seg_max);
-
 	int result = dbg_info_load(dbg_path);
 	if (result == 0) {
 		printf("[dap] Auto-loaded debug info: %s ($%04X-$%04X)\n",
