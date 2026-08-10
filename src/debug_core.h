@@ -169,6 +169,10 @@ int  debug_wp_count(void);
 // the index is out of range. The pointer is into the live table, so it is only
 // valid until the next add/remove.
 const struct watchpoint *debug_wp_at(int index);
+// Exact-identity test, the counterpart to debug_wp_covers(). Use this to decide
+// whether a toggle should add or remove, so that the decision and the removal
+// agree on the key.
+bool debug_wp_exists(uint16_t addr, int x16Bank);
 
 // Only fire when the value being written compares true against `value`, so
 // "stop when this becomes zero" does not stop on every other write to it.

@@ -381,6 +381,26 @@ int  DEBUGGetCurrentStatus(void) {
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
+			// With -debug and -imgui together this loop is the only one
+			// running while halted -- video_update() returns early whenever
+			// the text overlay is on screen -- so it has to feed the graphical
+			// debugger too. Without this the ImGui window stayed on screen but
+			// received no input at all: dead buttons, dead text fields, stale
+			// mouse state. -imgui -bp reaches this combination without asking
+			// for it, since -bp switches the text debugger on.
+			if (video_debug_ui_available()) {
+				video_debug_ui_feed_event(&event);
+				// Events aimed at the debugger window must not also drive the
+				// text debugger's command line.
+				if (video_event_targets_debug_ui(&event)) {
+					if (event.type == SDL_WINDOWEVENT &&
+					    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+						continue;   // closing the debugger must not quit
+					}
+					video_debug_ui_shortcut_key(&event);
+					continue;
+				}
+			}
 			switch(event.type) {
 				case SDL_QUIT:                                  // Time for exit
 					return -1;
@@ -391,8 +411,7 @@ int  DEBUGGetCurrentStatus(void) {
 					// last window -- so a close arrives here as a bare event.
 					// Dropping it made the emulator window's [X] inert while
 					// the text debugger was on screen under -debug -imgui.
-					if (event.window.event == SDL_WINDOWEVENT_CLOSE &&
-					    !video_is_debug_ui_window(event.window.windowID)) {
+					if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
 						return -1;
 					}
 					break;

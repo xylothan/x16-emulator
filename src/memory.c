@@ -235,7 +235,12 @@ real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 				clockticks6502 += 3;
 			}
 			if ((address & 0x01) != 0) { // partial decoding in this range
-				audio_render();
+				// A debug read must not flush audio: audio_render() advances
+				// the render write position, and the "no side effects"
+				// guarantee is what lets the debugger sweep the I/O page.
+				if (!debugOn) {
+					audio_render();
+				}
 				return YM_read_status();
 			}
 			return 0x9f; // open bus read

@@ -907,11 +907,11 @@ draw_registers_tab()
             // 0x09-0x0C are write-only FX registers when DCSEL>=2 — reading a
             // write-only VERA register logs a warning.
             bool fx_wo = (r >= 0x09 && r <= 0x0C && dcsel >= 2);
-            // AUDIO_CTRL (0x1B) runs audio_render() and SPI_DATA (0x1E) starts a
-            // real SPI byte transfer *on read* — video_read ignores debugOn for
-            // these, so passively polling them every frame would corrupt audio /
-            // SD-card I/O. Never read them here; show a placeholder instead.
-            bool side_effect = (r == 0x1B || r == 0x1E);
+            // AUDIO_CTRL (0x1B) and SPI_DATA (0x1E) used to be unreadable here:
+            // video_read() ignored debugOn for them, so polling them every frame
+            // flushed audio and clocked a real byte to the SD card. Both now
+            // honour debugOn (vera_spi_peek, and the audio_render guard), so
+            // they are read like any other register.
 
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
@@ -919,11 +919,11 @@ draw_registers_tab()
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(vera_reg_name(r, dcsel));
 
-            if (fx_wo || side_effect) {
+            if (fx_wo) {
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextDisabled("--");
                 ImGui::TableSetColumnIndex(3);
-                ImGui::TextDisabled(fx_wo ? "(write-only)" : "(read has side effects)");
+                ImGui::TextDisabled("(write-only)");
             } else {
                 uint8_t v = video_read((uint8_t)r, true);
                 ImGui::TableSetColumnIndex(2);

@@ -617,7 +617,13 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
     // the address - the way to find out what is clobbering a value. Note it
     // triggers on any write, even one that stores the same value back, so it is
     // "break on write" rather than "break on change".
-    const bool has_wp = DEBUGCheckWatchPoint(start);
+    //
+    // Tested with the same key it is added and removed under. Asking
+    // DEBUGCheckWatchPoint() instead answers a different question -- "would a
+    // write here fire anything", which is wildcard-aware -- so a watchpoint set
+    // on one specific bank made this read "Stop breaking on write" while the
+    // removal, being an exact match on ANY, found nothing and did nothing.
+    const bool has_wp = debug_wp_exists(start, DEBUG_BANK_ANY);
     if (ImGui::MenuItem(has_wp ? "Stop breaking on write" : "Break on write")) {
         if (has_wp)
             DEBUGRemoveWatchPoint(start);

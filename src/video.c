@@ -476,6 +476,12 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 			printf("Warning: Failed to create debugger window: %s\n", SDL_GetError());
 			if (imgui_renderer) { SDL_DestroyRenderer(imgui_renderer); imgui_renderer = NULL; }
 			if (imgui_window) { SDL_DestroyWindow(imgui_window); imgui_window = NULL; }
+			// Stop claiming the UI exists. Left set, -imgui alone would still
+			// route the emulator loop through DEBUGGetCurrentStatus() and stop
+			// at breakpoints, with no window to resume from and no text
+			// debugger either -- the machine would simply hang.
+			imgui_debugger_enabled = false;
+			printf("The graphical debugger is disabled for this session.\n");
 		}
 	}
 #endif
@@ -1572,12 +1578,64 @@ video_debug_ui_available(void)
 	return imgui_window != NULL && imgui_renderer != NULL;
 }
 
+static void video_imgui_debug_key(SDL_Keysym ks);
+
 // Whether an SDL window id belongs to the debugger window. Callers outside
 // video.c use this to tell "close the debugger" from "close the emulator".
 bool
 video_is_debug_ui_window(Uint32 window_id)
 {
 	return imgui_window != NULL && window_id == imgui_window_id;
+}
+
+// Whether an event is addressed to the debugger window, and so must not also
+// reach the emulated machine or the text debugger's command line. Events with
+// no window id (SDL_QUIT, joystick, audio) are never the debugger's.
+//
+// Shared by both event loops rather than copied into each: the running loop in
+// video_update() and the paused loop in DEBUGGetCurrentStatus() have to agree
+// about which events belong to the debugger, and two copies of this switch
+// would be two places to forget an event type.
+bool
+video_event_targets_debug_ui(const SDL_Event *ev)
+{
+	if (imgui_window == NULL) {
+		return false;
+	}
+	switch (ev->type) {
+		case SDL_WINDOWEVENT:      return ev->window.windowID == imgui_window_id;
+		case SDL_KEYDOWN:
+		case SDL_KEYUP:            return ev->key.windowID    == imgui_window_id;
+		case SDL_TEXTINPUT:        return ev->text.windowID   == imgui_window_id;
+		case SDL_TEXTEDITING:      return ev->edit.windowID   == imgui_window_id;
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONUP:    return ev->button.windowID == imgui_window_id;
+		case SDL_MOUSEMOTION:      return ev->motion.windowID == imgui_window_id;
+		case SDL_MOUSEWHEEL:       return ev->wheel.windowID  == imgui_window_id;
+		default:                   return false;
+	}
+}
+
+// Hand an event to the debugger UI. Wrapped here so debugger.c can feed the
+// graphical debugger without including its C++ headers -- video.c already owns
+// the window and is the only place that knows the UI exists.
+void
+video_debug_ui_feed_event(const SDL_Event *ev)
+{
+	if (imgui_window != NULL) {
+		debug_ui_process_event(ev);
+	}
+}
+
+// Apply the VS-style debug shortcuts for a keydown already known to target the
+// debugger window. A focused text field (goto/search) suppresses them; a merely
+// focused panel does not.
+void
+video_debug_ui_shortcut_key(const SDL_Event *ev)
+{
+	if (ev->type == SDL_KEYDOWN && !debug_ui_want_text_input()) {
+		video_imgui_debug_key(ev->key.keysym);
+	}
 }
 
 // Map a keydown on the debugger window to a Visual-Studio-style debug action.
@@ -1688,6 +1746,9 @@ video_debug_ui_pump_paused(void)
 bool video_debug_ui_available(void) { return false; }
 int  video_debug_ui_pump_paused(void) { return 1; }
 bool video_is_debug_ui_window(Uint32 window_id) { (void)window_id; return false; }
+bool video_event_targets_debug_ui(const SDL_Event *ev) { (void)ev; return false; }
+void video_debug_ui_shortcut_key(const SDL_Event *ev) { (void)ev; }
+void video_debug_ui_feed_event(const SDL_Event *ev) { (void)ev; }
 #endif
 
 bool
@@ -1715,22 +1776,7 @@ video_update()
 		// otherwise typing in a search box would also type into BASIC.
 		if (imgui_window) {
 			debug_ui_process_event(&event);
-			Uint32 imgui_wid = 0;
-			bool imgui_has_wid = true;
-			switch (event.type) {
-				case SDL_WINDOWEVENT: imgui_wid = event.window.windowID; break;
-				case SDL_KEYDOWN:
-				case SDL_KEYUP: imgui_wid = event.key.windowID; break;
-				case SDL_TEXTINPUT: imgui_wid = event.text.windowID; break;
-				case SDL_TEXTEDITING: imgui_wid = event.edit.windowID; break;
-				case SDL_MOUSEBUTTONDOWN:
-				case SDL_MOUSEBUTTONUP: imgui_wid = event.button.windowID; break;
-				case SDL_MOUSEMOTION: imgui_wid = event.motion.windowID; break;
-				case SDL_MOUSEWHEEL: imgui_wid = event.wheel.windowID; break;
-				default: imgui_has_wid = false; break;
-			}
-			// SDL_QUIT carries no window id, so it still falls through to quit.
-			if (imgui_has_wid && imgui_wid == imgui_window_id) {
+			if (video_event_targets_debug_ui(&event)) {
 				// Closing the debugger window must not kill the emulator.
 				if (event.type == SDL_WINDOWEVENT &&
 				    event.window.event == SDL_WINDOWEVENT_CLOSE) {
@@ -1739,9 +1785,7 @@ video_update()
 				// The VS-style shortcuts also work while the machine is running
 				// and the debugger window has focus (F9 to set a breakpoint,
 				// Break to pause). Step/continue are inert until paused.
-				if (event.type == SDL_KEYDOWN && !debug_ui_want_text_input()) {
-					video_imgui_debug_key(event.key.keysym);
-				}
+				video_debug_ui_shortcut_key(&event);
 				continue;
 			}
 		}
@@ -2604,7 +2648,14 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 		case 0x19:
 		case 0x1A: return reg_layer[1][reg - 0x14];
 
-		case 0x1B: audio_render(); return pcm_read_ctrl();
+		case 0x1B:
+			// Same rule as the YM status read: a debug read must not flush
+			// audio, so the debugger sees the control byte as of the last
+			// render rather than advancing the render position itself.
+			if (!debugOn) {
+				audio_render();
+			}
+			return pcm_read_ctrl();
 		case 0x1C: return pcm_read_rate();
 		case 0x1D: return 0;
 
@@ -2975,16 +3026,20 @@ bool video_is_special_address(int addr)
 
 void
 stop6502(uint16_t address, uint8_t bank) {
-	// STP is the 6502-side "break into the debugger". Either debugger will do:
-	// with -imgui alone this used to fall through to the modal message box
-	// below, which blocks inside instruction dispatch and whose "Reset Machine"
-	// button resets the machine mid-instruction.
-	if (debugger_enabled || imgui_debugger_enabled) {
+	// Testbench first: it is headless and scripted, so an STP there must report
+	// the result on stdout, not stop for a human. Putting the debugger check
+	// ahead of it made -testbench -imgui park invisibly with nothing to resume
+	// it and no "STP" line for the harness to read.
+	if (testbench) {
+		printf("STP\n");
+		fflush(stdout);
+	} else if (debugger_enabled || imgui_debugger_enabled) {
+		// STP is the 6502-side "break into the debugger". Either debugger will
+		// do: with -imgui alone this used to fall through to the modal message
+		// box below, which blocks inside instruction dispatch and whose "Reset
+		// Machine" button resets the machine mid-instruction.
 		DEBUGBreakToDebugger();
 		DEBUGSetStopReason("breakpoint");   // overrides the default "user"
-	} else if (testbench) {
-		printf("STP\n");
-        fflush(stdout);
 	} else {
 		int return_btn;
 		char error_message[80];
