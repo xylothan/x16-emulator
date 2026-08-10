@@ -244,9 +244,9 @@ timing_update_ex(bool may_sleep)
 		// wait into slices and let the host breathe between them.
 		//
 		// SDL_PumpEvents() dispatches the OS message queue without dequeuing
-		// anything, and video_present_no_input() repaints without touching the
-		// event queue or the recorder, so input still arrives intact at the
-		// next real poll. The threshold is above one frame's worth, so pacing
+		// anything, and video_repaint_only() re-presents the existing frame
+		// without touching the event queue or the recorder, so input still
+		// arrives intact at the next real poll. The threshold is above one frame's worth, so pacing
 		// at the machine's own clock takes the single-sleep path exactly as
 		// before.
 		//
@@ -268,7 +268,7 @@ timing_update_ex(bool may_sleep)
 				usleep(left > THROTTLE_SLICE_US ? THROTTLE_SLICE_US : left);
 
 				SDL_PumpEvents();
-				video_present_no_input();
+				video_repaint_only();
 			}
 			diff_time = 0;
 		} else {

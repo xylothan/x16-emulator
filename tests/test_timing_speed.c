@@ -27,13 +27,11 @@ bool    mouse_grabbed = false;
 uint32_t clockticks6502 = 0;
 
 void video_update_title(const char *t) { (void)t; }
-void video_present_no_input(void) {}
 
 // timing.c only uses these to pace; the tests here never call timing_update().
 uint32_t SDL_GetTicks(void) { return 0; }
 void     SDL_PumpEvents(void) {}
-uint64_t SDL_GetPerformanceCounter(void) { return 0; }
-uint64_t SDL_GetPerformanceFrequency(void) { return 1000000; }
+void     video_repaint_only(void) {}
 
 // ---- Harness ---------------------------------------------------------------
 
