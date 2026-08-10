@@ -843,6 +843,7 @@ int dbg_info_load(const char *path)
 	// that, and getting it wrong silently drops source lines.
 	int line_first = line_count;
 	int records    = 0;
+	int syms       = 0;
 
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
@@ -872,6 +873,7 @@ int dbg_info_load(const char *path)
 		} else if (strncmp(p, "sym", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
 			parse_sym_record(p + 3);
 			records++;
+			syms++;
 		}
 		/* Other record types (version, info, scope, …) are silently skipped. */
 	}
@@ -893,7 +895,18 @@ int dbg_info_load(const char *path)
 
 	// The file has been read, so this generation is what the module declares
 	// now. Anything it declared last time and did not declare again goes.
-	drop_stale_equates(cur_owner, cur_gen);
+	//
+	// Only if the file actually got as far as its `sym` block, though. ld65
+	// emits file/seg/span/line before sym, so a write cut off partway through
+	// has records but no symbols, and is indistinguishable from a module that
+	// genuinely declares none -- except that the first is common and the second
+	// barely exists, since a linked module without a single label is degenerate.
+	// Keeping the previous generation in that case risks equates outliving a
+	// module that dropped all of them; sweeping risks a truncated write
+	// deleting every constant and un-seeding every bank it fed. The second is
+	// the worse failure and the likelier one.
+	if (syms > 0)
+		drop_stale_equates(cur_owner, cur_gen);
 
 	// Now that every `file` record has been seen, turn this load's raw file IDs
 	// into the records that actually describe them.

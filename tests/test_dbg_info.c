@@ -64,10 +64,20 @@ static const char *k_dbg_equ_v2 =
 	"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x00BEEF,type=equ\n"
 	"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
 	"mod\tid=0,name=\"equ.o\",file=0\n";
+// Returns a path valid until this is called WRITE_TEMP_SLOTS more times.
+// It used to hand back one static buffer, so a caller that wrote a second
+// fixture before removing the first removed the wrong file -- and a caller that
+// wrote three before loading any would have loaded the last one three times.
+// Rotating the buffers makes holding a few paths at once safe, which is what
+// every multi-module fixture here needs.
+#define WRITE_TEMP_SLOTS 8
 static char *
 write_temp(const char *contents, const char *leaf)
 {
-	static char path[512];
+	static char slots[WRITE_TEMP_SLOTS][512];
+	static int  next_slot = 0;
+	char       *path      = slots[next_slot];
+	next_slot = (next_slot + 1) % WRITE_TEMP_SLOTS;
 	const char *dir = getenv("TMPDIR");
 	if (!dir || !*dir) {
 		dir = getenv("TEMP");
@@ -75,7 +85,7 @@ write_temp(const char *contents, const char *leaf)
 	if (!dir || !*dir) {
 		dir = ".";
 	}
-	snprintf(path, sizeof(path), "%s/%s", dir, leaf);
+	snprintf(path, 512, "%s/%s", dir, leaf);
 
 	FILE *f = fopen(path, "wb");
 	if (!f) {
@@ -929,13 +939,16 @@ main(void)
 			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
 			"sym\tid=1,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
 			"mod\tid=0,name=\"gone.o\",file=0\n";
-		// Same module, rebuilt with both equates removed.
+		// Same module, rebuilt with both equates removed. It still has a label,
+		// as any real linked module does -- that is what distinguishes it from
+		// a write that was cut off before the symbols.
 		static const char *k_gone_v2 =
 			"version\tmajor=2,minor=0\n"
 			"file\tid=0,name=\"gone.s\",size=10,mtime=0x00000000,mod=0\n"
 			"seg\tid=0,name=\"GONE\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
 			"span\tid=0,seg=0,start=0,size=16,type=0\n"
 			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"_gone_entry\",addrsize=absolute,size=3,scope=0,def=0,val=0x000800,type=lab\n"
 			"mod\tid=0,name=\"gone.o\",file=0\n";
 		static const char *k_borrower =
 			"version\tmajor=2,minor=0\n"
@@ -1153,7 +1166,8 @@ main(void)
 
 			// The same path, rebuilt empty -- as a truncated write leaves it.
 			if (write_temp("", "x16_dbg_info_tx.dbg")) {
-				dbg_info_load(txp);
+				check(dbg_info_load(txp) != 0,
+				      "an empty rebuild is reported as a failed load");
 				v = 0;
 				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
 				      "an empty rebuild does not delete what still works");
@@ -1166,12 +1180,68 @@ main(void)
 
 			// And a file of the right shape but no recognisable records.
 			if (write_temp("nonsense\nmore nonsense\n", "x16_dbg_info_tx.dbg")) {
-				dbg_info_load(txp);
+				check(dbg_info_load(txp) != 0,
+				      "an unparseable rebuild is reported as a failed load");
 				v = 0;
 				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
 				      "nor does an unparseable one");
 			}
+
+			// The shape that actually occurs: cut off after the line records
+			// but before the symbols. ld65 emits them in that order.
+			static const char *k_tx_partial =
+				"version\tmajor=2,minor=0\n"
+				"file\tid=0,name=\"tx.s\",size=10,mtime=0x00000000,mod=0\n"
+				"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16,type=0\n"
+				"line\tid=0,file=0,line=1,span=0\n";
+			if (write_temp(k_tx_partial, "x16_dbg_info_tx.dbg")) {
+				dbg_info_load(txp);
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "and a write cut off before the symbols keeps them too");
+			}
 			remove(txp);
+			dbg_info_free();
+		}
+	}
+
+	// An equate name too long for the reduction buffer must be refused, not
+	// copied into it. The name comes straight out of a file sitting next to a
+	// loaded program, so its length is not ours to assume.
+	//
+	// This is a smoke test, not a guard: squash_name() refuses the name either
+	// way, so the resolution outcome is the same with or without the length
+	// check, and only a sanitizer can see the difference. Removing the check
+	// turns this input into a 300-byte write into a 128-byte stack buffer.
+	{
+		dbg_info_free();
+		char huge[400];
+		memset(huge, 'B', 300);
+		huge[300] = '\0';
+		char buf2[1024];
+		snprintf(buf2, sizeof buf2,
+		         "version\tmajor=2,minor=0\n"
+		         "file\tid=0,name=\"ov.s\",size=10,mtime=0x00000000,mod=0\n"
+		         "seg\tid=0,name=\"%s\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+		         "span\tid=0,seg=0,start=0,size=16,type=0\n"
+		         "line\tid=0,file=0,line=1,span=0\n"
+		         "sym\tid=0,name=\"RAM_BANK_%s\",addrsize=absolute,size=1,scope=0,def=0,val=0x000008,type=equ\n"
+		         "mod\tid=0,name=\"ov.o\",file=0\n",
+		         huge, huge);
+		char *hp = write_temp(buf2, "x16_dbg_info_hugeequ.dbg");
+		if (!hp) {
+			check(false, "could not write the long-equate fixture");
+		} else {
+			char hpath[512];
+			snprintf(hpath, sizeof hpath, "%s", hp);
+			check(dbg_info_load(hpath) == 0, "loads a module with an oversized equate name");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 8, &f, &l)
+			          != DBG_BANK_RESOLVED,
+			      "and an oversized equate name is handled without incident");
+			remove(hpath);
 			dbg_info_free();
 		}
 	}
