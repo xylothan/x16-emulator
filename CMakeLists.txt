@@ -116,6 +116,54 @@ else()
     message(STATUS "[x16] cJSON not found; building without the DAP server.")
 endif()
 
+# Dear ImGui debugger
+#
+# An in-process debugger UI in its own window: memory, disassembly, CPU, VERA,
+# source, breakpoints, symbols and call stack. Opt in at runtime with -imgui.
+# AUTO builds it when the vendored sources are present, which they are in-tree;
+# OFF drops the third-party C++ from the build for anyone who does not want it.
+
+set(ENABLE_IMGUI "AUTO" CACHE STRING "Build the Dear ImGui debugger UI (ON/OFF/AUTO)")
+set_property(CACHE ENABLE_IMGUI PROPERTY STRINGS ON OFF AUTO)
+
+set(USE_IMGUI FALSE)
+# imgui_impl_sdlrenderer2 needs SDL_RenderGeometry(), added in SDL 2.0.17. Some
+# distributions still ship older SDL2 (Raspbian bullseye, Debian oldstable), so
+# AUTO has to check rather than assume. find_package sets SDL2_VERSION in config
+# mode; fall back to pkg-config, and treat "unknown" as too old rather than
+# assume the best -- an unbuildable configuration is worse than a missing panel.
+set(IMGUI_MIN_SDL_VERSION 2.0.17)
+set(IMGUI_SDL_VERSION "${SDL2_VERSION}")
+if(NOT IMGUI_SDL_VERSION AND PKG_CONFIG_FOUND)
+    pkg_check_modules(IMGUI_PC_SDL2 QUIET sdl2)
+    set(IMGUI_SDL_VERSION "${IMGUI_PC_SDL2_VERSION}")
+endif()
+
+if(ENABLE_IMGUI STREQUAL "OFF")
+    message(STATUS "[x16] ImGui debugger explicitly disabled.")
+elseif(EMSCRIPTEN)
+    # SDL2's emscripten backend is single-window -- it renders to the one HTML
+    # canvas -- so the second SDL_CreateWindow the debugger needs cannot
+    # succeed. Forced off rather than left to fail at runtime, which also keeps
+    # ~70k lines of dead C++ out of the .wasm download.
+    if(ENABLE_IMGUI STREQUAL "ON")
+        message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON is not supported under Emscripten (single-window backend).")
+    endif()
+    message(STATUS "[x16] ImGui debugger disabled: unsupported under Emscripten.")
+elseif(NOT IMGUI_SDL_VERSION OR IMGUI_SDL_VERSION VERSION_LESS IMGUI_MIN_SDL_VERSION)
+    if(ENABLE_IMGUI STREQUAL "ON")
+        message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON needs SDL ${IMGUI_MIN_SDL_VERSION} or newer, found '${IMGUI_SDL_VERSION}'.")
+    endif()
+    message(STATUS "[x16] ImGui debugger disabled: SDL '${IMGUI_SDL_VERSION}' is older than ${IMGUI_MIN_SDL_VERSION} (SDL_RenderGeometry).")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/extern/imgui/imgui.cpp")
+    set(USE_IMGUI TRUE)
+    message(STATUS "[x16] ImGui debugger enabled (SDL ${IMGUI_SDL_VERSION}).")
+elseif(ENABLE_IMGUI STREQUAL "ON")
+    message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON but src/extern/imgui is missing.")
+else()
+    message(STATUS "[x16] Vendored ImGui not found; building without the debugger UI.")
+endif()
+
 # Fluidsynth
 
 set(ENABLE_FLUIDSYNTH "AUTO" CACHE STRING "Enable FluidSynth MIDI support (ON/OFF/AUTO)")
@@ -236,6 +284,7 @@ set(X16_SOURCES
     src/dbg_info.c
     src/dbg_load.c
     src/source_view.c
+    src/insn_info.c
     src/code_map.c
     src/debug_core.c
     src/cpu/irq_ctx.c
@@ -254,6 +303,45 @@ set(X16_SOURCES
     src/midi.c
     src/extern/ymfm/src/ymfm_opm.cpp
 )
+
+if(USE_IMGUI)
+    # Vendored Dear ImGui (docking branch) + the SDL2 / SDLRenderer2 backends,
+    # kept in their own list so the project's strict warnings can be relaxed
+    # for just these files: ImGui does not build clean under /W3 /WX or
+    # -Wall -Werror, and it is not ours to fix. The debug_ui sources are
+    # deliberately NOT in this list -- see the warning settings below.
+    set(IMGUI_SOURCES
+        src/extern/imgui/imgui.cpp
+        src/extern/imgui/imgui_draw.cpp
+        src/extern/imgui/imgui_tables.cpp
+        src/extern/imgui/imgui_widgets.cpp
+        src/extern/imgui/imgui_demo.cpp
+        src/extern/imgui/backends/imgui_impl_sdl2.cpp
+        src/extern/imgui/backends/imgui_impl_sdlrenderer2.cpp
+    )
+
+    # The debug_ui module: a C-callable core plus self-registering panels.
+    # Adding a panel means dropping a file under src/debug_ui/panels/ and
+    # listing it here.
+    set(DEBUG_UI_SOURCES
+        src/debug_ui/debug_ui.cpp
+        src/debug_ui/debug_ui_panels.cpp
+        src/debug_ui/debug_ui_settings.cpp
+        src/debug_ui/panels/memory_panel.cpp
+        src/debug_ui/panels/disasm_panel.cpp
+        src/debug_ui/panels/cpu_panel.cpp
+        src/debug_ui/panels/vera_panel.cpp
+        src/debug_ui/panels/source_panel.cpp
+        src/debug_ui/panels/breakpoints_panel.cpp
+        src/debug_ui/panels/symbols_panel.cpp
+        src/debug_ui/panels/callstack_panel.cpp
+        src/debug_ui/panels/psg_panel.cpp
+        src/debug_ui/panels/fm_panel.cpp
+        src/debug_ui/panels/pcm_panel.cpp
+    )
+
+    list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
+endif()
 
 if(WIN32)
     list(APPEND X16_SOURCES src/video_win32.c)
@@ -279,6 +367,26 @@ target_include_directories(x16emu PRIVATE
     src/extern/ymfm/src
     ${GIT_REV_HEADER_DIR}
 )
+
+if(USE_IMGUI)
+    target_include_directories(x16emu PRIVATE
+        src/extern/imgui
+        src/extern/imgui/backends
+        src/extern/imgui_club
+        src/debug_ui
+    )
+    target_compile_definitions(x16emu PRIVATE HAS_IMGUI)
+    # Vendored ImGui does not build clean under this project's warning level,
+    # and it is not ours to fix -- so warnings are silenced for those files
+    # only. The debug_ui sources ARE ours and are held to the same standard as
+    # the rest of the tree; suppressing them too would have hidden real defects
+    # in the code most likely to contain them.
+    if(MSVC)
+        set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")
+    else()
+        set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+endif()
 
 if(USE_TRACE)
     target_compile_definitions(x16emu PRIVATE TRACE)

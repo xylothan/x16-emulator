@@ -19,6 +19,10 @@
 // needs and which can be tested without standing up an SDL window.
 #include "debug_core.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern int showDebugOnRender;
 
 void DEBUGRenderDisplay(int width,int height);
@@ -55,6 +59,22 @@ void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner); // run until (p
 bool DEBUGIsRunning(void);
 bool DEBUGIsPaused(void);
 
+// Interrupt following. With follow-interrupts on, an interrupt taken while
+// stepping stops at the handler's first instruction instead of being run
+// through invisibly; break-on-interrupt stops on every entry. Both off by
+// default, so stepping behaves exactly as it did without them.
+void DEBUGSetFollowInterrupts(bool on);
+bool DEBUGGetFollowInterrupts(void);
+void DEBUGSetBreakOnInterrupt(bool on);
+bool DEBUGGetBreakOnInterrupt(void);
+
+// Why execution last stopped: "step", "breakpoint", "data breakpoint", "user",
+// "interrupt", or "" before the first stop. The returned pointer is a string
+// literal and is never freed. A UI uses this to keep the view still after a
+// step but re-centre it after an arrival somewhere new.
+void        DEBUGSetStopReason(const char *reason);
+const char *DEBUGGetStopReason(void);
+
 #define DBG_WIDTH 		(60)									// Char cells across
 #define DBG_HEIGHT 		(60)
 
@@ -71,8 +91,12 @@ bool DEBUGIsPaused(void);
 #define DMODE_RUN 		(2)										// Debugger is running normally.
 
 // The run state itself, one of DMODE_*. Defined in debugger.c and driven by
-// whichever front end is attached -- the SDL debugger, or the DAP server when a
-// client is stepping.
+// whichever front end is attached -- the SDL debugger, the ImGui debugger, or
+// the DAP server when a client is stepping.
 extern int currentMode;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
