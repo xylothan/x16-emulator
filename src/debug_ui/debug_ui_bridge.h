@@ -46,6 +46,8 @@
 //     watchPoints[] was declared extern and indexed directly -- wrong field
 //     offsets and a 12-byte stride over a 16-byte array.
 //   * memory_get_num_rom_banks() was declared but has never existed.
+//   * cpu_irq_return_pc() was declared returning uint16_t against the core's
+//     uint32_t, silently dropping the program bank of a 65C816 return address.
 //
 // So the rule is now the opposite one: include the real header, and where the
 // panels genuinely want a different shape, convert in a documented shim below
@@ -58,6 +60,9 @@
 #include "glue.h"         // is_gen2, num_banks, num_ram_banks, MHZ, warp_mode
 #include "smc.h"          // smc_requested_reset
 #include "timing.h"       // absolute kHz speed control
+#include "video.h"        // video_read/video_space_* and the VERA debug views
+#include "cpu/irq_ctx.h"  // interrupt context, incl. the 24-bit return PC
+#include "cpu/fake6502.h" // irq6502()
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +72,6 @@ extern "C" {
 extern struct regs regs;
 
 // Non-intrusive read of VERA video memory / register space.
-uint8_t video_space_read(uint32_t address);
 
 // RAM banking is sized at runtime by -ram, so num_ram_banks (glue.h) is a real
 // variable. ROM is not: it is a fixed ROM[NUM_ROM_BANKS * 16384] array and has
@@ -138,30 +142,13 @@ enum { BP_CMP_EQ = BPCMP_EQ, BP_CMP_NE = BPCMP_NE, BP_CMP_LT = BPCMP_LT,
 // the read has no side effects (no address auto-increment, no FIFO changes).
 // Used by the VERA panel to read the layer registers ($0D..$1A) that describe
 // map/tile bases, color depth, scroll, and bitmap width.
-uint8_t video_read(uint8_t reg, bool debugOn);
-
-// Per-scanline history of the layer registers that were actually used to render
-// each display line (video.c). Programs commonly rewrite MAPBASE/TILEBASE/scroll
-// part-way down a frame from a line IRQ ("raster split"), so a single register
-// snapshot only describes one band of the screen. Viewers use this to decode
-// each row with the registers that produced it. out_regs receives the 7 layer
-// registers L?_CONFIG..L?_VSCROLL_H; out_eff_y is the composer's effective layer
-// Y for that line (before the layer's own VSCROLL). Returns false if the line is
-// out of range or has not been rendered yet.
-bool     video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
-                                    uint16_t *out_eff_y, bool *out_enabled);
-uint16_t video_get_scanline_count(void);
-
-// Size in layer pixels of the image the composer is actually displaying: the
-// active window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled by DC_HSCALE/VSCALE.
-// Viewers use this to default their geometry to the current video mode rather
-// than to a fixed guess. (video.c)
-void video_get_active_layer_size(int *out_w, int *out_h);
+//
+// The per-scanline layer-register history, the active layer size and the VERA
+// interrupt prediction all come from video.h, included above.
 
 // ─── Memory: accessors  (Memory panel — keep minimal & shared) ─────────────
 
 // Explicit, intended debug write into VERA video memory (0..0x1FFFF). (video.h)
-void video_space_write(uint32_t address, uint8_t value);
 
 // Banked-memory mapping controls (memory.c, declared in memory.h above). The
 // Memory panel drives its RAM/ROM bank selectors with these.
@@ -199,14 +186,6 @@ extern uint16_t num_banks;
 // mirror the classic F5/F10/F11 handlers and the DAP commands (including the
 // timing re-base on resume). Handy for e.g. a "Run to cursor" in the disasm
 // panel or a "Continue" shortcut in any panel.
-void DEBUGContinue(void);   // resume free-run
-void DEBUGStepInto(void);   // single instruction
-void DEBUGStepOver(void);   // step over calls
-void DEBUGStepOut(void);    // run to return address
-void DEBUGPause(void);      // halt now
-void DEBUGRunTo(uint16_t pc, uint8_t bank); // run to (pc,bank), then halt
-bool DEBUGIsRunning(void);  // true in RUN/SLOW
-bool DEBUGIsPaused(void);   // true in STOP
 
 // Why execution last stopped. This lived in the DAP server before, which meant
 // it did not exist unless that was built; it belongs to the debugger, which is
@@ -216,10 +195,6 @@ static inline const char *debug_server_last_stop_reason(void) { return DEBUGGetS
 // Interrupt following (debugger.c). With follow-interrupts on, an interrupt
 // taken while stepping stops at the handler's first instruction instead of
 // being run through invisibly; break-on-interrupt stops on every entry.
-void DEBUGSetFollowInterrupts(bool on);
-bool DEBUGGetFollowInterrupts(void);
-void DEBUGSetBreakOnInterrupt(bool on);
-bool DEBUGGetBreakOnInterrupt(void);
 
 // Publish the "run to cursor" target — the disassembly instruction row under// the mouse — for the Ctrl+F10 shortcut (consumed by debug_ui_run_to_cursor()).
 // The Disassembly panel calls this every frame: valid=true for the hovered row,
@@ -247,8 +222,6 @@ bool debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len);
 // also calls code_map_reset() so the disassembly re-aligns. IRQ/NMI are
 // edge-triggered exactly like the RESTORE-key NMI already in video.c.
 extern bool smc_requested_reset;  // set true to request a machine reset
-void machine_nmi(void);           // trigger an NMI
-void irq6502(void);               // trigger a maskable IRQ (honors the I flag)
 
 // ─── Symbols / labels ──────────────────────────────────────────────────────
 // dbg_info.h (included above) declares these. The panels want 16-bit addresses
@@ -265,22 +238,14 @@ extern int      instruction_counter; // instructions executed (main.c)
 // Speed is an absolute target clock in kHz. The machine's own clock comes from
 // -mhz at startup, so timing_native_khz() is what "normal speed" means for this
 // run. Warp bypasses the throttle entirely and ignores the target.
-void machine_toggle_warp(void);
 
 // ─── Interrupt context (cpu/fake6502.c) ─────────────────────────────────────
 // The CPU core records interrupt entry/exit so the debugger can show when
 // execution is inside a handler. Depth counts nesting.
-bool     cpu_in_interrupt(void);
-int      cpu_irq_depth(void);
-uint32_t cpu_irq_count(void);
-int      cpu_irq_last_vector(void);
-uint16_t cpu_irq_return_pc(void);
 
 // ─── VERA interrupt prediction (video.c) ────────────────────────────────────
 // Cycles until the next enabled VERA interrupt and the ISR bit that will cause
 // it (1 = VSYNC, 2 = LINE); false when neither is enabled.
-bool video_next_irq(float mhz, uint32_t *out_cycles, uint8_t *out_source);
-void video_get_irq_state(uint8_t *out_ien, uint8_t *out_isr, uint16_t *out_irq_line);
 
 #ifdef __cplusplus
 } // extern "C"

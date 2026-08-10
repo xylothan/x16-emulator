@@ -16,6 +16,7 @@
 #include "debugger.h"
 #ifdef HAS_IMGUI
 #include "smc.h" // smc_requested_reset (Ctrl+Shift+F5 restart)
+#include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
 #include "debug_ui/debug_ui.h"
 #endif
 #include "keyboard.h"
@@ -468,8 +469,12 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 			imgui_window_id = SDL_GetWindowID(imgui_window);
 			debug_ui_init(imgui_window, imgui_renderer);
 #ifdef _WIN32
-			// Keep the emulator running (and both windows painted) while the OS
-			// holds us in a modal move/resize loop dragging the debugger window.
+			// Keep both windows painted while the OS holds us in a modal
+			// move/resize loop dragging the debugger window. Emulation does
+			// *not* continue through a drag once a debugger is up --
+			// emulator_step_during_move() returns early for exactly that
+			// reason, so breakpoints cannot be stepped past behind the UI's
+			// back -- but without this the windows would freeze mid-drag.
 			video_win32_install_move_hook(imgui_window);
 #endif
 		} else {
@@ -482,6 +487,9 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 			// debugger either -- the machine would simply hang.
 			imgui_debugger_enabled = false;
 			printf("The graphical debugger is disabled for this session.\n");
+			// Same reasoning as the headless path in main.c: the .dbg policy
+			// was noted from a flag that has just been cleared.
+			dbg_load_note_debugger(debugger_enabled);
 		}
 	}
 #endif
@@ -1568,10 +1576,12 @@ video_render_all(void)
 
 #ifdef HAS_IMGUI
 // True only once the debugger window AND renderer were actually created.
-// video_init leaves imgui_debugger_enabled set even if creation failed (it only
-// warns), so the pause-loop delegation tests this instead: a failed UI must fall
-// back to the classic path rather than park the machine in a pump with no
-// visible control bar to resume it.
+//
+// This is the authority on whether the UI exists; imgui_debugger_enabled is the
+// authority on whether it was *asked* for. The two agree from video_init()
+// onward -- both the creation-failure path below and the headless path in
+// main.c clear the flag -- but callers that must not park the machine still
+// test this one, so the answer does not depend on that agreement holding.
 bool
 video_debug_ui_available(void)
 {

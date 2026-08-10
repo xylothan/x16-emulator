@@ -11,6 +11,10 @@
 // inside a handler and where it will return to.
 #include "irq_ctx.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern void reset6502(bool c816);
 extern void step6502();
 extern void exec6502(uint32_t tickcount);
@@ -19,5 +23,9 @@ extern void nmi6502();
 extern uint32_t clockticks6502;
 extern uint8_t waiting;
 extern bool warn_rockwell;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

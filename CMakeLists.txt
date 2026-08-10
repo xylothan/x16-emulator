@@ -349,14 +349,15 @@ if(USE_IMGUI)
         src/debug_ui
     )
     target_compile_definitions(x16emu PRIVATE HAS_IMGUI)
-    # Relaxed per-file so the rest of the tree keeps warnings-as-errors. On MSVC
-    # "/w" sets warning level 0, which also neutralises "/WX" for these files.
+    # Vendored ImGui does not build clean under this project's warning level,
+    # and it is not ours to fix -- so warnings are silenced for those files
+    # only. The debug_ui sources ARE ours and are held to the same standard as
+    # the rest of the tree; suppressing them too would have hidden real defects
+    # in the code most likely to contain them.
     if(MSVC)
-        set_source_files_properties(${IMGUI_SOURCES} ${DEBUG_UI_SOURCES}
-            PROPERTIES COMPILE_OPTIONS "/w")
+        set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")
     else()
-        set_source_files_properties(${IMGUI_SOURCES} ${DEBUG_UI_SOURCES}
-            PROPERTIES COMPILE_OPTIONS "-w")
+        set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
     endif()
 endif()
 

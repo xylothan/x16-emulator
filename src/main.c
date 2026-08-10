@@ -1502,12 +1502,17 @@ main(int argc, char **argv)
 	// never runs. Clearing the flag here keeps the invariant the rest of the
 	// code relies on -- the flag is set only if the window exists -- true on
 	// this path as well as on the creation-failure path. Left set, the emulator
-	// loop routes through DEBUGGetCurrentStatus(), and a breakpoint or an STP
-	// parks the machine in DMODE_STOP with no window, no events and nothing
-	// able to resume it: a silent spin at 100% of a core.
+	// loop routes through DEBUGGetCurrentStatus(), and a breakpoint parks the
+	// machine in DMODE_STOP with no window, no events and nothing able to
+	// resume it: a silent spin at 100% of a core. (STP is handled separately --
+	// stop6502() reports it to the testbench harness instead of stopping.)
 	if (headless && imgui_debugger_enabled) {
 		imgui_debugger_enabled = false;
 		printf("The graphical debugger needs a window; -imgui is ignored in headless mode.\n");
+		// Re-state the .dbg policy: it was noted above from a flag that has
+		// just been cleared, and without this a headless run would keep loading
+		// debug info for a debugger that is not there.
+		dbg_load_note_debugger(debugger_enabled || imgui_debugger_enabled);
 	}
 
 	if (!headless) {
