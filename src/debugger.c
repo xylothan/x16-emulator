@@ -171,6 +171,13 @@ int    oldRegisterTicks = 0;                          // Last PC when change not
 
 SDL_Renderer *dbgRenderer;                            // Renderer passed in.
 
+// Unbanked, the RAM window, or the ROM window. A bank number selected for one
+// of these means nothing in the others.
+static int bank_window_of(int addr) {
+	if (addr < 0xA000)
+		return 0;
+	return addr < 0xC000 ? 1 : 2;
+}
 // Which RAM/ROM window the PC is in, or -1 where a bank means nothing there.
 // Delegates to debug_core so the rule that *produces* a selector is the same one
 // the matcher applies. The copy that used to live here required the program bank
@@ -244,7 +251,19 @@ int  DEBUGGetCurrentStatus(void) {
 	}
 	const bool stopped     = (currentMode == DMODE_STOP);
 	const bool justResumed = (resumeSkipPC >= 0);
-	if (!stopped && !justResumed
+	// Parked in WAI counts as standing still here too. The CPU stops on the
+	// instruction AFTER the WAI -- the opcode fetch has already advanced the PC
+	// -- and then ticks the clock without retiring anything, so this poll runs
+	// once per emulated cycle with the PC unchanged. Testing arrival there
+	// stops before the awaited interrupt has happened, and because the test is
+	// not a query -- it counts the hit and spends the ignore budget -- an
+	// "ignore 60" meant as sixty frames is exhausted in sixty cycles, still
+	// inside the first wait.
+	//
+	// Both ways out stay correct: a masked interrupt clears `waiting` without
+	// vectoring, so the next poll sees the PC still on the breakpoint and stops
+	// there; a vectored one arrives after the handler returns.
+	if (!stopped && !justResumed && !waiting
 	    && (debug_bp_on_arrival(regs.pc, regs.k) || hitBreakpoint(regs.pc, regs.k, stepBreakPoint))) {       // Hit a breakpoint.
 		currentPC = regs.pc;                                    // Update current PC
 		currentPCBank = regs.k;
@@ -416,10 +435,22 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 	// once the mapped bank has changed, so a JSR could be missed or invented.
 	int x16Bank = getCurrentBank(regs.pc, regs.k);
 	int opcode = debug_read6502(regs.pc, regs.k, x16Bank);
-	if (opcode == 0x20 || opcode == 0xFC || opcode == 0x22) {   // JSR abs / JSR (abs,X) / JSL
-		stepBreakPoint.pc = (regs.pc + 3 + (opcode == 0x22)) & 0xFFFF; // JSL is 4 bytes
+	// $22 and $FC are JSL and JSR (abs,X) only on the 65816. On a 65C02 they
+	// are NOPs -- $22 a two-byte one -- so treating them as calls set the
+	// return breakpoint past the following instruction and stepping over ran
+	// away instead of stopping.
+	const bool is_call = (opcode == 0x20)
+	                  || (regs.is65c816 && (opcode == 0xFC || opcode == 0x22));
+	if (is_call) {
+		const int target = (regs.pc + 3 + (opcode == 0x22)) & 0xFFFF; // JSL is 4 bytes
+		stepBreakPoint.pc = target;
 		stepBreakPoint.bank = regs.k;
-		stepBreakPoint.x16Bank = x16Bank;
+		// Derived from the target, not from the calling instruction. A call near
+		// the top of the RAM window returns into the ROM window, where the
+		// caller's RAM bank number selects nothing and the breakpoint could
+		// never fire. Where the two are in the same window this is the same
+		// answer, and it is what stepping out and running-to already do.
+		stepBreakPoint.x16Bank = debug_current_x16_bank(target, regs.k);
 		DEBUGArmResumeSkip();
 		currentMode = DMODE_RUN;
 		debugCPUClocks = clockticks6502;
@@ -453,8 +484,11 @@ void DEBUGStepOut(void) {                               // run to the return add
 		uint8_t  hi     = debug_read6502((uint16_t)(a + 1), 0, -1);
 		uint16_t pushed = (uint16_t)(lo | (hi << 8));
 
+		// $FC is JSR (abs,X) only on the 65816; on a 65C02 it is a NOP, and
+		// accepting it there turns any pushed value preceded by one into a
+		// false frame. Same gate as the one stepping over uses.
 		uint8_t o2 = debug_read6502((uint16_t)(pushed - 2), regs.k, -1);
-		if (o2 == 0x20 || o2 == 0xFC) {                 // JSR abs / JSR (abs,X)
+		if (o2 == 0x20 || (regs.is65c816 && o2 == 0xFC)) {   // JSR abs / JSR (abs,X)
 			retAddr = (pushed + 1) & 0xFFFF;
 			break;
 		}
@@ -464,7 +498,8 @@ void DEBUGStepOut(void) {                               // run to the return add
 		// Reading the opcode through regs.k would inspect whatever happens to
 		// sit at that address in the callee's bank -- which for a long call is
 		// exactly the bank that is wrong.
-		if (a + 2 < end) {
+		// A long call only exists on the 65816 at all.
+		if (regs.is65c816 && a + 2 < end) {
 			uint8_t callerBank = debug_read6502((uint16_t)(a + 2), 0, -1);
 			if (debug_read6502((uint16_t)(pushed - 3), callerBank, -1) == 0x22) {   // JSL
 				retAddr = (pushed + 1) & 0xFFFF;
@@ -1004,13 +1039,6 @@ static void DEBUGRenderVRAM(int y, int data) {
 //
 // *******************************************************************************************
 
-// Unbanked, the RAM window, or the ROM window. A bank number selected for one
-// of these means nothing in the others.
-static int bank_window_of(int addr) {
-	if (addr < 0xA000)
-		return 0;
-	return addr < 0xC000 ? 1 : 2;
-}
 
 static void DEBUGRenderCode(int lines, int initialPC) {
 	char buffer[32];
