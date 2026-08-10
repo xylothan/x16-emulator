@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // A debug-info address. Flat 24-bit: bits 0-15 are the CPU address, bits 16-23
 // the 65C816 program bank. On the 65C02 the high byte is simply zero. Code on a
 // GS/Gen2 machine lives above $FFFF, so a 16-bit address cannot describe it.
@@ -170,5 +174,9 @@ bool dbg_info_file_at(int index, const char **name);
 // modules that the running code may LOAD later, so their sources/line
 // breakpoints can be queued up ahead of time.
 int  dbg_info_scan_dbg_files(const char *dir, char out[][DBG_INFO_PATH_MAX], int max);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

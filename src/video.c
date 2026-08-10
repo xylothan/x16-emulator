@@ -14,6 +14,10 @@
 #include "memory.h"
 #include "glue.h"
 #include "debugger.h"
+#ifdef HAS_IMGUI
+#include "smc.h" // smc_requested_reset (Ctrl+Shift+F5 restart)
+#include "debug_ui/debug_ui.h"
+#endif
 #include "keyboard.h"
 #include "gif.h"
 #include "joystick.h"
@@ -96,6 +100,12 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *sdlTexture;
 static bool is_fullscreen = false;
+#ifdef HAS_IMGUI
+// ImGui debugger window (separate; created only when -imgui is passed).
+static SDL_Window *imgui_window = NULL;
+static SDL_Renderer *imgui_renderer = NULL;
+static Uint32 imgui_window_id = 0;
+#endif
 bool mouse_grabbed = false;
 bool no_keyboard_capture = false;
 bool kernal_mouse_enabled = false;
@@ -422,6 +432,43 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 	if (debugger_enabled) {
 		DEBUGInitUI(renderer);
 	}
+
+#ifdef HAS_IMGUI
+	// ImGui debugger window -- additive, independent of the -debug SDL debugger.
+	if (imgui_debugger_enabled) {
+		int mainX, mainY, mainW;
+		SDL_GetWindowPosition(window, &mainX, &mainY);
+		SDL_GetWindowSize(window, &mainW, NULL);
+
+		imgui_window = SDL_CreateWindow("Commander X16 - Debugger",
+			mainX + mainW + 4, mainY,
+			960, 720,
+			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+		if (imgui_window) {
+			// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
+			// presented from the emulator thread, so a vsync'd present would
+			// block it for up to a refresh interval every frame -- capping the
+			// machine at the monitor's rate and defeating warp mode entirely.
+			// The main window does not vsync either; timing.c does the
+			// throttling. debug_ui_render() is rate-limited instead (see
+			// video_render_all_ex).
+			imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+		}
+		if (imgui_window && imgui_renderer) {
+			imgui_window_id = SDL_GetWindowID(imgui_window);
+			debug_ui_init(imgui_window, imgui_renderer);
+#ifdef _WIN32
+			// Keep the emulator running (and both windows painted) while the OS
+			// holds us in a modal move/resize loop dragging the debugger window.
+			video_win32_install_move_hook(imgui_window);
+#endif
+		} else {
+			printf("Warning: Failed to create debugger window: %s\n", SDL_GetError());
+			if (imgui_renderer) { SDL_DestroyRenderer(imgui_renderer); imgui_renderer = NULL; }
+			if (imgui_window) { SDL_DestroyWindow(imgui_window); imgui_window = NULL; }
+		}
+	}
+#endif
 
 	if (grab_mouse && !mouse_grabbed)
 		mousegrab_toggle();
@@ -1438,6 +1485,26 @@ video_render_all_ex(bool new_frame)
 	}
 
 	SDL_RenderPresent(renderer);
+
+#ifdef HAS_IMGUI
+	// Rebuild the debugger window's frame. Deliberately decoupled from the
+	// emulated frame rate, which spans four orders of magnitude here: under
+	// -warp or a 100MHz target this is reached far more often than a display
+	// can show, and at 25kHz a new frame may be seconds apart -- so pacing the
+	// UI off it would either burn the CPU rebuilding invisible frames or leave
+	// the debugger unresponsive. Wall-clock 60Hz is right at both ends. The
+	// throttle's repaint path (new_frame == false) calls in too, which is what
+	// keeps the UI live while the machine is running slowly.
+	if (imgui_renderer != NULL) {
+		static Uint32 last_ui_ticks = 0;
+		const Uint32 now = SDL_GetTicks();
+		// Unsigned subtraction, so this stays correct across the 49-day wrap.
+		if (now - last_ui_ticks >= 16) {
+			last_ui_ticks = now;
+			debug_ui_render();
+		}
+	}
+#endif
 }
 
 // Present a newly completed frame without pumping the event queue. Called from
@@ -1472,6 +1539,127 @@ video_render_all(void)
 	video_render_all_ex(true);
 }
 
+#ifdef HAS_IMGUI
+// True only once the debugger window AND renderer were actually created.
+// video_init leaves imgui_debugger_enabled set even if creation failed (it only
+// warns), so the pause-loop delegation tests this instead: a failed UI must fall
+// back to the classic path rather than park the machine in a pump with no
+// visible control bar to resume it.
+bool
+video_debug_ui_available(void)
+{
+	return imgui_window != NULL && imgui_renderer != NULL;
+}
+
+// Map a keydown on the debugger window to a Visual-Studio-style debug action.
+// Shared by the running event loop (video_update) and the paused pump
+// (video_debug_ui_pump_paused) so the shortcuts behave identically whether the
+// machine is running or halted. The caller has already confirmed the event
+// targets the debugger window and that no text field has focus.
+//   F5   continue          Ctrl+Shift+F5  restart (reset)
+//   F9   toggle bp at PC   Ctrl+F10       run to cursor
+//   F10  step over         F11            step into
+//   Shift+F11 step out     Break/Pause    pause
+// Step/continue are inert while running; pause is inert while halted.
+static void
+video_imgui_debug_key(SDL_Keysym ks)
+{
+	const bool shift = (ks.mod & KMOD_SHIFT) != 0;
+	const bool ctrl  = (ks.mod & KMOD_CTRL) != 0;
+	switch (ks.scancode) {
+		case SDL_SCANCODE_F5:
+			if (ctrl && shift) {
+				smc_requested_reset = true;      // Ctrl+Shift+F5 = restart
+			} else if (DEBUGIsPaused()) {
+				DEBUGContinue();                 // F5 = continue
+			}
+			break;
+		case SDL_SCANCODE_F9:
+			debug_ui_toggle_breakpoint_at_pc();
+			break;
+		case SDL_SCANCODE_F10:
+			if (ctrl) {
+				debug_ui_run_to_cursor();        // Ctrl+F10 = run to cursor
+			} else if (DEBUGIsPaused()) {
+				DEBUGStepOver();
+			}
+			break;
+		case SDL_SCANCODE_F11:
+			if (DEBUGIsPaused()) {
+				if (shift) {
+					DEBUGStepOut();
+				} else {
+					DEBUGStepInto();
+				}
+			}
+			break;
+		case SDL_SCANCODE_PAUSE:
+			if (DEBUGIsRunning()) {
+				DEBUGPause();
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+// Keep the debugger window live and interactive while the machine is halted
+// under -imgui. Called from DEBUGGetCurrentStatus() when it owns the pause loop.
+// Mirrors the SDL debugger's stopped behaviour -- pump events, re-render,
+// throttle -- but drives the ImGui window instead. Returns the
+// DEBUGGetCurrentStatus contract:
+//   -1 = quit, 1 = stay paused, 0 = a control-bar action resumed/stepped the CPU.
+int
+video_debug_ui_pump_paused(void)
+{
+	SDL_Event event;
+	while (SDL_PollEvent(&event)) {
+		// Feed everything to ImGui so its buttons and inputs work while paused.
+		debug_ui_process_event(&event);
+
+		if (event.type == SDL_QUIT) {
+			return -1;
+		}
+		if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE) {
+			// Closing the debugger window must not kill the emulator; only a
+			// close of the main emulator window quits.
+			if (imgui_window && event.window.windowID == imgui_window_id) {
+				continue;
+			}
+			return -1;
+		}
+
+		// Only an active text field (goto/search) suppresses the shortcuts; a
+		// merely focused panel does not, so F5/F10/F11 work while just viewing.
+		if (event.type == SDL_KEYDOWN && imgui_window &&
+		    event.key.windowID == imgui_window_id &&
+		    !debug_ui_want_text_input()) {
+			video_imgui_debug_key(event.key.keysym);
+		}
+	}
+
+	// Re-present the main window's existing frame and rebuild the debugger's.
+	// The machine is halted, so no new emulated frame exists -- rendering one
+	// would re-blend the activity LED and record a duplicate GIF frame. This is
+	// also where the control-bar buttons are evaluated and may change
+	// currentMode.
+	video_repaint_only();
+
+	SDL_Delay(16); // ~60fps; don't spin hot while parked
+
+	// If a control action resumed or single-stepped, tell emulator_loop to
+	// execute rather than stay parked. DMODE_STOP is the only mode that keeps
+	// us here; run and step both mean "go".
+	if (!DEBUGIsPaused()) {
+		return 0;
+	}
+	return 1;
+}
+#else
+bool video_debug_ui_available(void) { return false; }
+int  video_debug_ui_pump_paused(void) { return 1; }
+#endif
+
 bool
 video_update()
 {
@@ -1491,6 +1679,43 @@ video_update()
 
 	SDL_Event event;
 	while (SDL_PollEvent(&event)) {
+#ifdef HAS_IMGUI
+		// Feed every event to the debugger UI first. If it targets the debugger
+		// window, consume it here so it never reaches the emulated machine --
+		// otherwise typing in a search box would also type into BASIC.
+		if (imgui_window) {
+			debug_ui_process_event(&event);
+			Uint32 imgui_wid = 0;
+			bool imgui_has_wid = true;
+			switch (event.type) {
+				case SDL_WINDOWEVENT: imgui_wid = event.window.windowID; break;
+				case SDL_KEYDOWN:
+				case SDL_KEYUP: imgui_wid = event.key.windowID; break;
+				case SDL_TEXTINPUT: imgui_wid = event.text.windowID; break;
+				case SDL_TEXTEDITING: imgui_wid = event.edit.windowID; break;
+				case SDL_MOUSEBUTTONDOWN:
+				case SDL_MOUSEBUTTONUP: imgui_wid = event.button.windowID; break;
+				case SDL_MOUSEMOTION: imgui_wid = event.motion.windowID; break;
+				case SDL_MOUSEWHEEL: imgui_wid = event.wheel.windowID; break;
+				default: imgui_has_wid = false; break;
+			}
+			// SDL_QUIT carries no window id, so it still falls through to quit.
+			if (imgui_has_wid && imgui_wid == imgui_window_id) {
+				// Closing the debugger window must not kill the emulator.
+				if (event.type == SDL_WINDOWEVENT &&
+				    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+					continue;
+				}
+				// The VS-style shortcuts also work while the machine is running
+				// and the debugger window has focus (F9 to set a breakpoint,
+				// Break to pause). Step/continue are inert until paused.
+				if (event.type == SDL_KEYDOWN && !debug_ui_want_text_input()) {
+					video_imgui_debug_key(event.key.keysym);
+				}
+				continue;
+			}
+		}
+#endif
 		if (event.type == SDL_QUIT) {
 			return false;
 		}
@@ -1642,6 +1867,27 @@ video_end()
 	if (debugger_enabled) {
 		DEBUGFreeUI();
 	}
+
+#ifdef HAS_IMGUI
+	// Tear the UI down before its renderer and window: the ImGui SDL backends
+	// hold both and free renderer-owned textures on shutdown. Safe no-ops if
+	// -imgui was never passed or the window failed to open.
+	if (imgui_window && imgui_renderer) {
+		debug_ui_shutdown();
+	}
+	if (imgui_renderer) {
+		SDL_DestroyRenderer(imgui_renderer);
+		imgui_renderer = NULL;
+	}
+	if (imgui_window) {
+#ifdef _WIN32
+		extern void video_win32_remove_move_hook(SDL_Window *window);
+		video_win32_remove_move_hook(imgui_window);
+#endif
+		SDL_DestroyWindow(imgui_window);
+		imgui_window = NULL;
+	}
+#endif
 
 	if (record_gif != RECORD_GIF_DISABLED) {
 		GifEnd(&gif_writer);

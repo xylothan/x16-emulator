@@ -11,6 +11,10 @@
 
 #include "cpu/registers.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //#define TRACE
 //#define PERFSTAT
 
@@ -65,6 +69,7 @@ extern uint16_t num_banks;
 extern uint16_t num_ram_banks;
 
 extern bool debugger_enabled;
+extern bool imgui_debugger_enabled;
 extern bool log_video;
 extern bool log_keyboard;
 extern bool log_speed;
@@ -115,4 +120,8 @@ extern bool kernal_mouse_enabled;
 extern char window_title[];
 extern bool pwr_long_press;
 extern bool is_gen2;
+#ifdef __cplusplus
+}
+#endif
+
 #endif

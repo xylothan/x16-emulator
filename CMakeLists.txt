@@ -94,6 +94,27 @@ endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(PkgConfig QUIET)
 
+# Dear ImGui debugger
+#
+# An in-process debugger UI in its own window: memory, disassembly, CPU, VERA,
+# source, breakpoints, symbols and call stack. Opt in at runtime with -imgui.
+# AUTO builds it when the vendored sources are present, which they are in-tree;
+# OFF drops the third-party C++ from the build for anyone who does not want it.
+
+set(ENABLE_IMGUI "AUTO" CACHE STRING "Build the Dear ImGui debugger UI (ON/OFF/AUTO)")
+set_property(CACHE ENABLE_IMGUI PROPERTY STRINGS ON OFF AUTO)
+
+set(USE_IMGUI FALSE)
+if(ENABLE_IMGUI STREQUAL "OFF")
+    message(STATUS "[x16] ImGui debugger explicitly disabled.")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/extern/imgui/imgui.cpp")
+    set(USE_IMGUI TRUE)
+elseif(ENABLE_IMGUI STREQUAL "ON")
+    message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON but src/extern/imgui is missing.")
+else()
+    message(STATUS "[x16] Vendored ImGui not found; building without the debugger UI.")
+endif()
+
 # Fluidsynth
 
 set(ENABLE_FLUIDSYNTH "AUTO" CACHE STRING "Enable FluidSynth MIDI support (ON/OFF/AUTO)")
@@ -233,6 +254,40 @@ set(X16_SOURCES
     src/extern/ymfm/src/ymfm_opm.cpp
 )
 
+if(USE_IMGUI)
+    # Vendored Dear ImGui (docking branch) + the SDL2 / SDLRenderer2 backends,
+    # kept in their own list so the project's strict warnings can be relaxed for
+    # just these files: ImGui does not build clean under /W3 /WX or -Wall
+    # -Werror, and neither does UI code written against it.
+    set(IMGUI_SOURCES
+        src/extern/imgui/imgui.cpp
+        src/extern/imgui/imgui_draw.cpp
+        src/extern/imgui/imgui_tables.cpp
+        src/extern/imgui/imgui_widgets.cpp
+        src/extern/imgui/imgui_demo.cpp
+        src/extern/imgui/backends/imgui_impl_sdl2.cpp
+        src/extern/imgui/backends/imgui_impl_sdlrenderer2.cpp
+    )
+
+    # The debug_ui module: a C-callable core plus self-registering panels.
+    # Adding a panel means dropping a file under src/debug_ui/panels/ and
+    # listing it here.
+    set(DEBUG_UI_SOURCES
+        src/debug_ui/debug_ui.cpp
+        src/debug_ui/debug_ui_panels.cpp
+        src/debug_ui/panels/memory_panel.cpp
+        src/debug_ui/panels/disasm_panel.cpp
+        src/debug_ui/panels/cpu_panel.cpp
+        src/debug_ui/panels/vera_panel.cpp
+        src/debug_ui/panels/source_panel.cpp
+        src/debug_ui/panels/breakpoints_panel.cpp
+        src/debug_ui/panels/symbols_panel.cpp
+        src/debug_ui/panels/callstack_panel.cpp
+    )
+
+    list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
+endif()
+
 if(WIN32)
     list(APPEND X16_SOURCES src/video_win32.c)
 endif()
@@ -253,6 +308,25 @@ target_include_directories(x16emu PRIVATE
     src/extern/ymfm/src
     ${GIT_REV_HEADER_DIR}
 )
+
+if(USE_IMGUI)
+    target_include_directories(x16emu PRIVATE
+        src/extern/imgui
+        src/extern/imgui/backends
+        src/extern/imgui_club
+        src/debug_ui
+    )
+    target_compile_definitions(x16emu PRIVATE HAS_IMGUI)
+    # Relaxed per-file so the rest of the tree keeps warnings-as-errors. On MSVC
+    # "/w" sets warning level 0, which also neutralises "/WX" for these files.
+    if(MSVC)
+        set_source_files_properties(${IMGUI_SOURCES} ${DEBUG_UI_SOURCES}
+            PROPERTIES COMPILE_OPTIONS "/w")
+    else()
+        set_source_files_properties(${IMGUI_SOURCES} ${DEBUG_UI_SOURCES}
+            PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+endif()
 
 if(USE_TRACE)
     target_compile_definitions(x16emu PRIVATE TRACE)

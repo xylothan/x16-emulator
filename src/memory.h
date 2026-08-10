@@ -10,6 +10,10 @@
 #include <stdio.h>
 #include <SDL.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define BANK_SIZE 65536
 
 #define USE_CURRENT_X16_BANK (-1)
@@ -71,5 +75,9 @@ uint8_t memory_get_rom_bank();
 
 uint8_t emu_read(uint8_t reg, bool debugOn);
 void emu_write(uint8_t reg, uint8_t value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

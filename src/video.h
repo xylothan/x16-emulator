@@ -17,6 +17,11 @@ bool video_step(float mhz, float steps, bool midline);
 bool video_update(void);
 void video_present_no_input(void);
 void video_repaint_only(void);
+// The ImGui debugger window, in builds configured with -DENABLE_IMGUI.
+// Both are always defined: without the UI, available() is false and the pump
+// reports "stay paused", so call sites need no #ifdef.
+bool video_debug_ui_available(void);
+int  video_debug_ui_pump_paused(void);
 void video_end(void);
 bool video_get_irq_out(void);
 void video_save(SDL_RWops *f);

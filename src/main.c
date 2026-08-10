@@ -96,6 +96,10 @@ uint32_t stat[65536];
 #endif
 
 bool debugger_enabled = false;
+// -imgui: the graphical debugger window. Independent of debugger_enabled, so
+// the two UIs can be used together or separately. Always defined, even in a
+// build without the UI, so the emulator loop needs no #ifdef.
+bool imgui_debugger_enabled = false;
 char *paste_text = NULL;
 char *clipboard_buffer = NULL;
 char paste_text_data[65536];
@@ -574,6 +578,12 @@ usage()
 	printf("\tSet the opacity value (0.0 for transparent, 1.0 for opaque) of the window. (default: %.1f)\n", window_opacity);
 	printf("-debug [<address>]\n");
 	printf("\tEnable debugger. Optionally, set a breakpoint\n");
+#ifdef HAS_IMGUI
+	printf("-imgui\n");
+	printf("\tOpen the graphical debugger in a second window: memory,\n");
+	printf("\tdisassembly, CPU, VERA, source, breakpoints, symbols and call\n");
+	printf("\tstack. Independent of -debug, and can be combined with it.\n");
+#endif
 	printf("-bp <address>\n");
 	printf("\tEnable the debugger and set a breakpoint. Unlike -debug's optional\n");
 	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
@@ -1011,6 +1021,17 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-imgui")) {
+			argc--;
+			argv++;
+#ifdef HAS_IMGUI
+			imgui_debugger_enabled = true;
+#else
+			// Fail loudly rather than starting with a flag that silently does
+			// nothing: this build was configured with -DENABLE_IMGUI=OFF.
+			printf("This build has no graphical debugger; -imgui is unavailable.\n");
+			exit(1);
+#endif
 		} else if (!strcmp(argv[0], "-bp")) {
 			argc--;
 			argv++;
@@ -2071,7 +2092,10 @@ emulator_loop(void *param)
 			testbench_init();
 		}
 
-		if (debugger_enabled) {
+		// The graphical debugger needs this too: DEBUGGetCurrentStatus() is what
+		// detects breakpoint arrival and completes a step, and it delegates the
+		// pause loop to whichever UI is up.
+		if (debugger_enabled || imgui_debugger_enabled) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;

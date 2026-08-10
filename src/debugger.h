@@ -19,6 +19,10 @@
 // needs and which can be tested without standing up an SDL window.
 #include "debug_core.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern int showDebugOnRender;
 
 void DEBUGRenderDisplay(int width,int height);
@@ -55,5 +59,9 @@ bool DEBUGIsPaused(void);
 #define DMODE_STOP 		(0)										// Debugger is waiting for action.
 #define DMODE_STEP 		(1)										// Debugger is doing a single step
 #define DMODE_RUN 		(2)										// Debugger is running normally.
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

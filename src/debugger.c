@@ -291,6 +291,15 @@ int  DEBUGGetCurrentStatus(void) {
 	}
 
 	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
+		// -imgui without -debug: the graphical debugger owns the pause loop, so
+		// it pumps events, repaints and decides when to resume. Gated on the
+		// window having actually been created -- if it failed to open there is
+		// no control bar to resume from, and swallowing the loop here would
+		// park the machine unrecoverably.
+		if (!debugger_enabled && video_debug_ui_available()) {
+			showDebugOnRender = 0;                                  // no SDL overlay in this mode
+			return video_debug_ui_pump_paused();
+		}
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
