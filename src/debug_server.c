@@ -149,7 +149,49 @@ static bool     dap_session_active = false;
 // breakpoint can hit while the client is still configuring, and configurationDone
 // would then report the same halt a second time under a different reason.
 static bool     dap_stop_announced = false;
+// A step-over/step-out this session asked for. The step breakpoint is shared
+// with the SDL debugger's F10/F11, and cancelling one the user started would
+// silently turn their step into a run.
+static bool     dap_owns_pending_step = false;
 
+// Which core breakpoints were already armed before this server first asked for
+// them -- by -bp on the command line, or F9 in the SDL debug window. Those must
+// survive the session.
+//
+// It has to be decided per ADDRESS, once, by whichever server table gets there
+// first. Probing at each add cannot tell "the user already had this" from "a
+// sibling table of ours already added it", because debug_bp_find() answers yes
+// to both; the second table would then record the user's breakpoint as its own
+// and delete it at teardown.
+#define MAX_EXT_KEYS (MAX_DAP_BREAKPOINTS + 256)
+static struct { uint16_t pc; uint8_t bank; int x16Bank; bool external; }
+       ext_keys[MAX_EXT_KEYS];
+static int num_ext_keys = 0;
+
+static int ext_key_find(uint16_t pc, uint8_t bank, int x16Bank) {
+    for (int i = 0; i < num_ext_keys; i++)
+        if (ext_keys[i].pc == pc && ext_keys[i].bank == bank &&
+            ext_keys[i].x16Bank == x16Bank) return i;
+    return -1;
+}
+
+// Answers "does this core entry belong to someone outside the server?", and
+// remembers the answer for every later table that names the same address.
+static bool ext_key_note(uint16_t pc, uint8_t bank, int x16Bank) {
+    int i = ext_key_find(pc, bank, x16Bank);
+    if (i >= 0) return ext_keys[i].external;
+    bool external = (debug_bp_find(pc, bank, x16Bank) >= 0);
+    if (num_ext_keys < MAX_EXT_KEYS) {
+        ext_keys[num_ext_keys].pc       = pc;
+        ext_keys[num_ext_keys].bank     = bank;
+        ext_keys[num_ext_keys].x16Bank  = x16Bank;
+        ext_keys[num_ext_keys].external = external;
+        num_ext_keys++;
+    }
+    return external;
+}
+
+static void ext_key_reset(void) { num_ext_keys = 0; }
 // Forward declarations
 static void send_dap_event(const char *event_name, cJSON *body);
 static void send_dap_message(cJSON *json);
@@ -179,10 +221,7 @@ static void retry_unverified_breakpoints(void) {
                 hw_bp.pc = (int)(addr & 0xFFFF);
                 hw_bp.bank = (uint8_t)(addr >> 16);
                 hw_bp.x16Bank = bank_pin;
-                dap_bps[i].external =
-                    (debug_bp_find(hw_bp.pc, hw_bp.bank, hw_bp.x16Bank) >= 0) &&
-                    !server_bp_wanted_elsewhere((uint16_t)hw_bp.pc, hw_bp.bank,
-                                                hw_bp.x16Bank, 0, i);
+                dap_bps[i].external = ext_key_note((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank);
                 debug_bp_add(hw_bp);
                 printf("[dap] Resolved pending breakpoint: %s:%d -> $%04X\n",
                        dap_bps[i].file, dap_bps[i].line, (unsigned)addr);
@@ -1067,10 +1106,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             hw_bp.pc = (int)(addr & 0xFFFF);
             hw_bp.bank = (uint8_t)(addr >> 16);
             hw_bp.x16Bank = bank_pin;
-            dap_bps[num_dap_bps].external =
-                (debug_bp_find(hw_bp.pc, hw_bp.bank, hw_bp.x16Bank) >= 0) &&
-                !server_bp_wanted_elsewhere((uint16_t)hw_bp.pc, hw_bp.bank,
-                                            hw_bp.x16Bank, 0, num_dap_bps);
+            dap_bps[num_dap_bps].external = ext_key_note((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank);
             debug_bp_add(hw_bp);
             dap_bps[num_dap_bps].dap_id = bp_id;
             dap_bps[num_dap_bps].addr = (uint16_t)(addr & 0xFFFF);
@@ -1135,6 +1171,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
 
 static int handle_dap_continue(int seq, cJSON *args) {
     (void)args;
+    // Cleared first so the resume hook stays quiet: this request sends its own
+    // continued event after the response, and the hook exists for resumes the
+    // client did not ask for.
+    dap_stop_announced = false;
     DEBUGContinue();
     cJSON *body = cJSON_CreateObject();
     cJSON_AddBoolToObject(body, "allThreadsContinued", true);
@@ -1153,6 +1193,8 @@ static int handle_dap_continue(int seq, cJSON *args) {
 // collide with a breakpoint the user set at the same address.
 static int handle_dap_next(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // this request implies execution continues
+    dap_owns_pending_step = true;
     DEBUGStepOver();
     send_dap_response(seq, "next", true, NULL);
     return 1;
@@ -1160,6 +1202,7 @@ static int handle_dap_next(int seq, cJSON *args) {
 
 static int handle_dap_step_in(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // this request implies execution continues
     DEBUGStepInto();
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
@@ -1167,6 +1210,8 @@ static int handle_dap_step_in(int seq, cJSON *args) {
 
 static int handle_dap_step_out(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // this request implies execution continues
+    dap_owns_pending_step = true;
     DEBUGStepOut();
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
@@ -1327,9 +1372,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         // asked for it and could halt a headless machine with nobody able to
         // resume it.
         if (num_dap_bps < MAX_DAP_BREAKPOINTS) {
-            dap_bps[num_dap_bps].external =
-                (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0) &&
-                !server_bp_wanted_elsewhere(addr, 0, -1, 0, num_dap_bps);
+            dap_bps[num_dap_bps].external = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
             dap_bps[num_dap_bps].dap_id  = next_dap_bp_id++;
             dap_bps[num_dap_bps].addr    = addr;
             dap_bps[num_dap_bps].bank    = 0;
@@ -1950,6 +1993,11 @@ static int handle_dap_terminate(int seq, cJSON *args) {
     (void)args;
     send_dap_response(seq, "terminate", true, NULL);
     dap_session_active = false;
+    // Released before resuming, for the same reason as the disconnect request:
+    // running on with this client's breakpoints still armed halts the machine
+    // again moments later, and by then the session is marked inactive so the
+    // socket cleanup will not resume it.
+    dap_release_session_state();
     // Same rule as a client disconnecting: only take the machine out of a stop
     // when there is no local debugger whose user owns the run state. Otherwise
     // "Stop Debugging" in the editor runs the emulator out from under someone
@@ -2025,9 +2073,7 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
         bool verified = false;
         if (nm && cJSON_IsString(nm) && dbg_info_label_to_addr(nm->valuestring, &addr) && num_func_bps < 128) {
             struct breakpoint bp = { (int)(addr & 0xFFFF), (uint8_t)(addr >> 16), -1 };
-            func_bp_external[num_func_bps] =
-                (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0) &&
-                !server_bp_wanted_elsewhere((uint16_t)bp.pc, bp.bank, bp.x16Bank, 1, -1);
+            func_bp_external[num_func_bps] = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
             debug_bp_add(bp);
             func_bp_banks[num_func_bps] = (uint8_t)(addr >> 16);
             func_bp_addrs[num_func_bps++] = (uint16_t)(addr & 0xFFFF);
@@ -2071,9 +2117,7 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
             // server told the client to use.
             if (addr >= 0 && addr <= 0xFFFFFF && num_instr_bps < 128) {
                 struct breakpoint bp = { (int)(addr & 0xFFFF), (uint8_t)(addr >> 16), -1 };
-                instr_bp_external[num_instr_bps] =
-                    (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0) &&
-                    !server_bp_wanted_elsewhere((uint16_t)bp.pc, bp.bank, bp.x16Bank, 2, -1);
+                instr_bp_external[num_instr_bps] = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
                 debug_bp_add(bp);
                 instr_bp_banks[num_instr_bps] = (uint8_t)(addr >> 16);
                 instr_bp_addrs[num_instr_bps++] = (uint16_t)(addr & 0xFFFF);
@@ -2362,8 +2406,14 @@ static void dap_release_session_state(void) {
               debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY); }
     num_instr_bps = 0;
     dap_clear_own_watchpoints(true);
-    // A step-over or step-out still in flight has a breakpoint of its own.
-    DEBUGCancelStep();
+    // A step-over or step-out THIS session started has a breakpoint of its own,
+    // and nothing else can retract it. One the local debugger started belongs to
+    // the user at the keyboard and is left alone.
+    if (dap_owns_pending_step) {
+        DEBUGCancelStep();
+        dap_owns_pending_step = false;
+    }
+    ext_key_reset();
     dap_stop_on_entry = false;
     dap_stop_announced = false;
 }
