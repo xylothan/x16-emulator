@@ -943,7 +943,11 @@ main(void)
 	{
 		// -- Unbanked low memory: neither bank means anything.
 		reset_all();
-		debug_bp_add(bp_at(0x0801, 0, DEBUG_BANK_ANY));
+		// Named with a specific bank, which is the only way this proves
+		// anything: an ANY selector matches before the bank rule is consulted,
+		// so it would pass even under a rule that wrongly called low memory
+		// banked. A bank named here has to be normalised away on insert.
+		debug_bp_add(bp_at(0x0801, 0, 7));
 		bool unbanked_ok = true;
 		for (int b = 0; b < 3; b++) {
 			g_ram_bank = (uint8_t)(b * 7);
@@ -952,6 +956,10 @@ main(void)
 				unbanked_ok = false;
 		}
 		check(unbanked_ok, "an unbanked address matches whatever banks are mapped");
+
+		// And the rule itself agrees, asked directly.
+		check(debug_bank_selector_matches(7, 0x0801, 0),
+		      "a bank named for low memory does not filter anything out");
 
 		// -- RAM window, every bank a stock X16 can have.
 		reset_all();
@@ -1023,7 +1031,11 @@ main(void)
 		// registers select nothing and must not filter the breakpoint out.
 		reset_all();
 		is_gen2 = true;
-		debug_bp_add(bp_at(0xA000, 1, DEBUG_BANK_ANY));
+		// Added with a SPECIFIC bank, not ANY. An ANY selector short-circuits
+		// before the bank rule is ever consulted, so it passes whatever that
+		// rule does -- which is how the only direct check of this case used to
+		// pass with the very bug it was written for.
+		debug_bp_add(bp_at(0xA000, 1, 5));
 		bool gs_ok = true;
 		for (int b = 0; b < 8; b++) {
 			g_ram_bank = (uint8_t)b;
@@ -1031,6 +1043,19 @@ main(void)
 				gs_ok = false;
 		}
 		check(gs_ok, "in a Gen2 program bank the RAM bank does not apply");
+
+		// The shared entry point, called directly. hitBreakpoint() in the
+		// debugger reaches the rule through this and nothing else did.
+		check(debug_bank_selector_matches(5, 0xA000, 1),
+		      "a named bank does not filter inside a Gen2 program bank");
+		g_ram_bank = 5;
+		is_gen2 = false;
+		check(debug_bank_selector_matches(5, 0xA000, 1),
+		      "but on gen1 the window still applies inside a program bank");
+		g_ram_bank = 6;
+		check(!debug_bank_selector_matches(5, 0xA000, 1),
+		      "and there it filters on the mapped bank");
+		is_gen2 = true;
 
 		// And a bank named for such an address is normalised away rather than
 		// silently making a second, unreachable breakpoint.

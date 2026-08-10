@@ -171,12 +171,13 @@ int    oldRegisterTicks = 0;                          // Last PC when change not
 
 SDL_Renderer *dbgRenderer;                            // Renderer passed in.
 
+// Which RAM/ROM window the PC is in, or -1 where a bank means nothing there.
+// Delegates to debug_core so the rule that *produces* a selector is the same one
+// the matcher applies. The copy that used to live here required the program bank
+// to be zero unconditionally, which disagrees on gen1 with -c816: read6502
+// forces the bank to zero there, so the window registers do apply.
 static inline int getCurrentBank(int pc, uint8_t bank) {
-	int x16Bank = -1;
-	if (pc >= 0xA000 && bank == 0) {
-		x16Bank = pc < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
-	}
-	return x16Bank;
+	return debug_current_x16_bank(pc, bank);
 }
 
 // *******************************************************************************************
@@ -722,7 +723,13 @@ static void DEBUGExecCmd() {
 						if (addr >= 0xC000 && addr < 0x10000) {
 							// Nop.
 						} else if (addr >= 0xA000 && addr < 0xC000) {
-							BRAM[(currentX16Bank << 13) + addr - 0xA000] = number;
+							// Bounds-checked like the RAM branch below, which it
+							// was not: currentX16Bank starts at -1 and is taken
+							// from user input with only a & 0xFF, so an unset or
+							// out-of-range bank indexed outside the allocation.
+							if (currentX16Bank >= 0 && currentX16Bank < (int)num_ram_banks) {
+								BRAM[(currentX16Bank << 13) + addr - 0xA000] = number;
+							}
 						} else if ((addr >> 16) < num_banks) {
 							RAM[addr] = number;
 						}
