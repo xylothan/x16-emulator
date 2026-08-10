@@ -151,6 +151,8 @@ static uint32_t resumeSkipClock = 0;
 // DEBUGBreakOnWatchpoint().
 static bool watchpointStopPending = false;
 
+static void DEBUGClearStepBreakPoint(void);
+
 static void DEBUGArmResumeSkip(void) {
 	resumeSkipPC    = regs.pc;
 	resumeSkipBank  = regs.k;
@@ -278,9 +280,7 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
-			stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
-			stepBreakPoint.bank = 0;
-			stepBreakPoint.x16Bank = -1;
+			DEBUGClearStepBreakPoint();                             // and the step target is retired
 			// A step-over or step-out finishing is a completed step to a client,
 			// not a breakpoint it never set.
 			debug_server_notify_stopped(viaStep ? "step" : "breakpoint");
@@ -444,6 +444,8 @@ void DEBUGBreakOnWatchpoint(void) {
 // *******************************************************************************************
 
 static void DEBUGClearStepBreakPoint(void) {
+	// Whoever owned the pending step no longer does.
+	debug_server_note_step_ended();
 	stepBreakPoint.pc = -1;
 	stepBreakPoint.bank = 0;
 	stepBreakPoint.x16Bank = -1;

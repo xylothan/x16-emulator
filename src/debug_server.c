@@ -177,18 +177,39 @@ static int ext_key_find(uint16_t pc, uint8_t bank, int x16Bank) {
 
 // Answers "does this core entry belong to someone outside the server?", and
 // remembers the answer for every later table that names the same address.
-static bool ext_key_note(uint16_t pc, uint8_t bank, int x16Bank) {
+//
+// Decided from whether OUR add created the entry, not from a probe: when the
+// key is new to the registry no server table has armed it this session, so an
+// add that found something already there found somebody else's. A probe alone
+// could not tell that from a sibling table of ours -- and answering once and
+// trusting it for the session went stale the moment anyone removed the entry,
+// after which the cache would report the user's new F9 breakpoint as ours to
+// delete.
+static bool ext_key_note_after_add(uint16_t pc, uint8_t bank, int x16Bank, bool created) {
     int i = ext_key_find(pc, bank, x16Bank);
     if (i >= 0) return ext_keys[i].external;
-    bool external = (debug_bp_find(pc, bank, x16Bank) >= 0);
-    if (num_ext_keys < MAX_EXT_KEYS) {
-        ext_keys[num_ext_keys].pc       = pc;
-        ext_keys[num_ext_keys].bank     = bank;
-        ext_keys[num_ext_keys].x16Bank  = x16Bank;
-        ext_keys[num_ext_keys].external = external;
-        num_ext_keys++;
+    bool external = !created;
+    if (num_ext_keys >= MAX_EXT_KEYS) {
+        // Full. Answering conservatively is the safe direction: treat it as
+        // somebody else's, so teardown leaves it alone rather than deleting a
+        // breakpoint that may not be ours.
+        return true;
     }
+    ext_keys[num_ext_keys].pc       = pc;
+    ext_keys[num_ext_keys].bank     = bank;
+    ext_keys[num_ext_keys].x16Bank  = x16Bank;
+    ext_keys[num_ext_keys].external = external;
+    num_ext_keys++;
     return external;
+}
+
+// No server table names this address any more, so the next add works it out
+// again rather than inheriting an answer about an entry that has since been
+// removed -- possibly by the user, and possibly replaced with their own.
+static void ext_key_forget(uint16_t pc, uint8_t bank, int x16Bank) {
+    int i = ext_key_find(pc, bank, x16Bank);
+    if (i < 0) return;
+    ext_keys[i] = ext_keys[--num_ext_keys];
 }
 
 static void ext_key_reset(void) { num_ext_keys = 0; }
@@ -221,8 +242,7 @@ static void retry_unverified_breakpoints(void) {
                 hw_bp.pc = (int)(addr & 0xFFFF);
                 hw_bp.bank = (uint8_t)(addr >> 16);
                 hw_bp.x16Bank = bank_pin;
-                dap_bps[i].external = ext_key_note((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank);
-                debug_bp_add(hw_bp);
+                dap_bps[i].external = ext_key_note_after_add((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank, debug_bp_add(hw_bp) >= 0);
                 printf("[dap] Resolved pending breakpoint: %s:%d -> $%04X\n",
                        dap_bps[i].file, dap_bps[i].line, (unsigned)addr);
                 // Say so. This is reached after invalidate_breakpoints_in_range()
@@ -261,6 +281,7 @@ static void invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
                 !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+                ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
             dap_bps[i].verified = false;
             dap_bps[i].external = false;
@@ -349,7 +370,20 @@ static void send_dap_message(cJSON *json) {
         int body_len = (int)strlen(body);
         int header_len = snprintf(send_buf, sizeof(send_buf),
                                   "Content-Length: %d\r\n\r\n", body_len);
-        if (header_len + body_len < SEND_BUF_SIZE) {
+        if (header_len + body_len >= SEND_BUF_SIZE) {
+            // Too large to frame. Dropping it silently left the client waiting
+            // on a request_seq that would never be answered -- a source file
+            // over 64K is enough to do it, and the editor shows a tab that
+            // never finishes loading. The receive side already drops a client
+            // it cannot buffer; do the same rather than hang.
+            fprintf(stderr, "[dap] response of %d bytes exceeds the send buffer; dropping client\n",
+                    header_len + body_len);
+            cJSON_free(body);
+            cJSON_Delete(json);
+            disconnect_client();
+            return;
+        }
+        {
             memcpy(send_buf + header_len, body, body_len);
             int total = header_len + body_len;
             int offset = 0;
@@ -1061,6 +1095,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
                 !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+                ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
             // Shift array
             for (int j = i; j < num_dap_bps - 1; j++) {
@@ -1106,8 +1141,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             hw_bp.pc = (int)(addr & 0xFFFF);
             hw_bp.bank = (uint8_t)(addr >> 16);
             hw_bp.x16Bank = bank_pin;
-            dap_bps[num_dap_bps].external = ext_key_note((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank);
-            debug_bp_add(hw_bp);
+            dap_bps[num_dap_bps].external = ext_key_note_after_add((uint16_t)hw_bp.pc, hw_bp.bank, hw_bp.x16Bank, debug_bp_add(hw_bp) >= 0);
             dap_bps[num_dap_bps].dap_id = bp_id;
             dap_bps[num_dap_bps].addr = (uint16_t)(addr & 0xFFFF);
             dap_bps[num_dap_bps].bank = (uint8_t)(addr >> 16);
@@ -1194,8 +1228,8 @@ static int handle_dap_continue(int seq, cJSON *args) {
 static int handle_dap_next(int seq, cJSON *args) {
     (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    dap_owns_pending_step = true;
     DEBUGStepOver();
+    dap_owns_pending_step = true;   // after: the call retires any previous step
     send_dap_response(seq, "next", true, NULL);
     return 1;
 }
@@ -1211,8 +1245,8 @@ static int handle_dap_step_in(int seq, cJSON *args) {
 static int handle_dap_step_out(int seq, cJSON *args) {
     (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    dap_owns_pending_step = true;
     DEBUGStepOut();
+    dap_owns_pending_step = true;   // after: the call retires any previous step
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
 }
@@ -1372,7 +1406,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         // asked for it and could halt a headless machine with nobody able to
         // resume it.
         if (num_dap_bps < MAX_DAP_BREAKPOINTS) {
-            dap_bps[num_dap_bps].external = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
+            dap_bps[num_dap_bps].external = ext_key_note_after_add((uint16_t)bp.pc, bp.bank, bp.x16Bank, debug_bp_add(bp) >= 0);
             dap_bps[num_dap_bps].dap_id  = next_dap_bp_id++;
             dap_bps[num_dap_bps].addr    = addr;
             dap_bps[num_dap_bps].bank    = 0;
@@ -1383,8 +1417,9 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
             dap_bps[num_dap_bps].hit_cond[0] = '\0';
             dap_bps[num_dap_bps].verified = true;
             num_dap_bps++;
+        } else {
+            debug_bp_add(bp);   // table full; arm it anyway, untracked
         }
-        debug_bp_add(bp);
         snprintf(result, sizeof(result), "breakpoint added at $%04X", addr);
     } else if (strncmp(expr, "bp_remove ", 10) == 0) {
         uint16_t addr = (uint16_t)strtoul(expr + 10, NULL, 16);
@@ -2058,7 +2093,9 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
         if (!func_bp_external[i] &&
             !server_bp_wanted_elsewhere(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY, 1, -1))
             { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
+              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+              ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            }
     num_func_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -2073,8 +2110,7 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
         bool verified = false;
         if (nm && cJSON_IsString(nm) && dbg_info_label_to_addr(nm->valuestring, &addr) && num_func_bps < 128) {
             struct breakpoint bp = { (int)(addr & 0xFFFF), (uint8_t)(addr >> 16), -1 };
-            func_bp_external[num_func_bps] = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
-            debug_bp_add(bp);
+            func_bp_external[num_func_bps] = ext_key_note_after_add((uint16_t)bp.pc, bp.bank, bp.x16Bank, debug_bp_add(bp) >= 0);
             func_bp_banks[num_func_bps] = (uint8_t)(addr >> 16);
             func_bp_addrs[num_func_bps++] = (uint16_t)(addr & 0xFFFF);
             cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
@@ -2095,7 +2131,9 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
         if (!instr_bp_external[i] &&
             !server_bp_wanted_elsewhere(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY, 2, -1))
             { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY); }
+              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+              ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+            }
     num_instr_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -2117,8 +2155,7 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
             // server told the client to use.
             if (addr >= 0 && addr <= 0xFFFFFF && num_instr_bps < 128) {
                 struct breakpoint bp = { (int)(addr & 0xFFFF), (uint8_t)(addr >> 16), -1 };
-                instr_bp_external[num_instr_bps] = ext_key_note((uint16_t)bp.pc, bp.bank, bp.x16Bank);
-                debug_bp_add(bp);
+                instr_bp_external[num_instr_bps] = ext_key_note_after_add((uint16_t)bp.pc, bp.bank, bp.x16Bank, debug_bp_add(bp) >= 0);
                 instr_bp_banks[num_instr_bps] = (uint8_t)(addr >> 16);
                 instr_bp_addrs[num_instr_bps++] = (uint16_t)(addr & 0xFFFF);
                 cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
@@ -2392,18 +2429,23 @@ static void dap_release_session_state(void) {
             !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
             debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+            ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
         }
     }
     num_dap_bps = 0;
     for (int i = 0; i < num_func_bps; i++)
         if (!func_bp_external[i])
             { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
+              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+              ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            }
     num_func_bps = 0;
     for (int i = 0; i < num_instr_bps; i++)
         if (!instr_bp_external[i])
             { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY); }
+              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+              ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+            }
     num_instr_bps = 0;
     dap_clear_own_watchpoints(true);
     // A step-over or step-out THIS session started has a breakpoint of its own,
@@ -2653,6 +2695,10 @@ int debug_server_poll(void) {
     }
 
     return mode_changed;
+}
+
+void debug_server_note_step_ended(void) {
+    dap_owns_pending_step = false;
 }
 
 void debug_server_note_resumed(void) {

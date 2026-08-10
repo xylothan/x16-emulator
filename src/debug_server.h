@@ -25,6 +25,7 @@ static inline void debug_server_output(const char *category, const char *text) {
 static inline void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) { (void)start; (void)end; }
 static inline void debug_server_retry_unverified_breakpoints(void) { }
 static inline void debug_server_note_resumed(void) { }
+static inline void debug_server_note_step_ended(void) { }
 static inline void debug_server_shutdown(void) { }
 
 #else
@@ -68,6 +69,11 @@ void debug_server_retry_unverified_breakpoints(void);
 // next stop is then reported once, rather than suppressed as a duplicate of a
 // halt that is already over.
 void debug_server_note_resumed(void);
+
+// The debugger's step target has been retired -- reached, abandoned, or
+// cancelled. Whatever step was pending is over, so a later teardown must not
+// cancel whatever is armed next, which may belong to the user at the keyboard.
+void debug_server_note_step_ended(void);
 
 // Clean shutdown — close sockets, free resources.
 void debug_server_shutdown(void);
