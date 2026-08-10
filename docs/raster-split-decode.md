@@ -95,3 +95,26 @@ An exact implementation needs targeted tests: script a register change at a
 known scanline, then assert what the recorded state reports for rows above and
 below the split. Cover the bitmap path, a mid-line enable, a geometry change, a
 machine reset, a warp-skipped frame, and progressive mode.
+
+---
+
+## Follow-up: exact raster-split decoding
+
+Tracked here, locally. Not an issue on any tracker.
+
+The design an exact implementation needs is in the "What exact would require"
+section above. Summary of the work:
+
+1. Each `render_layer_line_*` publishes the resolved state it actually used
+   (map base, tile base, bpp, tile size, palette offset, layer row indexed), so
+   the record cannot disagree with the renderer by construction.
+2. The compositor commits that record, and only when it consumes a non-empty
+   visible span for that layer.
+3. Settlement tracked per layer, not per line.
+4. Mid-line changes represented explicitly: `(x0, x1, state)` spans, or
+   "first visible span per layer wins" with a flag on lines carrying more than
+   one state.
+5. One invalidation helper shared by reset, mode change and framebuffer clear.
+6. Geometry changes at a split rendered as separate bands rather than declined.
+
+Do the tests first — nothing currently exercises `src/video.c`.
