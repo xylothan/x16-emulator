@@ -1004,12 +1004,25 @@ static void DEBUGRenderVRAM(int y, int data) {
 //
 // *******************************************************************************************
 
+// Unbanked, the RAM window, or the ROM window. A bank number selected for one
+// of these means nothing in the others.
+static int bank_window_of(int addr) {
+	if (addr < 0xA000)
+		return 0;
+	return addr < 0xC000 ? 1 : 2;
+}
+
 static void DEBUGRenderCode(int lines, int initialPC) {
 	char buffer[32];
 	uint8_t implied_status = regs.status;
 	uint8_t implied_e = regs.e;
 	uint8_t opcode, operand, carry;
 	int implied_x16_bank = currentPCX16Bank;
+	// Which window that bank belongs to. A bank number only means something
+	// inside the window it names -- a RAM bank does not select a ROM bank -- so
+	// when the walk crosses out of it the carried value is re-derived from what
+	// is mapped there instead of being carried on regardless.
+	int implied_window = bank_window_of(initialPC);
 
 	for (int y = 0; y < lines; y++) { 							// Each line
 		DEBUGAddress(DBG_ASMX, y, implied_x16_bank, initialPC, currentPCBank, col_label);
@@ -1064,11 +1077,12 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 			}
 		}
 		initialPC = (initialPC + size) & 0xFFFF;										// Forward to next
-		// Same shared rule again. This copy had drifted further than the other:
-		// it filled in the RAM bank whatever window the address was in, so once
-		// disassembly walked past $C000 the RAM bank number was used to select
-		// a ROM bank and the pane showed bytes from the wrong one.
-		if (implied_x16_bank == -1) {
+		// Re-derive on leaving the window the carried bank belongs to. Without
+		// this the bank the pane started with is used for every line, so a walk
+		// from the RAM window into the ROM window selects a ROM bank by its RAM
+		// bank number and renders bytes from the wrong one.
+		if (bank_window_of(initialPC) != implied_window) {
+			implied_window   = bank_window_of(initialPC);
 			implied_x16_bank = debug_current_x16_bank(initialPC, currentPCBank);
 		}
 	}
