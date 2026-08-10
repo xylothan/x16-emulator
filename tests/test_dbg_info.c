@@ -563,6 +563,45 @@ main(void)
 		}
 	}
 
+	// A segment whose name is a prefix of another's. Matching an equate to a
+	// segment by prefix in either direction means RAM_BANK_CODE matches CODE2
+	// as readily as CODE, so whichever equate happened to be parsed first used
+	// to claim both -- and the exact match for the second was then discarded,
+	// putting its code confidently in the wrong bank.
+	{
+		dbg_info_free();
+		static const char *k_dbg_two_banks =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"two.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"seg\tid=1,name=\"CODE2\",start=0x00a020,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"span\tid=1,seg=1,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"line\tid=1,file=0,line=2,span=1\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"sym\tid=1,name=\"RAM_BANK_CODE2\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+			"mod\tid=0,name=\"two.o\",file=0\n";
+		char *tp = write_temp(k_dbg_two_banks, "x16_dbg_info_twobanks.dbg");
+		if (!tp) {
+			check(false, "could not write the prefix-collision fixture");
+		} else {
+			check(dbg_info_load(tp) == 0, "loads two segments with related names");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+			          == DBG_BANK_RESOLVED,
+			      "CODE takes the bank named for it");
+			f = NULL;
+			l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA020, 7, &f, &l)
+			          == DBG_BANK_RESOLVED,
+			      "and CODE2 is not claimed by CODE's equate");
+			remove(tp);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

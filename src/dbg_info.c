@@ -1219,50 +1219,85 @@ static void squash_name(const char *src, char *dst, size_t dstsz)
 	dst[o] = '\0';
 }
 
+/* Reduce a `RAM_BANK_x` / `BANK_x` / `x_BANK` equate name to the squashed
+ * segment name it is talking about. Returns false if it is not one of those. */
+static bool bank_equ_target(const char *nm, char *out, size_t outsz)
+{
+	if (!nm)
+		return false;
+	char stripped[128];
+	if (!strncmp(nm, "RAM_BANK_", 9))
+		snprintf(stripped, sizeof stripped, "%s", nm + 9);
+	else if (!strncmp(nm, "BANK_", 5))
+		snprintf(stripped, sizeof stripped, "%s", nm + 5);
+	else {
+		size_t l = strlen(nm);
+		if (l > 5 && !strcmp(nm + l - 5, "_BANK"))
+			snprintf(stripped, sizeof stripped, "%.*s", (int)(l - 5), nm);
+		else
+			return false;
+	}
+	squash_name(stripped, out, outsz);
+	return out[0] != '\0';
+}
+
 /* Seed segment banks from `RAM_BANK_x` / `x_BANK` style equates parsed out of
- * the .dbg. Matching is on the squashed names, accepting a prefix match so
- * RAM_BANK_STORE_TILEMAP pairs with segment STORETILE. */
+ * the .dbg. Matching is on the squashed names.
+ *
+ * Driven from the segment rather than the equate. Walking the equates and
+ * claiming every segment that matched put the answer at the mercy of the order
+ * the equates happened to be parsed in: a prefix match is accepted in either
+ * direction, so RAM_BANK_CODE matches segment CODE2 as readily as CODE, and
+ * because a segment that already has a bank is skipped, whichever equate was
+ * seen first won -- leaving the exact RAM_BANK_CODE2 to be discarded and CODE2's
+ * code attributed to the wrong bank. Per segment we can insist on the exact
+ * match when there is one, and fall back to a prefix only when exactly one
+ * equate matches; an ambiguous name is left unknown, which the caller reports
+ * honestly, rather than confidently wrong. */
 static void seed_banks_from_equates(void)
 {
-	for (int b = 0; b < bank_equ_count; b++) {
-		const char *nm = bank_equs[b].name;
-		if (!nm)
+	for (int i = 0; i < seg_count; i++) {
+		if (segs[i].bank >= 0 || !segs[i].name || !segs[i].size)
 			continue;
-		/* Strip a leading "RAM_BANK_" / "BANK_", or a trailing "_BANK". */
-		char stripped[128];
-		if (!strncmp(nm, "RAM_BANK_", 9))
-			snprintf(stripped, sizeof stripped, "%s", nm + 9);
-		else if (!strncmp(nm, "BANK_", 5))
-			snprintf(stripped, sizeof stripped, "%s", nm + 5);
-		else {
-			size_t l = strlen(nm);
-			if (l > 5 && !strcmp(nm + l - 5, "_BANK"))
-				snprintf(stripped, sizeof stripped, "%.*s", (int)(l - 5), nm);
-			else
-				continue;
-		}
-
-		char want[128];
-		squash_name(stripped, want, sizeof want);
-		if (!want[0])
+		if (segs[i].start < 0xA000 || segs[i].start > 0xBFFF)
 			continue;
 
-		for (int i = 0; i < seg_count; i++) {
-			if (segs[i].bank >= 0 || !segs[i].name || !segs[i].size)
+		char have[128];
+		squash_name(segs[i].name, have, sizeof have);
+		if (!have[0])
+			continue;
+		size_t lh = strlen(have);
+
+		int exact = -1, exact_n = 0;
+		int pref  = -1, pref_n  = 0;
+
+		for (int b = 0; b < bank_equ_count; b++) {
+			char want[128];
+			if (!bank_equ_target(bank_equs[b].name, want, sizeof want))
 				continue;
-			if (segs[i].start < 0xA000 || segs[i].start > 0xBFFF)
+			if (!strcmp(have, want)) {
+				if (exact < 0 || bank_equs[exact].bank != bank_equs[b].bank)
+					exact_n++;
+				if (exact < 0)
+					exact = b;
 				continue;
-			char have[128];
-			squash_name(segs[i].name, have, sizeof have);
-			if (!have[0])
-				continue;
-			/* Accept either direction of prefix match (STORETILE vs
-			 * STORETILEMAP), which is what these naming conventions produce. */
-			size_t lh = strlen(have), lw = strlen(want);
-			size_t n = lh < lw ? lh : lw;
-			if (n >= 4 && !strncmp(have, want, n))
-				segs[i].bank = bank_equs[b].bank;
+			}
+			/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with segment
+			 * STORETILE, which is what these naming conventions produce. */
+			size_t lw = strlen(want);
+			size_t n  = lh < lw ? lh : lw;
+			if (n >= 4 && !strncmp(have, want, n)) {
+				if (pref < 0 || bank_equs[pref].bank != bank_equs[b].bank)
+					pref_n++;
+				if (pref < 0)
+					pref = b;
+			}
 		}
+
+		if (exact_n == 1)
+			segs[i].bank = bank_equs[exact].bank;
+		else if (exact_n == 0 && pref_n == 1)
+			segs[i].bank = bank_equs[pref].bank;
 	}
 }
 
