@@ -64,13 +64,17 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 // also drops other modules' records in that window -- including debug info
 // loaded with -dbgfile, which nothing re-merges.
 //
-// It cannot simply be narrowed. Segment and label records are still appended
-// unconditionally -- only file and equate records are reused -- so a range that
-// misses this module's own BSS and zero-page records leaves them behind while
-// adding fresh copies, and they accumulate until an address can be described by
-// a module that is no longer resident. Evicting other modules and replacing this
-// one's own records want different ranges, and telling them apart needs records
-// to carry the module they came from.
+// It cannot simply be narrowed. Segment, span, line and label records are still
+// appended unconditionally -- only file and equate records are reused -- so a
+// range that misses this module's own BSS and zero-page records leaves them
+// behind while adding fresh copies, and they accumulate until an address can be
+// described by a module that is no longer resident. Evicting other modules and
+// replacing this one's own records want different ranges.
+//
+// Records do now carry the module they came from, but only the deduplicated
+// ones: dbg_file_t and the two equate tables. Finishing this means giving
+// dbg_seg_t/dbg_span_t/dbg_line_t/dbg_sym_t the same owner field and having
+// dbg_info_unload_range() drop by owner rather than purely by address.
 //
 // NOTE: load_addr is currently ignored -- the debug info always describes the
 // program at its link-time addresses. A relocating load (secondary address 0)

@@ -30,6 +30,7 @@ typedef struct {
 	uint32_t size;
 	char    *name;    /* segment name, e.g. "BANKCODE" */
 	int      bank;    /* X16 RAM bank this segment lives in, -1 = unknown */
+	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
 } dbg_seg_t;
 
 typedef struct {
@@ -395,9 +396,11 @@ static void parse_file_record(const char *p)
 	 * deliberately leaves file records alone -- callers keep the path pointers
 	 * we handed them -- so appending here would add a copy of every file on
 	 * every reload, and an overlay swapped in and out repeatedly would grow the
-	 * table without end. Restricted to one owner: two modules that both build a
-	 * "main.c" have two different main.c's, and merging them would send the
-	 * source viewer to the wrong one. */
+	 * table without end. Restricted to one owner because two modules that both
+	 * build a "main.c" have two different main.c's. Consumers currently resolve
+	 * a file by its name string, so merging them is not yet observable beyond
+	 * the record count; keeping them apart is what lets the ownership work
+	 * noted at dbg_info_load_for_file() tell them apart later. */
 	for (int i = 0; i < file_count; i++) {
 		if (files[i].owner == cur_owner && files[i].name &&
 		    strcmp(files[i].name, name) == 0) {
@@ -433,6 +436,7 @@ static void parse_seg_record(const char *p)
 	segs[seg_count].size  = (uint32_t)size;
 	segs[seg_count].name  = parse_str_key(p, "name"); /* may be NULL */
 	segs[seg_count].bank  = -1;                       /* learned later */
+	segs[seg_count].owner = cur_owner;
 	seg_count++;
 }
 
@@ -515,12 +519,12 @@ static void parse_sym_record(const char *p)
 			                  !strncmp(name, "BANK_", 5) ||
 			                  (l > 5 && !strcmp(name + l - 5, "_BANK"));
 			if (looks_bank) {
-				/* Replace rather than append. Nothing prunes these, and the
-				 * seeding below takes the FIRST equate that matches a segment
-				 * and then skips that segment, so appending would let a bank
-				 * from a module swapped out long ago decide where a live one
-				 * lives -- mislabelling code rather than merely reporting a
-				 * wrong number. */
+				/* Same-owner only, for symmetry with the other tables and so the
+				 * record count stays honest. Note this is defensive rather than
+				 * load-bearing: seeding prefers a segment's own module anyway,
+				 * and a segment keeps the first bank it is given, so pooling
+				 * these is not currently observable. The behaviour that matters
+				 * is the per-owner preference in seed_banks_from_equates(). */
 				for (int i = 0; i < bank_equ_count; i++) {
 					if (bank_equs[i].owner == cur_owner && bank_equs[i].name &&
 					    !strcasecmp(bank_equs[i].name, name)) {
@@ -575,10 +579,7 @@ static void parse_sym_record(const char *p)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Segment / span / file lookups by id. IDs are normally dense and equal to
- *  the array index (they are emitted sequentially and merges offset them by
- *  the current count), so try the direct index first and fall back to a linear
- *  scan. With 28k+ spans the linear-only form made map rebuilds quadratic.   */
+/*  Segment / span / file lookups by id.                                */
 /* ------------------------------------------------------------------ */
 
 /* Records are normally appended with increasing IDs, and compaction preserves
@@ -771,8 +772,10 @@ int dbg_info_load(const char *path)
 	file_alias_count = 0;
 
 	// Records deduplicated below are only pooled with others from this same
-	// .dbg; see dbg_owner_intern(). An intern failure yields -1, which simply
-	// disables reuse for this load rather than pooling it with everyone else.
+	// .dbg; see dbg_owner_intern(). An intern failure yields -1; loads that hit
+	// it share that value, so under memory exhaustion two modules can still
+	// pool. Not worth guarding against -- nothing else survives that condition
+	// either.
 	cur_owner = dbg_owner_intern(path);
 
 	// `line` records are resolved through the alias only after the whole file
@@ -1271,26 +1274,36 @@ static void seed_banks_from_equates(void)
 		int exact = -1, exact_n = 0;
 		int pref  = -1, pref_n  = 0;
 
-		for (int b = 0; b < bank_equ_count; b++) {
-			char want[128];
-			if (!bank_equ_target(bank_equs[b].name, want, sizeof want))
-				continue;
-			if (!strcmp(have, want)) {
-				if (exact < 0 || bank_equs[exact].bank != bank_equs[b].bank)
-					exact_n++;
-				if (exact < 0)
-					exact = b;
-				continue;
-			}
-			/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with segment
-			 * STORETILE, which is what these naming conventions produce. */
-			size_t lw = strlen(want);
-			size_t n  = lh < lw ? lh : lw;
-			if (n >= 4 && !strncmp(have, want, n)) {
-				if (pref < 0 || bank_equs[pref].bank != bank_equs[b].bank)
-					pref_n++;
-				if (pref < 0)
-					pref = b;
+		/* Two passes. A segment's own module is the authority on where it
+		 * lives, so its equates are considered alone first; only if that
+		 * module said nothing do we fall back to the whole table. Without this,
+		 * two overlays that each define RAM_BANK_CODE for their own CODE
+		 * segment -- an ordinary X16 arrangement -- would each see two equally
+		 * good candidates and both end up unknown. */
+		for (int pass = 0; pass < 2 && exact_n == 0 && pref_n == 0; pass++) {
+			for (int b = 0; b < bank_equ_count; b++) {
+				if (pass == 0 && bank_equs[b].owner != segs[i].owner)
+					continue;
+				char want[128];
+				if (!bank_equ_target(bank_equs[b].name, want, sizeof want))
+					continue;
+				if (!strcmp(have, want)) {
+					if (exact < 0 || bank_equs[exact].bank != bank_equs[b].bank)
+						exact_n++;
+					if (exact < 0)
+						exact = b;
+					continue;
+				}
+				/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with
+				 * segment STORETILE, which is what these conventions produce. */
+				size_t lw = strlen(want);
+				size_t n  = lh < lw ? lh : lw;
+				if (n >= 4 && !strncmp(have, want, n)) {
+					if (pref < 0 || bank_equs[pref].bank != bank_equs[b].bank)
+						pref_n++;
+					if (pref < 0)
+						pref = b;
+				}
 			}
 		}
 
@@ -1535,14 +1548,15 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 	// including debug info the user named with -dbgfile, which nothing
 	// re-merges.
 	//
-	// Narrowing it to the stored segments alone was tried and is worse: the
-	// parse below appends unconditionally, so this module's own BSS and
-	// zero-page records would no longer be pruned but would still be re-added,
-	// piling up on every overlay swap until an address could be described by a
-	// module that is no longer resident. The two jobs -- evicting other modules,
-	// and replacing this one's own records -- need different ranges, and
-	// separating them properly needs records to know which module they came
-	// from. See the note in dbg_info.h.
+	// Narrowing it to the stored segments alone was tried and is worse:
+	// segment, span, line and label records are still appended unconditionally,
+	// so this module's own BSS and zero-page records would no longer be pruned
+	// but would still be re-added, piling up on every overlay swap until an
+	// address could be described by a module that is no longer resident. The
+	// two jobs -- evicting other modules, and replacing this one's own records
+	// -- need different ranges. Records now carry an owner, but only the
+	// deduplicated ones (files and equates); finishing this means extending it
+	// to segs/spans/lines/syms and having unload consult it. See dbg_info.h.
 	dbg_info_unload_range(seg_min, seg_max);
 	int result = dbg_info_load(dbg_path);
 	if (result == 0) {
@@ -1554,6 +1568,15 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 
 void dbg_info_free(void)
 {
+	for (int i = 0; i < owner_count; i++)
+		free(owners[i]);
+	free(owners);
+	owners      = NULL;
+	owner_count = 0;
+	owner_cap   = 0;   /* GROW_ARRAY keys off this; leaving it set would append
+	                    * into a dangling pointer on the next load. */
+	cur_owner   = -1;
+
 	free(file_alias);
 	file_alias       = NULL;
 	file_alias_count = 0;

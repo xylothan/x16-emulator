@@ -602,6 +602,112 @@ main(void)
 		}
 	}
 
+	// Two equates that both prefix-match one segment, with no exact match and
+	// different banks. There is no basis for choosing between them, so the
+	// segment must be left unknown: unknown is recoverable -- a runtime bank
+	// observation can still resolve it -- whereas a confident wrong answer is
+	// not, and it silently attributes code to the wrong bank.
+	{
+		dbg_info_free();
+		static const char *k_dbg_ambig =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"amb.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"STORETILE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_STORE_TILEMAP\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"sym\tid=1,name=\"RAM_BANK_STORE_TILESET\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+			"mod\tid=0,name=\"amb.o\",file=0\n";
+		char *ap = write_temp(k_dbg_ambig, "x16_dbg_info_ambig.dbg");
+		if (!ap) {
+			check(false, "could not write the ambiguity fixture");
+		} else {
+			check(dbg_info_load(ap) == 0, "loads an ambiguously named segment");
+			const char *f = NULL;
+			int         l = 0;
+			// Neither candidate may be adopted, so neither bank resolves.
+			dbg_bank_result_t m3 = dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l);
+			f = NULL;
+			l = 0;
+			dbg_bank_result_t m7 = dbg_info_addr_to_source_banked_ex(0xA000, 7, &f, &l);
+			check(m3 != DBG_BANK_RESOLVED && m7 != DBG_BANK_RESOLVED,
+			      "and picks neither bank when two equates match equally well");
+			remove(ap);
+			dbg_info_free();
+		}
+	}
+
+	// Bank equates are owned too. Two overlays commonly each define
+	// RAM_BANK_CODE for their own CODE segment, with different values. Each
+	// module's own equate has to win for its own segment: pooling them lets the
+	// second module's bank decide where the first module's code lives, and
+	// merely refusing to choose would leave both unknown.
+	{
+		dbg_info_free();
+		static const char *k_bank_a =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ova.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"mod\tid=0,name=\"ova.o\",file=0\n";
+		static const char *k_bank_b =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ovb.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a020,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+			"mod\tid=0,name=\"ovb.o\",file=0\n";
+		char *ba = write_temp(k_bank_a, "x16_dbg_info_bankA.dbg");
+		if (!ba) {
+			check(false, "could not write bank module A");
+		} else {
+			check(dbg_info_load(ba) == 0, "loads overlay A");
+			char *bb = write_temp(k_bank_b, "x16_dbg_info_bankB.dbg");
+			if (bb) {
+				check(dbg_info_load(bb) == 0, "loads overlay B, same equate name");
+				const char *f = NULL;
+				int         l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "A's CODE keeps the bank A declared");
+				f = NULL;
+				l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA020, 7, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "and B's CODE keeps the bank B declared");
+				remove(bb);
+			}
+			remove(ba);
+			dbg_info_free();
+		}
+	}
+
+	// Files are owned as well. Two modules that each compile a file of the same
+	// name must keep two records; consumers resolve by name today, so the count
+	// is what makes the pooling visible.
+	{
+		dbg_info_free();
+		char *fa = write_temp(k_dbg_equ_v1, "x16_dbg_info_fileA.dbg");
+		if (!fa) {
+			check(false, "could not write file module A");
+		} else {
+			check(dbg_info_load(fa) == 0, "loads a module declaring equ.s");
+			int after_a = dbg_info_file_count();
+			char *fb = write_temp(k_dbg_equ_v2, "x16_dbg_info_fileB.dbg");
+			if (fb) {
+				check(dbg_info_load(fb) == 0, "loads another declaring its own equ.s");
+				check(dbg_info_file_count() == after_a + 1,
+				      "and the two same-named files stay separate records");
+				remove(fb);
+			}
+			remove(fa);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
