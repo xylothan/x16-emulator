@@ -92,6 +92,11 @@ static struct {
     // unconditional one that fires in every bank.
     char cond[192];
     char hit_cond[64];
+    // Whether WE created the core entry. -bp, the SDL debugger's F9 and the
+    // other server tables all share one deduplicating table, so an add that
+    // found an existing entry must not be undone on teardown -- that would
+    // delete a breakpoint the user set locally.
+    bool owned;
 } dap_bps[MAX_DAP_BREAKPOINTS];
 static int num_dap_bps = 0;
 static int next_dap_bp_id = 1;
@@ -156,7 +161,7 @@ static void retry_unverified_breakpoints(void) {
                 hw_bp.pc = (int)(addr & 0xFFFF);
                 hw_bp.bank = (uint8_t)(addr >> 16);
                 hw_bp.x16Bank = bank_pin;
-                debug_bp_add(hw_bp);
+                dap_bps[i].owned = (debug_bp_add(hw_bp) >= 0);
                 printf("[dap] Resolved pending breakpoint: %s:%d -> $%04X\n",
                        dap_bps[i].file, dap_bps[i].line, (unsigned)addr);
                 // Say so. This is reached after invalidate_breakpoints_in_range()
@@ -179,26 +184,28 @@ static void retry_unverified_breakpoints(void) {
 
 // Invalidate breakpoints whose addresses fall within a range being unloaded
 static void invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
-    // Ranges come from the .dbg and can name addresses past 16 bits; a
-    // breakpoint's PC cannot. Truncating to uint16_t made a range like
-    // 0x00FF00-0x010100 invert into one that matched nothing, and
-    // 0x010000-0x01FFFF collapse onto 0x0000-0xFFFF, which invalidated every
-    // unrelated breakpoint in the machine.
-    if (start > 0xFFFF) return;
-    if (end > 0xFFFF) end = 0xFFFF;
+    // Compared as full 24-bit addresses, program bank included. Clamping the
+    // range to 16 bits and comparing only the low half meant reloading a
+    // bank-1 module left its breakpoints armed and stale, while reloading a
+    // bank-0 range invalidated unrelated breakpoints in every other bank.
     for (int i = 0; i < num_dap_bps; i++) {
-        if (dap_bps[i].verified && dap_bps[i].addr >= start && dap_bps[i].addr <= end) {
+        const uint32_t bp_addr =
+            ((uint32_t)dap_bps[i].bank << 16) | dap_bps[i].addr;
+        if (dap_bps[i].verified && bp_addr >= start && bp_addr <= end) {
             // Remove from hardware, and drop the condition record with it.
             // debug_bp_remove() leaves that behind, so re-arming the same
             // address later would find a stale record keyed to the old
             // selector rather than the one it is about to be given.
-            if (!server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
+            if (dap_bps[i].owned &&
+                !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
             dap_bps[i].verified = false;
+            dap_bps[i].owned = false;
             dap_bps[i].addr = 0;
-            printf("[dap] Invalidated breakpoint: %s:%d (range $%04X-$%04X unloaded)\n",
+            dap_bps[i].bank = 0;
+            printf("[dap] Invalidated breakpoint: %s:%d (range $%06X-$%06X unloaded)\n",
                    dap_bps[i].file, dap_bps[i].line, start, end);
 
             // Notify VS that breakpoint is no longer verified
@@ -361,7 +368,6 @@ static void send_dap_event(const char *event_name, cJSON *body) {
 
 // ContinuedEvent — tell the client execution resumed (all threads).
 static void send_continued_event(void) {
-    dap_stop_announced = false;   // whatever we were stopped in is over
     if (client_sock == SOCKET_INVALID) return;
     cJSON *body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "threadId", 1);
@@ -982,7 +988,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
     // Clear existing DAP breakpoints for this source file
     for (int i = num_dap_bps - 1; i >= 0; i--) {
         if (strcmp(dap_bps[i].file, src_path) == 0) {
-            if (!server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
+            // A pending entry holds address 0 and was never armed; removing
+            // that would delete an unrelated breakpoint at $0000.
+            if (dap_bps[i].verified && dap_bps[i].owned &&
+                !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
@@ -1030,7 +1039,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             hw_bp.pc = (int)(addr & 0xFFFF);
             hw_bp.bank = (uint8_t)(addr >> 16);
             hw_bp.x16Bank = bank_pin;
-            debug_bp_add(hw_bp);
+            dap_bps[num_dap_bps].owned = (debug_bp_add(hw_bp) >= 0);
             dap_bps[num_dap_bps].dap_id = bp_id;
             dap_bps[num_dap_bps].addr = (uint16_t)(addr & 0xFFFF);
             dap_bps[num_dap_bps].bank = (uint8_t)(addr >> 16);
@@ -1077,6 +1086,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             strncpy(dap_bps[num_dap_bps].file, src_path, sizeof(dap_bps[num_dap_bps].file) - 1);
             dap_bps[num_dap_bps].line = line;
             dap_bps[num_dap_bps].verified = false;
+            dap_bps[num_dap_bps].owned = false;
             strncpy(dap_bps[num_dap_bps].cond, cond_str, sizeof(dap_bps[num_dap_bps].cond) - 1);
             dap_bps[num_dap_bps].cond[sizeof(dap_bps[num_dap_bps].cond) - 1] = '\0';
             strncpy(dap_bps[num_dap_bps].hit_cond, hit_str, sizeof(dap_bps[num_dap_bps].hit_cond) - 1);
@@ -1111,7 +1121,6 @@ static int handle_dap_continue(int seq, cJSON *args) {
 // collide with a breakpoint the user set at the same address.
 static int handle_dap_next(int seq, cJSON *args) {
     (void)args;
-    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepOver();
     send_dap_response(seq, "next", true, NULL);
     return 1;
@@ -1119,7 +1128,6 @@ static int handle_dap_next(int seq, cJSON *args) {
 
 static int handle_dap_step_in(int seq, cJSON *args) {
     (void)args;
-    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepInto();
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
@@ -1127,7 +1135,6 @@ static int handle_dap_step_in(int seq, cJSON *args) {
 
 static int handle_dap_step_out(int seq, cJSON *args) {
     (void)args;
-    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepOut();
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
@@ -1143,7 +1150,7 @@ static int handle_dap_pause(int seq, cJSON *args) {
     // there first. There is no transition for DEBUGBreakToDebugger() to report,
     // and the protocol still owes this request a stopped event; without one the
     // client waits forever for a pause that has in fact already happened.
-    if (!wasRunning) {
+    if (!wasRunning && !dap_stop_announced) {
         debug_server_notify_stopped("pause");
     }
     return 1;
@@ -2264,7 +2271,7 @@ static void disconnect_client(void) {
         // leaving the function, instruction or data ones armed would halt the
         // machine later for a session that no longer exists.
         for (int i = 0; i < num_dap_bps; i++) {
-            if (dap_bps[i].verified) {
+            if (dap_bps[i].verified && dap_bps[i].owned) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
@@ -2502,6 +2509,10 @@ int debug_server_poll(void) {
     }
 
     return mode_changed;
+}
+
+void debug_server_note_resumed(void) {
+    dap_stop_announced = false;
 }
 
 void debug_server_notify_stopped(const char *reason) {

@@ -458,6 +458,7 @@ static void DEBUGClearStepBreakPoint(void) {
 // user had already broken out of and said nothing more about. Continuing means
 // continuing; ask for the step again if that is what you wanted.
 void DEBUGContinue(void) {
+	debug_server_note_resumed();   // a stop is owed again when this lands
 	DEBUGClearStepBreakPoint();
 	DEBUGArmResumeSkip();
 	currentMode = DMODE_RUN;
@@ -466,6 +467,7 @@ void DEBUGContinue(void) {
 }
 
 void DEBUGStepInto(void) {                              // F11 — single instruction
+	debug_server_note_resumed();   // a stop is owed again when this lands
 	DEBUGArmResumeSkip();                               // step OFF a breakpoint, not into it again
 	currentMode = DMODE_STEP;                           // runs once, then DEBUGGetCurrentStatus stops us
 	currentPC = regs.pc;
@@ -475,6 +477,7 @@ void DEBUGStepInto(void) {                              // F11 — single instru
 }
 
 void DEBUGStepOver(void) {                              // F10 — step over calls
+	debug_server_note_resumed();   // a stop is owed again when this lands
 	// Read the opcode through the bank live for the CURRENT pc. Using the
 	// stale currentPCX16Bank (set when we last stopped) misreads the opcode
 	// once the mapped bank has changed, so a JSR could be missed or invented.
@@ -511,6 +514,7 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 }
 
 void DEBUGStepOut(void) {                               // run to the return address
+	debug_server_note_resumed();   // a stop is owed again when this lands
 	// The return address is not necessarily on top of the stack: by the time
 	// you want to step out, the routine has usually pushed registers or locals
 	// over it. So scan upward for the first plausible return frame, keyed on
@@ -575,6 +579,7 @@ void DEBUGPause(void) {
 }
 
 void DEBUGRunTo(uint16_t pc, uint8_t bank) {
+	debug_server_note_resumed();   // a stop is owed again when this lands
 	stepBreakPoint.pc = pc;
 	stepBreakPoint.bank = bank;
 	stepBreakPoint.x16Bank = getCurrentBank(pc, bank);

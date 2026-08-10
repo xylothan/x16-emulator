@@ -24,6 +24,7 @@ static inline bool debug_server_is_enabled(void) { return false; }
 static inline void debug_server_output(const char *category, const char *text) { (void)category; (void)text; }
 static inline void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) { (void)start; (void)end; }
 static inline void debug_server_retry_unverified_breakpoints(void) { }
+static inline void debug_server_note_resumed(void) { }
 static inline void debug_server_shutdown(void) { }
 
 #else
@@ -61,6 +62,12 @@ void debug_server_retry_unverified_breakpoints(void);
 // set on the source breakpoint also gates the function breakpoint at that
 // address. Removal is refcounted between the tables, but the condition is not
 // -- separating them needs per-owner condition records in debug_core.
+
+// The machine has resumed. Called from the debugger's own execution control, so
+// that a local F5/F10/F11 is accounted for the same way a DAP continue is: the
+// next stop is then reported once, rather than suppressed as a duplicate of a
+// halt that is already over.
+void debug_server_note_resumed(void);
 
 // Clean shutdown — close sockets, free resources.
 void debug_server_shutdown(void);
