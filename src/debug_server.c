@@ -2,6 +2,7 @@
 // Speaks DAP over TCP for direct IDE integration (Visual Studio, VS Code, etc.)
 // Transport: Content-Length framed JSON over TCP, default port 9009
 
+#include <SDL.h>
 #include "debug_server.h"
 #include "dbg_info.h"
 #include "debugger.h"
@@ -14,7 +15,6 @@
 #include <ws2tcpip.h>
 #else
 #include <netinet/tcp.h>
-#include <unistd.h>     /* usleep(), when a peer is not reading fast enough */
 #endif
 #include "video.h"
 #include "keyboard.h"
@@ -407,11 +407,10 @@ static void send_dap_message(cJSON *json) {
                         disconnect_client();
                         break;
                     }
-#ifdef _WIN32
-                    Sleep(1);
-#else
-                    usleep(1000);
-#endif
+                    // SDL's, rather than Sleep/usleep behind a platform split:
+                    // usleep needs a feature-test macro this file does not set,
+                    // which only the -Werror Linux builds noticed.
+                    SDL_Delay(1);
                 } else {
                     break; // real error
                 }
