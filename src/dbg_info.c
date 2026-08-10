@@ -31,6 +31,7 @@ typedef struct {
 	char    *name;    /* segment name, e.g. "BANKCODE" */
 	int      bank;    /* X16 RAM bank this segment lives in, -1 = unknown */
 	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
+	bool     bank_from_equ; /* bank was inferred from an equate, not observed */
 } dbg_seg_t;
 
 typedef struct {
@@ -437,6 +438,7 @@ static void parse_seg_record(const char *p)
 	segs[seg_count].name  = parse_str_key(p, "name"); /* may be NULL */
 	segs[seg_count].bank  = -1;                       /* learned later */
 	segs[seg_count].owner = cur_owner;
+	segs[seg_count].bank_from_equ = false;
 	seg_count++;
 }
 
@@ -519,12 +521,10 @@ static void parse_sym_record(const char *p)
 			                  !strncmp(name, "BANK_", 5) ||
 			                  (l > 5 && !strcmp(name + l - 5, "_BANK"));
 			if (looks_bank) {
-				/* Same-owner only, for symmetry with the other tables and so the
-				 * record count stays honest. Note this is defensive rather than
-				 * load-bearing: seeding prefers a segment's own module anyway,
-				 * and a segment keeps the first bank it is given, so pooling
-				 * these is not currently observable. The behaviour that matters
-				 * is the per-owner preference in seed_banks_from_equates(). */
+				/* Same-owner only. Pooling these lets a second module's value
+				 * overwrite the first's, and since equate-derived banks are now
+				 * re-derived on every load, the first module's own segments
+				 * would then be re-seeded from a value it never declared. */
 				for (int i = 0; i < bank_equ_count; i++) {
 					if (bank_equs[i].owner == cur_owner && bank_equs[i].name &&
 					    !strcasecmp(bank_equs[i].name, name)) {
@@ -1259,6 +1259,35 @@ static bool bank_equ_target(const char *nm, char *out, size_t outsz)
  * honestly, rather than confidently wrong. */
 static void seed_banks_from_equates(void)
 {
+	/* Equate-derived banks are recomputed from scratch, because the equates
+	 * they came from may have changed. A module that reloads with a different
+	 * RAM_BANK_x value can have seeded segments belonging to OTHER modules
+	 * through the fallback pass below, and those segments are not unloaded --
+	 * so without this they would keep a bank nobody declares any more. Banks
+	 * that were observed at runtime are left alone: an observation is evidence,
+	 * an equate is only an inference, and the observation must keep winning. */
+	for (int i = 0; i < seg_count; i++) {
+		if (segs[i].bank_from_equ) {
+			segs[i].bank          = -1;
+			segs[i].bank_from_equ = false;
+		}
+	}
+
+	/* Squash each equate's target once rather than once per segment. Matching
+	 * is O(segments x equates) either way, but this keeps the string work out
+	 * of the inner loop -- seeding runs from the emulator's main loop via the
+	 * auto-load path, so a large .dbg must not stall emulation. */
+	char *targets = NULL;
+	if (bank_equ_count > 0) {
+		targets = (char *)malloc((size_t)bank_equ_count * 128);
+		if (!targets)
+			return;   /* leaves banks unknown, which callers report honestly */
+		for (int b = 0; b < bank_equ_count; b++) {
+			if (!bank_equ_target(bank_equs[b].name, targets + (size_t)b * 128, 128))
+				targets[(size_t)b * 128] = '\0';
+		}
+	}
+
 	for (int i = 0; i < seg_count; i++) {
 		if (segs[i].bank >= 0 || !segs[i].name || !segs[i].size)
 			continue;
@@ -1271,27 +1300,31 @@ static void seed_banks_from_equates(void)
 			continue;
 		size_t lh = strlen(have);
 
-		int exact = -1, exact_n = 0;
-		int pref  = -1, pref_n  = 0;
+		int  exact = -1, pref = -1;
+		bool exact_ambiguous = false, pref_ambiguous = false;
 
 		/* Two passes. A segment's own module is the authority on where it
 		 * lives, so its equates are considered alone first; only if that
 		 * module said nothing do we fall back to the whole table. Without this,
 		 * two overlays that each define RAM_BANK_CODE for their own CODE
 		 * segment -- an ordinary X16 arrangement -- would each see two equally
-		 * good candidates and both end up unknown. */
-		for (int pass = 0; pass < 2 && exact_n == 0 && pref_n == 0; pass++) {
+		 * good candidates and both end up unknown.
+		 *
+		 * Nothing carries over between the passes: the second only runs when
+		 * the first matched nothing at all, which leaves every accumulator at
+		 * its initial value. */
+		for (int pass = 0; pass < 2 && exact < 0 && pref < 0; pass++) {
 			for (int b = 0; b < bank_equ_count; b++) {
 				if (pass == 0 && bank_equs[b].owner != segs[i].owner)
 					continue;
-				char want[128];
-				if (!bank_equ_target(bank_equs[b].name, want, sizeof want))
+				const char *want = targets + (size_t)b * 128;
+				if (!want[0])
 					continue;
 				if (!strcmp(have, want)) {
-					if (exact < 0 || bank_equs[exact].bank != bank_equs[b].bank)
-						exact_n++;
 					if (exact < 0)
 						exact = b;
+					else if (bank_equs[exact].bank != bank_equs[b].bank)
+						exact_ambiguous = true;
 					continue;
 				}
 				/* Either direction, so RAM_BANK_STORE_TILEMAP pairs with
@@ -1299,19 +1332,30 @@ static void seed_banks_from_equates(void)
 				size_t lw = strlen(want);
 				size_t n  = lh < lw ? lh : lw;
 				if (n >= 4 && !strncmp(have, want, n)) {
-					if (pref < 0 || bank_equs[pref].bank != bank_equs[b].bank)
-						pref_n++;
 					if (pref < 0)
 						pref = b;
+					else if (bank_equs[pref].bank != bank_equs[b].bank)
+						pref_ambiguous = true;
 				}
 			}
 		}
 
-		if (exact_n == 1)
-			segs[i].bank = bank_equs[exact].bank;
-		else if (exact_n == 0 && pref_n == 1)
-			segs[i].bank = bank_equs[pref].bank;
+		/* An exact match outranks a prefix one. Either is used only if every
+		 * candidate of that kind agreed on the bank; otherwise there is no
+		 * basis for choosing and the segment is left unknown, which callers
+		 * report honestly and a runtime observation can still resolve. */
+		if (exact >= 0) {
+			if (!exact_ambiguous) {
+				segs[i].bank          = bank_equs[exact].bank;
+				segs[i].bank_from_equ = true;
+			}
+		} else if (pref >= 0 && !pref_ambiguous) {
+			segs[i].bank          = bank_equs[pref].bank;
+			segs[i].bank_from_equ = true;
+		}
 	}
+
+	free(targets);
 }
 
 void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_bank)
@@ -1331,8 +1375,11 @@ void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_ba
 			hit = i;
 		}
 	}
-	if (hit >= 0)
+	if (hit >= 0) {
 		segs[hit].bank = ram_bank;
+		/* Observed, not inferred: re-seeding must not clear this. */
+		segs[hit].bank_from_equ = false;
+	}
 }
 
 bool dbg_info_is_loaded(void)

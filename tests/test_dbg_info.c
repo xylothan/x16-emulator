@@ -708,6 +708,106 @@ main(void)
 		}
 	}
 
+	// A segment can be given its bank by another module's equate, through the
+	// fallback pass. Those segments are not unloaded when that other module
+	// reloads, so unless equate-derived banks are recomputed they keep a value
+	// nobody declares any more.
+	{
+		dbg_info_free();
+		static const char *k_donor_v1 =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"donor.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"DONOR\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"mod\tid=0,name=\"donor.o\",file=0\n";
+		static const char *k_donor_v2 =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"donor.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"DONOR\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+			"mod\tid=0,name=\"donor.o\",file=0\n";
+		// Declares no bank equate of its own, so it is seeded from the donor's.
+		static const char *k_consumer =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"consumer.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"mod\tid=0,name=\"consumer.o\",file=0\n";
+		char *dp = write_temp(k_donor_v1, "x16_dbg_info_donor.dbg");
+		if (!dp) {
+			check(false, "could not write the donor fixture");
+		} else {
+			check(dbg_info_load(dp) == 0, "loads the donor module");
+			char *cp = write_temp(k_consumer, "x16_dbg_info_consumer.dbg");
+			if (cp) {
+				check(dbg_info_load(cp) == 0, "loads a consumer with no equate of its own");
+				const char *f = NULL;
+				int         l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "which borrows the donor's bank");
+
+				// The donor is rebuilt with a different bank and reloaded.
+				char *dp2 = write_temp(k_donor_v2, "x16_dbg_info_donor.dbg");
+				if (dp2) {
+					dbg_info_unload_range(0x0800, 0x080F);
+					check(dbg_info_load(dp2) == 0, "reloads the donor with a new bank");
+					f = NULL;
+					l = 0;
+					check(dbg_info_addr_to_source_banked_ex(0xA000, 7, &f, &l)
+					          == DBG_BANK_RESOLVED,
+					      "and the borrowed bank follows it");
+					f = NULL;
+					l = 0;
+					check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+					          != DBG_BANK_RESOLVED,
+					      "rather than answering to the bank nobody declares");
+				}
+				remove(cp);
+			}
+			remove(dp);
+			dbg_info_free();
+		}
+	}
+
+	// Re-deriving equate banks must not discard what was actually observed at
+	// runtime. An observation is evidence; an equate is only an inference.
+	{
+		dbg_info_free();
+		char *op = write_temp(k_dbg_equ_v1, "x16_dbg_info_obs.dbg");
+		if (!op) {
+			check(false, "could not write the observation fixture");
+		} else {
+			check(dbg_info_load(op) == 0, "loads a module whose equate says bank 3");
+			// The loader saw it land somewhere else.
+			dbg_info_note_bank_load(0xA000, 0x10, 9);
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 9, &f, &l)
+			          == DBG_BANK_RESOLVED,
+			      "and a runtime observation overrides it");
+
+			// Any later load re-derives equate banks; the observation must stay.
+			char *o2 = write_temp(k_dbg_equ_v1, "x16_dbg_info_obs2.dbg");
+			if (o2) {
+				check(dbg_info_load(o2) == 0, "loads another module afterwards");
+				f = NULL;
+				l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 9, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "and re-deriving equate banks leaves the observation alone");
+				remove(o2);
+			}
+			remove(op);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
