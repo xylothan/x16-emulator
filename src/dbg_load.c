@@ -2,6 +2,7 @@
 
 #include "dbg_load.h"
 #include "dbg_info.h"
+#include "debug_server.h"
 #include "source_view.h"
 
 #include <stdlib.h>
@@ -386,6 +387,12 @@ dbg_load_poll(void)
 
 		int rc = dbg_info_load_for_file(ev.path, ev.addr);
 
+		// A DAP client's breakpoints are addresses resolved from debug info
+		// that has just been replaced, so anything inside the range it covered
+		// is now pointing at whatever used to be there.
+		debug_server_invalidate_breakpoints_in_range((uint16_t)new_start,
+		                                            (uint16_t)new_end);
+
 		// Forgotten whether or not that succeeded. It unloads the range before
 		// reading the file, so a failure part-way through still leaves those
 		// modules' records gone -- and a registry claiming they are live would
@@ -397,6 +404,11 @@ dbg_load_poll(void)
 		if (rc != 0)
 			return false;
 		remember_parsed(ev.path, new_start, new_end);
+
+		// Breakpoints set before the program was loaded could not be resolved
+		// then. The debug info describing them has just arrived, so this is the
+		// moment they can be armed.
+		debug_server_retry_unverified_breakpoints();
 	}
 
 	// Now say which bank the program went into, every time, because the same

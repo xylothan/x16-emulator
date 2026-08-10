@@ -160,7 +160,37 @@ time.sleep(0.3)
 msgs = recv_dap(sock, 1)
 check("setExceptionBreakpoints", msgs, "response", "setExceptionBreakpoints")
 
-# 12. Disconnect
+# 12. Pipelined requests in one TCP segment.
+#
+# A client sends its configuration burst without waiting for each response, so
+# several framed messages routinely arrive in a single read. The framing used to
+# NUL-terminate each body in place, which overwrote the first byte of the next
+# message; the connection then stopped dispatching entirely. Nothing above can
+# catch that, because every request here is sent on its own with a sleep after
+# it.
+body_a = json.dumps({"seq": 90, "type": "request", "command": "threads"})
+body_b = json.dumps({"seq": 91, "type": "request", "command": "evaluate",
+                     "arguments": {"expression": "PC"}})
+blob = ("Content-Length: %d\r\n\r\n%s" % (len(body_a), body_a) +
+        "Content-Length: %d\r\n\r\n%s" % (len(body_b), body_b))
+sock.sendall(blob.encode())
+time.sleep(0.5)
+msgs = recv_dap(sock, 2)
+seqs = sorted(m.get("request_seq") for m in msgs if m.get("type") == "response")
+if seqs == [90, 91]:
+    print("  PASS both pipelined requests answered")
+    passed += 1
+else:
+    print("  FAIL both pipelined requests answered: got %r" % (seqs,))
+    failed += 1
+
+# A third request after the burst proves the buffer is still usable.
+send_dap(sock, {"seq": 92, "type": "request", "command": "threads"})
+time.sleep(0.3)
+msgs = recv_dap(sock, 1)
+check("connection still live after pipelining", msgs, "response", "threads")
+
+# 13. Disconnect
 send_dap(sock, {"seq": 12, "type": "request", "command": "disconnect", "arguments": {"terminateDebuggee": False}})
 time.sleep(0.3)
 msgs = recv_dap(sock, 1)

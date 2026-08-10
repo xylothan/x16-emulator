@@ -1104,6 +1104,7 @@ main(int argc, char **argv)
 				return 1;
 			}
 #else
+			(void)port;
 			fprintf(stderr, "-debugport requires a build with the DAP server "
 			                "(cJSON was not available at configure time)\n");
 			return 1;
@@ -2106,6 +2107,12 @@ emulator_loop(void *param)
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
+		} else if (debug_server_is_enabled()) {
+			// The guest can clear debugger_enabled by writing $9FB0, and a
+			// program that does so would otherwise take the DAP server down
+			// with it: nothing would poll the socket again for the rest of the
+			// session, so the client would hang with no way back.
+			debug_server_poll();
 		}
 
 #ifdef PERFSTAT

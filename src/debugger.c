@@ -268,23 +268,34 @@ int  DEBUGGetCurrentStatus(void) {
 	// Both ways out stay correct: a masked interrupt clears `waiting` without
 	// vectoring, so the next poll sees the PC still on the breakpoint and stops
 	// there; a vectored one arrives after the handler returns.
-	if (!stopped && !justResumed && !waiting
-	    && (debug_bp_on_arrival(regs.pc, regs.k) || hitBreakpoint(regs.pc, regs.k, stepBreakPoint))) {       // Hit a breakpoint.
-		currentPC = regs.pc;                                    // Update current PC
-		currentPCBank = regs.k;
-		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
-		currentMode = DMODE_STOP;                               // So now stop, as we've done it.
-		stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
-		stepBreakPoint.bank = 0;
-		stepBreakPoint.x16Bank = -1;
-		debug_server_notify_stopped("breakpoint");
+	if (!stopped && !justResumed && !waiting) {
+		// Order matters: debug_bp_on_arrival() counts the hit and spends the
+		// ignore budget, so it has to be reached exactly as often as before.
+		const bool viaUser = debug_bp_on_arrival(regs.pc, regs.k);
+		const bool viaStep = !viaUser && hitBreakpoint(regs.pc, regs.k, stepBreakPoint);
+		if (viaUser || viaStep) {                               // Hit a breakpoint.
+			currentPC = regs.pc;                                    // Update current PC
+			currentPCBank = regs.k;
+			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
+			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
+			stepBreakPoint.bank = 0;
+			stepBreakPoint.x16Bank = -1;
+			// A step-over or step-out finishing is a completed step to a client,
+			// not a breakpoint it never set.
+			debug_server_notify_stopped(viaStep ? "step" : "breakpoint");
+		}
 	}
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
+		const bool wasRunning = (currentMode != DMODE_STOP);
 		currentMode = DMODE_STOP;
 		currentPC = regs.pc;                                     // Set the PC to what it is.
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
+		if (wasRunning) {                                        // Tell a DAP client too; see DEBUGBreakToDebugger().
+			debug_server_notify_stopped("pause");
+		}
 	}
 
 	// Repair the bank when it is unset: currentPC moves independently of
@@ -387,10 +398,17 @@ void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
 // *******************************************************************************************
 
 void DEBUGBreakToDebugger(void) {
+	const bool wasRunning = (currentMode != DMODE_STOP);
 	currentMode = DMODE_STOP;
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
 	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+	// A DAP client only refreshes its view -- stack, variables, step controls --
+	// when it is told execution stopped. Halting without saying so leaves it
+	// believing the machine is still running.
+	if (wasRunning) {
+		debug_server_notify_stopped("pause");
+	}
 }
 
 // A watched address was written. Called from the CPU store path, so it does as
