@@ -56,13 +56,18 @@ void debug_server_output(const char *category, const char *text);
 void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end);
 void debug_server_retry_unverified_breakpoints(void);
 
-// KNOWN LIMITATION: the three breakpoint kinds a client can set (source,
-// function, instruction) all land in one core table keyed on (pc, bank,
-// x16Bank), and conditions are keyed the same way. Two of them naming the same
-// address therefore share one entry AND one condition record, so a condition
-// set on the source breakpoint also gates the function breakpoint at that
-// address. Removal is refcounted between the tables, but the condition is not
-// -- separating them needs per-owner condition records in debug_core.
+// KNOWN LIMITATION: debug_core has no concept of who asked for a breakpoint.
+// Its table deduplicates on add and deletes on remove, so everything that can
+// want one at the same address -- -bp, the SDL debugger's F9, and the three
+// kinds a DAP client can set -- shares a single entry and a single condition
+// record. This file therefore reconstructs an ownership model from outside
+// (ext_keys[], server_bp_wanted_elsewhere(), the `external` flags), which is
+// where most of this file's defects have been found.
+//
+// See docs/breakpoint-ownership.md for the full history and the design that
+// replaces it: refcounted per-owner references inside debug_core, which deletes
+// roughly 150 lines here. Until then, note that a condition set on one owner's
+// breakpoint also gates any other owner's at the same address.
 
 // The machine has resumed. Called from the debugger's own execution control, so
 // that a local F5/F10/F11 is accounted for the same way a DAP continue is: the
