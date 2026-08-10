@@ -163,12 +163,6 @@ void note_from_kc_kf(uint8_t kc, uint8_t kf, NoteInfo *out)
     snprintf(out->text, sizeof(out->text), "%s%d %+d c  %.2f Hz", names[semi], oct, (int)(fine_semi * 100.0 + 0.5), out->hz);
 }
 
-void text_hover_value(const char *text, const char *desc, uint32_t v, int bytes)
-{
-    ImGui::TextUnformatted(text);
-    dbgui_hover_value_tooltip(desc, v, bytes);
-}
-
 void draw_key_mask(uint8_t mask)
 {
     // YM_debug_get_keyon() is already repacked into slot order. Raw $08 bits are
