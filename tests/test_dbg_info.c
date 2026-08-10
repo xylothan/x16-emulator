@@ -48,21 +48,21 @@ static const char *k_dbg =
 static const char *k_dbg_equ_v1 =
 	"version\tmajor=2,minor=0\n"
 	"file\tid=0,name=\"equ.s\",size=10,mtime=0x00000000,mod=0\n"
-	"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
+	"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
 	"span\tid=0,seg=0,start=0,size=16,type=0\n"
 	"line\tid=0,file=0,line=1,span=0\n"
 	"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
-	"sym\tid=1,name=\"RAM_BANK_LEVEL\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+	"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
 	"mod\tid=0,name=\"equ.o\",file=0\n";
 
 static const char *k_dbg_equ_v2 =
 	"version\tmajor=2,minor=0\n"
 	"file\tid=0,name=\"equ.s\",size=10,mtime=0x00000000,mod=0\n"
-	"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
+	"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
 	"span\tid=0,seg=0,start=0,size=16,type=0\n"
 	"line\tid=0,file=0,line=1,span=0\n"
 	"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x00BEEF,type=equ\n"
-	"sym\tid=1,name=\"RAM_BANK_LEVEL\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+	"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
 	"mod\tid=0,name=\"equ.o\",file=0\n";
 static char *
 write_temp(const char *contents, const char *leaf)
@@ -480,11 +480,22 @@ main(void)
 			// The same module rebuilt, with the constant moved.
 			char *p2 = write_temp(k_dbg_equ_v2, "x16_dbg_info_equ.dbg");
 			if (p2) {
-				dbg_info_unload_range(0x0801, 0x0810);
+				dbg_info_unload_range(0xA000, 0xA00F);
 				check(dbg_info_load(p2) == 0, "reloads it after a rebuild");
 				v = 0;
 				check(dbg_info_equate_to_value("SCORE", &v) && v == 0xBEEF,
 				      "and the new value replaces the old one");
+
+				// Bank equates have no accessor of their own; what they do is
+				// seed which RAM bank a segment is taken to live in, so a stale
+				// one mislabels code rather than merely reporting a wrong
+				// number. The segment is in the banked window and named to match
+				// the equate, so the reload's bank 7 must be the one in force.
+				const char *bf = NULL;
+				int         bl = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 7, &bf, &bl)
+				          == DBG_BANK_RESOLVED,
+				      "and a reloaded bank equate reseeds the segment's bank");
 			}
 			remove(p1);
 			dbg_info_free();

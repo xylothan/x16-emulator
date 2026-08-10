@@ -469,10 +469,12 @@ static void parse_sym_record(const char *p)
 			                  !strncmp(name, "BANK_", 5) ||
 			                  (l > 5 && !strcmp(name + l - 5, "_BANK"));
 			if (looks_bank) {
-				/* Replace rather than append. Nothing prunes these, and lookup
-				 * returns the first match, so appending would let a bank equate
-				 * from a module that has since been swapped out shadow the live
-				 * one for the rest of the session. */
+				/* Replace rather than append. Nothing prunes these, and the
+				 * seeding below takes the FIRST equate that matches a segment
+				 * and then skips that segment, so appending would let a bank
+				 * from a module swapped out long ago decide where a live one
+				 * lives -- mislabelling code rather than merely reporting a
+				 * wrong number. */
 				for (int i = 0; i < bank_equ_count; i++) {
 					if (bank_equs[i].name && !strcasecmp(bank_equs[i].name, name)) {
 						free(bank_equs[i].name);

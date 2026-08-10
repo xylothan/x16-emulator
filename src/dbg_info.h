@@ -64,7 +64,8 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 // also drops other modules' records in that window -- including debug info
 // loaded with -dbgfile, which nothing re-merges.
 //
-// It cannot simply be narrowed. Parsing appends unconditionally, so a range that
+// It cannot simply be narrowed. Segment and label records are still appended
+// unconditionally -- only file and equate records are reused -- so a range that
 // misses this module's own BSS and zero-page records leaves them behind while
 // adding fresh copies, and they accumulate until an address can be described by
 // a module that is no longer resident. Evicting other modules and replacing this
