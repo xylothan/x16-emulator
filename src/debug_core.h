@@ -177,6 +177,11 @@ bool debug_wp_set_active(uint16_t addr, int x16Bank, bool active);
 // Does any watchpoint cover `addr`? Read-only; for a UI marking watched bytes.
 bool debug_wp_covers(uint16_t addr);
 
+// Read-only view of the watchpoint table, for UIs and the DAP server that need
+// to list what is being watched. Returns NULL if `index` is out of range.
+// Valid until the next call that adds or removes a watchpoint.
+const struct watchpoint *debug_wp_at(int index);
+
 // The CPU is writing `value` to `addr`: should execution stop? Honours the
 // value filter. Called from the store path, so callers should test
 // debug_wp_count() first and skip this entirely when nothing is being watched.

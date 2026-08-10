@@ -450,6 +450,14 @@ debug_wp_count(void)
 	return numWatchpoints;
 }
 
+const struct watchpoint *
+debug_wp_at(int index)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return NULL;
+	return &watchPoints[index];
+}
+
 int
 debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 {

@@ -23,6 +23,7 @@
 #include "video.h"
 #include "cpu/fake6502.h"
 #include "debugger.h"
+#include "debug_server.h"
 #include "rendertext.h"
 
 static void DEBUGHandleKeyEvent(SDL_Keycode key,int isShift);
@@ -222,6 +223,9 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPC = regs.pc;
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+		// Reported here rather than from the store itself, for the same reason:
+		// only now does regs.pc name the instruction after the write.
+		debug_server_notify_stopped("data breakpoint");
 	}
 
 	if (currentMode == DMODE_STEP) {                                // Single step before
@@ -230,6 +234,7 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			debug_server_notify_stopped("step");
 		}
 	}
 
@@ -272,6 +277,7 @@ int  DEBUGGetCurrentStatus(void) {
 		stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
 		stepBreakPoint.bank = 0;
 		stepBreakPoint.x16Bank = -1;
+		debug_server_notify_stopped("breakpoint");
 	}
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
@@ -291,6 +297,13 @@ int  DEBUGGetCurrentStatus(void) {
 	}
 
 	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
+		// A DAP client can drive the run state while we are halted, so give it
+		// a turn before we block on the keyboard: continue/step arriving over
+		// the socket has to be able to get us moving again.
+		debug_server_poll();
+		if (currentMode == DMODE_RUN || currentMode == DMODE_STEP) {
+			return 0;                                                   // Mode changed remotely — execute.
+		}
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
@@ -314,6 +327,20 @@ int  DEBUGGetCurrentStatus(void) {
 		video_update();
 		SDL_Delay(10);
 		return 1;
+	}
+
+	// While running, a client still has to be able to connect and ask us to
+	// break. This runs per instruction, so polling the socket every time would
+	// cost more than the emulation; once every few thousand is still well
+	// inside a frame.
+	{
+		static int poll_counter = 0;
+		if (++poll_counter >= 1000) {
+			poll_counter = 0;
+			if (debug_server_poll()) {
+				return (currentMode == DMODE_STOP) ? 1 : 0;
+			}
+		}
 	}
 
 	return 0;                                                               // Run wild, run free.

@@ -56,4 +56,9 @@ bool DEBUGIsPaused(void);
 #define DMODE_STEP 		(1)										// Debugger is doing a single step
 #define DMODE_RUN 		(2)										// Debugger is running normally.
 
+// The run state itself, one of DMODE_*. Defined in debugger.c and driven by
+// whichever front end is attached -- the SDL debugger, or the DAP server when a
+// client is stepping.
+extern int currentMode;
+
 #endif

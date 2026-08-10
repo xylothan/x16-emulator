@@ -36,6 +36,7 @@
 #include "debugger.h"
 #include "dbg_info.h"
 #include "dbg_load.h"
+#include "debug_server.h"
 #include "source_view.h"
 #include "code_map.h"
 #include "utf8.h"
@@ -600,6 +601,11 @@ usage()
 	printf("-srcpath <dir>\n");
 	printf("\tAdd a directory to search for the source files a .dbg file names.\n");
 	printf("\tCan be repeated.\n");
+	printf("-debugport [port]\n");
+	printf("\tServe the Debug Adapter Protocol on <port> (default %d), so an\n",
+	       DEBUG_SERVER_DEFAULT_PORT);
+	printf("\teditor can set breakpoints and step through source. The emulator\n");
+	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-zeroram\n");
@@ -1078,6 +1084,30 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			dbg_auto_opt = 0;
+		} else if (!strcmp(argv[0], "-debugport")) {
+			argc--;
+			argv++;
+			// The breakpoint machinery lives behind debugger_enabled, and a DAP
+			// client needs it whether or not the SDL debug window is up.
+			debugger_enabled = true;
+			int port = DEBUG_SERVER_DEFAULT_PORT;
+			if (argc && argv[0][0] != '-') {
+				port = atoi(argv[0]);
+				argc--;
+				argv++;
+			}
+#ifdef HAS_DAP
+			// The CPU keeps running; a client attaches when it is ready, and
+			// breakpoints it sets are what stop execution.
+			if (debug_server_init(port) != 0) {
+				fprintf(stderr, "Failed to start debug server on port %d\n", port);
+				return 1;
+			}
+#else
+			fprintf(stderr, "-debugport requires a build with the DAP server "
+			                "(cJSON was not available at configure time)\n");
+			return 1;
+#endif
 		} else if (!strcmp(argv[0], "-dbgfile")) {
 			argc--;
 			argv++;
@@ -1515,6 +1545,7 @@ main(int argc, char **argv)
 	emulator_loop(NULL);
 #endif
 
+	debug_server_shutdown();
 	source_view_free();
 	dbg_info_free();
 	main_shutdown();
