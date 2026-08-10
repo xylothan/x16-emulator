@@ -1572,6 +1572,14 @@ video_debug_ui_available(void)
 	return imgui_window != NULL && imgui_renderer != NULL;
 }
 
+// Whether an SDL window id belongs to the debugger window. Callers outside
+// video.c use this to tell "close the debugger" from "close the emulator".
+bool
+video_is_debug_ui_window(Uint32 window_id)
+{
+	return imgui_window != NULL && window_id == imgui_window_id;
+}
+
 // Map a keydown on the debugger window to a Visual-Studio-style debug action.
 // Shared by the running event loop (video_update) and the paused pump
 // (video_debug_ui_pump_paused) so the shortcuts behave identically whether the
@@ -1679,6 +1687,7 @@ video_debug_ui_pump_paused(void)
 #else
 bool video_debug_ui_available(void) { return false; }
 int  video_debug_ui_pump_paused(void) { return 1; }
+bool video_is_debug_ui_window(Uint32 window_id) { (void)window_id; return false; }
 #endif
 
 bool

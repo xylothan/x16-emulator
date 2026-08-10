@@ -33,21 +33,22 @@ std::vector<TrackedBP> s_tracked;    // panel-owned superset of breakPoints[] (i
 int                    s_runto_addr = 0; // hex address for the "Run to" box
 
 bool
-active_bp_exists(int pc, uint8_t bank)
+active_bp_exists(int pc, uint8_t bank, int x16Bank)
 {
-	for (int i = 0; i < numBreakpoints; i++) {
-		if (breakPoints[i].pc == pc && breakPoints[i].bank == bank) {
-			return true;
-		}
-	}
-	return false;
+	return debug_bp_find(pc, bank, x16Bank) >= 0;
 }
 
+// A breakpoint is identified by (pc, bank, x16Bank), because the same $A000 in
+// two RAM banks is two different breakpoints. Keying the tracker on (pc, bank)
+// alone collapsed them into one row: the count under-reported, "Clear All" left
+// the other one armed and the list repopulated itself on the next frame, and
+// the enable checkbox flipped back on by itself because sync_tracked() kept
+// finding the surviving twin.
 TrackedBP *
-tracked_find(int pc, uint8_t bank)
+tracked_find(int pc, uint8_t bank, int x16Bank)
 {
 	for (TrackedBP &t : s_tracked) {
-		if (t.pc == pc && t.bank == bank) {
+		if (t.pc == pc && t.bank == bank && t.x16Bank == x16Bank) {
 			return &t;
 		}
 	}
@@ -61,10 +62,10 @@ sync_tracked(void)
 {
 	// Live breakpoints → ensure tracked + marked enabled.
 	for (int i = 0; i < numBreakpoints; i++) {
-		TrackedBP *t = tracked_find(breakPoints[i].pc, breakPoints[i].bank);
+		TrackedBP *t = tracked_find(breakPoints[i].pc, breakPoints[i].bank,
+		                            breakPoints[i].x16Bank);
 		if (t) {
 			t->enabled = true;
-			t->x16Bank = breakPoints[i].x16Bank;
 		} else {
 			s_tracked.push_back(TrackedBP{breakPoints[i].pc, breakPoints[i].bank,
 			                              breakPoints[i].x16Bank, true});
@@ -73,7 +74,8 @@ sync_tracked(void)
 	// Tracked-enabled entries no longer live were deleted elsewhere → drop them.
 	// (Disabled entries are intentionally absent from breakPoints[], so keep.)
 	for (size_t i = 0; i < s_tracked.size();) {
-		if (s_tracked[i].enabled && !active_bp_exists(s_tracked[i].pc, s_tracked[i].bank)) {
+		if (s_tracked[i].enabled && !active_bp_exists(s_tracked[i].pc, s_tracked[i].bank,
+		                                              s_tracked[i].x16Bank)) {
 			s_tracked.erase(s_tracked.begin() + (long)i);
 		} else {
 			++i;

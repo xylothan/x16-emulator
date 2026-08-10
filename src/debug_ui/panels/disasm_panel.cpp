@@ -36,15 +36,17 @@ x16bank_for(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank)
 	return -1;
 }
 
-// Index of a breakpoint at (pc, bank), or -1.
+// Index of a breakpoint at (pc, bank, x16bank), or -1.
+//
+// Delegates to the core rather than re-walking breakPoints[] here. Comparing pc
+// and bank only -- which this did -- ignores the bank selector that identifies a
+// breakpoint, so the gutter drew a dot for a breakpoint set in a different RAM
+// bank; clicking it then failed to find one to remove and silently added a
+// second, once per bank the machine happened to be in.
 int
-find_breakpoint(int pc, uint8_t bank)
+find_breakpoint(int pc, uint8_t bank, int x16bank)
 {
-	for (int i = 0; i < numBreakpoints; i++) {
-		if (breakPoints[i].pc == pc && breakPoints[i].bank == bank)
-			return i;
-	}
-	return -1;
+	return debug_bp_find(pc, bank, x16bank);
 }
 
 void
@@ -179,7 +181,9 @@ disasm_panel_render(bool *p_open)
 	for (int i = 0; i < n; i++) {
 		const code_map_line_t &ln = lines[i];
 		const bool is_pc  = (ln.addr == pc);
-		const int  bpidx  = find_breakpoint((int)ln.addr, bank);
+		// Same bank the toggle below uses, so the dot and the click agree.
+		const int  ln_x16 = x16bank_for(ln.addr, bank, rambank, rombank);
+		const int  bpidx  = find_breakpoint((int)ln.addr, bank, ln_x16);
 		const bool has_bp = (bpidx >= 0);
 
 		ImGui::PushID(i);
@@ -187,7 +191,7 @@ disasm_panel_render(bool *p_open)
 		// Clickable gutter → toggle breakpoint on this address.
 		const ImVec2 row_pos = ImGui::GetCursorScreenPos();
 		if (ImGui::InvisibleButton("bp", ImVec2(gutter, line_h))) {
-			toggle_breakpoint(ln.addr, bank, x16bank_for(ln.addr, bank, rambank, rombank));
+			toggle_breakpoint(ln.addr, bank, ln_x16);
 		}
 		if (has_bp) {
 			const ImVec2 c(row_pos.x + gutter * 0.5f, row_pos.y + line_h * 0.5f);

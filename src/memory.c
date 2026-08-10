@@ -533,8 +533,11 @@ emu_write(uint8_t reg, uint8_t value)
 	bool v = value != 0;
 	switch (reg) {
 		// Also told to dbg_load: it follows the debugger by default, and the
-		// machine can switch the debugger on here long after startup.
-		case 0: debugger_enabled = v; dbg_load_note_debugger(v); break;
+		// machine can switch the debugger on here long after startup. The
+		// graphical debugger counts as "a debugger is on" too, so a guest
+		// clearing this register must not switch .dbg loading off underneath
+		// a running -imgui session.
+		case 0: debugger_enabled = v; dbg_load_note_debugger(v || imgui_debugger_enabled); break;
 		case 1: log_video = v; break;
 		case 2: log_keyboard = v; break;
 		case 3: echo_mode = value; break;

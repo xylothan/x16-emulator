@@ -1386,7 +1386,11 @@ main(int argc, char **argv)
 	// someone just running a game gains nothing from reading .dbg files. A
 	// policy rather than a snapshot, because the running machine can switch the
 	// debugger on itself (emu_write register 0).
-	dbg_load_note_debugger(debugger_enabled);
+	//
+	// Either debugger counts. The graphical one's Source and Symbols panels are
+	// exactly the things that need this, and gating on -debug alone left them
+	// permanently empty under -imgui.
+	dbg_load_note_debugger(debugger_enabled || imgui_debugger_enabled);
 	dbg_load_set_policy(dbg_auto_opt);
 
 	if (is_gen2) {
@@ -2225,7 +2229,11 @@ emulator_loop(void *param)
 
 		instruction_counter += waiting ^ 0x1;
 
-		if (debugger_enabled && !waiting) {
+		// The code map is what the disassembly views anchor on: without it every
+		// line above the PC is decoded from a mid-instruction byte. The ImGui
+		// Disassembly panel is built entirely on it, so it has to be recorded
+		// for -imgui too, not just -debug.
+		if ((debugger_enabled || imgui_debugger_enabled) && !waiting) {
 			code_map_record_current();
 		}
 		step6502();

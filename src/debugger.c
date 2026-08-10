@@ -351,31 +351,51 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCX16Bank = debug_current_x16_bank(currentPC, currentPCBank);
 	}
 
-	// -imgui without -debug: the graphical debugger owns the pause loop, so it
-	// pumps events, repaints and decides when to resume. Gated on the window
-	// having actually been created -- if it failed to open there is no control
-	// bar to resume from, and swallowing the loop here would park the machine
-	// unrecoverably.
-	//
+	// Who owns the UI while the machine is not running. With -imgui and no
+	// -debug the graphical debugger does: it pumps events, repaints, and
+	// decides when to resume. Gated on the window having actually been created
+	// -- if it failed to open there is no control bar to resume from, and
+	// swallowing the loop here would park the machine unrecoverably.
+	const bool imguiOwnsUI = (!debugger_enabled && video_debug_ui_available());
+
 	// DMODE_STOP only, not "not RUN". DMODE_STEP means one instruction has been
 	// asked for and must be executed now: routing it through the pump costs it
-	// the pump's 16ms sleep, and a step lands in DMODE_STEP repeatedly until the
-	// PC actually moves. Over a WAI the PC does not move for the whole wait, so
+	// the pump's 16ms sleep, and a step stays in DMODE_STEP until the PC
+	// actually moves. Over a WAI the PC does not move for the whole wait, so
 	// stepping one instruction would run at ~60 emulated cycles a second and
-	// take tens of minutes. The classic path has the same shape below: it only
+	// take tens of minutes. The classic path below has the same shape: it only
 	// sleeps once currentMode == DMODE_STOP.
-	if (currentMode == DMODE_STOP && !debugger_enabled && video_debug_ui_available()) {
+	if (currentMode == DMODE_STOP && imguiOwnsUI) {
 		showDebugOnRender = 0;                                  // no SDL overlay in this mode
 		return video_debug_ui_pump_paused();
 	}
 
-	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
+	// The classic text debugger's event pump. Skipped entirely when the ImGui
+	// window owns the UI: it drains the whole SDL queue into the text
+	// debugger's key handler and drops everything else, so letting DMODE_STEP
+	// fall in here destroys every mouse and keyboard event before ImGui or the
+	// machine sees it. That is reachable whenever a step leaves the PC where it
+	// was -- for the duration of a WAI, and permanently on a `JMP *` self-loop,
+	// which would leave the debugger input-dead with no way to quit.
+	if (currentMode != DMODE_RUN && !imguiOwnsUI) {                     // Not running, we own the keyboard.
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
 			switch(event.type) {
 				case SDL_QUIT:                                  // Time for exit
 					return -1;
+
+				case SDL_WINDOWEVENT:
+					// With the ImGui window open SDL2 no longer synthesises
+					// SDL_QUIT on a window close -- it only does that for the
+					// last window -- so a close arrives here as a bare event.
+					// Dropping it made the emulator window's [X] inert while
+					// the text debugger was on screen under -debug -imgui.
+					if (event.window.event == SDL_WINDOWEVENT_CLOSE &&
+					    !video_is_debug_ui_window(event.window.windowID)) {
+						return -1;
+					}
+					break;
 
 				case SDL_KEYDOWN:                               // Handle key presses.
 					DEBUGHandleKeyEvent(event.key.keysym.sym, event.key.keysym.mod & (KMOD_LSHIFT|KMOD_RSHIFT));

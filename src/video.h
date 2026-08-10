@@ -22,6 +22,7 @@ void video_repaint_only(void);
 // reports "stay paused", so call sites need no #ifdef.
 bool video_debug_ui_available(void);
 int  video_debug_ui_pump_paused(void);
+bool video_is_debug_ui_window(Uint32 window_id);
 void video_end(void);
 bool video_get_irq_out(void);
 void video_save(SDL_RWops *f);
