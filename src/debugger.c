@@ -485,8 +485,11 @@ void DEBUGStepOut(void) {                               // run to the return add
 		uint8_t  hi     = debug_read6502((uint16_t)(a + 1), 0, -1);
 		uint16_t pushed = (uint16_t)(lo | (hi << 8));
 
+		// $FC is JSR (abs,X) only on the 65816; on a 65C02 it is a NOP, and
+		// accepting it there turns any pushed value preceded by one into a
+		// false frame. Same gate as the one stepping over uses.
 		uint8_t o2 = debug_read6502((uint16_t)(pushed - 2), regs.k, -1);
-		if (o2 == 0x20 || o2 == 0xFC) {                 // JSR abs / JSR (abs,X)
+		if (o2 == 0x20 || (regs.is65c816 && o2 == 0xFC)) {   // JSR abs / JSR (abs,X)
 			retAddr = (pushed + 1) & 0xFFFF;
 			break;
 		}
@@ -496,7 +499,8 @@ void DEBUGStepOut(void) {                               // run to the return add
 		// Reading the opcode through regs.k would inspect whatever happens to
 		// sit at that address in the callee's bank -- which for a long call is
 		// exactly the bank that is wrong.
-		if (a + 2 < end) {
+		// A long call only exists on the 65816 at all.
+		if (regs.is65c816 && a + 2 < end) {
 			uint8_t callerBank = debug_read6502((uint16_t)(a + 2), 0, -1);
 			if (debug_read6502((uint16_t)(pushed - 3), callerBank, -1) == 0x22) {   // JSL
 				retAddr = (pushed + 1) & 0xFFFF;
