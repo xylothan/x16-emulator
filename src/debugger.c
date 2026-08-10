@@ -445,13 +445,12 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 		const int target = (regs.pc + 3 + (opcode == 0x22)) & 0xFFFF; // JSL is 4 bytes
 		stepBreakPoint.pc = target;
 		stepBreakPoint.bank = regs.k;
-		// A bank number means something only inside the window it names, so a
-		// call near the top of the RAM window whose return address lands in the
-		// ROM window cannot carry the caller's RAM bank across -- filtered on
-		// that, the breakpoint would never fire. Re-derive it there.
-		stepBreakPoint.x16Bank = (bank_window_of(target) == bank_window_of(regs.pc))
-		                             ? x16Bank
-		                             : debug_current_x16_bank(target, regs.k);
+		// Derived from the target, not from the calling instruction. A call near
+		// the top of the RAM window returns into the ROM window, where the
+		// caller's RAM bank number selects nothing and the breakpoint could
+		// never fire. Where the two are in the same window this is the same
+		// answer, and it is what stepping out and running-to already do.
+		stepBreakPoint.x16Bank = debug_current_x16_bank(target, regs.k);
 		DEBUGArmResumeSkip();
 		currentMode = DMODE_RUN;
 		debugCPUClocks = clockticks6502;
