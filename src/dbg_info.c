@@ -1314,16 +1314,20 @@ static bool bank_equ_target(const char *nm, char *out, size_t outsz)
  * direction, so RAM_BANK_CODE matches segment CODE2 as readily as CODE, and
  * because a segment that already has a bank is skipped, whichever equate was
  * seen first won -- leaving the exact RAM_BANK_CODE2 to be discarded and CODE2's
- * code attributed to the wrong bank. Per segment we can insist on the exact
- * match when there is one, and fall back to a prefix only when exactly one
- * equate matches; an ambiguous name is left unknown, which the caller reports
- * honestly, rather than confidently wrong. */
+ * code attributed to the wrong bank.
+ *
+ * Per segment, every equate is sorted into one of four ranks: own-exact,
+ * other-exact, own-prefix, other-prefix. The best non-empty rank decides, and
+ * decides alone -- if its candidates disagree about the bank the segment is
+ * left unknown rather than falling through to a weaker rank. Callers report
+ * unknown honestly and a runtime observation can still resolve it, whereas a
+ * confident wrong answer is not recoverable. */
 static void seed_banks_from_equates(void)
 {
 	/* Equate-derived banks are recomputed from scratch, because the equates
 	 * they came from may have changed. A module that reloads with a different
 	 * RAM_BANK_x value can have seeded segments belonging to OTHER modules
-	 * through the fallback pass below, and those segments are not unloaded --
+	 * through the cross-module ranks, and those segments are not unloaded --
 	 * so without this they would keep a bank nobody declares any more. Banks
 	 * that were observed at runtime are left alone: an observation is evidence,
 	 * an equate is only an inference, and the observation must keep winning. */

@@ -1017,6 +1017,113 @@ main(void)
 		}
 	}
 
+	// An ambiguous winning rank does not fall through to a weaker one. The
+	// better evidence has just said the question is undecidable; answering it
+	// from worse evidence would be inventing certainty.
+	{
+		dbg_info_free();
+		// Owns CODE2, and its own equate only resembles it (own-prefix).
+		static const char *k_ft_own =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ftown.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE2\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000002,type=equ\n"
+			"mod\tid=0,name=\"ftown.o\",file=0\n";
+		// Two other modules name CODE2 exactly, and disagree.
+		static const char *k_ft_x =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ftx.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"XONE\",start=0x000900,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE2\",addrsize=absolute,size=1,scope=0,def=0,val=0x000005,type=equ\n"
+			"mod\tid=0,name=\"ftx.o\",file=0\n";
+		static const char *k_ft_y =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"fty.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"YONE\",start=0x000920,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE2\",addrsize=absolute,size=1,scope=0,def=0,val=0x000006,type=equ\n"
+			"mod\tid=0,name=\"fty.o\",file=0\n";
+		char px[512], py[512], po2[512];
+		char *t = write_temp(k_ft_x, "x16_dbg_info_ftx.dbg");
+		bool wrote = (t != NULL);
+		if (wrote) snprintf(px, sizeof px, "%s", t);
+		t = wrote ? write_temp(k_ft_y, "x16_dbg_info_fty.dbg") : NULL;
+		wrote = wrote && (t != NULL);
+		if (wrote) snprintf(py, sizeof py, "%s", t);
+		t = wrote ? write_temp(k_ft_own, "x16_dbg_info_ftown.dbg") : NULL;
+		wrote = wrote && (t != NULL);
+		if (wrote) snprintf(po2, sizeof po2, "%s", t);
+		if (!wrote) {
+			check(false, "could not write the fall-through fixtures");
+		} else {
+			check(dbg_info_load(px) == 0 && dbg_info_load(py) == 0 &&
+			          dbg_info_load(po2) == 0,
+			      "loads two disagreeing exact namers and one that resembles");
+			const char *f = NULL;
+			int         l = 0;
+			dbg_bank_result_t r5 = dbg_info_addr_to_source_banked_ex(0xA000, 5, &f, &l);
+			f = NULL; l = 0;
+			dbg_bank_result_t r6 = dbg_info_addr_to_source_banked_ex(0xA000, 6, &f, &l);
+			f = NULL; l = 0;
+			dbg_bank_result_t r2 = dbg_info_addr_to_source_banked_ex(0xA000, 2, &f, &l);
+			check(r5 != DBG_BANK_RESOLVED && r6 != DBG_BANK_RESOLVED,
+			      "the contradicting exact matches resolve to neither");
+			check(r2 != DBG_BANK_RESOLVED,
+			      "and the weaker resemblance is not used to break the tie");
+			remove(px);
+			remove(py);
+			remove(po2);
+			dbg_info_free();
+		}
+	}
+
+	// Among equally good name matches, the segment's own module still wins.
+	{
+		dbg_info_free();
+		static const char *k_pp_other =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ppo.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"PPOTHER\",start=0x000940,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_STORETILEMAP\",addrsize=absolute,size=1,scope=0,def=0,val=0x000005,type=equ\n"
+			"mod\tid=0,name=\"ppo.o\",file=0\n";
+		static const char *k_pp_own =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"ppw.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"STORETILE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_STORETILESET\",addrsize=absolute,size=1,scope=0,def=0,val=0x000006,type=equ\n"
+			"mod\tid=0,name=\"ppw.o\",file=0\n";
+		char ppa[512], ppb[512];
+		char *t2 = write_temp(k_pp_other, "x16_dbg_info_ppo.dbg");
+		bool wrote2 = (t2 != NULL);
+		if (wrote2) snprintf(ppa, sizeof ppa, "%s", t2);
+		t2 = wrote2 ? write_temp(k_pp_own, "x16_dbg_info_ppw.dbg") : NULL;
+		wrote2 = wrote2 && (t2 != NULL);
+		if (wrote2) snprintf(ppb, sizeof ppb, "%s", t2);
+		if (!wrote2) {
+			check(false, "could not write the prefix-ownership fixtures");
+		} else {
+			check(dbg_info_load(ppa) == 0 && dbg_info_load(ppb) == 0,
+			      "loads two modules that both merely resemble the segment");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 6, &f, &l)
+			          == DBG_BANK_RESOLVED,
+			      "and the segment's own module wins among resemblances");
+			remove(ppa);
+			remove(ppb);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
