@@ -177,20 +177,73 @@ draw_tiles_tab(const uint32_t pal[256])
     static const char *bpp_names   = "1 bpp\0" "2 bpp\0" "4 bpp\0" "8 bpp\0";
     static const char *dim_names   = "8\0" "16\0";
 
-    ImGui::PushItemWidth(120);
-    int step = 1, stepfast = 0x800;
-    ImGui::InputScalar("Tile base", ImGuiDataType_S32, &base, &step, &stepfast, "$%05X",
-                       ImGuiInputTextFlags_CharsHexadecimal);
-    base = clampi(base, 0, 0x1FFFF);
+    // Row 1 — base address (type any hex address to jump straight there) + format.
+    // A plain "%05X" field (no "$" in the format) keeps hex text-entry unambiguous.
+    ImGui::TextUnformatted("Base $");
+    ImGui::SameLine(0.0f, 2.0f);
+    ImGui::PushItemWidth(90);
+    ImGui::InputScalar("##tilebase", ImGuiDataType_S32, &base, nullptr, nullptr, "%05X",
+                       ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
     ImGui::SameLine();
     ImGui::Combo("Depth", &bpp_idx, bpp_names);
     ImGui::SameLine();
-    ImGui::Combo("Tile W", &tw_idx, dim_names);
+    ImGui::Combo("W", &tw_idx, dim_names);
     ImGui::SameLine();
-    ImGui::Combo("Tile H", &th_idx, dim_names);
+    ImGui::Combo("H", &th_idx, dim_names);
     ImGui::PopItemWidth();
 
-    ImGui::PushItemWidth(120);
+    // Geometry (computed here so the navigation controls below can use it).
+    const int bpp = bpp_vals[bpp_idx];
+    const int tw  = tw_idx ? 16 : 8;
+    const int th  = th_idx ? 16 : 8;
+    const int bytes_per_tile = tw * th * bpp / 8;
+    cols = clampi(cols, 1, 64);
+    rows = clampi(rows, 1, 64);
+    const int row_step  = cols * bytes_per_tile;
+    const int page_step = cols * rows * bytes_per_tile;
+
+    base = clampi(base, 0, 0x1FFFF);
+
+    // Row 2 — jump by tile index + alignment.
+    int tile_no = bytes_per_tile ? base / bytes_per_tile : 0;
+    ImGui::PushItemWidth(110);
+    if (ImGui::InputInt("Tile #", &tile_no, 1, 16))
+        base = clampi(tile_no * bytes_per_tile, 0, 0x1FFFF);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Align"))          // snap to the current tile stride
+        base -= base % bytes_per_tile;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Align $800"))     // snap to VERA tile-base granularity (2KB)
+        base &= ~0x7FF;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Type a hex address in Base, or a tile index in Tile #, to jump.\n"
+                          "Step with the buttons below, or drag the scrollbar for fast scrolling.\n"
+                          "-1/+1 nudge by one byte; Align snaps to the tile stride ($800 = VERA tilebase).");
+
+    // Row 3 — stepping: home / page / row / tile / byte-nudge.
+    if (ImGui::SmallButton("|< Home")) base = 0;
+    ImGui::SameLine(); if (ImGui::SmallButton("<< Page")) base -= page_step;
+    ImGui::SameLine(); if (ImGui::SmallButton("< Row"))   base -= row_step;
+    ImGui::SameLine(); if (ImGui::SmallButton("< Tile"))  base -= bytes_per_tile;
+    ImGui::SameLine(); if (ImGui::SmallButton("-1"))      base -= 1;
+    ImGui::SameLine(); if (ImGui::SmallButton("+1"))      base += 1;
+    ImGui::SameLine(); if (ImGui::SmallButton("Tile >"))  base += bytes_per_tile;
+    ImGui::SameLine(); if (ImGui::SmallButton("Row >"))   base += row_step;
+    ImGui::SameLine(); if (ImGui::SmallButton("Page >>")) base += page_step;
+    base = clampi(base, 0, 0x1FFFF);
+
+    // Row 4 — full-width fast-scroll bar across all of VRAM (tile-aligned).
+    ImGui::PushItemWidth(-1);
+    if (ImGui::SliderInt("##tilescroll", &base, 0, 0x1FFFF, "scroll -> $%05X"))
+        base -= base % bytes_per_tile; // keep tiles aligned while dragging
+    ImGui::PopItemWidth();
+    base = clampi(base, 0, 0x1FFFF);
+
+    // Row 5 — grid geometry.
+    ImGui::PushItemWidth(110);
     ImGui::SliderInt("Columns", &cols, 1, 64);
     ImGui::SameLine();
     ImGui::SliderInt("Rows", &rows, 1, 64);
@@ -200,10 +253,6 @@ draw_tiles_tab(const uint32_t pal[256])
     ImGui::SliderFloat("Zoom", &zoom, 1.0f, 8.0f, "%.0fx");
     ImGui::PopItemWidth();
 
-    const int bpp = bpp_vals[bpp_idx];
-    const int tw  = tw_idx ? 16 : 8;
-    const int th  = th_idx ? 16 : 8;
-    const int bytes_per_tile = tw * th * bpp / 8;
     cols = clampi(cols, 1, 64);
     rows = clampi(rows, 1, 64);
     const int img_w = cols * tw;
@@ -366,7 +415,8 @@ draw_sprites_tab(const uint32_t pal[256])
 
     ImGui::Separator();
     const ImGuiTableFlags tflags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                   ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+                                   ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit |
+                                   DBGUI_TABLE_FLAGS_RESIZABLE;
     if (ImGui::BeginTable("sprites", 9, tflags, ImVec2(0, 0))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#");
@@ -435,16 +485,9 @@ struct LayerRegs {
 };
 
 LayerRegs
-read_layer_regs(int layer)
+decode_layer_regs(const uint8_t r[7])
 {
-    const uint8_t base = layer == 0 ? 0x0D : 0x14;
-    uint8_t r0 = video_read(base + 0, true);
-    uint8_t r1 = video_read(base + 1, true);
-    uint8_t r2 = video_read(base + 2, true);
-    uint8_t r3 = video_read(base + 3, true);
-    uint8_t r4 = video_read(base + 4, true);
-    uint8_t r5 = video_read(base + 5, true);
-    uint8_t r6 = video_read(base + 6, true);
+    uint8_t r0 = r[0], r1 = r[1], r2 = r[2], r3 = r[3], r4 = r[4], r5 = r[5], r6 = r[6];
 
     LayerRegs L;
     L.color_depth    = r0 & 3;
@@ -466,23 +509,135 @@ read_layer_regs(int layer)
     return L;
 }
 
+LayerRegs
+read_layer_regs(int layer)
+{
+    const uint8_t base = layer == 0 ? 0x0D : 0x14;
+    uint8_t r[7];
+    for (int i = 0; i < 7; ++i)
+        r[i] = video_read(base + i, true);
+    return decode_layer_regs(r);
+}
+
+// True when two snapshots describe the same tile geometry, i.e. a per-scanline
+// snapshot can be substituted for the live one without changing image layout.
+bool
+same_layer_geometry(const LayerRegs &a, const LayerRegs &b)
+{
+    return a.color_depth == b.color_depth && a.bitmap_mode == b.bitmap_mode &&
+           a.text_mode == b.text_mode && a.text_256c == b.text_256c &&
+           a.mapw == b.mapw && a.maph == b.maph &&
+           a.tilew == b.tilew && a.tileh == b.tileh;
+}
+
+// ---------------------------------------------------------------------------
+// Raster-split support
+//
+// A program can rewrite the layer registers part-way down a frame (typically
+// from a line IRQ) so that different horizontal bands of the screen use a
+// different MAPBASE/TILEBASE/scroll. A single register snapshot therefore only
+// describes the band that happened to be active when the debugger looked, and
+// every band below it decodes as garbage. video_get_layer_line_state() reports
+// what each scanline actually rendered with, so we index those snapshots by the
+// layer row each scanline displayed and decode each pixel row with the
+// registers that produced it.
+// ---------------------------------------------------------------------------
+// Largest layer height VERA can produce: MAPH (256) * TILEH (16).
+constexpr int MAX_LAYER_ROWS = 256 * 16;
+
+struct RasterRowRegs {
+    uint8_t regs[MAX_LAYER_ROWS][7];
+    bool    valid[MAX_LAYER_ROWS];
+    bool    any_split; // layer registers changed part-way down the frame
+    bool    any_valid; // at least one scanline mapped onto a layer row
+};
+
+void
+build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
+{
+    memset(out.valid, 0, sizeof(out.valid));
+    out.any_split = false;
+    out.any_valid = false;
+
+    const uint16_t lines      = video_get_scanline_count();
+    bool           have_first = false;
+    uint8_t        first[7]   = {0};
+
+    for (uint16_t line = 0; line < lines; ++line) {
+        uint8_t  r[7];
+        uint16_t eff_y   = 0;
+        bool     enabled = false;
+        if (!video_get_layer_line_state((uint8_t)layer, line, r, &eff_y, &enabled))
+            continue;
+        if (!enabled)
+            continue;
+
+        if (!have_first) {
+            memcpy(first, r, sizeof(first));
+            have_first = true;
+        } else if (memcmp(first, r, sizeof(first)) != 0) {
+            out.any_split = true;
+        }
+
+        // Only substitute snapshots that keep the image layout identical;
+        // anything else would change the texture geometry mid-frame.
+        const LayerRegs LL = decode_layer_regs(r);
+        if (!same_layer_geometry(LL, live))
+            continue;
+
+        // Which row of the layer image this scanline showed. VERA forces the
+        // scroll registers to 0 in bitmap mode, so eff_y is the row directly.
+        int ly;
+        if (LL.bitmap_mode) {
+            ly = eff_y;
+        } else {
+            const int layer_h = LL.maph * LL.tileh;
+            ly                = ((int)eff_y + LL.vscroll) & (layer_h - 1);
+        }
+        if (ly < 0 || ly >= MAX_LAYER_ROWS || out.valid[ly])
+            continue; // first scanline to show this row wins
+
+        memcpy(out.regs[ly], r, sizeof(out.regs[ly]));
+        out.valid[ly] = true;
+        out.any_valid = true;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bitmap viewer tab
 // ---------------------------------------------------------------------------
 void
 draw_bitmap_tab(const uint32_t pal[256])
 {
-    static int   layer  = 0;
-    static int   height = 240;
-    static float zoom   = 1.0f;
+    static int   layer         = 0;
+    static int   height        = 240;
+    static float zoom          = 1.0f;
+    static bool  follow_raster = true;
+    static bool  auto_fit      = true;
+
+    // Default the height to whatever the composer is actually displaying, so a
+    // 320x200-style mode shows 200 rows rather than a fixed guess. Any manual
+    // edit turns auto-fit off; Fit turns it back on.
+    int fit_h = 0;
+    video_get_active_layer_size(nullptr, &fit_h);
+    if (auto_fit && fit_h > 0)
+        height = clampi(fit_h, 1, 480);
 
     ImGui::PushItemWidth(120);
     ImGui::Combo("Layer", &layer, "Layer 0\0Layer 1\0");
     ImGui::SameLine();
-    ImGui::SliderInt("Height", &height, 8, 480);
+    // DragInt rather than SliderInt: a 120px slider cannot address every value
+    // in a 1..480 range, so dragging skips numbers.
+    if (ImGui::DragInt("Height", &height, 1.0f, 8, 480))
+        auto_fit = false;
     ImGui::SameLine();
     ImGui::SliderFloat("Zoom", &zoom, 1.0f, 4.0f, "%.1fx");
     ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::Button("Fit"))
+        auto_fit = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Match the active video mode (%d lines)", fit_h);
 
     LayerRegs L = read_layer_regs(layer);
     ImGui::Text("depth=%dbpp  bitmap=%s  tile_base(data)=$%05X  width=%d  pal_off=$%02X",
@@ -490,6 +645,20 @@ draw_bitmap_tab(const uint32_t pal[256])
     if (!L.bitmap_mode) {
         ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1),
                            "Layer %d is not in bitmap mode; showing raw decode anyway.", layer);
+    }
+
+    ImGui::Checkbox("Follow raster", &follow_raster);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(decode each row with the registers that rendered it)");
+
+    static RasterRowRegs rr;
+    build_raster_row_regs(layer, L, rr);
+    const bool raster_active = follow_raster && rr.any_valid;
+
+    if (rr.any_split) {
+        ImGui::TextColored(raster_active ? ImVec4(0.4f, 1, 0.4f, 1) : ImVec4(1, 0.7f, 0.2f, 1),
+                           raster_active ? "Raster split detected - rows decoded per scanline."
+                                         : "Raster split detected - enable \"Follow raster\".");
     }
 
     const int img_w = L.bitmap_w;
@@ -502,13 +671,18 @@ draw_bitmap_tab(const uint32_t pal[256])
         return;
 
     for (int y = 0; y < img_h; ++y) {
-        const uint32_t row_base = L.tile_base + (uint32_t)((y * img_w * L.bpp) >> 3);
+        // Registers in effect on the scanline that displayed this bitmap row.
+        LayerRegs LR = L;
+        if (raster_active && y < MAX_LAYER_ROWS && rr.valid[y])
+            LR = decode_layer_regs(rr.regs[y]);
+
+        const uint32_t row_base = LR.tile_base + (uint32_t)((y * img_w * LR.bpp) >> 3);
         for (int x = 0; x < img_w; ++x) {
-            const uint32_t bitpos = (uint32_t)x * L.bpp;
+            const uint32_t bitpos = (uint32_t)x * LR.bpp;
             const uint8_t  byte   = video_space_read(row_base + (bitpos >> 3));
-            const int      shift  = 8 - L.bpp - (int)(bitpos & 7);
+            const int      shift  = 8 - LR.bpp - (int)(bitpos & 7);
             const int      idx    = (byte >> shift) & mask;
-            px[(size_t)y * img_w + x] = resolve_color(pal, idx, L.bitmap_pal_off, false);
+            px[(size_t)y * img_w + x] = resolve_color(pal, idx, LR.bitmap_pal_off, false);
         }
     }
 
@@ -529,22 +703,49 @@ draw_bitmap_tab(const uint32_t pal[256])
 void
 draw_tilemap_tab(const uint32_t pal[256])
 {
-    static int   layer     = 0;
-    static int   max_cols  = 32;
-    static int   max_rows  = 32;
-    static float zoom      = 1.0f;
+    static int   layer         = 0;
+    static int   max_cols      = 32;
+    static int   max_rows      = 32;
+    static float zoom          = 1.0f;
+    static bool  follow_raster = true;
+    static bool  auto_fit      = true;
 
     ImGui::PushItemWidth(120);
     ImGui::Combo("Layer", &layer, "Layer 0\0Layer 1\0");
-    ImGui::SameLine();
-    ImGui::SliderInt("Max cols", &max_cols, 1, 128);
-    ImGui::SameLine();
-    ImGui::SliderInt("Max rows", &max_rows, 1, 128);
-    ImGui::SameLine();
-    ImGui::SliderFloat("Zoom", &zoom, 1.0f, 4.0f, "%.1fx");
     ImGui::PopItemWidth();
 
     LayerRegs L = read_layer_regs(layer);
+
+    // Default the viewport to the tile area the composer is actually showing,
+    // so e.g. a 320x200 tile mode opens at 40x25 instead of a fixed 32x32.
+    // Any manual edit turns auto-fit off; Fit turns it back on.
+    int fit_w = 0, fit_h = 0;
+    video_get_active_layer_size(&fit_w, &fit_h);
+    const int fit_cols = L.tilew > 0 ? (fit_w + L.tilew - 1) / L.tilew : 0;
+    const int fit_rows = L.tileh > 0 ? (fit_h + L.tileh - 1) / L.tileh : 0;
+    if (auto_fit && fit_cols > 0 && fit_rows > 0) {
+        max_cols = clampi(fit_cols, 1, 128);
+        max_rows = clampi(fit_rows, 1, 128);
+    }
+
+    ImGui::PushItemWidth(120);
+    // DragInt rather than SliderInt: a 120px slider cannot address every value
+    // in a 1..128 range, so dragging skips numbers.
+    if (ImGui::DragInt("Max cols", &max_cols, 0.25f, 1, 128))
+        auto_fit = false;
+    ImGui::SameLine();
+    if (ImGui::DragInt("Max rows", &max_rows, 0.25f, 1, 128))
+        auto_fit = false;
+    ImGui::SameLine();
+    ImGui::SliderFloat("Zoom", &zoom, 1.0f, 4.0f, "%.1fx");
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::Button("Fit"))
+        auto_fit = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Match the active video mode (%dx%d px = %dx%d tiles)",
+                          fit_w, fit_h, fit_cols, fit_rows);
+
     ImGui::Text("mode=%s  depth=%dbpp  map_base=$%05X  tile_base=$%05X  map=%dx%d  tile=%dx%d",
                 L.bitmap_mode ? "bitmap" : (L.text_mode ? (L.text_256c ? "text256" : "text") : "tile"),
                 L.bpp, L.map_base, L.tile_base, L.mapw, L.maph, L.tilew, L.tileh);
@@ -553,6 +754,24 @@ draw_tilemap_tab(const uint32_t pal[256])
         ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1),
                            "Layer %d is in bitmap mode — use the Bitmap tab.", layer);
         return;
+    }
+
+    ImGui::Checkbox("Follow raster", &follow_raster);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(decode each row with the registers that rendered it)");
+
+    static RasterRowRegs rr;
+    build_raster_row_regs(layer, L, rr);
+    const bool raster_active = follow_raster && rr.any_valid;
+
+    if (rr.any_split) {
+        if (raster_active)
+            ImGui::TextColored(ImVec4(0.4f, 1, 0.4f, 1),
+                               "Raster split detected - rows decoded per scanline.");
+        else
+            ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1),
+                               "Raster split detected - rows outside the active band will "
+                               "decode incorrectly. Enable \"Follow raster\".");
     }
 
     // Clamp rendered region so the texture stays a sane size.
@@ -573,41 +792,46 @@ draw_tilemap_tab(const uint32_t pal[256])
         return;
 
     for (int ty = 0; ty < rows; ++ty) {
-        for (int tx = 0; tx < cols; ++tx) {
-            const uint32_t map_addr = L.map_base + (uint32_t)(ty * L.mapw + tx) * 2;
-            const uint8_t  byte0    = video_space_read(map_addr);
-            const uint8_t  byte1    = video_space_read(map_addr + 1);
+        for (int y = 0; y < L.tileh; ++y) {
+            // Registers in effect on the scanline that displayed this pixel row.
+            const int layer_row = ty * L.tileh + y;
+            LayerRegs LR        = L;
+            if (raster_active && layer_row < MAX_LAYER_ROWS && rr.valid[layer_row])
+                LR = decode_layer_regs(rr.regs[layer_row]);
 
-            if (L.text_mode) {
-                // Map entry: byte0 = char, byte1 = fg/bg colors (or full fg in 256c).
-                const int fg = L.text_256c ? byte1 : (byte1 & 0x0f);
-                const int bg = L.text_256c ? 0 : ((byte1 >> 4) & 0x0f);
-                const uint32_t glyph_base = L.tile_base + (uint32_t)byte0 * (L.tilew * L.tileh / 8);
-                for (int y = 0; y < L.tileh; ++y) {
-                    for (int x = 0; x < L.tilew; ++x) {
-                        const uint32_t bitpos = (uint32_t)(y * L.tilew + x);
+            uint32_t *dst = px + (size_t)(ty * L.tileh + y) * img_w;
+
+            for (int tx = 0; tx < cols; ++tx) {
+                const uint32_t map_addr = LR.map_base + (uint32_t)(ty * LR.mapw + tx) * 2;
+                const uint8_t  byte0    = video_space_read(map_addr);
+                const uint8_t  byte1    = video_space_read(map_addr + 1);
+
+                if (LR.text_mode) {
+                    // Map entry: byte0 = char, byte1 = fg/bg colors (or full fg in 256c).
+                    const int      fg         = LR.text_256c ? byte1 : (byte1 & 0x0f);
+                    const int      bg         = LR.text_256c ? 0 : ((byte1 >> 4) & 0x0f);
+                    const uint32_t glyph_base = LR.tile_base + (uint32_t)byte0 * (LR.tilew * LR.tileh / 8);
+                    for (int x = 0; x < LR.tilew; ++x) {
+                        const uint32_t bitpos = (uint32_t)(y * LR.tilew + x);
                         const uint8_t  b      = video_space_read(glyph_base + (bitpos >> 3));
                         const int      on     = (b >> (7 - (bitpos & 7))) & 1;
-                        px[(size_t)(ty * L.tileh + y) * img_w + (tx * L.tilew + x)] = pal[on ? fg : bg];
+                        dst[tx * L.tilew + x] = pal[on ? fg : bg];
                     }
-                }
-            } else {
-                // Tile mode: byte0 low tile index, byte1 = pal offset + flips + index hi.
-                const int      tile_index = byte0 | ((byte1 & 3) << 8);
-                const int      pal_off    = byte1 & 0xf0;
-                const bool     vflip      = (byte1 >> 3) & 1;
-                const bool     hflip      = (byte1 >> 2) & 1;
-                const uint32_t tile_start = L.tile_base + ((uint32_t)tile_index << L.tile_size_log2);
-                for (int y = 0; y < L.tileh; ++y) {
-                    for (int x = 0; x < L.tilew; ++x) {
-                        const int      sx     = hflip ? (L.tilew - 1 - x) : x;
-                        const int      sy     = vflip ? (L.tileh - 1 - y) : y;
-                        const uint32_t bitpos = (uint32_t)(sy * L.tilew + sx) * L.bpp;
+                } else {
+                    // Tile mode: byte0 low tile index, byte1 = pal offset + flips + index hi.
+                    const int      tile_index = byte0 | ((byte1 & 3) << 8);
+                    const int      pal_off    = byte1 & 0xf0;
+                    const bool     vflip      = (byte1 >> 3) & 1;
+                    const bool     hflip      = (byte1 >> 2) & 1;
+                    const uint32_t tile_start = LR.tile_base + ((uint32_t)tile_index << LR.tile_size_log2);
+                    const int      sy         = vflip ? (LR.tileh - 1 - y) : y;
+                    for (int x = 0; x < LR.tilew; ++x) {
+                        const int      sx     = hflip ? (LR.tilew - 1 - x) : x;
+                        const uint32_t bitpos = (uint32_t)(sy * LR.tilew + sx) * LR.bpp;
                         const uint8_t  byte   = video_space_read(tile_start + (bitpos >> 3));
-                        const int      shift  = 8 - L.bpp - (int)(bitpos & 7);
+                        const int      shift  = 8 - LR.bpp - (int)(bitpos & 7);
                         const int      idx    = (byte >> shift) & mask;
-                        px[(size_t)(ty * L.tileh + y) * img_w + (tx * L.tilew + x)] =
-                            resolve_color(pal, idx, pal_off, false);
+                        dst[tx * L.tilew + x] = resolve_color(pal, idx, pal_off, false);
                     }
                 }
             }
@@ -669,7 +893,8 @@ draw_registers_tab()
     ImGui::Separator();
 
     ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
-                             ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY;
+                             ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY |
+                             DBGUI_TABLE_FLAGS_RESIZABLE;
     if (ImGui::BeginTable("vera_regs", 4, tflags, ImVec2(0, 300))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Reg");
@@ -762,16 +987,17 @@ void
 vera_panel_render(bool *p_open)
 {
     if (ImGui::Begin("VERA", p_open)) {
+        dbgui_window_zoom("vera");
         if (debug_ui_get_renderer() == nullptr) {
             ImGui::TextUnformatted("Debugger renderer unavailable.");
-            ImGui::End();
+            dbgui_window_end();
             return;
         }
 
         uint32_t pal[256];
         build_palette(pal);
 
-        if (ImGui::BeginTabBar("vera_tabs")) {
+        if (ImGui::BeginTabBar("vera_tabs", ImGuiTabBarFlags_DrawSelectedOverline)) {
             if (ImGui::BeginTabItem("Registers")) {
                 draw_registers_tab();
                 ImGui::EndTabItem();
@@ -799,7 +1025,7 @@ vera_panel_render(bool *p_open)
             ImGui::EndTabBar();
         }
     }
-    ImGui::End();
+    dbgui_window_end();
 }
 
 } // namespace

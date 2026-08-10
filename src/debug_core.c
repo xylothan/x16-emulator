@@ -450,6 +450,20 @@ debug_wp_count(void)
 	return numWatchpoints;
 }
 
+// Read-only access to one watchpoint, for UIs that list them. Returns NULL for
+// an out-of-range index rather than trusting the caller's bound, since the table
+// shrinks as watchpoints are removed and a UI's cached count can outlive it.
+// The table itself stays private: handing out a mutable pointer would let a
+// caller change addr or x16Bank behind wp_find()'s back, and the identity of a
+// watchpoint is exactly those two fields.
+const struct watchpoint *
+debug_wp_at(int index)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return NULL;
+	return &watchPoints[index];
+}
+
 int
 debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 {
@@ -510,6 +524,20 @@ debug_wp_set_active(uint16_t addr, int x16Bank, bool active)
 	if (idx < 0)
 		return false;
 	watchPoints[idx].active = active;
+	return true;
+}
+
+// Drop the value filter, so the watchpoint fires on any write again. The
+// counterpart to debug_wp_set_value(); without it a UI that offers a "only when
+// the written value is..." toggle can turn the filter on but never off, since
+// has_value is not otherwise reachable from outside.
+bool
+debug_wp_clear_value(uint16_t addr, int x16Bank)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	watchPoints[idx].has_value = false;
 	return true;
 }
 

@@ -11,6 +11,7 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
 #include "debug_ui_widgets.h" // dbgui_value_lines
+#include "debug_ui_insn_tooltip.h" // dbgui_instruction_tooltip_body
 
 #include <stdio.h>
 #include <string.h>
@@ -80,9 +81,10 @@ void
 disasm_panel_render(bool *p_open)
 {
 	if (!ImGui::Begin("Disassembly", p_open)) {
-		ImGui::End();
+		dbgui_window_end();
 		return;
 	}
+	dbgui_window_zoom("disasm"); // Ctrl+wheel zooms this window's text only
 
 	const uint16_t pc      = regs.pc;
 	const uint8_t  bank    = regs.k;
@@ -239,24 +241,36 @@ disasm_panel_render(bool *p_open)
 			debug_ui_set_cursor(ln.addr, bank, true);
 			cursor_set = true;
 
-			// Value tooltip for the instruction's effective address.
-			if (ln.eff_addr >= 0) {
-				uint16_t ea = (uint16_t)ln.eff_addr;
-				uint8_t  b  = debug_ui_read6502(ea, 0, DEBUG_UI_CURRENT_BANK);
-				uint8_t  b2 = debug_ui_read6502((uint16_t)(ea + 1), 0, DEBUG_UI_CURRENT_BANK);
-				uint16_t w  = (uint16_t)(b | (b2 << 8));
-				const char *elabel = nullptr;
+			// Same instruction help the Source panel gives, so hovering here
+			// explains the instruction and — on the PC's row — predicts what it
+			// will do. Followed by the operand's live value.
+			char mnem[16];
+			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem);
+
+			if (have_mnem || ln.eff_addr >= 0) {
 				ImGui::BeginTooltip();
-				if (dbg_info_addr_to_label(ea, &elabel) && elabel)
-					ImGui::Text("[$%04X]  %s", ea, elabel);
-				else
-					ImGui::Text("[$%04X]", ea);
-				ImGui::Separator();
-				ImGui::TextDisabled("byte");
-				dbgui_value_lines(b, 1);
-				ImGui::Separator();
-				ImGui::TextDisabled("word (LE)");
-				dbgui_value_lines(w, 2);
+				if (have_mnem) {
+					dbgui_instruction_tooltip_body(mnem, ln.addr, bank, is_pc);
+				}
+				if (ln.eff_addr >= 0) {
+					uint16_t ea = (uint16_t)ln.eff_addr;
+					uint8_t  b  = debug_ui_read6502(ea, 0, DEBUG_UI_CURRENT_BANK);
+					uint8_t  b2 = debug_ui_read6502((uint16_t)(ea + 1), 0, DEBUG_UI_CURRENT_BANK);
+					uint16_t w  = (uint16_t)(b | (b2 << 8));
+					const char *elabel = nullptr;
+					if (have_mnem)
+						ImGui::Separator();
+					if (dbg_info_addr_to_label(ea, &elabel) && elabel)
+						ImGui::Text("[$%04X]  %s", ea, elabel);
+					else
+						ImGui::Text("[$%04X]", ea);
+					ImGui::Separator();
+					ImGui::TextDisabled("byte");
+					dbgui_value_lines(b, 1);
+					ImGui::Separator();
+					ImGui::TextDisabled("word (LE)");
+					dbgui_value_lines(w, 2);
+				}
 				ImGui::EndTooltip();
 			}
 		}
@@ -293,7 +307,7 @@ disasm_panel_render(bool *p_open)
 	}
 
 	ImGui::EndChild();
-	ImGui::End();
+	dbgui_window_end();
 }
 
 DebugPanelRegistration s_reg("Disassembly", disasm_panel_render, true);

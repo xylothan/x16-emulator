@@ -18,11 +18,13 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"  // regs, DEBUGRunTo/DEBUGIsPaused, breakpoints, dbg_info_label_to_addr
 #include "debug_ui_widgets.h" // dbgui_value_lines
+#include "debug_ui_insn_tooltip.h" // dbgui_instruction_tooltip_body
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <string>
 #include <vector>
 
@@ -30,12 +32,26 @@
 extern "C" {
 #include "dbg_info.h"    // dbg_info_* : PC<->source mapping + file enumeration
 #include "source_view.h" // source_view_* : locate + cache source files on disk
+#include "insn_info.h"   // insn_info_* : what an instruction does, for hover help
+#include "disasm.h"      // disasm() : re-decode at the PC for the live preview
 extern uint8_t *fsroot_path; // host FS root (main.c) — scanned for .dbg modules
 }
 
 // Breakpoint + bank surface (struct breakpoint, DEBUGAddBreakPoint,
 // DEBUGRemoveBreakPoint, breakPoints, numBreakpoints, memory_get_ram_bank,
 // memory_get_rom_bank) comes from debug_ui_bridge.h — do NOT redeclare it here.
+
+// Case-insensitive compare; MSVC spells the POSIX one differently.
+static int
+dbgui_stricmp(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb || !ca)
+            return ca - cb;
+    }
+}
 
 // --- Panel state --------------------------------------------------------------
 static std::vector<std::string> s_tabs;          // open source-file tabs (by .dbg name)
@@ -48,10 +64,54 @@ static bool                     s_addedDbgPath = false;
 
 // Scroll request applied to whichever tab body renders this frame (only the
 // selected tab renders). Follow requests it on the PC tab; Goto forces it.
+//
+// The request is tagged with the file it was issued for. Only the matching tab
+// may consume it, so a request raised for a tab that isn't rendering yet (a
+// cross-panel goto, or Go to PC while another tab is selected) survives until
+// that tab actually draws instead of being swallowed by whichever tab happened
+// to render first. It is also dropped if the target tab never appears, rather
+// than being applied later to the wrong file.
 static bool s_scrollRequest = false;
 static bool s_scrollForce   = false;
 static int  s_scrollTarget  = 0;
+static std::string s_scrollFile;  // file the request belongs to ("" = any/current)
+static int  s_scrollAge     = 0;  // frames the request has waited for its tab
+static std::string s_selectFile;  // force-select this tab next frame (cross-panel goto)
 static int  s_gotoLine      = 0;
+static std::string s_activeFile;  // file whose body rendered last frame (the visible tab)
+
+// Destination of the most recent deliberate navigation, highlighted on arrival
+// so you can see where you were sent, then faded out so it does not linger as a
+// second "current line".
+static std::string s_flashFile;
+static int         s_flashLine = 0;
+static double      s_flashTime = 0.0;
+constexpr double   SRC_FLASH_SECONDS = 3.0;
+
+// Raise a scroll request for `file` (nullptr/"" = whichever tab is showing).
+// `force` centres unconditionally rather than only when the line is off-screen.
+// `flash` briefly highlights the destination; pass false when the line already
+// carries the current-line highlight, which would make the flash redundant.
+static void
+src_request_scroll(const char *file, int line, bool force, bool flash = true)
+{
+    if (line < 1)
+        return;
+    s_scrollRequest = true;
+    s_scrollForce   = force;
+    s_scrollTarget  = line;
+    s_scrollFile    = file ? file : "";
+    s_scrollAge     = 0;
+
+    // Deliberate navigation (goto line, go to PC, clicking a symbol or a call
+    // frame) drops you in the middle of a file with nothing marking where you
+    // landed. Flag the destination so it can be highlighted on arrival.
+    if (force && flash) {
+        s_flashFile = file ? file : "";
+        s_flashLine = line;
+        s_flashTime = ImGui::GetTime();
+    }
+}
 
 // Basename of a path (after the last / or \).
 static const char *
@@ -196,7 +256,7 @@ src_render_open_popup(void)
 // live value (or multi-base for a literal). `line` is the tab-expanded display
 // string; `text_x` is its left edge; `glyph_w` the monospace advance.
 static void
-src_hover_token_tooltip(const char *line, float text_x, float glyph_w)
+src_hover_token_tooltip(const char *line, float text_x, float glyph_w, bool is_pc_line)
 {
     ImVec2 mp  = ImGui::GetIO().MousePos;
     float  rel = mp.x - text_x;
@@ -248,14 +308,59 @@ src_hover_token_tooltip(const char *line, float text_x, float glyph_w)
         return;
     }
 
-    // Known label?
+    // An instruction mnemonic? Only treat it as one when it is the first token
+    // on the line (after optional whitespace/label), which is where a mnemonic
+    // lives in assembly source, so a variable called "and" isn't misread.
+    const insn_info_t *insn = insn_info_lookup(tok);
+    if (insn) {
+        int first = 0;
+        while (first < len && (line[first] == ' ' || line[first] == '\t'))
+            first++;
+        // Skip a leading "label:" if present.
+        if (first < len) {
+            int c = first;
+            while (c < len && is_ident(line[c]))
+                c++;
+            if (c < len && line[c] == ':') {
+                c++;
+                while (c < len && (line[c] == ' ' || line[c] == '\t'))
+                    c++;
+                first = c;
+            }
+        }
+        if (s != first)
+            insn = nullptr; // not in mnemonic position
+    }
+    if (insn) {
+        ImGui::BeginTooltip();
+        dbgui_instruction_tooltip_body(tok, regs.pc, regs.k, is_pc_line);
+        ImGui::EndTooltip();
+        return;
+    }
+
+    // A name the debug info knows: a program label, or an equate (KERNAL entry
+    // points, hardware registers, constants). Equates were previously invisible
+    // here, which is why things like JOYGET resolved to nothing.
     uint16_t addr;
-    if (debug_ui_label_to_addr(tok, &addr)) {
-        uint8_t  b  = debug_ui_read6502(addr, 0, DEBUG_UI_CURRENT_BANK);
-        uint8_t  b2 = debug_ui_read6502((uint16_t)(addr + 1), 0, DEBUG_UI_CURRENT_BANK);
-        uint16_t w  = (uint16_t)(b | (b2 << 8));
+    int      kind = DBG_NAME_LABEL;
+    if (debug_ui_name_to_value(tok, &addr, &kind)) {
+        const bool is_equ = (kind == DBG_NAME_EQUATE);
+        uint8_t    b      = debug_ui_read6502(addr, 0, DEBUG_UI_CURRENT_BANK);
+        uint8_t    b2     = debug_ui_read6502((uint16_t)(addr + 1), 0, DEBUG_UI_CURRENT_BANK);
+        uint16_t   w      = (uint16_t)(b | (b2 << 8));
+
         ImGui::BeginTooltip();
         ImGui::Text("%s  =  $%04X", tok, addr);
+        ImGui::SameLine();
+        ImGui::TextDisabled(is_equ ? "(equate)" : "(label)");
+
+        // A label the disassembler also knows about at that address is worth
+        // naming, since equates often alias a routine entry point.
+        const char *at = nullptr;
+        if (dbg_info_addr_to_label(addr, &at) && at && dbgui_stricmp(at, tok) != 0) {
+            ImGui::TextDisabled("also known as %s", at);
+        }
+
         ImGui::Separator();
         ImGui::TextDisabled("byte [$%04X]", addr);
         dbgui_value_lines(b, 1);
@@ -271,6 +376,7 @@ src_hover_token_tooltip(const char *line, float text_x, float glyph_w)
 static void
 src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
 {
+    s_activeFile = file ? file : "";
     const ImVec4 orange(1.0f, 0.78f, 0.35f, 1.0f);
 
     const source_file_t *sf        = source_view_get(file);
@@ -291,10 +397,18 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
     ImGui::Separator();
 
     // Follow: recenter on the current line when the PC moves (PC tab only).
+    //
+    // Stepping and breaking want different things. While stepping, the line
+    // creeps along and yanking the view to centre on every step is disorienting,
+    // so only scroll once it would leave the window. But arriving at a
+    // breakpoint, a break-from-code (STP / DEBUGBreakToDebugger), a watchpoint
+    // or a manual pause is a jump to somewhere new - there the line must be
+    // centred, or it turns up wherever the old scroll position happened to leave
+    // it and you have to hunt for the highlight.
     if (isPcFile && s_follow && pcMoved) {
-        s_scrollRequest = true;
-        s_scrollForce   = false;
-        s_scrollTarget  = pcLine;
+        const char *why = debug_server_last_stop_reason();
+        const bool  stepping = (why && strcmp(why, "step") == 0);
+        src_request_scroll(file, pcLine, !stepping, /*flash=*/false);
     }
 
     ImGui::BeginChild("srcbody", ImVec2(0, 0), 0, ImGuiWindowFlags_None);
@@ -319,10 +433,18 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
     const ImU32 bpCol   = IM_COL32(230, 70, 70, 255);
 
     // Reveal a requested line (follow recenters only when off-screen; goto forces).
-    if (s_scrollRequest && s_scrollTarget >= 1) {
+    // Only the tab the request was raised for may consume it, so a request for a
+    // tab that hasn't rendered yet isn't swallowed here. Clamp to the file's
+    // length so an out-of-range line still lands somewhere sensible.
+    if (s_scrollRequest && s_scrollTarget >= 1 &&
+        (s_scrollFile.empty() || s_scrollFile == file)) {
+        int target_line = s_scrollTarget;
+        if (target_line > lineCount)
+            target_line = lineCount > 0 ? lineCount : 1;
+
         float childH  = ImGui::GetWindowHeight();
         float sY      = ImGui::GetScrollY();
-        float top     = (s_scrollTarget - 1) * rowH;
+        float top     = (target_line - 1) * rowH;
         bool  visible = (top >= sY + rowH) && (top <= sY + childH - 2 * rowH);
         if (s_scrollForce || !visible) {
             float target = top - childH * 0.5f + rowH * 0.5f;
@@ -331,6 +453,7 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
             ImGui::SetScrollY(target);
         }
         s_scrollRequest = false;
+        s_scrollFile.clear();
     }
 
     ImGuiListClipper clipper;
@@ -339,6 +462,10 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             int  lineNo = i + 1;
             bool isCur  = isPcFile && (lineNo == pcLine);
+            // Recently navigated-to line in this file (fades out).
+            const double flashAge = ImGui::GetTime() - s_flashTime;
+            const bool   isFlash  = (s_flashLine == lineNo) && (s_flashFile == file) &&
+                                  (flashAge >= 0.0) && (flashAge < SRC_FLASH_SECONDS);
 
             ImGui::PushID(i);
             ImVec2 p0   = ImGui::GetCursorScreenPos();
@@ -365,18 +492,32 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
                 ImGui::EndPopup();
             }
 
-            // Row background (current line, else hover feedback).
-            if (isCur)
+            // Row background: current line, then the just-navigated-to line,
+            // then hover feedback. The navigation flash fades so it can't be
+            // mistaken for a second current line.
+            if (isCur) {
                 dl->AddRectFilled(p0, ImVec2(p0.x + rowW, p0.y + rowH), curBg);
-            else if (hovered)
+            } else if (isFlash) {
+                const float k = 1.0f - (float)(flashAge / SRC_FLASH_SECONDS);
+                const int   a = (int)(40.0f + 150.0f * k);
+                dl->AddRectFilled(p0, ImVec2(p0.x + rowW, p0.y + rowH),
+                                  IM_COL32(150, 110, 30, a));
+                dl->AddRect(p0, ImVec2(p0.x + rowW, p0.y + rowH),
+                            IM_COL32(240, 200, 90, (int)(80.0f + 175.0f * k)));
+            } else if (hovered) {
                 dl->AddRectFilled(p0, ImVec2(p0.x + rowW, p0.y + rowH), hoverBg);
+            }
 
             // Breakpoint marker (filled) / hover hint (hollow) in the gutter.
+            // The hint only appears while the mouse is actually over the gutter,
+            // since that is the only place a click sets a breakpoint.
             ImVec2 center(p0.x + markerW * 0.5f, p0.y + rowH * 0.5f);
             float  radius = rowH * 0.30f;
+            const float mouseX  = ImGui::GetIO().MousePos.x - p0.x;
+            const bool  inGutter = hovered && mouseX >= 0.0f && mouseX < markerW;
             if (src_line_has_bp(file, lineNo)) {
                 dl->AddCircleFilled(center, radius, bpCol);
-            } else if (hovered) {
+            } else if (inGutter) {
                 uint16_t tmp;
                 if (debug_ui_source_to_addr(file, lineNo, &tmp))
                     dl->AddCircle(center, radius, IM_COL32(230, 70, 70, 150));
@@ -394,14 +535,23 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
             src_expand_tabs(sf->lines[lineNo - 1], buf, sizeof buf);
             dl->AddText(ImVec2(p0.x + textX, p0.y), isCur ? colCur : colText, buf);
 
-            // Hover a label/number token → tooltip with its address + live value.
+            // Hover a mnemonic/label/number token → tooltip explaining it. On
+            // the PC's line the instruction tooltip also predicts the result.
             if (hovered)
-                src_hover_token_tooltip(buf, p0.x + textX, glyphW);
+                src_hover_token_tooltip(buf, p0.x + textX, glyphW, isCur);
 
             ImGui::PopID();
 
-            if (pressed)
-                src_toggle_bp(file, lineNo);
+            // Only a click in the gutter toggles a breakpoint. The row-wide
+            // button stays (it drives hover feedback, the context menu and the
+            // hover tooltips), but clicking the text itself must not arm a
+            // breakpoint - that made it far too easy to set one by accident
+            // while just clicking around the source.
+            if (pressed) {
+                const float clickX = ImGui::GetIO().MousePos.x - p0.x;
+                if (clickX >= 0.0f && clickX < markerW)
+                    src_toggle_bp(file, lineNo);
+            }
         }
     }
     clipper.End();
@@ -414,9 +564,10 @@ static void
 source_panel_render(bool *p_open)
 {
     if (!ImGui::Begin("Source", p_open)) {
-        ImGui::End();
+        dbgui_window_end();
         return;
     }
+    dbgui_window_zoom("source"); // Ctrl+wheel zooms this window's text only
 
     const ImVec4 orange(1.0f, 0.78f, 0.35f, 1.0f);
 
@@ -431,7 +582,7 @@ source_panel_render(bool *p_open)
         ImGui::BulletText("Start the emulator with:  -dbgfile <program.dbg>");
         ImGui::BulletText("If the .s/.c files aren't beside the .dbg:  -srcpath <dir>");
         ImGui::BulletText("A LOADed program's matching .dbg is picked up automatically.");
-        ImGui::End();
+        dbgui_window_end();
         return;
     }
 
@@ -440,9 +591,38 @@ source_panel_render(bool *p_open)
     const char *pcf     = nullptr;
     int         pcl     = 0;
     bool        mapping = (regs.k == 0) &&
-                   dbg_info_addr_to_source_nearest(regs.pc, &pcf, &pcl);
+                   dbg_info_addr_to_source_banked(regs.pc, (int)memory_get_ram_bank(), &pcf, &pcl);
 
-    if (mapping && pcf) {
+    // The PC often sits in code with no debug info: the KERNAL, or a small
+    // trampoline copied into low RAM (e.g. JSRFAR at $02xx used for far calls).
+    // Showing nothing at all leaves no clue where execution is, so fall back to
+    // the nearest return address on the stack that DOES map and display that,
+    // clearly flagged as the calling line rather than the PC.
+    bool     viaCaller = false;
+    uint16_t callerPc  = 0;
+    if (!mapping) {
+        const bool native = regs.is65c816 && !regs.e;
+        uint32_t   sp     = regs.sp;
+        uint32_t   from   = native ? (sp + 1) : (0x100 + (sp & 0xFF) + 1);
+        uint32_t   to     = native ? (sp + 1 + 256) : 0x200;
+        for (uint32_t a = from; a + 1 < to && !viaCaller; a++) {
+            uint8_t  lo     = debug_ui_read6502((uint16_t)a, 0, DEBUG_UI_CURRENT_BANK);
+            uint8_t  hi     = debug_ui_read6502((uint16_t)(a + 1), 0, DEBUG_UI_CURRENT_BANK);
+            uint16_t pushed = (uint16_t)(lo | (hi << 8));
+            uint8_t  opc    = debug_ui_read6502((uint16_t)(pushed - 2), regs.k, DEBUG_UI_CURRENT_BANK);
+            if (opc != 0x20 && opc != 0xFC)
+                continue;                       // not a JSR return frame
+            uint16_t ret = (uint16_t)(pushed + 1);
+            const char *cf = nullptr;
+            int         cl = 0;
+            if (dbg_info_addr_to_source_banked(ret, (int)memory_get_ram_bank(), &cf, &cl) && cf) {
+                pcf = cf; pcl = cl; callerPc = ret;
+                viaCaller = true;
+            }
+        }
+    }
+
+    if ((mapping || viaCaller) && pcf) {
         s_pcFile = pcf;
         s_pcLine = pcl;
         if (!s_addedDbgPath) {
@@ -452,10 +632,43 @@ source_panel_render(bool *p_open)
         src_ensure_tab(s_pcFile.c_str()); // keep the PC's file open as a tab
     }
 
-    bool pcMoved = mapping && (s_pcLine != s_lastPcLine || s_pcFile != s_lastPcFile);
+    bool pcMoved = (mapping || viaCaller) && (s_pcLine != s_lastPcLine || s_pcFile != s_lastPcFile);
+
+    // Cross-panel goto (clicking a Call Stack / Symbols / Breakpoints entry):
+    // open that address's source file and jump to its line, so selecting a
+    // frame lands you in the code rather than only moving the memory view.
+    {
+        uint16_t gaddr;
+        uint8_t  gbank;
+        if (debug_ui_peek_goto(&gaddr, &gbank)) {
+            const char *gf = nullptr;
+            int         gl = 0;
+            if (dbg_info_addr_to_source_banked(gaddr, (int)memory_get_ram_bank(), &gf, &gl) && gf) {
+                if (!s_addedDbgPath) {
+                    source_view_add_path(dbg_info_get_dbg_dir());
+                    s_addedDbgPath = true;
+                }
+                src_ensure_tab(gf);
+                s_selectFile    = gf;
+                src_request_scroll(gf, gl, true);
+            }
+        }
+    }
 
     // --- Toolbar ---
     ImGui::Checkbox("Follow PC", &s_follow);
+    ImGui::SameLine();
+    if (ImGui::Button("Go to PC")) {
+        // Jump to wherever the PC maps right now, without changing Follow PC.
+        if ((mapping || viaCaller) && !s_pcFile.empty()) {
+            src_ensure_tab(s_pcFile.c_str());
+            s_selectFile    = s_pcFile;
+            src_request_scroll(s_pcFile.c_str(), s_pcLine, true);
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Jump to the line the PC maps to (or its nearest\n"
+                          "mapped caller when the PC has no source).");
     ImGui::SameLine(0, 16);
     if (ImGui::Button("Open..."))
         ImGui::OpenPopup("src_open");
@@ -471,13 +684,30 @@ source_panel_render(bool *p_open)
     if (ImGui::Button("Go"))
         go = true;
     if (go && s_gotoLine >= 1) {
-        s_scrollRequest = true;
-        s_scrollForce   = true;
-        s_scrollTarget  = s_gotoLine;
+        // Target the tab that is actually showing (recorded when it last
+        // rendered), so the jump lands in the file the user is looking at
+        // instead of whichever tab happens to draw next. Fall back to the PC's
+        // file when nothing has rendered yet.
+        const std::string &target = !s_activeFile.empty() ? s_activeFile : s_pcFile;
+        if (!target.empty()) {
+            src_ensure_tab(target.c_str());
+            s_selectFile = target;
+            src_request_scroll(target.c_str(), s_gotoLine, true);
+        } else {
+            src_request_scroll(nullptr, s_gotoLine, true);
+        }
     }
     if (!mapping && regs.k != 0) {
         ImGui::SameLine(0, 16);
         ImGui::TextDisabled("PC in bank %02X (no source map)", regs.k);
+    } else if (viaCaller) {
+        ImGui::SameLine(0, 16);
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f),
+                           "PC $%04X has no source (KERNAL/trampoline) — showing caller $%04X",
+                           regs.pc, callerPc);
+    } else if (!mapping) {
+        ImGui::SameLine(0, 16);
+        ImGui::TextDisabled("PC $%04X — no source mapping", regs.pc);
     }
 
     ImGui::Separator();
@@ -487,7 +717,7 @@ source_panel_render(bool *p_open)
                            "step into code covered by the loaded .dbg.");
         s_lastPcLine = s_pcLine;
         s_lastPcFile = s_pcFile;
-        ImGui::End();
+        dbgui_window_end();
         return;
     }
 
@@ -496,14 +726,17 @@ source_panel_render(bool *p_open)
     if (ImGui::BeginTabBar("src_tabs",
                            ImGuiTabBarFlags_AutoSelectNewTabs |
                                ImGuiTabBarFlags_Reorderable |
+                               ImGuiTabBarFlags_DrawSelectedOverline |
                                ImGuiTabBarFlags_TabListPopupButton)) {
         for (int i = 0; i < (int)s_tabs.size(); i++) {
             const std::string &f    = s_tabs[i];
-            bool               isPc = mapping && (f == s_pcFile);
+            bool               isPc = (mapping || viaCaller) && (f == s_pcFile);
 
             ImGuiTabItemFlags flags = 0;
             if (s_follow && isPc && pcMoved)
                 flags |= ImGuiTabItemFlags_SetSelected; // snap to PC while following
+            if (!s_selectFile.empty() && f == s_selectFile)
+                flags |= ImGuiTabItemFlags_SetSelected; // cross-panel goto target
 
             // Display shows a "> " marker on the PC's file; the ID (after ###)
             // is the stable full name so toggling the marker never recreates it.
@@ -523,13 +756,21 @@ source_panel_render(bool *p_open)
         }
         ImGui::EndTabBar();
     }
+    s_selectFile.clear(); // one-shot: only force tab selection for this frame
     if (closeIdx >= 0)
         s_tabs.erase(s_tabs.begin() + closeIdx);
+
+    // Drop a scroll request whose target tab never rendered (closed, or never
+    // opened) instead of letting it fire later against an unrelated file.
+    if (s_scrollRequest && ++s_scrollAge > 4) {
+        s_scrollRequest = false;
+        s_scrollFile.clear();
+    }
 
     s_lastPcLine = s_pcLine;
     s_lastPcFile = s_pcFile;
 
-    ImGui::End();
+    dbgui_window_end();
 }
 
 static DebugPanelRegistration s_reg("Source", source_panel_render, true);

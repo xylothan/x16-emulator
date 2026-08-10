@@ -128,6 +128,16 @@ static uint16_t irq_line;
 
 static uint8_t reg_layer[2][7];
 
+// Per-scanline record of the layer registers that were actually used to render
+// each line, so debug views can reproduce raster-split effects -- programs
+// routinely rewrite MAPBASE/TILEBASE/scroll part-way down a frame from a line
+// IRQ. Without this a debugger can only ever show one register snapshot for the
+// whole frame, which describes just one band of the screen.
+static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
+static uint16_t line_eff_y[SCREEN_HEIGHT];
+static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
+static bool     line_state_valid[SCREEN_HEIGHT];
+
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
 static uint8_t prev_reg_composer[2][COMPOSER_SLOTS];
@@ -440,7 +450,7 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 		SDL_GetWindowPosition(window, &mainX, &mainY);
 		SDL_GetWindowSize(window, &mainW, NULL);
 
-		imgui_window = SDL_CreateWindow("Commander X16 - Debugger",
+		imgui_window = SDL_CreateWindow("Commander X16 - ImGui Debugger",
 			mainX + mainW + 4, mainY,
 			960, 720,
 			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -1189,6 +1199,17 @@ render_line(uint16_t y, float scan_pos_x)
 	layer_line_enable[1] = dc_video & 0x20;
 	sprite_line_enable   = dc_video & 0x40;
 
+	// Snapshot the layer state this line is about to be rendered with, for
+	// debug views (see line_reg_layer). Taken here rather than at end of frame
+	// because that is the point at which reg_layer holds the values that
+	// produced *this* scanline.
+	if (y < SCREEN_HEIGHT) {
+		memcpy(line_reg_layer[y], reg_layer, sizeof(line_reg_layer[y]));
+		line_eff_y[y]         = eff_y;
+		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
+		line_state_valid[y]   = true;
+	}
+
 	// clear layer_line if layer gets disabled
 	for (uint8_t layer = 0; layer < 2; layer++) {
 		if (!layer_line_enable[layer] && old_layer_line_enable[layer]) {
@@ -1859,6 +1880,150 @@ video_update()
 		mouse_send_state();
 	}
 	return true;
+}
+
+// ─── Debug view accessors ──────────────────────────────────────────────────
+
+// Report the layer registers and effective layer Y that were used to render a
+// given display scanline. Debug views use this to reproduce mid-frame register
+// changes (raster splits) instead of assuming one snapshot covers the frame.
+bool
+video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
+                           uint16_t *out_eff_y, bool *out_enabled)
+{
+	if (layer >= 2 || line >= SCREEN_HEIGHT || !line_state_valid[line]) {
+		return false;
+	}
+	if (out_regs) {
+		memcpy(out_regs, line_reg_layer[line][layer], 7);
+	}
+	if (out_eff_y) {
+		*out_eff_y = line_eff_y[line];
+	}
+	if (out_enabled) {
+		*out_enabled = (line_layer_enabled[line] & (1 << layer)) != 0;
+	}
+	return true;
+}
+
+uint16_t
+video_get_scanline_count(void)
+{
+	return SCREEN_HEIGHT;
+}
+
+// Size, in layer pixels, of the image the composer is actually putting on
+// screen: the active display window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled
+// by DC_HSCALE/DC_VSCALE. The composer advances the layer by scale/128 of a
+// pixel per output pixel, so this is what a 320x200-style mode really shows.
+// Debug viewers use it to size themselves to the current video mode.
+void
+video_get_active_layer_size(int *out_w, int *out_h)
+{
+	int hstart = reg_composer[4] << 2;
+	int hstop  = reg_composer[5] << 2;
+	int vstart = reg_composer[6] << 1;
+	int vstop  = reg_composer[7] << 1;
+
+	if (hstart > SCREEN_WIDTH)  hstart = SCREEN_WIDTH;
+	if (hstop  > SCREEN_WIDTH)  hstop  = SCREEN_WIDTH;
+	if (vstart > SCREEN_HEIGHT) vstart = SCREEN_HEIGHT;
+	if (vstop  > SCREEN_HEIGHT) vstop  = SCREEN_HEIGHT;
+
+	const int screen_w = hstop > hstart ? hstop - hstart : 0;
+	const int screen_h = vstop > vstart ? vstop - vstart : 0;
+
+	if (out_w) {
+		*out_w = (screen_w * reg_composer[1]) >> 7;
+	}
+	if (out_h) {
+		*out_h = (screen_h * reg_composer[2]) >> 7;
+	}
+}
+
+// Predict the next VERA interrupt.
+//
+// VERA raises VSYNC when the scan reaches line SCREEN_HEIGHT and LINE when it
+// reaches IRQLINE, so with the current scan position both are predictable. The
+// debugger uses this for its "cycles until the next IRQ" readout. Returns false
+// when neither a line nor a vsync interrupt is enabled in IEN. out_cycles
+// receives CPU cycles (at `mhz`) until the next one; out_source receives the
+// ISR bit that will be set (1 = VSYNC, 2 = LINE).
+bool
+video_next_irq(float mhz, uint32_t *out_cycles, uint8_t *out_source)
+{
+	const bool ntsc_mode = reg_composer[0] & 2;
+	const bool vsync_en  = (ien & 1) != 0;
+	const bool line_en   = (ien & 2) != 0;
+
+	if (!vsync_en && !line_en) {
+		return false;
+	}
+
+	// Scanline the renderer is currently on, in the same space as the compares
+	// in update_isr_and_coll().
+	const int cur = ntsc_mode ? (int)(ntsc_scan_pos_y % SCAN_HEIGHT) - NTSC_Y_OFFSET_LOW
+	                          : (int)vga_scan_pos_y - VGA_Y_OFFSET;
+
+	// Lines from `cur` to `target`, wrapping through the end of the frame.
+	#define LINES_UNTIL(target) \
+		((((int)(target) - cur) + SCAN_HEIGHT) % SCAN_HEIGHT)
+
+	int     best_lines  = SCAN_HEIGHT + 1;
+	uint8_t best_source = 0;
+
+	if (vsync_en) {
+		const int d = LINES_UNTIL(SCREEN_HEIGHT);
+		if (d < best_lines) {
+			best_lines  = d;
+			best_source = 1;
+		}
+	}
+	if (line_en) {
+		const int d = LINES_UNTIL(irq_line);
+		if (d < best_lines) {
+			best_lines  = d;
+			best_source = 2;
+		}
+	}
+	#undef LINES_UNTIL
+
+	if (!best_source) {
+		return false;
+	}
+
+	// video_step() advances the scan by PIXEL_FREQ * cycles / mhz pixels, so a
+	// whole scanline costs scan_width * mhz / PIXEL_FREQ CPU cycles. Subtract
+	// how far into the current line we already are.
+	const float scan_width      = ntsc_mode ? NTSC_HALF_SCAN_WIDTH : VGA_SCAN_WIDTH;
+	const float cycles_per_line = scan_width * mhz / (float)PIXEL_FREQ;
+	const float into_line       = ntsc_mode ? ntsc_half_cnt : vga_scan_pos_x;
+	float       cycles          = best_lines * cycles_per_line
+	                              - into_line * mhz / (float)PIXEL_FREQ;
+	if (cycles < 0) {
+		cycles = 0;
+	}
+
+	if (out_cycles) {
+		*out_cycles = (uint32_t)cycles;
+	}
+	if (out_source) {
+		*out_source = best_source;
+	}
+	return true;
+}
+
+// Raw VERA interrupt state, for debug views: enable mask, pending mask and the
+// programmed IRQ line.
+void
+video_get_irq_state(uint8_t *out_ien, uint8_t *out_isr, uint16_t *out_irq_line)
+{
+	if (out_ien)
+		*out_ien = ien;
+	if (out_isr)
+		*out_isr = isr | (pcm_is_fifo_almost_empty() ? 8 : 0);
+	if (out_irq_line)
+		*out_irq_line = irq_line;
 }
 
 void

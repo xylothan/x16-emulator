@@ -77,9 +77,10 @@ void
 symbols_panel_render(bool *p_open)
 {
     if (!ImGui::Begin("Symbols", p_open)) {
-        ImGui::End();
+        dbgui_window_end();
         return;
     }
+    dbgui_window_zoom("symbols");
 
     const ImVec4 orange(1.0f, 0.78f, 0.35f, 1.0f);
 
@@ -89,7 +90,7 @@ symbols_panel_render(bool *p_open)
         ImGui::TextWrapped("Symbols come from cc65 .dbg address labels. Start with "
                            "-dbgfile <prog.dbg> (and -srcpath if needed), or LOAD a "
                            "program whose matching .dbg auto-loads.");
-        ImGui::End();
+        dbgui_window_end();
         return;
     }
 
@@ -185,7 +186,7 @@ symbols_panel_render(bool *p_open)
         ImGui::EndTable();
     }
 
-    ImGui::End();
+    dbgui_window_end();
 }
 
 DebugPanelRegistration s_reg("Symbols", symbols_panel_render, true);

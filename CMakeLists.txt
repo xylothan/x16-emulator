@@ -235,6 +235,7 @@ set(X16_SOURCES
     src/dbg_info.c
     src/dbg_load.c
     src/source_view.c
+    src/insn_info.c
     src/code_map.c
     src/debug_core.c
     src/cpu/irq_ctx.c
@@ -275,6 +276,7 @@ if(USE_IMGUI)
     set(DEBUG_UI_SOURCES
         src/debug_ui/debug_ui.cpp
         src/debug_ui/debug_ui_panels.cpp
+        src/debug_ui/debug_ui_settings.cpp
         src/debug_ui/panels/memory_panel.cpp
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
@@ -283,6 +285,9 @@ if(USE_IMGUI)
         src/debug_ui/panels/breakpoints_panel.cpp
         src/debug_ui/panels/symbols_panel.cpp
         src/debug_ui/panels/callstack_panel.cpp
+        src/debug_ui/panels/psg_panel.cpp
+        src/debug_ui/panels/fm_panel.cpp
+        src/debug_ui/panels/pcm_panel.cpp
     )
 
     list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
