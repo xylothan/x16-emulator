@@ -262,8 +262,13 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
 	}
 
-	if (currentPCX16Bank<0 && currentPC >= 0xA000 && currentPCBank == 0) {
-		currentPCX16Bank = currentPC < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
+	// Repair the bank when it is unset: currentPC moves independently of
+	// regs.pc via the navigation keys, so it can land in a banked window while
+	// currentPCX16Bank still says "none". Uses the shared rule rather than a
+	// local copy of it, which is what let this one keep the old requirement
+	// that the program bank be zero.
+	if (currentPCX16Bank < 0) {
+		currentPCX16Bank = debug_current_x16_bank(currentPC, currentPCBank);
 	}
 
 	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
@@ -723,12 +728,22 @@ static void DEBUGExecCmd() {
 						if (addr >= 0xC000 && addr < 0x10000) {
 							// Nop.
 						} else if (addr >= 0xA000 && addr < 0xC000) {
+							// -1 means "whichever bank is mapped", as it does
+							// everywhere else this is used, so resolve it before
+							// bounds-checking rather than rejecting it -- the
+							// initial value is -1 and refusing it would make the
+							// commonest case silently do nothing.
+							//
 							// Bounds-checked like the RAM branch below, which it
-							// was not: currentX16Bank starts at -1 and is taken
-							// from user input with only a & 0xFF, so an unset or
-							// out-of-range bank indexed outside the allocation.
-							if (currentX16Bank >= 0 && currentX16Bank < (int)num_ram_banks) {
-								BRAM[(currentX16Bank << 13) + addr - 0xA000] = number;
+							// was not: the bank is taken from user input with
+							// only a & 0xFF, so an out-of-range one indexed past
+							// the end of the allocation, and the unset -1 indexed
+							// before its start.
+							const int fill_bank = currentX16Bank < 0
+							                          ? (int)memory_get_ram_bank()
+							                          : currentX16Bank;
+							if (fill_bank >= 0 && fill_bank < (int)num_ram_banks) {
+								BRAM[(fill_bank << 13) + addr - 0xA000] = number;
 							}
 						} else if ((addr >> 16) < num_banks) {
 							RAM[addr] = number;
@@ -1049,8 +1064,12 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 			}
 		}
 		initialPC = (initialPC + size) & 0xFFFF;										// Forward to next
-		if (currentPCBank == 0 && initialPC >= 0xA000 && implied_x16_bank == -1) {
-			implied_x16_bank = memory_get_ram_bank();
+		// Same shared rule again. This copy had drifted further than the other:
+		// it filled in the RAM bank whatever window the address was in, so once
+		// disassembly walked past $C000 the RAM bank number was used to select
+		// a ROM bank and the pane showed bytes from the wrong one.
+		if (implied_x16_bank == -1) {
+			implied_x16_bank = debug_current_x16_bank(initialPC, currentPCBank);
 		}
 	}
 }
@@ -1265,7 +1284,11 @@ static void DEBUGNumberDec(int x, int y, int n, int w, SDL_Color colour) {
 static void DEBUGAddress(int x, int y, int x16Bank, int addr, uint8_t bank, SDL_Color colour) {
 	char buffer[4];
 
-	if(addr >= 0xA000 && bank == 0) {
+	// Whether a window bank means anything here is the shared rule's decision,
+	// not a fourth local copy of it. The one that used to be here required the
+	// program bank to be zero, so on gen1 with -c816 it rendered "--:" at an
+	// address the window registers really do select.
+	if (debug_current_x16_bank(addr, bank) >= 0) {
 		snprintf(buffer, sizeof(buffer), "%.2X:", x16Bank);
 	} else if (is_gen2) {
 		snprintf(buffer, sizeof(buffer), "%.2X ", bank);
