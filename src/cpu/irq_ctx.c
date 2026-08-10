@@ -4,21 +4,26 @@
 
 #include <string.h>
 
-// Deep enough for any plausible nesting: the X16 has IRQ, NMI and BRK, and a
-// handler that re-enables interrupts can nest a few more. Past this the depth
-// still counts correctly; only the per-frame detail stops being recorded.
-#define CPU_IRQ_CTX_MAX 16
+// Past CPU_IRQ_CTX_MAX (see irq_ctx.h) the depth still counts, but there is no
+// room to record which stack pointer each of those entries had. A return can
+// therefore only take them off one at a time, since it has nothing to match
+// against; an entry can still clear them wholesale, by judging them against the
+// deepest frame that does have a recorded pointer.
 
-// How far the stack may have unwound and still count as "past" the next frame
-// down. An interrupt frame is 3 bytes (4 on the 65C816 in native mode), so the
-// deepest nest we record spans 64; anything beyond that is a wrap or a handler
-// that abandoned the stack wholesale, neither of which should cascade.
-#define CPU_IRQ_UNWIND_WINDOW (CPU_IRQ_CTX_MAX * 8)
+// Nesting beyond this is a runaway loop, and the exact number stops meaning
+// anything. This is reachable, not merely defensive. Once the depth passes the
+// array, frames[] stops being written, so the pointer everything above is
+// judged against -- frames[CPU_IRQ_CTX_MAX - 1] -- is frozen. Interrupts taken
+// strictly below it therefore add a level every time with nothing able to
+// retire any of them, and they need not even keep descending. A handler that
+// BRKs on entry would climb until a signed counter overflowed, which is
+// undefined behaviour rather than merely a wrong answer.
+#define CPU_IRQ_DEPTH_MAX 0x10000
 
 struct irq_frame {
 	uint8_t  vector;
-	uint16_t from_pc;
-	uint16_t sp;      // stack pointer before the interrupt pushed anything
+	uint32_t from_pc;  // 24-bit: the program bank matters on the 65816
+	uint16_t sp;       // stack pointer before the interrupt pushed anything
 };
 
 static struct irq_frame frames[CPU_IRQ_CTX_MAX];
@@ -28,18 +33,47 @@ static uint8_t          last_vector;
 static bool             just_entered;
 
 void
-cpu_irq_ctx_enter(int vector, uint16_t from_pc, uint16_t sp)
+cpu_irq_ctx_enter(int vector, uint32_t from_pc, uint16_t sp)
 {
 	taken++;
 	last_vector  = (uint8_t)vector;
 	just_entered = true;
+
+	// Retire frames the stack has already passed. Nesting drives the pointer
+	// DOWN, so open frames must be strictly decreasing in sp; one recorded at or
+	// below where this interrupt is being taken cannot still be live, because
+	// the stack has risen back above it.
+	//
+	// This is what clears a handler that left without an RTI -- a BRK reaching a
+	// warm start, which resets the stack instead of returning. Nothing on the
+	// return path can do it: the abandoned frame has no matching return, so it
+	// would sit there for the rest of the session, and every further BRK would
+	// add another.
+	//
+	// Judged here rather than on return because entry is the moment the stack
+	// level is known to be real. A return only tells us where the stack ended
+	// up, which a handler is free to fake.
+	//
+	// Levels above the array have no recorded pointer of their own, so they are
+	// judged by the deepest one that has: an interrupt taken at or above
+	// frames[CPU_IRQ_CTX_MAX - 1] proves everything from there up is gone,
+	// unrecorded levels included. Skipping them instead would strand every frame
+	// underneath as soon as the depth passed the array, which is the same
+	// permanent staleness this rule exists to prevent.
+	while (depth > 0) {
+		const int top = (depth < CPU_IRQ_CTX_MAX ? depth : CPU_IRQ_CTX_MAX) - 1;
+		if (frames[top].sp > sp)
+			break;
+		depth = top;
+	}
 
 	if (depth >= 0 && depth < CPU_IRQ_CTX_MAX) {
 		frames[depth].vector  = (uint8_t)vector;
 		frames[depth].from_pc = from_pc;
 		frames[depth].sp      = sp;
 	}
-	depth++;
+	if (depth < CPU_IRQ_DEPTH_MAX)
+		depth++;
 }
 
 void
@@ -53,33 +87,41 @@ cpu_irq_ctx_leave(uint16_t sp)
 		return;
 	}
 
-	// Pop the innermost frame, then keep popping while the stack has unwound to
-	// or past the frame below it. A balanced RTI restores the stack pointer to
-	// exactly what it was on entry, so it pops one; a handler that returns
-	// further than its own frame -- unwinding several at once -- would
-	// otherwise leave the depth stuck high.
-	//
-	// "Past" is judged on a bounded difference, not on the raw values, because
-	// the stack wraps: within page 1 in emulation mode, and at 16 bits in
-	// native mode. A frame entered a few bytes from the bottom has a
-	// numerically LOWER pointer than the one nested inside it, so comparing
-	// absolutely would read a balanced inner return as having unwound past the
-	// outer frame and collapse the whole depth. Every frame this can cascade
-	// through was pushed by an interrupt, costing 3 or 4 bytes, so a genuine
-	// unwind of the frames we record spans well under this window while a wrap
-	// lands far outside it.
-	while (depth > 0) {
-		const int top = depth - 1;
+	// Nothing was recorded for entries above the array, so they come off singly.
+	if (depth > CPU_IRQ_CTX_MAX) {
 		depth--;
-		if (top >= CPU_IRQ_CTX_MAX)
-			break;                       // no detail recorded for this one
-		if (depth > 0 && depth - 1 < CPU_IRQ_CTX_MAX
-		    && (uint16_t)(sp - frames[depth - 1].sp) <= CPU_IRQ_UNWIND_WINDOW)
-			continue;                    // the next one down is finished too
-		break;
+		return;
 	}
-}
 
+	// A balanced RTI restores the stack pointer to exactly what it was when the
+	// interrupt was taken, so the frame being returned from is the one whose
+	// recorded pointer equals this one. Matching exactly, rather than measuring
+	// how far the stack has moved, is what keeps this honest: a distance test
+	// cannot tell a genuine unwind from a stack that wrapped, and guessing
+	// wrong collapses the depth to zero while a handler is still running.
+	//
+	// Retirement on entry keeps the recorded pointers strictly decreasing, so
+	// at most one frame can match and the search direction does not matter.
+	// Searching outwards also handles a handler that returns past its own
+	// frame, unwinding several at once.
+	for (int i = depth - 1; i >= 0; i--) {
+		if (frames[i].sp == sp) {
+			depth = i;
+			return;
+		}
+	}
+
+	// No frame matches: a handler that rewrote the stack, or an RTI for an
+	// interrupt taken before this was watching. Leave the depth alone rather
+	// than popping a frame that may still be live -- a handler can fabricate a
+	// frame and RTI to itself with three pushes, which lands on no recorded
+	// pointer at all while the real interrupt is still running.
+	//
+	// So this errs high, and stays there until a return matches an outer frame.
+	// Too high corrects itself at the next matching return; too low would claim
+	// no interrupt is running while one is, and a debugger confidently
+	// reporting that is worse than one reporting a stale depth.
+}
 void
 cpu_irq_ctx_reset(void)
 {
@@ -114,7 +156,7 @@ cpu_irq_last_vector(void)
 	return last_vector;
 }
 
-uint16_t
+uint32_t
 cpu_irq_return_pc(void)
 {
 	if (depth <= 0)
