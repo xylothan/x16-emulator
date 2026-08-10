@@ -1497,6 +1497,19 @@ main(int argc, char **argv)
 #ifdef __EMSCRIPTEN__
 	emscripten_set_main_loop(emscripten_main_loop, 0, 0);
 #endif
+	// The graphical debugger needs a window, and headless mode never opens one:
+	// video_init() below is skipped entirely, so the self-disable inside it
+	// never runs. Clearing the flag here keeps the invariant the rest of the
+	// code relies on -- the flag is set only if the window exists -- true on
+	// this path as well as on the creation-failure path. Left set, the emulator
+	// loop routes through DEBUGGetCurrentStatus(), and a breakpoint or an STP
+	// parks the machine in DMODE_STOP with no window, no events and nothing
+	// able to resume it: a silent spin at 100% of a core.
+	if (headless && imgui_debugger_enabled) {
+		imgui_debugger_enabled = false;
+		printf("The graphical debugger needs a window; -imgui is ignored in headless mode.\n");
+	}
+
 	if (!headless) {
 		// Shows up in the power management area of Linux desktops of applications inhibiting the screensaver
 		// As well as the audio mixer
@@ -2100,8 +2113,10 @@ emulator_loop(void *param)
 
 		// The graphical debugger needs this too: DEBUGGetCurrentStatus() is what
 		// detects breakpoint arrival and completes a step, and it delegates the
-		// pause loop to whichever UI is up.
-		if (debugger_enabled || imgui_debugger_enabled) {
+		// pause loop to whichever UI is up. Tested against the window rather
+		// than the flag alone, so that no path can park the machine in a pause
+		// loop that has no UI to resume it.
+		if (debugger_enabled || (imgui_debugger_enabled && video_debug_ui_available())) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
