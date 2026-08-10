@@ -138,6 +138,9 @@ static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
 static uint16_t line_eff_y[SCREEN_HEIGHT];
 static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
 static bool     line_state_valid[SCREEN_HEIGHT];
+// The raw registers on the same two-stage delay the layer properties use, so
+// the history above can record the generation that actually rendered a line.
+static uint8_t  prev_reg_layer[2][2][7];
 
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
@@ -245,6 +248,13 @@ mousegrab_toggle() {
 void
 video_reset()
 {
+	// Drop the per-scanline debug history: it describes a machine that no
+	// longer exists, and nothing else invalidates it, so without this a
+	// debug view would keep decoding rows against pre-reset registers
+	// indefinitely -- for any line the beam has not reached again yet.
+	memset(line_state_valid, 0, sizeof(line_state_valid));
+	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
+
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
 	memset(io_inc, 0, sizeof(io_inc));
@@ -1163,6 +1173,15 @@ render_line(uint16_t y, float scan_pos_x)
 		memcpy(prev_layer_properties[1], prev_layer_properties[0], sizeof(*layer_properties) * NUM_LAYERS);
 		memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 
+		// The raw layer registers travel down the same two-stage pipeline, so
+		// the debug history can record what a line was actually rendered with.
+		// The renderers read prev_layer_properties[1], two generations behind
+		// live: snapshotting reg_layer directly would attribute a mid-frame
+		// register change to a line two scanlines before the one it affected,
+		// which is precisely the raster-split case this history exists for.
+		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
+		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
+
 		if ((dc_video & 3) > 1) { // 480i or 240p
 			if ((y >> 1) == 0) {
 				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
@@ -1213,15 +1232,24 @@ render_line(uint16_t y, float scan_pos_x)
 	layer_line_enable[1] = dc_video & 0x20;
 	sprite_line_enable   = dc_video & 0x40;
 
-	// Snapshot the layer state this line is about to be rendered with, for
-	// debug views (see line_reg_layer). Taken here rather than at end of frame
-	// because that is the point at which reg_layer holds the values that
-	// produced *this* scanline.
+	// Snapshot the layer state this line was actually rendered with, for debug
+	// views (see line_reg_layer). Takes prev_reg_layer[1], the same generation
+	// the renderers read via prev_layer_properties[1] -- not the live
+	// registers, which by now describe a line two scanlines further down.
+	//
+	// In progressive mode y has already been forced even above, so both fields
+	// of a pair record the same state rather than leaving odd lines stale.
 	if (y < SCREEN_HEIGHT) {
-		memcpy(line_reg_layer[y], reg_layer, sizeof(line_reg_layer[y]));
+		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
 		line_eff_y[y]         = eff_y;
 		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
 		line_state_valid[y]   = true;
+		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+			memcpy(line_reg_layer[y + 1], prev_reg_layer[1], sizeof(line_reg_layer[y + 1]));
+			line_eff_y[y + 1]         = eff_y;
+			line_layer_enabled[y + 1] = line_layer_enabled[y];
+			line_state_valid[y + 1]   = true;
+		}
 	}
 
 	// clear layer_line if layer gets disabled
