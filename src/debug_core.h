@@ -75,6 +75,12 @@ enum {
 // disagreeing about what -1 means.
 bool debug_bank_selector_matches(int selector, int addr, uint8_t pbank);
 
+// What the core will actually record for a selector at this address. Outside a
+// banked window there is nothing to select, so it stores DEBUG_BANK_ANY. A
+// caller that keeps its own copy of the key must normalise the same way, or its
+// copy will not match the entry the core created.
+int debug_normalise_bank(int selector, int addr, uint8_t pbank);
+
 // Which RAM/ROM window `pc` sits in given program bank `pbank`, or
 // DEBUG_BANK_ANY where a bank means nothing there. Exported so callers that
 // produce selectors use the same rule as the matcher above: a second copy will
