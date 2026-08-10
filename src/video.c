@@ -1258,28 +1258,6 @@ render_line(uint16_t y, float scan_pos_x)
 	layer_line_enable[1] = dc_video & 0x20;
 	sprite_line_enable   = dc_video & 0x40;
 
-	// Snapshot the layer state this line was actually rendered with, for debug
-	// views (see line_reg_layer). Takes prev_reg_layer[1], the same generation
-	// the renderers read via prev_layer_properties[1] -- not the live
-	// registers, which by now describe a line two scanlines further down.
-	if (y < SCREEN_HEIGHT) {
-		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
-		line_eff_y[y]         = eff_y;
-		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
-		for (uint8_t l = 0; l < 2; l++) {
-			line_layer_row[y][l] =
-				(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
-		}
-		line_state_valid[y]   = true;
-		// Progressive modes draw only the even line of each pair, so the odd
-		// one was never rendered. Marked invalid rather than filled in: the
-		// contract is "what this scanline showed", and inventing a row for a
-		// line the beam never drew is how a debug view starts lying.
-		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
-			line_state_valid[y + 1] = false;
-		}
-	}
-
 
 	// clear layer_line if layer gets disabled
 	for (uint8_t layer = 0; layer < 2; layer++) {
