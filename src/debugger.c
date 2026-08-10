@@ -171,12 +171,13 @@ int    oldRegisterTicks = 0;                          // Last PC when change not
 
 SDL_Renderer *dbgRenderer;                            // Renderer passed in.
 
+// Which RAM/ROM window the PC is in, or -1 where a bank means nothing there.
+// Delegates to debug_core so the rule that *produces* a selector is the same one
+// the matcher applies. The copy that used to live here required the program bank
+// to be zero unconditionally, which disagrees on gen1 with -c816: read6502
+// forces the bank to zero there, so the window registers do apply.
 static inline int getCurrentBank(int pc, uint8_t bank) {
-	int x16Bank = -1;
-	if (pc >= 0xA000 && bank == 0) {
-		x16Bank = pc < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
-	}
-	return x16Bank;
+	return debug_current_x16_bank(pc, bank);
 }
 
 // *******************************************************************************************
@@ -261,8 +262,13 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
 	}
 
-	if (currentPCX16Bank<0 && currentPC >= 0xA000 && currentPCBank == 0) {
-		currentPCX16Bank = currentPC < 0xC000 ? memory_get_ram_bank() : memory_get_rom_bank();
+	// Repair the bank when it is unset: currentPC moves independently of
+	// regs.pc via the navigation keys, so it can land in a banked window while
+	// currentPCX16Bank still says "none". Uses the shared rule rather than a
+	// local copy of it, which is what let this one keep the old requirement
+	// that the program bank be zero.
+	if (currentPCX16Bank < 0) {
+		currentPCX16Bank = debug_current_x16_bank(currentPC, currentPCBank);
 	}
 
 	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
@@ -722,7 +728,23 @@ static void DEBUGExecCmd() {
 						if (addr >= 0xC000 && addr < 0x10000) {
 							// Nop.
 						} else if (addr >= 0xA000 && addr < 0xC000) {
-							BRAM[(currentX16Bank << 13) + addr - 0xA000] = number;
+							// -1 means "whichever bank is mapped", as it does
+							// everywhere else this is used, so resolve it before
+							// bounds-checking rather than rejecting it -- the
+							// initial value is -1 and refusing it would make the
+							// commonest case silently do nothing.
+							//
+							// Bounds-checked like the RAM branch below, which it
+							// was not: the bank is taken from user input with
+							// only a & 0xFF, so an out-of-range one indexed past
+							// the end of the allocation, and the unset -1 indexed
+							// before its start.
+							const int fill_bank = currentX16Bank < 0
+							                          ? (int)memory_get_ram_bank()
+							                          : currentX16Bank;
+							if (fill_bank >= 0 && fill_bank < (int)num_ram_banks) {
+								BRAM[(fill_bank << 13) + addr - 0xA000] = number;
+							}
 						} else if ((addr >> 16) < num_banks) {
 							RAM[addr] = number;
 						}
@@ -982,12 +1004,25 @@ static void DEBUGRenderVRAM(int y, int data) {
 //
 // *******************************************************************************************
 
+// Unbanked, the RAM window, or the ROM window. A bank number selected for one
+// of these means nothing in the others.
+static int bank_window_of(int addr) {
+	if (addr < 0xA000)
+		return 0;
+	return addr < 0xC000 ? 1 : 2;
+}
+
 static void DEBUGRenderCode(int lines, int initialPC) {
 	char buffer[32];
 	uint8_t implied_status = regs.status;
 	uint8_t implied_e = regs.e;
 	uint8_t opcode, operand, carry;
 	int implied_x16_bank = currentPCX16Bank;
+	// Which window that bank belongs to. A bank number only means something
+	// inside the window it names -- a RAM bank does not select a ROM bank -- so
+	// when the walk crosses out of it the carried value is re-derived from what
+	// is mapped there instead of being carried on regardless.
+	int implied_window = bank_window_of(initialPC);
 
 	for (int y = 0; y < lines; y++) { 							// Each line
 		DEBUGAddress(DBG_ASMX, y, implied_x16_bank, initialPC, currentPCBank, col_label);
@@ -1003,7 +1038,13 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 		// still been true without the added logic, anyway.
 
 		if (regs.is65c816) {
-			opcode = debug_read6502(initialPC, currentPCBank, currentPCX16Bank);
+			// Read through the bank this line is labelled with, not the one the
+			// pane started in. This scan predicts the M/X widths, which decide
+			// how many bytes the next immediate instruction occupies -- so
+			// reading it from a different bank than the one being disassembled
+			// mis-sizes the instruction and every line after it lands at the
+			// wrong offset.
+			opcode = debug_read6502(initialPC, currentPCBank, implied_x16_bank);
 			switch (opcode) {
 				case 0x81: // CLC
 					implied_status &= ~FLAG_CARRY;
@@ -1012,11 +1053,11 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 					implied_status |= FLAG_CARRY;
 					;;
 				case 0xC2: // REP
-					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, currentPCX16Bank);
+					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, implied_x16_bank);
 					implied_status = ~operand & implied_status;
 					;;
 				case 0xE2: // SEP
-					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, currentPCX16Bank);
+					operand = debug_read6502((initialPC+1) & 0xffff, currentPCBank, implied_x16_bank);
 					implied_status = operand | implied_status;
 					;;
 				case 0xFB: // XCE
@@ -1042,8 +1083,13 @@ static void DEBUGRenderCode(int lines, int initialPC) {
 			}
 		}
 		initialPC = (initialPC + size) & 0xFFFF;										// Forward to next
-		if (currentPCBank == 0 && initialPC >= 0xA000 && implied_x16_bank == -1) {
-			implied_x16_bank = memory_get_ram_bank();
+		// Re-derive on leaving the window the carried bank belongs to. Without
+		// this the bank the pane started with is used for every line, so a walk
+		// from the RAM window into the ROM window selects a ROM bank by its RAM
+		// bank number and renders bytes from the wrong one.
+		if (bank_window_of(initialPC) != implied_window) {
+			implied_window   = bank_window_of(initialPC);
+			implied_x16_bank = debug_current_x16_bank(initialPC, currentPCBank);
 		}
 	}
 }
@@ -1258,7 +1304,11 @@ static void DEBUGNumberDec(int x, int y, int n, int w, SDL_Color colour) {
 static void DEBUGAddress(int x, int y, int x16Bank, int addr, uint8_t bank, SDL_Color colour) {
 	char buffer[4];
 
-	if(addr >= 0xA000 && bank == 0) {
+	// Whether a window bank means anything here is the shared rule's decision,
+	// not a fourth local copy of it. The one that used to be here required the
+	// program bank to be zero, so on gen1 with -c816 it rendered "--:" at an
+	// address the window registers really do select.
+	if (debug_current_x16_bank(addr, bank) >= 0) {
 		snprintf(buffer, sizeof(buffer), "%.2X:", x16Bank);
 	} else if (is_gen2) {
 		snprintf(buffer, sizeof(buffer), "%.2X ", bank);

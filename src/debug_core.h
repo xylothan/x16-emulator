@@ -75,6 +75,14 @@ enum {
 // disagreeing about what -1 means.
 bool debug_bank_selector_matches(int selector, int addr, uint8_t pbank);
 
+// Which RAM/ROM window `pc` sits in given program bank `pbank`, or
+// DEBUG_BANK_ANY where a bank means nothing there. Exported so callers that
+// produce selectors use the same rule as the matcher above: a second copy will
+// eventually disagree with it, and the one that existed did -- on gen1 with a
+// non-zero program bank, where read6502 forces the bank to zero and the window
+// registers still apply.
+int debug_current_x16_bank(int pc, uint8_t pbank);
+
 // ---- Table management ------------------------------------------------------
 // Breakpoints are identified by all three of (pc, bank, x16Bank), so the same
 // address in two different RAM banks is two different breakpoints. Add returns

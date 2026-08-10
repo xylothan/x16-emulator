@@ -42,8 +42,8 @@ addr_is_banked(int addr, uint8_t pbank)
 
 // Which RAM/ROM window an address sits in, or DEBUG_BANK_ANY where it is not
 // banked at all.
-static int
-current_x16_bank(int pc, uint8_t bank)
+int
+debug_current_x16_bank(int pc, uint8_t bank)
 {
 	if (!addr_is_banked(pc, bank))
 		return DEBUG_BANK_ANY;
@@ -58,7 +58,7 @@ bank_selector_matches(int selector, int addr, uint8_t pbank)
 		return true;                     // banks select nothing here
 	if (selector == DEBUG_BANK_ANY)
 		return true;                     // whichever bank is mapped
-	return selector == current_x16_bank(addr, pbank);
+	return selector == debug_current_x16_bank(addr, pbank);
 }
 
 bool
