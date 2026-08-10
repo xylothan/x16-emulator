@@ -65,6 +65,9 @@ extern uint16_t num_banks;
 extern uint16_t num_ram_banks;
 
 extern bool debugger_enabled;
+// True only when a local interactive debugger was requested (-debug/-bp/-wp).
+// Distinct from debugger_enabled, which -debugport also sets.
+extern bool debug_window_enabled;
 extern bool log_video;
 extern bool log_keyboard;
 extern bool log_speed;

@@ -390,8 +390,7 @@ dbg_load_poll(void)
 		// A DAP client's breakpoints are addresses resolved from debug info
 		// that has just been replaced, so anything inside the range it covered
 		// is now pointing at whatever used to be there.
-		debug_server_invalidate_breakpoints_in_range((uint16_t)new_start,
-		                                            (uint16_t)new_end);
+		debug_server_invalidate_breakpoints_in_range(new_start, new_end);
 
 		// Forgotten whether or not that succeeded. It unloads the range before
 		// reading the file, so a failure part-way through still leaves those

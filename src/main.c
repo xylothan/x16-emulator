@@ -97,6 +97,10 @@ uint32_t stat[65536];
 #endif
 
 bool debugger_enabled = false;
+// True when a local interactive debugger was asked for (-debug/-bp/-wp), as
+// distinct from the machinery merely being switched on. A DAP client uses this
+// to decide whether anyone is left to resume the machine if it disconnects.
+bool debug_window_enabled = false;
 char *paste_text = NULL;
 char *clipboard_buffer = NULL;
 char paste_text_data[65536];
@@ -1006,6 +1010,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (argc && argv[0][0] != '-') {
 				// Adds rather than replaces, so it composes with -bp instead of
 				// depending on which came first on the command line.
@@ -1021,6 +1026,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1037,6 +1043,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1088,7 +1095,10 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			// The breakpoint machinery lives behind debugger_enabled, and a DAP
-			// client needs it whether or not the SDL debug window is up.
+			// client needs it whether or not the SDL debug window is up. It is
+			// deliberately NOT debug_window_enabled: there is no local UI here,
+			// which is what lets the server resume the machine when its client
+			// disconnects rather than leaving it halted with nobody to drive it.
 			debugger_enabled = true;
 			int port = DEBUG_SERVER_DEFAULT_PORT;
 			if (argc && argv[0][0] != '-') {
@@ -2103,16 +2113,17 @@ emulator_loop(void *param)
 			testbench_init();
 		}
 
-		if (debugger_enabled) {
+		// The guest can clear debugger_enabled by writing $9FB0. With a DAP
+		// client attached that must not take the debugger down with it: nothing
+		// would poll the socket again, breakpoints would stop being tested, and
+		// the client would hang with no way back. Running the status hook here
+		// rather than polling separately also keeps the socket work behind the
+		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
+		// syscall per emulated instruction.
+		if (debugger_enabled || debug_server_is_enabled()) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
-		} else if (debug_server_is_enabled()) {
-			// The guest can clear debugger_enabled by writing $9FB0, and a
-			// program that does so would otherwise take the DAP server down
-			// with it: nothing would poll the socket again for the rest of the
-			// session, so the client would hang with no way back.
-			debug_server_poll();
 		}
 
 #ifdef PERFSTAT

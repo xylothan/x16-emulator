@@ -22,7 +22,7 @@ static inline void debug_server_notify_stopped(const char *reason) { (void)reaso
 static inline bool debug_server_has_client(void) { return false; }
 static inline bool debug_server_is_enabled(void) { return false; }
 static inline void debug_server_output(const char *category, const char *text) { (void)category; (void)text; }
-static inline void debug_server_invalidate_breakpoints_in_range(uint16_t start, uint16_t end) { (void)start; (void)end; }
+static inline void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) { (void)start; (void)end; }
 static inline void debug_server_retry_unverified_breakpoints(void) { }
 static inline void debug_server_shutdown(void) { }
 
@@ -51,7 +51,7 @@ void debug_server_output(const char *category, const char *text);
 
 // Breakpoint bookkeeping hooks driven by the shared runtime-load handler when a
 // module is (re)loaded. No-ops when no DAP client is connected.
-void debug_server_invalidate_breakpoints_in_range(uint16_t start, uint16_t end);
+void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end);
 void debug_server_retry_unverified_breakpoints(void);
 
 // Clean shutdown — close sockets, free resources.

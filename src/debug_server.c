@@ -85,27 +85,35 @@ static struct {
     bool verified;
     int  x16Bank;      // the selector it was armed with; a removal that passes
                        // DEBUG_BANK_ANY will not match a bank-pinned entry
+    // Kept so the breakpoint can be armed again exactly as the client asked for
+    // it when an overlay reload forces it to be re-resolved. Without these, a
+    // reload quietly turned a bank-pinned conditional breakpoint into an
+    // unconditional one that fires in every bank.
+    char cond[192];
+    char hit_cond[64];
 } dap_bps[MAX_DAP_BREAKPOINTS];
 static int num_dap_bps = 0;
 static int next_dap_bp_id = 1;
 
 // Function/instruction breakpoints tracked separately so each re-set clears its
-// own set (they add into the same DEBUGAddBreakPoint pool as source bps).
+// own set. All three tables add into the same core pool, which deduplicates by
+// (pc, bank, x16Bank) -- see server_bp_wanted_elsewhere().
 static uint16_t func_bp_addrs[128];
 static int      num_func_bps = 0;
 static uint16_t instr_bp_addrs[128];
 static int      num_instr_bps = 0;
 
-// Temporary breakpoint for step-over / step-out (auto-removed when hit)
-// A breakpoint the server sets for itself to implement step-over and step-out.
-// 	emp_bp_owned records whether we actually created the core entry: if the
-// user already had a breakpoint at the same address, debug_bp_add() is a no-op
-// and removing it afterwards would delete theirs.
+
+
+
+
 static bool     dap_session_active = false;
 
 // Forward declarations
 static void send_dap_event(const char *event_name, cJSON *body);
 static void send_dap_message(cJSON *json);
+static bool server_bp_wanted_elsewhere(uint16_t addr, int x16Bank, int skip_table);
+static int dap_apply_bp_condition(uint16_t addr, const char *cond_str, const char *hit_str);
 
 // Re-resolve unverified breakpoints after new .dbg file loads
 static void retry_unverified_breakpoints(void) {
@@ -113,30 +121,61 @@ static void retry_unverified_breakpoints(void) {
         if (!dap_bps[i].verified) {
             dbg_addr_t addr = 0;
             if (dbg_info_source_to_addr(dap_bps[i].file, dap_bps[i].line, &addr)) {
-                dap_bps[i].addr = addr;
+                // Re-arm it exactly as the client asked for it. Re-applying the
+                // condition also recovers the bank pin, which decides the
+                // selector the core entry is keyed on -- arming with ANY here
+                // turned a bank-pinned conditional breakpoint into one that
+                // fires in every bank on its first arrival.
+                int bank_pin = dap_apply_bp_condition((uint16_t)addr,
+                                                      dap_bps[i].cond,
+                                                      dap_bps[i].hit_cond);
+                dap_bps[i].addr = (uint16_t)addr;
                 dap_bps[i].verified = true;
+                dap_bps[i].x16Bank = bank_pin;
                 struct breakpoint hw_bp;
-                hw_bp.pc = addr;
+                hw_bp.pc = (int)addr;
                 hw_bp.bank = 0;
-                hw_bp.x16Bank = DEBUG_BANK_ANY;
-                dap_bps[i].x16Bank = DEBUG_BANK_ANY;
+                hw_bp.x16Bank = bank_pin;
                 debug_bp_add(hw_bp);
                 printf("[dap] Resolved pending breakpoint: %s:%d -> $%04X\n",
-                       dap_bps[i].file, dap_bps[i].line, addr);
-                // Don't send breakpoint changed event here — VS already
-                // thinks it's verified (we told it so). The stopped event
-                // when the BP hits will confirm everything works.
+                       dap_bps[i].file, dap_bps[i].line, (unsigned)addr);
+                // Say so. This is reached after invalidate_breakpoints_in_range()
+                // has told the client the breakpoint is unverified, so staying
+                // quiet would leave it showing one that is in fact armed.
+                if (client_sock != SOCKET_INVALID) {
+                    cJSON *body = cJSON_CreateObject();
+                    cJSON *bp = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(bp, "id", dap_bps[i].dap_id);
+                    cJSON_AddBoolToObject(bp, "verified", true);
+                    cJSON_AddNumberToObject(bp, "line", dap_bps[i].line);
+                    cJSON_AddItemToObject(body, "breakpoint", bp);
+                    cJSON_AddStringToObject(body, "reason", "changed");
+                    send_dap_event("breakpoint", body);
+                }
             }
         }
     }
 }
 
 // Invalidate breakpoints whose addresses fall within a range being unloaded
-static void invalidate_breakpoints_in_range(uint16_t start, uint16_t end) {
+static void invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
+    // Ranges come from the .dbg and can name addresses past 16 bits; a
+    // breakpoint's PC cannot. Truncating to uint16_t made a range like
+    // 0x00FF00-0x010100 invert into one that matched nothing, and
+    // 0x010000-0x01FFFF collapse onto 0x0000-0xFFFF, which invalidated every
+    // unrelated breakpoint in the machine.
+    if (start > 0xFFFF) return;
+    if (end > 0xFFFF) end = 0xFFFF;
     for (int i = 0; i < num_dap_bps; i++) {
         if (dap_bps[i].verified && dap_bps[i].addr >= start && dap_bps[i].addr <= end) {
-            // Remove from hardware
-            debug_bp_remove(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+            // Remove from hardware, and drop the condition record with it.
+            // debug_bp_remove() leaves that behind, so re-arming the same
+            // address later would find a stale record keyed to the old
+            // selector rather than the one it is about to be given.
+            if (!server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].x16Bank, 0)) {
+                debug_bp_remove(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+                debug_bp_forget(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+            }
             dap_bps[i].verified = false;
             dap_bps[i].addr = 0;
             printf("[dap] Invalidated breakpoint: %s:%d (range $%04X-$%04X unloaded)\n",
@@ -161,7 +200,7 @@ static void invalidate_breakpoints_in_range(uint16_t start, uint16_t end) {
 // Public wrappers so the shared runtime-load handler (debugger.c) can drive the
 // DAP-only breakpoint bookkeeping around a module swap. Both are no-ops when no
 // DAP client is connected, so the native source window works without DAP.
-void debug_server_invalidate_breakpoints_in_range(uint16_t start, uint16_t end) {
+void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
     if (!server_enabled || client_sock == SOCKET_INVALID) return;
     invalidate_breakpoints_in_range(start, end);
 }
@@ -389,22 +428,36 @@ static int handle_dap_launch(int seq, cJSON *args) {
 
 static int handle_dap_configuration_done(int seq) {
     send_dap_response(seq, "configurationDone", true, NULL);
-    // Breakpoints are all set by now, so the machine can run. Unless the client
-    // asked to stop on entry, in which case it wants control before anything
-    // executes -- and it is waiting for the stopped event to know it has it.
+
+    // Sending can drop the client -- a peer that stops reading is disconnected
+    // rather than allowed to freeze the emulator -- so there may be no session
+    // left to configure. Carrying on would halt a headless machine with nobody
+    // able to resume it.
+    if (client_sock == SOCKET_INVALID) {
+        dap_stop_on_entry = false;
+        return 0;
+    }
+
+    // Already halted, because a breakpoint set moments ago has hit or a
+    // previous client left it that way. Report where we actually are; resuming
+    // would drive past a stop the client should see, and saying nothing leaves
+    // it showing a running target it cannot pause. Checked before stopOnEntry
+    // so the same halt is not announced twice under two different reasons.
+    if (currentMode == DMODE_STOP) {
+        dap_stop_on_entry = false;
+        debug_server_notify_stopped("breakpoint");
+        return 1;
+    }
+
+    // The client wants control before anything executes, and is waiting for the
+    // stopped event to know it has it.
     if (dap_stop_on_entry) {
         dap_stop_on_entry = false;
         currentMode = DMODE_STOP;
         debug_server_notify_stopped("entry");
         return 1;
     }
-    // The emulator keeps running during configuration, so a breakpoint set
-    // moments ago may already have hit. Resuming unconditionally here would
-    // drive straight past a stop the client has been told about and is waiting
-    // to inspect.
-    if (currentMode == DMODE_STOP) {
-        return 1;
-    }
+
     currentMode = DMODE_RUN;
     return 1;
 }
@@ -820,7 +873,7 @@ static bool dap_parse_simple_cmp(const char *s, int *out_op, uint32_t *out_val) 
 // applied) drives the conditional-BP core; the bank term is returned so the
 // caller can pin the breakpoint's x16Bank. hitCondition's number N means "stop
 // on the Nth hit". Returns the bank pin (0..255) or -1 if none was given.
-static int dap_apply_bp_condition(uint16_t addr, cJSON *bp_item) {
+static int dap_apply_bp_condition(uint16_t addr, const char *cond_str, const char *hit_str) {
     // Work out the bank pin FIRST, across the whole expression, before applying
     // anything keyed on it. The terms are applied in the order written, so
     // "A == 5 && bank == 3" used to store the value condition against
@@ -829,11 +882,10 @@ static int dap_apply_bp_condition(uint16_t addr, cJSON *bp_item) {
     // unconditionally. Writing the same two terms the other way round worked,
     // which is not a distinction the user should be able to feel.
     int bank_pin = -1;
-    cJSON *cond = cJSON_GetObjectItemCaseSensitive(bp_item, "condition");
     char buf[192];
     buf[0] = '\0';
-    if (cond && cJSON_IsString(cond) && cond->valuestring[0]) {
-        strncpy(buf, cond->valuestring, sizeof(buf) - 1);
+    if (cond_str && cond_str[0]) {
+        strncpy(buf, cond_str, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
         char *scan = buf;
         while (scan && *scan) {
@@ -870,9 +922,8 @@ static int dap_apply_bp_condition(uint16_t addr, cJSON *bp_item) {
         }
     }
 
-    cJSON *hit = cJSON_GetObjectItemCaseSensitive(bp_item, "hitCondition");
-    if (hit && cJSON_IsString(hit) && hit->valuestring[0]) {
-        const char *h = hit->valuestring;
+    if (hit_str && hit_str[0]) {
+        const char *h = hit_str;
         while (*h && !(*h >= '0' && *h <= '9')) h++;
         uint32_t n = (uint32_t)strtoul(h, NULL, 0);
         if (n > 0) debug_bp_set_ignore(addr, 0, bank_pin, n - 1); // stop on the Nth hit
@@ -899,8 +950,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
     // Clear existing DAP breakpoints for this source file
     for (int i = num_dap_bps - 1; i >= 0; i--) {
         if (strcmp(dap_bps[i].file, src_path) == 0) {
-            debug_bp_remove(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
-            debug_bp_forget(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+            if (!server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].x16Bank, 0)) {
+                debug_bp_remove(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+                debug_bp_forget(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+            }
             // Shift array
             for (int j = i; j < num_dap_bps - 1; j++) {
                 dap_bps[j] = dap_bps[j + 1];
@@ -922,6 +975,17 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         cJSON *result_bp = cJSON_CreateObject();
         int bp_id = next_dap_bp_id++;
 
+        // Kept verbatim so the breakpoint can be re-armed exactly as asked for
+        // if an overlay reload forces it to be resolved again.
+        const char *cond_str = "";
+        const char *hit_str  = "";
+        {
+            cJSON *c = cJSON_GetObjectItemCaseSensitive(bp_item, "condition");
+            if (c && cJSON_IsString(c) && c->valuestring) cond_str = c->valuestring;
+            cJSON *h = cJSON_GetObjectItemCaseSensitive(bp_item, "hitCondition");
+            if (h && cJSON_IsString(h) && h->valuestring) hit_str = h->valuestring;
+        }
+
         // Try to resolve source:line to address
         dbg_addr_t addr = 0;
         bool resolved = dbg_info_source_to_addr(src_path, line, &addr);
@@ -929,7 +993,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         if (resolved) {
             // The condition is parsed first so a "bank==N" term pins x16Bank at
             // add time; the value term and hit count go to the core as well.
-            int bank_pin = dap_apply_bp_condition(addr, bp_item);
+            int bank_pin = dap_apply_bp_condition(addr, cond_str, hit_str);
             struct breakpoint hw_bp;
             hw_bp.pc = addr;
             hw_bp.bank = 0;
@@ -941,6 +1005,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             strncpy(dap_bps[num_dap_bps].file, src_path, sizeof(dap_bps[num_dap_bps].file) - 1);
             dap_bps[num_dap_bps].line = line;
             dap_bps[num_dap_bps].verified = true;
+            strncpy(dap_bps[num_dap_bps].cond, cond_str, sizeof(dap_bps[num_dap_bps].cond) - 1);
+            dap_bps[num_dap_bps].cond[sizeof(dap_bps[num_dap_bps].cond) - 1] = '\0';
+            strncpy(dap_bps[num_dap_bps].hit_cond, hit_str, sizeof(dap_bps[num_dap_bps].hit_cond) - 1);
+            dap_bps[num_dap_bps].hit_cond[sizeof(dap_bps[num_dap_bps].hit_cond) - 1] = '\0';
             num_dap_bps++;
 
 
@@ -969,6 +1037,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             strncpy(dap_bps[num_dap_bps].file, src_path, sizeof(dap_bps[num_dap_bps].file) - 1);
             dap_bps[num_dap_bps].line = line;
             dap_bps[num_dap_bps].verified = false;
+            strncpy(dap_bps[num_dap_bps].cond, cond_str, sizeof(dap_bps[num_dap_bps].cond) - 1);
+            dap_bps[num_dap_bps].cond[sizeof(dap_bps[num_dap_bps].cond) - 1] = '\0';
+            strncpy(dap_bps[num_dap_bps].hit_cond, hit_str, sizeof(dap_bps[num_dap_bps].hit_cond) - 1);
+            dap_bps[num_dap_bps].hit_cond[sizeof(dap_bps[num_dap_bps].hit_cond) - 1] = '\0';
             num_dap_bps++;
         }
         cJSON_AddItemToArray(result_bps, result_bp);
@@ -1020,9 +1092,17 @@ static int handle_dap_step_out(int seq, cJSON *args) {
 
 static int handle_dap_pause(int seq, cJSON *args) {
     (void)args;
+    const bool wasRunning = (currentMode != DMODE_STOP);
     // Emits the stopped event itself on the RUN->STOP transition.
     DEBUGBreakToDebugger();
     send_dap_response(seq, "pause", true, NULL);
+    // Already halted -- a previous client left it that way, or a breakpoint got
+    // there first. There is no transition for DEBUGBreakToDebugger() to report,
+    // and the protocol still owes this request a stopped event; without one the
+    // client waits forever for a pause that has in fact already happened.
+    if (!wasRunning) {
+        debug_server_notify_stopped("pause");
+    }
     return 1;
 }
 
@@ -1046,7 +1126,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
         dap_session_active = false;
         // Resume only when there is no interactive debugger UI to drive the run
         // state; otherwise leave it as the user left it (see disconnect_client).
-        if (currentMode == DMODE_STOP && !showDebugOnRender) {
+        if (currentMode == DMODE_STOP && !debug_window_enabled) {
             currentMode = DMODE_RUN;
         }
     }
@@ -1749,9 +1829,32 @@ static int handle_dap_attach(int seq, cJSON *args) {
     return 0;
 }
 
+// The three server-side breakpoint tables (source, function, instruction) all
+// add into one core table that deduplicates on (pc, bank, x16Bank). Two of them
+// naming the same address share a single core entry, so whichever clears first
+// would disarm the other while its client still shows it set. Nothing is
+// removed while another table still wants it.
+static bool server_bp_wanted_elsewhere(uint16_t addr, int x16Bank, int skip_table) {
+    if (skip_table != 0) {
+        for (int i = 0; i < num_dap_bps; i++)
+            if (dap_bps[i].verified && dap_bps[i].addr == addr &&
+                dap_bps[i].x16Bank == x16Bank) return true;
+    }
+    if (skip_table != 1) {
+        for (int i = 0; i < num_func_bps; i++)
+            if (func_bp_addrs[i] == addr && x16Bank == DEBUG_BANK_ANY) return true;
+    }
+    if (skip_table != 2) {
+        for (int i = 0; i < num_instr_bps; i++)
+            if (instr_bp_addrs[i] == addr && x16Bank == DEBUG_BANK_ANY) return true;
+    }
+    return false;
+}
 // ─── setFunctionBreakpoints (label breakpoints via .dbg) ─────────────
 static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
-    for (int i = 0; i < num_func_bps; i++) debug_bp_remove(func_bp_addrs[i], 0, DEBUG_BANK_ANY);
+    for (int i = 0; i < num_func_bps; i++)
+        if (!server_bp_wanted_elsewhere(func_bp_addrs[i], DEBUG_BANK_ANY, 1))
+            debug_bp_remove(func_bp_addrs[i], 0, DEBUG_BANK_ANY);
     num_func_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -1782,7 +1885,9 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
 
 // ─── setInstructionBreakpoints ───────────────────────────────────────
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
-    for (int i = 0; i < num_instr_bps; i++) debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+    for (int i = 0; i < num_instr_bps; i++)
+        if (!server_bp_wanted_elsewhere(instr_bp_addrs[i], DEBUG_BANK_ANY, 2))
+            debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
     num_instr_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -2066,13 +2171,24 @@ static void disconnect_client(void) {
         client_sock = SOCKET_INVALID;
         recv_buf_len = 0;
         // Remove any breakpoints that were set via DAP so the emu doesn't
-        // keep hitting stale ones after the client goes away.
+        // keep hitting stale ones after the client goes away. All four kinds:
+        // leaving the function, instruction or data ones armed would halt the
+        // machine later for a session that no longer exists.
         for (int i = 0; i < num_dap_bps; i++) {
             if (dap_bps[i].verified) {
                 debug_bp_remove(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
+                debug_bp_forget(dap_bps[i].addr, 0, dap_bps[i].x16Bank);
             }
         }
         num_dap_bps = 0;
+        for (int i = 0; i < num_func_bps; i++)
+            debug_bp_remove(func_bp_addrs[i], 0, DEBUG_BANK_ANY);
+        num_func_bps = 0;
+        for (int i = 0; i < num_instr_bps; i++)
+            debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+        num_instr_bps = 0;
+        debug_wp_clear_all();
+        dap_stop_on_entry = false;
         dap_seq = 1;
         printf("[dap] Client disconnected\n");
 
@@ -2087,7 +2203,7 @@ static void disconnect_client(void) {
         // machine out from under them.
         if (dap_session_active) {
             dap_session_active = false;
-            bool has_ui = showDebugOnRender != 0;
+            bool has_ui = debug_window_enabled;
             if (currentMode == DMODE_STOP && !has_ui) {
                 printf("[dap] Session ended, resuming emulator\n");
                 currentMode = DMODE_RUN;
@@ -2160,8 +2276,14 @@ static bool try_extract_dap_message(char *out, size_t out_size, int *consumed) {
         return false;
     }
     if (content_length >= (int)out_size) {
-        fprintf(stderr, "[dap] Message of %d bytes is too large\n", content_length);
-        *consumed = header_size + content_length;   // skip it rather than wedge
+        // Too large to be one of ours. The body may not even have arrived yet,
+        // so consuming header + length here would skip bytes that are not in
+        // the buffer and then parse the tail of the body as a fresh header.
+        // There is no way to resynchronise on a stream we cannot buffer.
+        fprintf(stderr, "[dap] message of %d bytes is too large; dropping client\n",
+                content_length);
+        disconnect_client();
+        *consumed = 0;
         return false;
     }
 
