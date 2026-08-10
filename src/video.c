@@ -144,6 +144,13 @@ static uint16_t line_eff_y[SCREEN_HEIGHT];
 // the contract true instead of approximately true.
 static uint16_t line_layer_row[SCREEN_HEIGHT][2];
 static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
+// Which (frame, line) the capture below is currently accumulating, and whether
+// an interval that actually drew pixels has settled it. At file scope so
+// video_reset() can clear them: as function statics they outlived a reset and
+// let a post-reset line inherit the previous machine's capture state.
+static uint32_t rl_capture_frame = 0xFFFFFFFFu;
+static int      rl_capture_line  = -1;
+static bool     rl_capture_final = false;
 static bool     line_state_valid[SCREEN_HEIGHT];
 // The raw registers on the same two-stage delay the layer properties use, so
 // the history above can record the generation that actually rendered a line.
@@ -683,6 +690,11 @@ video_reset_layer_pipeline(void)
 	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
+	// Forget which scanline the capture was mid-way through, so the first line
+	// after a reset is treated as a new occurrence rather than a continuation.
+	rl_capture_frame = 0xFFFFFFFFu;
+	rl_capture_line  = -1;
+	rl_capture_final = false;
 }
 
 struct video_sprite_properties
@@ -1302,21 +1314,26 @@ render_line(uint16_t y, float scan_pos_x)
 	if (y < SCREEN_HEIGHT) {
 		// render_line() runs several times per scanline, once per compositor
 		// interval, and the trailing intervals cover horizontal blanking and
-		// draw no pixels at all. Capturing on every call let the last of those
-		// -- carrying register writes made during blanking, after the visible
-		// part of the line was already drawn -- overwrite the snapshot that
+		// draw nothing. Capturing on every call let the last of those --
+		// carrying register writes made during blanking, after the visible part
+		// of the line was already drawn -- overwrite the snapshot that
 		// described what was actually on screen.
 		//
-		// So: the first interval of a line that really puts pixels down is the
-		// one recorded, and later intervals leave it alone. The line is marked
-		// invalid when it begins and only becomes valid once something has been
-		// captured, so a line that never draws reads as "no data" rather than
-		// holding last frame's.
-		static int  capture_line = -1;
-		static bool capture_done = false;
-		if (capture_line != (int)y) {
-			capture_line        = (int)y;
-			capture_done        = false;
+		// So the interval that really puts pixels down is the one that sticks.
+		// A line with no such interval (border, or output disabled) is still
+		// recorded, as "nothing displayed", but only provisionally: output can
+		// be switched on part-way along a line, and that later interval must be
+		// able to replace the provisional record.
+		//
+		// Keyed on (frame, line), not line alone. These statics outlive both a
+		// machine reset and the warp guard above -- which returns before this
+		// point for 63 frames in 64 -- so matching on the line number alone
+		// would make a later occurrence of the same numbered line look like a
+		// continuation of an old one and keep its stale snapshot.
+		if (rl_capture_frame != (uint32_t)frame_count || rl_capture_line != (int)y) {
+			rl_capture_frame    = (uint32_t)frame_count;
+			rl_capture_line     = (int)y;
+			rl_capture_final    = false;
 			line_state_valid[y] = false;
 		}
 
@@ -1341,8 +1358,11 @@ render_line(uint16_t y, float scan_pos_x)
 		const bool     draws_pixels = (s_pos_x > s_pos_x_p) &&
 		                              (MAX(h0, s_pos_x_p) < (h1 < s_pos_x ? h1 : s_pos_x));
 
-		if (!capture_done && (!line_displayed || draws_pixels)) {
-			capture_done = true;
+		if (!rl_capture_final && (draws_pixels || !line_displayed)) {
+			// Only an interval that actually drew pixels settles the matter.
+			// A "nothing displayed" record stays replaceable, so enabling
+			// output part-way along the line still gets recorded.
+			rl_capture_final = draws_pixels;
 			memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
 			line_eff_y[y]         = eff_y;
 			line_layer_enabled[y] = line_displayed
