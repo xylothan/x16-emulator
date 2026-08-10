@@ -370,15 +370,28 @@ machine_paste(char *s, bool handle_free)
 			clipboard_buffer = s; // so that we can free this later
 		}
 		pasting_bas = true;
-		if (warp_pastes) warp_mode = true;
+		if (warp_pastes) machine_set_warp(true);
 	}
+}
+
+// Every warp change re-bases the clock. Leaving warp with a surplus already
+// accrued makes the throttle sleep it off, which at a slow target is seconds of
+// frozen machine; entering warp with a deficit makes it sprint. The paste paths
+// used to set the flag directly and did both.
+void
+machine_set_warp(bool on)
+{
+	if (warp_mode == on) {
+		return;
+	}
+	warp_mode = on;
+	timing_init();
 }
 
 void
 machine_toggle_warp()
 {
-	warp_mode = !warp_mode;
-	timing_init();
+	machine_set_warp(!warp_mode);
 }
 
 
@@ -1877,7 +1890,7 @@ emulator_post_step(void)
 			if (paste_text) {
 				// ...paste BASIC code into the keyboard buffer
 				pasting_bas = true;
-				if (warp_pastes) warp_mode = true;
+				if (warp_pastes) machine_set_warp(true);
 			}
 		}
 
@@ -1903,7 +1916,7 @@ emulator_post_step(void)
 			BRAM[NDX - 0xa000]++;
 		} else {
 			pasting_bas = false;
-			if (warp_pastes) warp_mode = false;
+			if (warp_pastes) machine_set_warp(false);
 			paste_text = NULL;
 			if (clipboard_buffer) {
 				SDL_free(clipboard_buffer);

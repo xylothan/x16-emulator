@@ -1382,11 +1382,16 @@ video_save(SDL_RWops *f)
 // video_present_no_input(); deliberately does not touch the SDL event queue, so
 // it is safe to call from inside the OS modal move/resize loop.
 static void
-video_render_all(void)
+video_render_all_ex(bool allow_record)
 {
 	// for activity LED, overlay red 8x4 square into top right of framebuffer
 	// for progressive modes, draw LED only on even scanlines
-	for (int y = 0; y < 4; y+=1+!!((reg_composer[0] & 0x0b) > 0x09)) {
+	//
+	// Blended into the framebuffer in place, so it must happen once per frame
+	// and not once per present. A repaint between throttle slices re-presents
+	// the frame that is already there, LED included; blending again would drive
+	// the square toward pure red a slice at a time.
+	for (int y = 0; allow_record && y < 4; y+=1+!!((reg_composer[0] & 0x0b) > 0x09)) {
 		for (int x = SCREEN_WIDTH - 8; x < SCREEN_WIDTH; x++) {
 			uint8_t b = framebuffer[(y * SCREEN_WIDTH + x) * 4 + 0];
 			uint8_t g = framebuffer[(y * SCREEN_WIDTH + x) * 4 + 1];
@@ -1403,7 +1408,11 @@ video_render_all(void)
 
 	SDL_UpdateTexture(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
 
-	if (record_gif > RECORD_GIF_PAUSED) {
+	// Skipped for a repaint that is not a new emulated frame. The throttle
+	// repaints between sleep slices to keep the window alive, and there can be
+	// hundreds of those per frame at a slow target; recording them would bloat
+	// the file and stretch its timeline against the emulated one.
+	if (allow_record && record_gif > RECORD_GIF_PAUSED) {
 		if(!GifWriteFrame(&gif_writer, framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT, 2, 8, false)) {
 			// if that failed, stop recording
 			GifEnd(&gif_writer);
@@ -1434,7 +1443,13 @@ video_present_no_input(void)
 	if (renderer == NULL || sdlTexture == NULL) {
 		return;
 	}
-	video_render_all();
+	video_render_all_ex(false);
+}
+
+void
+video_render_all(void)
+{
+	video_render_all_ex(true);
 }
 
 bool
