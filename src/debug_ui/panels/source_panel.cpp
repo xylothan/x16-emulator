@@ -166,11 +166,12 @@ src_toggle_bp(const char *file, int line)
     uint16_t addr;
     if (!file || !file[0] || !debug_ui_source_to_addr(file, line, &addr))
         return; // line has no generated code — nothing to toggle
-    if (!DEBUGRemoveBreakPoint((int)addr, 0)) {
-        int x16Bank = (addr >= 0xA000)
-                          ? (addr < 0xC000 ? (int)memory_get_ram_bank()
-                                           : (int)memory_get_rom_bank())
-                          : -1;
+    // Resolve the bank first: it keys the remove as well as the add.
+    int x16Bank = (addr >= 0xA000)
+                      ? (addr < 0xC000 ? (int)memory_get_ram_bank()
+                                       : (int)memory_get_rom_bank())
+                      : -1;
+    if (!DEBUGRemoveBreakPoint((int)addr, 0, x16Bank)) {
         struct breakpoint bp;
         bp.pc      = (int)addr;
         bp.bank    = 0;

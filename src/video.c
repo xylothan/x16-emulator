@@ -1740,6 +1740,19 @@ video_update()
 		if (event.type == SDL_QUIT) {
 			return false;
 		}
+#ifdef HAS_IMGUI
+		// SDL2 only synthesises SDL_QUIT for a window close when that window is
+		// the last one open. With the debugger window up there are two, so
+		// closing the emulator window delivers a bare SDL_WINDOWEVENT_CLOSE and
+		// nothing else -- which used to fall through here and be dropped,
+		// leaving the [X] button inert. A close of the debugger window has
+		// already been consumed above, so anything reaching this point is a
+		// close of the emulator window and does mean quit.
+		if (event.type == SDL_WINDOWEVENT &&
+		    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+			return false;
+		}
+#endif
 		if (event.type == SDL_KEYDOWN) {
 			bool consumed = false;
 			if (cmd_down && !(disable_emu_cmd_keys || mouse_grabbed)) {
@@ -2465,7 +2478,13 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 	uint16_t scanline = ntsc_mode ? ntsc_scan_pos_y % SCAN_HEIGHT : vga_scan_pos_y;
 	if (scanline >= 512) scanline=511;
 
-	check_not_writeonly(reg);
+	// A debug read is the debugger looking, not the program reading: it must
+	// neither warn about the guest's behaviour nor change any state. The rest
+	// of this function already honours debugOn for the data ports; SPI did not,
+	// and the warning fired for the debugger's own reads.
+	if (!debugOn) {
+		check_not_writeonly(reg);
+	}
 
 	switch (reg & 0x1F) {
 		case 0x00: return io_addr[io_addrsel] & 0xff;
@@ -2581,7 +2600,15 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 		case 0x1D: return 0;
 
 		case 0x1E:
-		case 0x1F: return vera_spi_read(reg & 1);
+		case 0x1F:
+			// Reading $9F3E is not passive: with autotx armed and SS asserted
+			// it clocks another byte out to the SD card. A debug read must not,
+			// or simply having the debugger's memory view open steals bytes
+			// from the block the KERNAL is in the middle of reading.
+			if (debugOn) {
+				return vera_spi_peek(reg & 1);
+			}
+			return vera_spi_read(reg & 1);
 	}
 	return 0;
 }
@@ -2939,8 +2966,13 @@ bool video_is_special_address(int addr)
 
 void
 stop6502(uint16_t address, uint8_t bank) {
-	if (debugger_enabled) {
+	// STP is the 6502-side "break into the debugger". Either debugger will do:
+	// with -imgui alone this used to fall through to the modal message box
+	// below, which blocks inside instruction dispatch and whose "Reset Machine"
+	// button resets the machine mid-instruction.
+	if (debugger_enabled || imgui_debugger_enabled) {
 		DEBUGBreakToDebugger();
+		DEBUGSetStopReason("breakpoint");   // overrides the default "user"
 	} else if (testbench) {
 		printf("STP\n");
         fflush(stdout);

@@ -82,18 +82,24 @@ memory_get_num_rom_banks(void)
 // ─── Breakpoints ───────────────────────────────────────────────────────────
 // struct breakpoint, breakPoints[], numBreakpoints and the debug_bp_* API all
 // come from debug_core.h. The panels were written against the older DEBUG*
-// spelling, and against a two-argument (pc, bank) identity that predates bank
-// awareness -- a breakpoint is now identified by (pc, bank, x16Bank), because
-// the same $A000 in two RAM banks is two different breakpoints.
+// spelling and a two-argument (pc, bank) identity that predates bank
+// awareness. A breakpoint is now identified by (pc, bank, x16Bank), because the
+// same $A000 in two RAM banks is two different breakpoints.
 //
-// DEBUG_BANK_ANY is the right default for the UI: it means "whatever bank is
-// mapped", which is what a user clicking a gutter in a disassembly view means.
+// These shims therefore take x16Bank and pass it through, rather than
+// supplying DEBUG_BANK_ANY on the panels' behalf. ANY is a wildcard when a
+// breakpoint is *tested* (bank_selector_matches), but debug_bp_find() compares
+// x16Bank for equality, so passing ANY as a lookup key finds only breakpoints
+// that were themselves stored as ANY. Since debug_bp_add() records a concrete
+// bank for every address at $A000 and above, keying on ANY silently matched
+// nothing for any breakpoint in banked RAM or ROM -- so they could be set, but
+// never removed, disabled, cleared, or have their hits or condition read.
 static inline int  DEBUGAddBreakPoint(struct breakpoint bp) { return debug_bp_add(bp); }
-static inline bool DEBUGRemoveBreakPoint(int pc, uint8_t bank) { return debug_bp_remove(pc, bank, DEBUG_BANK_ANY); }
-static inline void DEBUGForgetBreakpoint(int pc, uint8_t bank) { debug_bp_forget(pc, bank, DEBUG_BANK_ANY); }
-static inline void DEBUGClearBreakpointCondition(int pc, uint8_t bank) { debug_bp_clear_condition(pc, bank, DEBUG_BANK_ANY); }
-static inline uint32_t DEBUGGetBreakpointHits(int pc, uint8_t bank) { return debug_bp_get_hits(pc, bank, DEBUG_BANK_ANY); }
-static inline void DEBUGResetBreakpointHits(int pc, uint8_t bank) { debug_bp_reset_hits(pc, bank, DEBUG_BANK_ANY); }
+static inline bool DEBUGRemoveBreakPoint(int pc, uint8_t bank, int x16Bank) { return debug_bp_remove(pc, bank, x16Bank); }
+static inline void DEBUGForgetBreakpoint(int pc, uint8_t bank, int x16Bank) { debug_bp_forget(pc, bank, x16Bank); }
+static inline void DEBUGClearBreakpointCondition(int pc, uint8_t bank, int x16Bank) { debug_bp_clear_condition(pc, bank, x16Bank); }
+static inline uint32_t DEBUGGetBreakpointHits(int pc, uint8_t bank, int x16Bank) { return debug_bp_get_hits(pc, bank, x16Bank); }
+static inline void DEBUGResetBreakpointHits(int pc, uint8_t bank, int x16Bank) { debug_bp_reset_hits(pc, bank, x16Bank); }
 
 static inline void
 DEBUGSetBreakpointCondition(int pc, uint8_t bank, int x16Bank, int operand,
@@ -109,11 +115,11 @@ DEBUGSetBreakpointIgnore(int pc, uint8_t bank, int x16Bank, uint32_t ignore)
 }
 
 static inline bool
-DEBUGGetBreakpointCondition(int pc, uint8_t bank, int *has_cond, int *operand,
-                            uint16_t *operand_addr, int *op, uint32_t *value,
-                            uint32_t *ignore)
+DEBUGGetBreakpointCondition(int pc, uint8_t bank, int x16Bank, int *has_cond,
+                            int *operand, uint16_t *operand_addr, int *op,
+                            uint32_t *value, uint32_t *ignore)
 {
-	return debug_bp_get_condition(pc, bank, DEBUG_BANK_ANY, has_cond, operand,
+	return debug_bp_get_condition(pc, bank, x16Bank, has_cond, operand,
 	                             operand_addr, op, value, ignore);
 }
 

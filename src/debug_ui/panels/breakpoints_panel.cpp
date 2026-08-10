@@ -92,7 +92,7 @@ set_enabled(TrackedBP &t, bool enable)
 		DEBUGAddBreakPoint(bp);
 		t.enabled = true;
 	} else if (!enable && t.enabled) {
-		DEBUGRemoveBreakPoint(t.pc, t.bank);
+		DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
 		t.enabled = false;
 	}
 }
@@ -119,7 +119,7 @@ cond_summary(char *out, size_t n, const TrackedBP &t)
 	int      has = 0, operand = 0, op = 0;
 	uint16_t oaddr = 0;
 	uint32_t value = 0, ignore = 0;
-	bool     have = DEBUGGetBreakpointCondition(t.pc, t.bank, &has, &operand, &oaddr, &op, &value, &ignore);
+	bool     have = DEBUGGetBreakpointCondition(t.pc, t.bank, t.x16Bank, &has, &operand, &oaddr, &op, &value, &ignore);
 	if (have && has) {
 		if (operand == BP_OPND_BYTE)
 			snprintf(out, n, "byte[$%04X]%s$%X", oaddr, kOpNames[op], value);
@@ -144,7 +144,7 @@ cond_editor_popup(const TrackedBP &t)
 		int      has = 0, operand = 0, op = 0;
 		uint16_t oaddr = 0;
 		uint32_t value = 0, ignore = 0;
-		DEBUGGetBreakpointCondition(t.pc, t.bank, &has, &operand, &oaddr, &op, &value, &ignore);
+		DEBUGGetBreakpointCondition(t.pc, t.bank, t.x16Bank, &has, &operand, &oaddr, &op, &value, &ignore);
 		s_edit.pc      = t.pc;
 		s_edit.operand = operand;
 		s_edit.op      = op;
@@ -189,13 +189,13 @@ cond_editor_popup(const TrackedBP &t)
 	if (s_edit.ignore < 0)
 		s_edit.ignore = 0;
 
-	ImGui::Text("Hit count: %u", DEBUGGetBreakpointHits(t.pc, t.bank));
+	ImGui::Text("Hit count: %u", DEBUGGetBreakpointHits(t.pc, t.bank, t.x16Bank));
 	ImGui::SetItemTooltip("Times this breakpoint's condition has matched since it was set or\n"
 	                      "last reset. Only counts while the machine is running - sitting at\n"
 	                      "the breakpoint does not add to it.");
 	ImGui::SameLine();
 	if (ImGui::SmallButton("Reset hits"))
-		DEBUGResetBreakpointHits(t.pc, t.bank);
+		DEBUGResetBreakpointHits(t.pc, t.bank, t.x16Bank);
 
 	ImGui::Separator();
 	if (ImGui::Button("Apply")) {
@@ -206,7 +206,7 @@ cond_editor_popup(const TrackedBP &t)
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Clear condition")) {
-		DEBUGClearBreakpointCondition(t.pc, t.bank);
+		DEBUGClearBreakpointCondition(t.pc, t.bank, t.x16Bank);
 		DEBUGSetBreakpointIgnore(t.pc, t.bank, t.x16Bank, (uint32_t)s_edit.ignore);
 		ImGui::CloseCurrentPopup();
 	}
@@ -302,7 +302,7 @@ draw_breakpoints()
 			}
 
 			ImGui::TableNextColumn();
-			ImGui::Text("%u", DEBUGGetBreakpointHits(t.pc, t.bank));
+			ImGui::Text("%u", DEBUGGetBreakpointHits(t.pc, t.bank, t.x16Bank));
 
 			ImGui::TableNextColumn();
 			char summary[48];
@@ -331,15 +331,15 @@ draw_breakpoints()
 	// also free the condition/hit entry (enable/disable must NOT).
 	if (clear_all) {
 		for (TrackedBP &t : s_tracked) {
-			if (t.enabled) DEBUGRemoveBreakPoint(t.pc, t.bank);
-			DEBUGForgetBreakpoint(t.pc, t.bank);
+			if (t.enabled) DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
+			DEBUGForgetBreakpoint(t.pc, t.bank, t.x16Bank);
 		}
 		s_tracked.clear();
 	} else if (remove_idx >= 0 && remove_idx < (int)s_tracked.size()) {
 		if (s_tracked[remove_idx].enabled) {
-			DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank);
+			DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		}
-		DEBUGForgetBreakpoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank);
+		DEBUGForgetBreakpoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		s_tracked.erase(s_tracked.begin() + remove_idx);
 	}
 }

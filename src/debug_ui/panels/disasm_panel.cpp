@@ -50,7 +50,7 @@ find_breakpoint(int pc, uint8_t bank)
 void
 toggle_breakpoint(uint16_t addr, uint8_t bank, int x16bank)
 {
-	if (!DEBUGRemoveBreakPoint((int)addr, bank)) {
+	if (!DEBUGRemoveBreakPoint((int)addr, bank, x16bank)) {
 		struct breakpoint bp;
 		bp.pc      = (int)addr;
 		bp.bank    = bank;

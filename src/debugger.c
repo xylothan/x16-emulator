@@ -351,16 +351,25 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCX16Bank = debug_current_x16_bank(currentPC, currentPCBank);
 	}
 
+	// -imgui without -debug: the graphical debugger owns the pause loop, so it
+	// pumps events, repaints and decides when to resume. Gated on the window
+	// having actually been created -- if it failed to open there is no control
+	// bar to resume from, and swallowing the loop here would park the machine
+	// unrecoverably.
+	//
+	// DMODE_STOP only, not "not RUN". DMODE_STEP means one instruction has been
+	// asked for and must be executed now: routing it through the pump costs it
+	// the pump's 16ms sleep, and a step lands in DMODE_STEP repeatedly until the
+	// PC actually moves. Over a WAI the PC does not move for the whole wait, so
+	// stepping one instruction would run at ~60 emulated cycles a second and
+	// take tens of minutes. The classic path has the same shape below: it only
+	// sleeps once currentMode == DMODE_STOP.
+	if (currentMode == DMODE_STOP && !debugger_enabled && video_debug_ui_available()) {
+		showDebugOnRender = 0;                                  // no SDL overlay in this mode
+		return video_debug_ui_pump_paused();
+	}
+
 	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
-		// -imgui without -debug: the graphical debugger owns the pause loop, so
-		// it pumps events, repaints and decides when to resume. Gated on the
-		// window having actually been created -- if it failed to open there is
-		// no control bar to resume from, and swallowing the loop here would
-		// park the machine unrecoverably.
-		if (!debugger_enabled && video_debug_ui_available()) {
-			showDebugOnRender = 0;                                  // no SDL overlay in this mode
-			return video_debug_ui_pump_paused();
-		}
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
@@ -430,6 +439,11 @@ void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
 // *******************************************************************************************
 
 void DEBUGBreakToDebugger(void) {
+	// Default reason for "something broke into the debugger". Set here, before
+	// the mode changes, so no path can leave the previous stop's reason
+	// showing; a caller with something more specific to say (the STP hook)
+	// overrides it immediately after.
+	DEBUGSetStopReason("user");
 	currentMode = DMODE_STOP;
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
@@ -596,8 +610,7 @@ void DEBUGStepOut(void) {                               // run to the return add
 }
 
 void DEBUGPause(void) {
-	DEBUGSetStopReason("user");
-	DEBUGBreakToDebugger();
+	DEBUGBreakToDebugger();   // records "user"
 }
 
 void DEBUGRunTo(uint16_t pc, uint8_t bank) {

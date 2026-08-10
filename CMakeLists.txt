@@ -105,6 +105,18 @@ set(ENABLE_IMGUI "AUTO" CACHE STRING "Build the Dear ImGui debugger UI (ON/OFF/A
 set_property(CACHE ENABLE_IMGUI PROPERTY STRINGS ON OFF AUTO)
 
 set(USE_IMGUI FALSE)
+# imgui_impl_sdlrenderer2 needs SDL_RenderGeometry(), added in SDL 2.0.17. Some
+# distributions still ship older SDL2 (Raspbian bullseye, Debian oldstable), so
+# AUTO has to check rather than assume. find_package sets SDL2_VERSION in config
+# mode; fall back to pkg-config, and treat "unknown" as too old rather than
+# assume the best -- an unbuildable configuration is worse than a missing panel.
+set(IMGUI_MIN_SDL_VERSION 2.0.17)
+set(IMGUI_SDL_VERSION "${SDL2_VERSION}")
+if(NOT IMGUI_SDL_VERSION AND PKG_CONFIG_FOUND)
+    pkg_check_modules(IMGUI_PC_SDL2 QUIET sdl2)
+    set(IMGUI_SDL_VERSION "${IMGUI_PC_SDL2_VERSION}")
+endif()
+
 if(ENABLE_IMGUI STREQUAL "OFF")
     message(STATUS "[x16] ImGui debugger explicitly disabled.")
 elseif(EMSCRIPTEN)
@@ -116,8 +128,14 @@ elseif(EMSCRIPTEN)
         message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON is not supported under Emscripten (single-window backend).")
     endif()
     message(STATUS "[x16] ImGui debugger disabled: unsupported under Emscripten.")
+elseif(NOT IMGUI_SDL_VERSION OR IMGUI_SDL_VERSION VERSION_LESS IMGUI_MIN_SDL_VERSION)
+    if(ENABLE_IMGUI STREQUAL "ON")
+        message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON needs SDL ${IMGUI_MIN_SDL_VERSION} or newer, found '${IMGUI_SDL_VERSION}'.")
+    endif()
+    message(STATUS "[x16] ImGui debugger disabled: SDL '${IMGUI_SDL_VERSION}' is older than ${IMGUI_MIN_SDL_VERSION} (SDL_RenderGeometry).")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/extern/imgui/imgui.cpp")
     set(USE_IMGUI TRUE)
+    message(STATUS "[x16] ImGui debugger enabled (SDL ${IMGUI_SDL_VERSION}).")
 elseif(ENABLE_IMGUI STREQUAL "ON")
     message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON but src/extern/imgui is missing.")
 else()

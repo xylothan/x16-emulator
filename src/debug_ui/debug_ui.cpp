@@ -827,19 +827,22 @@ debug_ui_run_to_cursor(void)
 extern "C" void
 debug_ui_toggle_breakpoint_at_pc(void)
 {
-    // Toggle: remove one at (pc,bank) if present, else add one there.
-    if (!DEBUGRemoveBreakPoint((int)regs.pc, regs.k)) {
+    // Toggle: remove one at (pc,bank,x16Bank) if present, else add one there.
+    // The bank has to be worked out before the remove, not just for the add:
+    // debug_bp_find() matches x16Bank exactly, so removing with a different
+    // selector than the one it was stored under finds nothing.
+    int x16 = -1;
+    // Match getCurrentBank()/x16bank_for(): a banked window only applies in
+    // program bank 0 (getCurrentBank returns -1 for any k != 0), so guarding
+    // on regs.k == 0 keeps the breakpoint matchable instead of dead.
+    if (regs.pc >= 0xA000 && regs.k == 0) {
+        x16 = (regs.pc < 0xC000) ? (int)memory_get_ram_bank()
+                                 : (int)memory_get_rom_bank();
+    }
+    if (!DEBUGRemoveBreakPoint((int)regs.pc, regs.k, x16)) {
         struct breakpoint bp;
         bp.pc   = (int)regs.pc;
         bp.bank = regs.k;
-        int x16 = -1;
-        // Match getCurrentBank()/x16bank_for(): a banked window only applies in
-        // program bank 0 (getCurrentBank returns -1 for any k != 0), so guarding
-        // on regs.k == 0 keeps the breakpoint matchable instead of dead.
-        if (regs.pc >= 0xA000 && regs.k == 0) {
-            x16 = (regs.pc < 0xC000) ? (int)memory_get_ram_bank()
-                                     : (int)memory_get_rom_bank();
-        }
         bp.x16Bank = x16;
         DEBUGAddBreakPoint(bp);
     }

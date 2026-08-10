@@ -113,10 +113,20 @@ struct MemChangeTracker {
     int      baseline_rom_bank = -1;
     int      baseline_cpu_bank = -1;
 
+    // The I/O page is not memory and does not belong in a "what changed"
+    // sweep. Several registers report live hardware state that differs on
+    // every read (the VERA scanline, VIA timers), so every pass would light
+    // the whole page up as changed; and a read of one is not always passive --
+    // $9F3E clocks the next byte out to the SD card. debug_ui_read6502() asks
+    // the devices not to do that, but a debugger has no reason to be poking at
+    // I/O to spot memory writes in the first place.
+    static bool is_io_page(uint16_t a) { return a >= 0x9F00 && a <= 0x9FFF; }
+
     void scan(double now)
     {
         if (!primed) {
             for (int a = 0; a < 0x10000; ++a) {
+                if (is_io_page((uint16_t)a)) continue;
                 prev[a] = debug_ui_read6502((uint16_t)a, 0, cpu_bank_for((uint16_t)a));
             }
             memset(when, 0, sizeof when);
@@ -124,6 +134,7 @@ struct MemChangeTracker {
             return;
         }
         for (int a = 0; a < 0x10000; ++a) {
+            if (is_io_page((uint16_t)a)) continue;
             const uint8_t v = debug_ui_read6502((uint16_t)a, 0, cpu_bank_for((uint16_t)a));
             if (v != prev[a]) {
                 prev[a] = v;

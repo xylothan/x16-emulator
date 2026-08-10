@@ -2001,12 +2001,14 @@ emulator_step_during_move(void)
 	if (in_step) {
 		return;
 	}
-	// Leave the machine alone whenever the debugger is in play. Breakpoints are
+	// Leave the machine alone whenever any debugger is in play. Breakpoints are
 	// honoured by DEBUGGetCurrentStatus(), which also drives the debugger's own
 	// window and event pump and so cannot be called from inside the OS modal
 	// loop; stepping here without it would run straight through breakpoints.
-	// Dragging with -debug therefore behaves as it always has.
-	if (debugger_enabled) {
+	// Dragging with -debug therefore behaves as it always has -- and the same
+	// has to hold for -imgui, whose window is move-hooked too, so a drag of
+	// either window cannot run the CPU behind the UI's back.
+	if (debugger_enabled || imgui_debugger_enabled) {
 		return;
 	}
 

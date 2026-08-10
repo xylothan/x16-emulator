@@ -56,10 +56,11 @@ sym_stricmp(const char *a, const char *b)
 void
 sym_toggle_bp(uint16_t addr)
 {
-    if (!DEBUGRemoveBreakPoint((int)addr, 0)) {
-        int x16 = (addr >= 0xA000)
-                      ? (addr < 0xC000 ? (int)memory_get_ram_bank() : (int)memory_get_rom_bank())
-                      : -1;
+    // Resolve the bank first: it keys the remove as well as the add.
+    int x16 = (addr >= 0xA000)
+                  ? (addr < 0xC000 ? (int)memory_get_ram_bank() : (int)memory_get_rom_bank())
+                  : -1;
+    if (!DEBUGRemoveBreakPoint((int)addr, 0, x16)) {
         struct breakpoint bp;
         bp.pc      = (int)addr;
         bp.bank    = 0;
