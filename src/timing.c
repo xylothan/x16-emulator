@@ -246,7 +246,8 @@ timing_update_ex(bool may_sleep)
 		// SDL_PumpEvents() dispatches the OS message queue without dequeuing
 		// anything, and video_repaint_only() re-presents the existing frame
 		// without touching the event queue or the recorder, so input still
-		// arrives intact at the next real poll. The threshold is above one frame's worth, so pacing
+		// arrives intact at the next real poll. The threshold is above one
+		// frame's worth, so pacing
 		// at the machine's own clock takes the single-sleep path exactly as
 		// before.
 		//

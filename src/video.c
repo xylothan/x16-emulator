@@ -1466,7 +1466,7 @@ video_repaint_only(void)
 	video_render_all_ex(false);
 }
 
-void
+static void
 video_render_all(void)
 {
 	video_render_all_ex(true);

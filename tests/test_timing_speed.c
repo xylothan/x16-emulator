@@ -29,7 +29,11 @@ uint32_t clockticks6502 = 0;
 void video_update_title(const char *t) { (void)t; }
 
 // timing.c only uses these to pace; the tests here never call timing_update().
-uint32_t SDL_GetTicks(void) { return 0; }
+// Settable, so a check can advance emulated time and wall-clock time
+// independently. Never moved backwards: timing.c subtracts it as uint32_t, so a
+// backwards step wraps to about 4.29e9 ms rather than reading as negative.
+static uint32_t fake_ticks_ms = 0;
+uint32_t SDL_GetTicks(void) { return fake_ticks_ms; }
 void     SDL_PumpEvents(void) {}
 void     video_repaint_only(void) {}
 
@@ -259,6 +263,57 @@ main(void)
 		clockticks6502 = 0;
 		timing_init();
 	}
+	// ── The wall-clock side of the lead ─────────────────────────────────────
+	// The checks above pin the scaling of emulated time, but hold wall-clock
+	// time at zero, so they cannot see the term that subtracts it -- nor the
+	// accumulated cpu_ticks that the pending delta is added to. Both survive
+	// deletion without them.
+	//
+	// timing_update() is deliberately never called: its slice loop re-reads the
+	// clock to decide when to stop, and a stub that does not advance during a
+	// sleep would spin forever. timing_update_no_sleep() skips that block.
+	{
+		MHZ = 8;
+		timing_reset_speed();
+
+		// Three milliseconds of real time against one of emulated work: the
+		// machine is two milliseconds behind.
+		fake_ticks_ms  = 0;
+		clockticks6502 = 0;
+		timing_init();
+		fake_ticks_ms  = 3;
+		clockticks6502 = 8000;
+		check(timing_lead_us() == -2000, "lead goes negative when real time runs ahead");
+
+		// Only the emulated side is scaled. At 25 kHz the same 8000 ticks are
+		// worth 320 ms, against one second of real time.
+		timing_set_speed_khz(25);
+		fake_ticks_ms  = 0;
+		clockticks6502 = 0;
+		timing_init();
+		fake_ticks_ms  = 1000;
+		clockticks6502 = 8000;
+		check(timing_lead_us() == 320000 - 1000000,
+		      "and the wall-clock side is not scaled with it");
+
+		// Ticks already folded into the running total still count. The wall
+		// clock stays at zero across the update, so the catch-up re-base -- which
+		// would silently rewrite the base and hide this -- cannot trigger.
+		timing_reset_speed();
+		fake_ticks_ms  = 0;
+		clockticks6502 = 0;
+		timing_init();
+		clockticks6502 = 8000;
+		timing_update_no_sleep();      // folds 8000 into the accumulated total
+		clockticks6502 = 16000;        // another 8000 pending
+		check(timing_lead_us() == 2000, "accumulated ticks count as well as pending ones");
+
+		fake_ticks_ms  = 0;
+		clockticks6502 = 0;
+		timing_reset_speed();
+		timing_init();
+	}
+
 	if (failures) {
 		printf("\nFAILED (%d failures)\n", failures);
 		return 1;
