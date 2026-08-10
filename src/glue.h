@@ -68,6 +68,7 @@ extern uint8_t *CART;
 extern uint16_t num_banks;
 extern uint16_t num_ram_banks;
 
+extern int  instruction_counter;  // instructions retired (main.c)
 extern bool debugger_enabled;
 extern bool imgui_debugger_enabled;
 extern bool log_video;

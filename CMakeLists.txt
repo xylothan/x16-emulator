@@ -284,9 +284,10 @@ set(X16_SOURCES
 
 if(USE_IMGUI)
     # Vendored Dear ImGui (docking branch) + the SDL2 / SDLRenderer2 backends,
-    # kept in their own list so the project's strict warnings can be relaxed for
-    # just these files: ImGui does not build clean under /W3 /WX or -Wall
-    # -Werror, and neither does UI code written against it.
+    # kept in their own list so the project's strict warnings can be relaxed
+    # for just these files: ImGui does not build clean under /W3 /WX or
+    # -Wall -Werror, and it is not ours to fix. The debug_ui sources are
+    # deliberately NOT in this list -- see the warning settings below.
     set(IMGUI_SOURCES
         src/extern/imgui/imgui.cpp
         src/extern/imgui/imgui_draw.cpp

@@ -5,9 +5,9 @@
 // single, documented, C++-safe surface so that linkage is correct.
 //
 // FLEET PANEL AUTHORS: include THIS header (not the raw C core headers) to read
-// emulator state. If you need another accessor, ADD it here inside the
-// extern "C" block rather than including core C headers ad hoc from a panel —
-// that keeps one consistent bridge everyone shares.
+// emulator state. If an accessor you need is missing, add the *include* of the
+// real emulator header here rather than a declaration of the function -- see
+// the note below on why re-declaring is how this file went wrong.
 //
 // Why it is shaped this way:
 //   * Struct/type *definitions* (POD; identical layout in C and C++) are
@@ -231,8 +231,8 @@ extern bool smc_requested_reset;  // set true to request a machine reset
 // core write four bytes into the caller's two-byte variable.
 
 // ─── Counters (status line) ─────────────────────────────────────────────────
-extern uint32_t clockticks6502;      // CPU cycle counter (fake6502.c)
-extern int      instruction_counter; // instructions executed (main.c)
+// clockticks6502 comes from cpu/fake6502.h and instruction_counter from
+// glue.h, both included above.
 
 // ─── Emulation speed / warp (timing.h above, main.c, glue.h) ────────────────
 // Speed is an absolute target clock in kHz. The machine's own clock comes from

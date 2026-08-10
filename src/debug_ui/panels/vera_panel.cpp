@@ -565,9 +565,10 @@ build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
 
     for (uint16_t line = 0; line < lines; ++line) {
         uint8_t  r[7];
-        uint16_t eff_y   = 0;
-        bool     enabled = false;
-        if (!video_get_layer_line_state((uint8_t)layer, line, r, &eff_y, &enabled))
+        uint16_t eff_y     = 0;
+        bool     enabled   = false;
+        uint16_t layer_row = 0;
+        if (!video_get_layer_line_state((uint8_t)layer, line, r, &eff_y, &enabled, &layer_row))
             continue;
         if (!enabled)
             continue;
@@ -585,15 +586,14 @@ build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
         if (!same_layer_geometry(LL, live))
             continue;
 
-        // Which row of the layer image this scanline showed. VERA forces the
-        // scroll registers to 0 in bitmap mode, so eff_y is the row directly.
-        int ly;
-        if (LL.bitmap_mode) {
-            ly = eff_y;
-        } else {
-            const int layer_h = LL.maph * LL.tileh;
-            ly                = ((int)eff_y + LL.vscroll) & (layer_h - 1);
-        }
+        // Which row of the layer image this scanline showed. Taken from the
+        // renderer rather than recomputed here: the renderer applies VSCROLL
+        // and the layer-height mask from a different register generation than
+        // the layout registers above, so deriving it from `r` would be off by
+        // whatever the scroll changed mid-frame -- in exactly the raster-split
+        // case this whole path exists to show. VERA forces the scroll
+        // registers to 0 in bitmap mode, so there eff_y is the row directly.
+        const int ly = LL.bitmap_mode ? (int)eff_y : (int)layer_row;
         if (ly < 0 || ly >= MAX_LAYER_ROWS || out.valid[ly])
             continue; // first scanline to show this row wins
 

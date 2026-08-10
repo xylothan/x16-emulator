@@ -136,6 +136,13 @@ static uint8_t reg_layer[2][7];
 // whole frame, which describes just one band of the screen.
 static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
 static uint16_t line_eff_y[SCREEN_HEIGHT];
+// The layer row each line actually displayed. Recorded rather than left for a
+// consumer to recompute from the registers: the renderers take the layout from
+// prev_layer_properties[1] but VSCROLL and the layer-height mask from [0]
+// (video.c: render_layer_line_text/tile via calc_layer_eff_y(props0, ...)), so
+// no single register generation describes the result. Storing the answer makes
+// the contract true instead of approximately true.
+static uint16_t line_layer_row[SCREEN_HEIGHT][2];
 static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
 static bool     line_state_valid[SCREEN_HEIGHT];
 // The raw registers on the same two-stage delay the layer properties use, so
@@ -252,8 +259,13 @@ video_reset()
 	// longer exists, and nothing else invalidates it, so without this a
 	// debug view would keep decoding rows against pre-reset registers
 	// indefinitely -- for any line the beam has not reached again yet.
+	//
+	// Only the validity flags. The raw-register pipeline is deliberately left
+	// alone so it stays in lockstep with prev_layer_properties, which reset
+	// does not clear either; zeroing one side would make the history describe
+	// registers the renderer is not using. No row is exposed until the beam
+	// refills both, so nothing stale can be read in the meantime.
 	memset(line_state_valid, 0, sizeof(line_state_valid));
-	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
 
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
@@ -1236,19 +1248,21 @@ render_line(uint16_t y, float scan_pos_x)
 	// views (see line_reg_layer). Takes prev_reg_layer[1], the same generation
 	// the renderers read via prev_layer_properties[1] -- not the live
 	// registers, which by now describe a line two scanlines further down.
-	//
-	// In progressive mode y has already been forced even above, so both fields
-	// of a pair record the same state rather than leaving odd lines stale.
 	if (y < SCREEN_HEIGHT) {
 		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
 		line_eff_y[y]         = eff_y;
 		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
+		for (uint8_t l = 0; l < 2; l++) {
+			line_layer_row[y][l] =
+				(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+		}
 		line_state_valid[y]   = true;
+		// Progressive modes draw only the even line of each pair, so the odd
+		// one was never rendered. Marked invalid rather than filled in: the
+		// contract is "what this scanline showed", and inventing a row for a
+		// line the beam never drew is how a debug view starts lying.
 		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
-			memcpy(line_reg_layer[y + 1], prev_reg_layer[1], sizeof(line_reg_layer[y + 1]));
-			line_eff_y[y + 1]         = eff_y;
-			line_layer_enabled[y + 1] = line_layer_enabled[y];
-			line_state_valid[y + 1]   = true;
+			line_state_valid[y + 1] = false;
 		}
 	}
 
@@ -1993,7 +2007,8 @@ video_update()
 // changes (raster splits) instead of assuming one snapshot covers the frame.
 bool
 video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
-                           uint16_t *out_eff_y, bool *out_enabled)
+                           uint16_t *out_eff_y, bool *out_enabled,
+                           uint16_t *out_layer_row)
 {
 	if (layer >= 2 || line >= SCREEN_HEIGHT || !line_state_valid[line]) {
 		return false;
@@ -2006,6 +2021,9 @@ video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
 	}
 	if (out_enabled) {
 		*out_enabled = (line_layer_enabled[line] & (1 << layer)) != 0;
+	}
+	if (out_layer_row) {
+		*out_layer_row = line_layer_row[line][layer];
 	}
 	return true;
 }
