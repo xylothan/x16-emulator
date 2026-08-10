@@ -1002,12 +1002,12 @@ main(void)
 		// so it is accepted. The segment name shares that whole head but runs
 		// past the buffer, so truncating it would make the two compare equal
 		// even though the full names differ.
-		char longseg[200], longequ[160];
+		char longseg[256], longequ[256];
 		memset(longseg, 'A', 130);
 		memcpy(longseg + 130, "LEFT", 5);
 		memset(longequ, 'A', 127);
 		longequ[127] = '\0';
-		char buf[1024];
+		char buf[2048];
 		snprintf(buf, sizeof buf,
 		         "version\tmajor=2,minor=0\n"
 		         "file\tid=0,name=\"lng.s\",size=10,mtime=0x00000000,mod=0\n"
@@ -1224,7 +1224,7 @@ main(void)
 		char huge[400];
 		memset(huge, 'B', 300);
 		huge[300] = '\0';
-		char buf2[1024];
+		char buf2[2048];
 		snprintf(buf2, sizeof buf2,
 		         "version\tmajor=2,minor=0\n"
 		         "file\tid=0,name=\"ov.s\",size=10,mtime=0x00000000,mod=0\n"
