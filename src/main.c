@@ -2027,7 +2027,12 @@ emulator_step_during_move(void)
 	// window and event pump and so cannot be called from inside the OS modal
 	// loop; stepping here without it would run straight through breakpoints.
 	// Dragging with -debug therefore behaves as it always has.
-	if (debugger_enabled) {
+	//
+	// The DAP server counts too, and for the same reason -- a client's
+	// breakpoints are the same breakpoints. The guest can clear
+	// debugger_enabled by writing $9FB0, so testing that alone would let a drag
+	// step past a breakpoint a client is waiting on.
+	if (debugger_enabled || debug_server_is_enabled()) {
 		return;
 	}
 

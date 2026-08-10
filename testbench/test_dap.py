@@ -197,5 +197,34 @@ msgs = recv_dap(sock, 1)
 check("disconnect response", msgs, "response", "disconnect")
 
 sock.close()
+
+# 14. An oversized frame must not poison the receive buffer for later clients.
+#
+# A body bigger than the buffer drops the connection -- there is no way to
+# resynchronise a stream we cannot hold. The header was left sitting in the
+# buffer though, so the next client was accepted, had that stale header
+# re-parsed before it had written a byte, and was dropped on connect. For the
+# life of the process.
+probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+probe.connect(('127.0.0.1', 9009))
+probe.sendall(b"Content-Length: 100000\r\n\r\n")
+time.sleep(0.5)
+probe.close()
+time.sleep(0.5)
+
+try:
+    after = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    after.connect(('127.0.0.1', 9009))
+    time.sleep(0.5)          # let a poll run before we send anything
+    send_dap(after, {"seq": 1, "type": "request", "command": "initialize",
+                     "arguments": {"adapterID": "test"}})
+    time.sleep(0.5)
+    msgs = recv_dap(after, 2)
+    check("server still usable after an oversized frame", msgs, "response", "initialize")
+    after.close()
+except OSError as e:
+    print("  FAIL server still usable after an oversized frame: %s" % e)
+    failed += 1
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(0 if failed == 0 else 1)
