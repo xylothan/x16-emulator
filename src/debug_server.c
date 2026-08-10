@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 #else
 #include <netinet/tcp.h>
+#include <unistd.h>     /* usleep(), when a peer is not reading fast enough */
 #endif
 #include "video.h"
 #include "keyboard.h"
