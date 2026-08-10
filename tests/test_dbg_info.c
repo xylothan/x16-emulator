@@ -501,6 +501,68 @@ main(void)
 			dbg_info_free();
 		}
 	}
+	// Deduplication is only correct within one module. Two linked modules may
+	// each define the same equate name with different values, and may each
+	// compile a file of the same name. Pooling those would not merely report a
+	// stale number -- it destroys one module's definition outright, since
+	// nothing puts it back when the other module unloads.
+	{
+		dbg_info_free();
+		char *pa = write_temp(k_dbg_equ_v1, "x16_dbg_info_modA.dbg");
+		if (!pa) {
+			check(false, "could not write module A");
+		} else {
+			check(dbg_info_load(pa) == 0, "loads module A");
+			// A different module, same equate name, different value.
+			char *pb = write_temp(k_dbg_equ_v2, "x16_dbg_info_modB.dbg");
+			if (pb) {
+				check(dbg_info_load(pb) == 0, "loads module B alongside it");
+				dbg_addr_t v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "and B's SCORE does not overwrite A's");
+				remove(pb);
+			}
+			remove(pa);
+			dbg_info_free();
+		}
+	}
+
+	// A `line` that precedes the `file` it names. cc65 emits them the other way
+	// round today, but nothing in the format promises that, and resolving the
+	// reference before the record exists silently loses the source mapping.
+	{
+		dbg_info_free();
+		static const char *k_dbg_line_first =
+			"version\tmajor=2,minor=0\n"
+			"line\tid=0,file=0,line=7,span=0\n"
+			"file\tid=0,name=\"late.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"mod\tid=0,name=\"late.o\",file=0\n";
+		char *lp = write_temp(k_dbg_line_first, "x16_dbg_info_linefirst.dbg");
+		if (!lp) {
+			check(false, "could not write the record-order fixture");
+		} else {
+			check(dbg_info_load(lp) == 0, "loads a .dbg with line before file");
+			const char *f = NULL;
+			int         n = 0;
+			check(dbg_info_addr_to_source(0x0801, &f, &n) && n == 7,
+			      "and the line still resolves to its file");
+
+			// The reload is what actually exercises the ordering: only then has
+			// the ID base moved on, so the reused file record's ID and the one
+			// a `line` would assume for itself are different numbers.
+			dbg_info_unload_range(0x0801, 0x0810);
+			check(dbg_info_load(lp) == 0, "reloads it");
+			f = NULL;
+			n = 0;
+			check(dbg_info_addr_to_source(0x0801, &f, &n) && n == 7,
+			      "and it still resolves after the IDs have moved on");
+			remove(lp);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

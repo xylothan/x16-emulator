@@ -21,6 +21,7 @@
 typedef struct {
 	int    id;
 	char  *name;
+	int    owner;     /* which .dbg declared it; see dbg_owner_intern() */
 } dbg_file_t;
 
 typedef struct {
@@ -95,6 +96,7 @@ static int              sym_cap;
 typedef struct {
 	char *name;
 	int   bank;
+	int   owner;      /* which .dbg declared it; see dbg_owner_intern() */
 } dbg_bank_equ_t;
 
 static dbg_bank_equ_t  *bank_equs;
@@ -110,6 +112,7 @@ static int              bank_equ_cap;
 typedef struct {
 	char    *name;
 	dbg_addr_t val;
+	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
 } dbg_equ_t;
 
 static dbg_equ_t       *equs;
@@ -314,6 +317,44 @@ static const char *basename_ptr(const char *path)
 /*  Record parsers                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Records are deduplicated so that reloading a module does not grow the tables
+ * without end. That is only correct WITHIN a module: two linked modules may
+ * legitimately both compile a file called "main.c", and may both define an
+ * equate called LIMIT with different values. Deduplicating those against each
+ * other would make one module's debug info describe the other's code. So every
+ * deduplicated record remembers which .dbg declared it, and a reused record has
+ * to come from the same one.
+ *
+ * The owner is the .dbg path, interned. Comparison is case-insensitive on
+ * Windows, where the same file reached by two spellings is still one file. */
+static char **owners      = NULL;
+static int    owner_count = 0;
+static int    owner_cap   = 0;
+static int    cur_owner   = -1;
+
+static int dbg_owner_intern(const char *path)
+{
+	if (!path)
+		return -1;
+	for (int i = 0; i < owner_count; i++) {
+#ifdef _WIN32
+		if (owners[i] && _stricmp(owners[i], path) == 0)
+#else
+		if (owners[i] && strcmp(owners[i], path) == 0)
+#endif
+			return i;
+	}
+	if (!GROW_ARRAY(owners, owner_count, owner_cap, char *))
+		return -1;
+	size_t n = strlen(path);
+	char  *copy = (char *)malloc(n + 1);
+	if (!copy)
+		return -1;
+	memcpy(copy, path, n + 1);
+	owners[owner_count] = copy;
+	return owner_count++;
+}
+
 /* Maps this load's `file` IDs onto the record that ends up describing them.
  * Needed because a file already known from an earlier load is reused rather than
  * appended, so its ID is not this load's ID plus the usual base. Reset per load.
@@ -350,12 +391,16 @@ static void parse_file_record(const char *p)
 		return;
 	}
 
-	/* Reuse a file we already know. Unloading a range deliberately leaves file
-	 * records alone -- callers keep the path pointers we handed them -- so
-	 * appending here would add a copy of every file on every reload, and an
-	 * overlay swapped in and out repeatedly would grow the table without end. */
+	/* Reuse a file this same .dbg already gave us. Unloading a range
+	 * deliberately leaves file records alone -- callers keep the path pointers
+	 * we handed them -- so appending here would add a copy of every file on
+	 * every reload, and an overlay swapped in and out repeatedly would grow the
+	 * table without end. Restricted to one owner: two modules that both build a
+	 * "main.c" have two different main.c's, and merging them would send the
+	 * source viewer to the wrong one. */
 	for (int i = 0; i < file_count; i++) {
-		if (files[i].name && strcmp(files[i].name, name) == 0) {
+		if (files[i].owner == cur_owner && files[i].name &&
+		    strcmp(files[i].name, name) == 0) {
 			file_alias_set(id, files[i].id);
 			free(name);
 			return;
@@ -363,9 +408,10 @@ static void parse_file_record(const char *p)
 	}
 
 	if (!GROW_ARRAY(files, file_count, file_cap, dbg_file_t)) { free(name); return; }
-	files[file_count].id   = (int)id + id_base_file;
+	files[file_count].id    = (int)id + id_base_file;
 	note_id(&next_id_file, files[file_count].id);
-	files[file_count].name = name;
+	files[file_count].name  = name;
+	files[file_count].owner = cur_owner;
 	file_alias_set(id, files[file_count].id);
 	file_count++;
 }
@@ -432,7 +478,7 @@ static void parse_line_record(const char *p)
 	if (!GROW_ARRAY(lines, line_count, line_cap, dbg_line_t)) { free(span_ids); return; }
 	lines[line_count].id         = (int)id + id_base_line;
 	note_id(&next_id_line, lines[line_count].id);
-	lines[line_count].file       = file_alias_get(file);
+	lines[line_count].file       = (int)file;   /* raw; resolved after the load */
 	lines[line_count].line       = (int)line;
 	lines[line_count].spans      = span_ids;
 	lines[line_count].span_count = span_n;
@@ -476,7 +522,8 @@ static void parse_sym_record(const char *p)
 				 * lives -- mislabelling code rather than merely reporting a
 				 * wrong number. */
 				for (int i = 0; i < bank_equ_count; i++) {
-					if (bank_equs[i].name && !strcasecmp(bank_equs[i].name, name)) {
+					if (bank_equs[i].owner == cur_owner && bank_equs[i].name &&
+					    !strcasecmp(bank_equs[i].name, name)) {
 						free(bank_equs[i].name);
 						bank_equs[i].name = name;   /* takes ownership */
 						bank_equs[i].bank = (int)val;
@@ -484,8 +531,9 @@ static void parse_sym_record(const char *p)
 					}
 				}
 				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return; }
-				bank_equs[bank_equ_count].name = name;   /* takes ownership */
-				bank_equs[bank_equ_count].bank = (int)val;
+				bank_equs[bank_equ_count].name  = name;   /* takes ownership */
+				bank_equs[bank_equ_count].bank  = (int)val;
+				bank_equs[bank_equ_count].owner = cur_owner;
 				bank_equ_count++;
 				return;
 			}
@@ -496,9 +544,13 @@ static void parse_sym_record(const char *p)
 		if (tlen == 3 && strncmp(tv, "equ", 3) == 0) {
 			/* Replace rather than append, for the same reason as bank equates:
 			 * unloading a range never prunes these, and the lookup returns the
-			 * first match, so a stale value would win forever. */
+			 * first match, so a stale value would win forever. Same-owner only:
+			 * two modules may each define LIMIT with different values, and
+			 * replacing across them would destroy one of the two outright,
+			 * since nothing restores it when the other module unloads. */
 			for (int i = 0; i < equ_count; i++) {
-				if (equs[i].name && !strcasecmp(equs[i].name, name)) {
+				if (equs[i].owner == cur_owner && equs[i].name &&
+				    !strcasecmp(equs[i].name, name)) {
 					free(equs[i].name);
 					equs[i].name = name;   /* takes ownership */
 					equs[i].val  = (dbg_addr_t)val;
@@ -506,8 +558,9 @@ static void parse_sym_record(const char *p)
 				}
 			}
 			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return; }
-			equs[equ_count].name = name;   /* takes ownership */
-			equs[equ_count].val  = (dbg_addr_t)val;
+			equs[equ_count].name  = name;   /* takes ownership */
+			equs[equ_count].val   = (dbg_addr_t)val;
+			equs[equ_count].owner = cur_owner;
 			equ_count++;
 			return;
 		}
@@ -717,6 +770,17 @@ int dbg_info_load(const char *path)
 	// Per load: this file's `file` IDs mean nothing to the next one.
 	file_alias_count = 0;
 
+	// Records deduplicated below are only pooled with others from this same
+	// .dbg; see dbg_owner_intern(). An intern failure yields -1, which simply
+	// disables reuse for this load rather than pooling it with everyone else.
+	cur_owner = dbg_owner_intern(path);
+
+	// `line` records are resolved through the alias only after the whole file
+	// is read, so a `line` that precedes its `file` still lands on the right
+	// record. cc65 emits them in the other order today, but nothing promises
+	// that, and getting it wrong silently drops source lines.
+	int line_first = line_count;
+
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
 
@@ -746,6 +810,11 @@ int dbg_info_load(const char *path)
 
 	fclose(f);
 	free(buf);
+
+	// Now that every `file` record has been seen, turn this load's raw file IDs
+	// into the records that actually describe them.
+	for (int i = line_first; i < line_count; i++)
+		lines[i].file = file_alias_get(lines[i].file);
 
 	// Remember the directory this .dbg came from, for source-file discovery.
 	{
