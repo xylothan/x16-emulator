@@ -126,8 +126,51 @@ reset_all(void)
 static struct breakpoint
 bp_at(int pc, uint8_t bank, int x16Bank)
 {
-	struct breakpoint bp = { pc, bank, x16Bank };
+	struct breakpoint bp = { pc, bank, x16Bank, 0, false };
 	return bp;
+}
+
+// ---- Owner-defaulting shim -------------------------------------------------
+//
+// Ownership is exercised on its own further down. Everything above it is about
+// bank matching, conditions and counts, which are the same whoever asked, so
+// those cases name a single owner through these rather than restating it on
+// every line. Deliberately thin: each is the ownership call the emulator itself
+// makes, with DEBUG_OWNER_CLI standing in for "somebody".
+
+static int
+debug_bp_add(struct breakpoint bp)
+{
+	// The old entry point answered with the new entry's index, and several
+	// cases below check that a second breakpoint got its own slot rather than
+	// displacing the first. A created entry always lands at the end.
+	return debug_bp_add_for(bp, DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED ? numBreakpoints - 1 : -1;
+}
+
+static bool
+debug_bp_remove(int pc, uint8_t bank, int x16Bank)
+{
+	return debug_bp_delete(pc, bank, x16Bank);
+}
+
+static void
+debug_bp_toggle(int pc, uint8_t bank, int x16Bank)
+{
+	debug_bp_toggle_for(pc, bank, x16Bank, DEBUG_OWNER_CLI);
+}
+
+static int
+debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
+{
+	return debug_wp_add_for(addr, len, x16Bank, DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED
+	           ? debug_wp_count() - 1
+	           : -1;
+}
+
+static bool
+debug_wp_remove(uint16_t addr, int x16Bank)
+{
+	return debug_wp_delete(addr, x16Bank);
 }
 
 int
@@ -1145,6 +1188,282 @@ main(void)
 		g_ram_bank = 6;
 		check(!debug_wp_check_write(0xBFFF, 0) && !debug_wp_check_write(0xC000, 0),
 		      "and the whole range stops matching when that bank is unmapped");
+
+		reset_all();
+	}
+
+	// ── Ownership ───────────────────────────────────────────────────────────
+	// The table used to record only that an address was wanted, never by whom,
+	// so the first remove disarmed it for everyone. Five independent things can
+	// want one address -- -bp, the debugger's F9, and the three kinds of DAP
+	// breakpoint -- and the DAP server spent eight review rounds trying to
+	// reconstruct from outside what only the table can know. Every case here is
+	// a defect that was actually found during those rounds.
+	{
+		// -- Two owners, one address. The first to let go must not disarm the
+		// other. (Round 4: teardown deleted -bp and F9 breakpoints outright.)
+		reset_all();
+		check(debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED,
+		      "the first owner creates the entry");
+		check(debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE) == DEBUG_ADD_EXISTED,
+		      "the second owner joins the entry that is already there");
+		check(numBreakpoints == 1, "two owners at one address are still one place to stop");
+
+		check(debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_CLI),
+		      "the first owner can let go");
+		check(numBreakpoints == 1 && debug_bp_is_set(0x2000, 0),
+		      "and the breakpoint stays armed for the owner that still wants it");
+		check(debug_bp_on_arrival(0x2000, 0), "and still actually fires");
+
+		// -- ...and when the last owner goes, so does the entry. (Round 5: the
+		// orphan -- armed, with no table naming it, unreachable by any request.
+		// On a headless -debugport run that is a machine that cannot resume.)
+		check(debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE),
+		      "the last owner can let go too");
+		check(numBreakpoints == 0 && !debug_bp_is_set(0x2000, 0),
+		      "and then nothing is left armed");
+
+		// -- Letting go of something you never asked for changes nothing.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		check(!debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE),
+		      "an owner that never asked cannot remove");
+		check(numBreakpoints == 1, "and the entry is untouched");
+
+		// -- Asking twice as the same owner is idempotent, and one clear
+		// retires it. Two source paths with the same basename resolved to one
+		// address and the two records vetoed each other's removal, leaving it
+		// armed. (Round 8: the mutual veto.)
+		reset_all();
+		debug_bp_add_for(bp_at(0x3000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_add_for(bp_at(0x3000, 0, -1), DEBUG_OWNER_DAP_SOURCE) == DEBUG_ADD_EXISTED,
+		      "one owner asking twice is idempotent");
+		check(debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE) == 1,
+		      "and one clear retires it exactly once");
+		check(numBreakpoints == 0, "leaving nothing armed");
+
+		// -- Clearing an owner that holds nothing is a no-op.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		check(debug_bp_clear_owner(DEBUG_OWNER_DAP_FUNCTION) == 0,
+		      "clearing an owner that holds nothing disarms nothing");
+		check(numBreakpoints == 1, "and leaves the table alone");
+
+		// -- A -bp breakpoint survives a DAP session, with its condition and
+		// hit count intact. (Rounds 5 and 6: the flag that was meant to protect
+		// it either orphaned it or handed it to the wrong table.)
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		debug_bp_set_condition(0x2000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 5);
+		regs.c = 5;
+		debug_bp_on_arrival(0x2000, 0);
+		debug_bp_on_arrival(0x2000, 0);
+		check(debug_bp_get_hits(0x2000, 0, -1) == 2, "the -bp breakpoint has been hit twice");
+
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE) == 0,
+		      "a DAP session ending disarms nothing another owner still wants");
+		check(debug_bp_is_set(0x2000, 0), "the -bp breakpoint is still armed");
+
+		int      has_cond = 0, operand = 0, op = 0;
+		uint32_t value = 0, ignore = 0;
+		uint16_t operand_addr = 0;
+		check(debug_bp_get_condition(0x2000, 0, -1, &has_cond, &operand, &operand_addr, &op,
+		                             &value, &ignore)
+		          && has_cond && operand == BPOPERAND_A && op == BPCMP_EQ && value == 5,
+		      "with its condition intact");
+		check(debug_bp_get_hits(0x2000, 0, -1) == 2, "and its hit count intact");
+
+		// -- A client re-sending its list keeps the count. VS Code re-sends a
+		// whole file's breakpoints on every edit, so this path runs constantly;
+		// a count that reset each time could not drive a hit condition.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_on_arrival(0x2000, 0);
+		debug_bp_on_arrival(0x2000, 0);
+		debug_bp_on_arrival(0x2000, 0);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		check(numBreakpoints == 0, "the client's breakpoint goes when the client drops it");
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_get_hits(0x2000, 0, -1) == 3,
+		      "but re-sending the same breakpoint keeps its hit count");
+
+		// -- The stale-registry pair. The server cached a per-address verdict
+		// and nothing invalidated it, so it went wrong in both directions.
+		//
+		// Direction 1: a client set and cleared an address, the user then set
+		// their own there, and teardown deleted the user's. (Round 7.)
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_UI);   // the user's F9
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);             // session teardown
+		check(numBreakpoints == 1 && debug_bp_is_set(0x2000, 0),
+		      "a client session ending leaves the user's F9 breakpoint armed");
+		check(debug_bp_has_owner(0x2000, 0, -1, DEBUG_OWNER_UI)
+		          && !debug_bp_has_owner(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE),
+		      "and owned by the user alone");
+
+		// Direction 2: a cached "someone else owns this" survived the user
+		// deleting their own, leaving a server-created entry armed and orphaned.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_CLI);      // the user deletes theirs
+		check(numBreakpoints == 0, "both owners letting go clears the address");
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		check(numBreakpoints == 0,
+		      "and a later client breakpoint there is not mistaken for the user's");
+
+		// -- The human's delete is authoritative. Under a strict refcount F9 on
+		// a client's breakpoint would only drop the UI's own reference and
+		// leave it armed, so the user would press the key and watch nothing
+		// happen. Whoever asked for it, the keyboard wins.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_FUNCTION);
+		check(debug_bp_delete(0x2000, 0, -1), "the user can delete a client's breakpoint");
+		check(numBreakpoints == 0 && !debug_bp_is_set(0x2000, 0),
+		      "and it is really gone, not merely down one owner");
+
+		// F9 over an address nobody has claimed creates one owned by the UI;
+		// pressing it again takes it away, exactly as it did before ownership.
+		reset_all();
+		debug_bp_toggle_for(0x2000, 0, -1, DEBUG_OWNER_UI);
+		check(debug_bp_is_set(0x2000, 0) && debug_bp_has_owner(0x2000, 0, -1, DEBUG_OWNER_UI),
+		      "F9 on a clear address arms one for the user");
+		debug_bp_toggle_for(0x2000, 0, -1, DEBUG_OWNER_UI);
+		check(!debug_bp_is_set(0x2000, 0), "and F9 again takes it away");
+
+		// -- Ownership keys are normalised like every other key. A bank named
+		// for an address that is not banked must not produce an entry that the
+		// owner can never name again. (This was its own defect, on gen2 with a
+		// non-zero program bank.)
+		reset_all();
+		debug_bp_add_for(bp_at(0x0801, 0, 7), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_has_owner(0x0801, 0, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE),
+		      "an owner recorded with a meaningless bank is found without one");
+		check(debug_bp_remove_for(0x0801, 0, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE),
+		      "and can let go without naming it");
+		check(numBreakpoints == 0, "leaving nothing behind");
+
+		// -- The "restate what I still want" pattern the DAP source handler
+		// uses. Source files are matched to addresses by basename, so two paths
+		// can resolve to one entry and one owner's two claims are a single bit;
+		// removing per entry would disarm an address the owner still wants.
+		// Clearing the owner and re-asserting the survivors is safe instead.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);        // the user's
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE); // two paths,
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE); // one address
+		debug_bp_add_for(bp_at(0x2100, 0, -1), DEBUG_OWNER_DAP_SOURCE); // a third, elsewhere
+		debug_bp_set_condition(0x2000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 5);
+		regs.c = 5;
+		debug_bp_on_arrival(0x2000, 0);
+
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_is_set(0x2000, 0),
+		      "clearing the owner leaves an address another owner still wants");
+		check(!debug_bp_is_set(0x2100, 0), "and releases the one only it wanted");
+
+		// Re-assert only the surviving claim.
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_is_set(0x2000, 0) && numBreakpoints == 1,
+		      "re-asserting a claim restores it without duplicating the entry");
+		check(debug_bp_get_hits(0x2000, 0, -1) == 1,
+		      "and the hit count survives the round trip");
+		check(debug_bp_get_condition(0x2000, 0, -1, &has_cond, NULL, NULL, NULL, NULL, NULL)
+		          && has_cond,
+		      "as does the condition, which belongs to the address");
+
+		reset_all();
+	}
+
+	// ── Enable and disable ──────────────────────────────────────────────────
+	// Front ends used to implement this by deleting the entry and remembering
+	// it themselves, which loses the condition, the count, and every other
+	// view's marker. A disabled breakpoint keeps its place.
+	{
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_UI);
+		debug_bp_on_arrival(0x2000, 0);
+		debug_bp_on_arrival(0x2000, 0);
+
+		check(debug_bp_set_enabled(0x2000, 0, -1, false), "a breakpoint can be disabled");
+		check(numBreakpoints == 1, "and keeps its place in the table");
+		check(!debug_bp_is_set(0x2000, 0), "but no longer counts as set");
+		check(!debug_bp_on_arrival(0x2000, 0), "and does not stop the machine");
+		check(debug_bp_get_hits(0x2000, 0, -1) == 2,
+		      "arriving while disabled does not spend the count");
+		check(debug_bp_has_owner(0x2000, 0, -1, DEBUG_OWNER_UI),
+		      "and it still belongs to whoever asked for it");
+
+		check(debug_bp_set_enabled(0x2000, 0, -1, true), "and can be enabled again");
+		check(debug_bp_on_arrival(0x2000, 0), "whereupon it fires again");
+		check(debug_bp_get_hits(0x2000, 0, -1) == 3, "carrying its count with it");
+
+		// Asking for a breakpoint is asking for it to be armed, so a client
+		// re-sending one that is disabled gets an armed breakpoint back.
+		debug_bp_set_enabled(0x2000, 0, -1, false);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_is_enabled(0x2000, 0, -1), "re-adding a disabled breakpoint re-arms it");
+
+		check(!debug_bp_set_enabled(0x9999, 0, -1, false),
+		      "enabling something that is not there reports so");
+
+		reset_all();
+	}
+
+	// ── Watchpoint ownership ────────────────────────────────────────────────
+	// The same shape, and it had the same defect: -wp, the debugger and a DAP
+	// client can all want one address.
+	{
+		reset_all();
+		check(debug_wp_add_for(0xA100, 1, DEBUG_BANK_ANY, DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED,
+		      "-wp creates the watchpoint");
+		check(debug_wp_add_for(0xA100, 1, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE)
+		          == DEBUG_ADD_EXISTED,
+		      "a data breakpoint joins it");
+		check(debug_wp_count() == 1, "two owners share one watch");
+
+		debug_wp_set_value(0xA100, DEBUG_BANK_ANY, BPCMP_EQ, 0x42);
+		check(debug_wp_clear_owner(DEBUG_OWNER_DAP_SOURCE) == 0,
+		      "the client's session ending disarms nothing -wp still wants");
+		check(debug_wp_count() == 1, "the -wp watchpoint survives");
+		check(debug_wp_check_write(0xA100, 0x42) && !debug_wp_check_write(0xA100, 0x01),
+		      "with its value filter intact");
+
+		check(debug_wp_remove_for(0xA100, DEBUG_BANK_ANY, DEBUG_OWNER_CLI),
+		      "and goes when its last owner does");
+		check(debug_wp_count() == 0, "leaving nothing watched");
+
+		// The console's watch_clear is the human speaking, so it takes
+		// everything, exactly like the breakpoint delete above.
+		reset_all();
+		debug_wp_add_for(0xA100, 1, DEBUG_BANK_ANY, DEBUG_OWNER_CLI);
+		debug_wp_add_for(0xA100, 1, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_CONSOLE);
+		check(debug_wp_delete(0xA100, DEBUG_BANK_ANY), "a delete takes the whole watch");
+		check(debug_wp_count() == 0, "whoever asked for it");
+
+		// A full table has to be distinguishable from a duplicate. The server
+		// read one -1 as "already there" and would have armed nothing while
+		// believing it had.
+		reset_all();
+		bool filled = true;
+		for (int i = 0; i < MAX_WATCHPOINTS; i++) {
+			if (debug_wp_add_for((uint16_t)(0x1000 + i), 1, DEBUG_BANK_ANY, DEBUG_OWNER_CLI)
+			    != DEBUG_ADD_CREATED)
+				filled = false;
+		}
+		check(filled, "the watchpoint table takes its full complement");
+		check(debug_wp_add_for(0x2000, 1, DEBUG_BANK_ANY, DEBUG_OWNER_CLI) == DEBUG_ADD_FULL,
+		      "one more reports a full table");
+		check(debug_wp_add_for(0x1000, 1, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE)
+		          == DEBUG_ADD_EXISTED,
+		      "which is not the same answer as one that is already there");
 
 		reset_all();
 	}

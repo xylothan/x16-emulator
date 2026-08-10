@@ -292,6 +292,26 @@ x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 > several real C64→X16 porting projects, but you should expect rough edges and occasional
 > changes to keys, layouts and DAP details between releases.
 
+#### Using the debugger and an editor at the same time
+
+Breakpoints live in one place. Whether a breakpoint came from `-bp` on the command line, F9 in
+the debugger, or your editor over DAP, there is a single table deciding where the machine stops,
+and each of those can hold a breakpoint at the same address without disturbing the others.
+Disconnecting your editor takes away the breakpoints *it* asked for and leaves yours alone.
+
+What is **not** shared is the view. Each front end shows the breakpoints it knows about:
+
+* A breakpoint you set with F9 will not appear in your editor's gutter.
+* A breakpoint you delete with F9 goes away in the emulator, but your editor still believes in
+  it — and because DAP clients re-send a source file's whole breakpoint list whenever you edit
+  it, your editor will usually put it back.
+
+This is a limitation of the protocol rather than an oversight: in DAP the client owns its
+breakpoint list and is expected to be authoritative about it. If you are driving the emulator
+from an editor, the least surprising approach is to manage breakpoints from the editor and treat
+F9 as a local, temporary override. See [`docs/breakpoint-ownership.md`](docs/breakpoint-ownership.md)
+for the reasoning.
+
 ### The ImGui debugger
 
 `-imgui` opens a second, resizable OS window titled **"Commander X16 - ImGui Debugger"**,

@@ -159,7 +159,15 @@ static void DEBUGArmResumeSkip(void) {
 	resumeSkipClock = clockticks6502;
 }
 
-struct breakpoint stepBreakPoint = { -1, 0, -1 };     // Single step break.
+struct breakpoint stepBreakPoint = { -1, 0, -1, 0, true };     // Single step break.
+
+// Who asked for the pending step-over/step-out.
+//
+// The step target deliberately lives outside the shared breakpoint table, so it
+// needs its own record of who wanted it -- and that record belongs next to the
+// state it describes, rather than in a flag kept by whichever front end happened
+// to start the step. DEBUG_OWNER_COUNT means nothing is pending.
+static debug_owner_t stepOwner = DEBUG_OWNER_COUNT;
 char cmdLine[64]= "";                                 // command line buffer
 int currentPosInLine= 0;                              // cursor position in the buffer (NOT USED _YET_)
 int currentLineLen= 0;                                // command line buffer length
@@ -237,9 +245,8 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
 			// A single step retires here without ever arming a step target, so
-			// this is the only place that can report it finished. Step-over on
-			// anything that is not a call lands here too.
-			debug_server_note_step_ended();
+			// there is none to retract: the owner of a pending step is derived
+			// from whether one is armed at all.
 			debug_server_notify_stopped("step");
 		}
 	}
@@ -381,22 +388,6 @@ void DEBUGFreeUI() {
 
 // *******************************************************************************************
 //
-//								Set a new breakpoint address. -1 to disable.
-//
-// *******************************************************************************************
-
-void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
-	// Kept for callers that only ever wanted "the" breakpoint. There is now a
-	// table, so replace its contents rather than tracking a separate single
-	// slot that the rest of the debugger would have to check as well.
-	debug_bp_clear_all();
-	if (newBreakPoint.pc >= 0) {
-		debug_bp_add(newBreakPoint);
-	}
-}
-
-// *******************************************************************************************
-//
 //								Break into debugger from code.
 //
 // *******************************************************************************************
@@ -449,7 +440,7 @@ void DEBUGBreakOnWatchpoint(void) {
 
 static void DEBUGClearStepBreakPoint(void) {
 	// Whoever owned the pending step no longer does.
-	debug_server_note_step_ended();
+	stepOwner = DEBUG_OWNER_COUNT;
 	stepBreakPoint.pc = -1;
 	stepBreakPoint.bank = 0;
 	stepBreakPoint.x16Bank = -1;
@@ -459,6 +450,24 @@ static void DEBUGClearStepBreakPoint(void) {
 // step it started, and nothing outside this file can reach stepBreakPoint.
 void DEBUGCancelStep(void) {
 	DEBUGClearStepBreakPoint();
+}
+
+debug_owner_t DEBUGStepOwner(void) {
+	return stepBreakPoint.pc < 0 ? DEBUG_OWNER_COUNT : stepOwner;
+}
+
+// Retract a step only if `owner` is the one that started it.
+//
+// A session tearing down has to take back a step it asked for -- left armed, it
+// stops the machine later for a client that has gone away -- but it must not
+// take back one the user started at the keyboard. The server used to answer
+// this from a flag of its own; the state being asked about lives here, so the
+// question belongs here too.
+bool DEBUGCancelStepFor(debug_owner_t owner) {
+	if (DEBUGStepOwner() != owner)
+		return false;
+	DEBUGClearStepBreakPoint();
+	return true;
 }
 
 // F5 — run until break.
@@ -494,7 +503,7 @@ void DEBUGStepInto(void) {                              // F11 — single instru
 	debug_server_note_resumed();
 }
 
-void DEBUGStepOver(void) {                              // F10 — step over calls
+void DEBUGStepOver(debug_owner_t owner) {                // F10 — step over calls
 	// Read the opcode through the bank live for the CURRENT pc. Using the
 	// stale currentPCX16Bank (set when we last stopped) misreads the opcode
 	// once the mapped bank has changed, so a JSR could be missed or invented.
@@ -516,6 +525,7 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 		// never fire. Where the two are in the same window this is the same
 		// answer, and it is what stepping out and running-to already do.
 		stepBreakPoint.x16Bank = debug_current_x16_bank(target, regs.k);
+		stepOwner = owner;
 		DEBUGArmResumeSkip();
 		currentMode = DMODE_RUN;
 		debugCPUClocks = clockticks6502;
@@ -534,7 +544,7 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 	debug_server_note_resumed();
 }
 
-void DEBUGStepOut(void) {                               // run to the return address
+void DEBUGStepOut(debug_owner_t owner) {                 // run to the return address
 	// The return address is not necessarily on top of the stack: by the time
 	// you want to step out, the routine has usually pushed registers or locals
 	// over it. So scan upward for the first plausible return frame, keyed on
@@ -588,6 +598,7 @@ void DEBUGStepOut(void) {                               // run to the return add
 	stepBreakPoint.pc = retAddr;
 	stepBreakPoint.bank = retBank;
 	stepBreakPoint.x16Bank = getCurrentBank(stepBreakPoint.pc, retBank);
+	stepOwner = owner;
 	DEBUGArmResumeSkip();
 	currentMode = DMODE_RUN;
 	debugCPUClocks = clockticks6502;
@@ -602,10 +613,11 @@ void DEBUGPause(void) {
 	DEBUGBreakToDebugger();
 }
 
-void DEBUGRunTo(uint16_t pc, uint8_t bank) {
+void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner) {
 	stepBreakPoint.pc = pc;
 	stepBreakPoint.bank = bank;
 	stepBreakPoint.x16Bank = getCurrentBank(pc, bank);
+	stepOwner = owner;
 	DEBUGArmResumeSkip();
 	currentMode = DMODE_RUN;
 	debugCPUClocks = clockticks6502;
@@ -637,14 +649,14 @@ static void DEBUGHandleKeyEvent(SDL_Keycode key, int isShift) {
 
 		case DBGKEY_STEP:      // Single step (F11 by default)
 			if (isShift) {
-				DEBUGStepOut();
+				DEBUGStepOut(DEBUG_OWNER_UI);
 			} else {
 				DEBUGStepInto();
 			}
 			break;
 
 		case DBGKEY_STEPOVER:  // Step over (F10 by default)
-			DEBUGStepOver();
+			DEBUGStepOver(DEBUG_OWNER_UI);
 			break;
 
 		case DBGKEY_RUN:                                // F5 Runs until Break.
@@ -654,7 +666,14 @@ static void DEBUGHandleKeyEvent(SDL_Keycode key, int isShift) {
 		case DBGKEY_SETBRK:                             // F9 Set breakpoint to displayed.
 			// Now a toggle over the table rather than over one slot, so F9 adds
 			// a breakpoint without silently discarding the previous one.
-			debug_bp_toggle(currentPC, (uint8_t)currentPCBank, currentPCX16Bank);
+			//
+			// Deleting takes the breakpoint away whoever asked for it, rather
+			// than merely dropping this debugger's own claim on it. Someone at
+			// the keyboard pressing F9 on a breakpoint a DAP client happens to
+			// have set expects it gone, not to watch the key do nothing because
+			// an editor somewhere else still wants it.
+			debug_bp_toggle_for(currentPC, (uint8_t)currentPCBank, currentPCX16Bank,
+			                    DEBUG_OWNER_UI);
 			break;
 
 		case DBGKEY_HOME:                               // F1 sets the display PC to the actual one.

@@ -1014,11 +1014,14 @@ main(int argc, char **argv)
 			if (argc && argv[0][0] != '-') {
 				// Adds rather than replaces, so it composes with -bp instead of
 				// depending on which came first on the command line.
-				struct breakpoint bp;
+				struct breakpoint bp = { 0 };
 				if (!parse_breakpoint_arg(argv[0], &bp)) {
 					usage();
 				}
-				debug_bp_add(bp);
+				if (debug_bp_add_for(bp, DEBUG_OWNER_CLI) == DEBUG_ADD_FULL) {
+					fprintf(stderr, "Out of memory adding breakpoint: %s\n", argv[0]);
+					usage();
+				}
 				argc--;
 				argv++;
 			}
@@ -1031,11 +1034,14 @@ main(int argc, char **argv)
 				usage();
 			}
 			{
-				struct breakpoint bp;
+				struct breakpoint bp = { 0 };
 				if (!parse_breakpoint_arg(argv[0], &bp)) {
 					usage();
 				}
-				debug_bp_add(bp);
+				if (debug_bp_add_for(bp, DEBUG_OWNER_CLI) == DEBUG_ADD_FULL) {
+					fprintf(stderr, "Out of memory adding breakpoint: %s\n", argv[0]);
+					usage();
+				}
 			}
 			argc--;
 			argv++;
@@ -1071,12 +1077,15 @@ main(int argc, char **argv)
 					}
 				}
 
-				struct breakpoint wp;
+				struct breakpoint wp = { 0 };
 				if (!parse_breakpoint_arg(spec, &wp)) {
 					usage();
 				}
-				if (debug_wp_add((uint16_t)wp.pc, (uint16_t)len, wp.x16Bank) < 0) {
-					fprintf(stderr, "Could not add watchpoint (duplicate, or more than %d): %s\n",
+				// A duplicate and a full table used to be one answer, so the
+				// message had to guess at both. They are distinct now.
+				if (debug_wp_add_for((uint16_t)wp.pc, (uint16_t)len, wp.x16Bank,
+				                     DEBUG_OWNER_CLI) == DEBUG_ADD_FULL) {
+					fprintf(stderr, "Could not add watchpoint (no more than %d): %s\n",
 					        MAX_WATCHPOINTS, argv[0]);
 					usage();
 				}

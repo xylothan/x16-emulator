@@ -25,7 +25,6 @@ static inline void debug_server_output(const char *category, const char *text) {
 static inline void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) { (void)start; (void)end; }
 static inline void debug_server_retry_unverified_breakpoints(void) { }
 static inline void debug_server_note_resumed(void) { }
-static inline void debug_server_note_step_ended(void) { }
 static inline void debug_server_shutdown(void) { }
 
 #else
@@ -56,29 +55,29 @@ void debug_server_output(const char *category, const char *text);
 void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end);
 void debug_server_retry_unverified_breakpoints(void);
 
-// KNOWN LIMITATION: debug_core has no concept of who asked for a breakpoint.
-// Its table deduplicates on add and deletes on remove, so everything that can
-// want one at the same address -- -bp, the SDL debugger's F9, and the three
-// kinds a DAP client can set -- shares a single entry and a single condition
-// record. This file therefore reconstructs an ownership model from outside
-// (ext_keys[], server_bp_wanted_elsewhere(), the `external` flags), which is
-// where most of this file's defects have been found.
+// Breakpoints are owned, not reconstructed. debug_core records which of -bp,
+// the SDL debugger's F9, and the four kinds this file can ask for wants each
+// entry, so a client session can clear everything it asked for with
+// debug_bp_clear_owner() and nothing else is disturbed. This replaced an
+// ownership model rebuilt from outside the core (ext_keys[],
+// server_bp_wanted_elsewhere(), per-table `external` flags), which is where
+// most of this file's defects were found. See docs/breakpoint-ownership.md.
 //
-// See docs/breakpoint-ownership.md for the full history and the design that
-// replaces it: refcounted per-owner references inside debug_core, which deletes
-// roughly 150 lines here. Until then, note that a condition set on one owner's
-// breakpoint also gates any other owner's at the same address.
+// KNOWN LIMITATION, and a deliberate one: the core is the single source of
+// truth for what is ARMED, but each front end owns its own VIEW. A breakpoint
+// the user sets with F9 does not appear in a connected client's UI, and one the
+// user deletes with F9 may be sent again by the client -- DAP's setBreakpoints
+// replaces a source's whole list from the client's own model, and the
+// specification tells clients to keep using their own properties rather than
+// the adapter's. Emitting `breakpoint` events with reason `new`/`removed` would
+// paper over this in VS Code specifically, but nothing in the protocol requires
+// a client to act on them, so the divergence is documented rather than faked.
 
 // The machine has resumed. Called from the debugger's own execution control, so
 // that a local F5/F10/F11 is accounted for the same way a DAP continue is: the
 // next stop is then reported once, rather than suppressed as a duplicate of a
 // halt that is already over.
 void debug_server_note_resumed(void);
-
-// The debugger's step target has been retired -- reached, abandoned, or
-// cancelled. Whatever step was pending is over, so a later teardown must not
-// cancel whatever is armed next, which may belong to the user at the keyboard.
-void debug_server_note_step_ended(void);
 
 // Clean shutdown — close sockets, free resources.
 void debug_server_shutdown(void);

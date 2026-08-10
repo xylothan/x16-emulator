@@ -190,7 +190,102 @@ time.sleep(0.3)
 msgs = recv_dap(sock, 1)
 check("connection still live after pipelining", msgs, "response", "threads")
 
-# 13. Disconnect
+# 13. Ownership: a session must take away only what it asked for.
+#
+# The core records who wanted each breakpoint, so a client disconnecting clears
+# its own and leaves everything else armed. Reconstructing that from outside the
+# core is what this replaced, and every version of it deleted somebody's
+# breakpoints. Nothing below can be checked from the unit tests: it needs a real
+# session, a real teardown, and a real reconnect.
+#
+# Start the emulator with `-bp <addr>` to get the strongest form of this -- the
+# case where the surviving breakpoint is the user's, set before any client
+# existed.
+
+def evaluate(s, expr, pause=0.3):
+    global _eval_seq
+    _eval_seq += 1
+    send_dap(s, {"seq": 500 + _eval_seq, "type": "request", "command": "evaluate",
+                 "arguments": {"expression": expr}})
+    time.sleep(pause)
+    for m in recv_dap(s, 1):
+        if m.get("type") == "response" and m.get("command") == "evaluate":
+            return m.get("body", {}).get("result", "")
+    return ""
+
+def bp_addrs(s):
+    # "N breakpoints: $1234 $5678" -> ["$1234", "$5678"]
+    out = evaluate(s, "bp_list")
+    return [t for t in out.split() if t.startswith("$")]
+
+_eval_seq = 0
+
+baseline = bp_addrs(sock)
+print("       breakpoints before this session: %s" % (" ".join(baseline) or "(none)"))
+
+# A console breakpoint at an address nothing else is using.
+scratch = "3F00"
+evaluate(sock, "bp_add " + scratch)
+if ("$" + scratch) in bp_addrs(sock):
+    print("  PASS console bp_add arms a breakpoint")
+    passed += 1
+else:
+    print("  FAIL console bp_add arms a breakpoint")
+    failed += 1
+
+# The interesting one: claim an address the user already had. Both owners now
+# want it, and the session going away must not take it with them.
+shared = baseline[0][1:] if baseline else None
+if shared:
+    evaluate(sock, "bp_add " + shared)
+
+send_dap(sock, {"seq": 13, "type": "request", "command": "disconnect",
+                "arguments": {"terminateDebuggee": False}})
+time.sleep(0.3)
+msgs = recv_dap(sock, 1)
+check("disconnect response", msgs, "response", "disconnect")
+sock.close()
+time.sleep(0.5)
+
+after_session = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+after_session.connect(('127.0.0.1', 9009))
+send_dap(after_session, {"seq": 1, "type": "request", "command": "initialize",
+                         "arguments": {"adapterID": "test"}})
+time.sleep(0.5)
+recv_dap(after_session, 1)
+
+remaining = bp_addrs(after_session)
+print("       breakpoints after teardown: %s" % (" ".join(remaining) or "(none)"))
+
+if ("$" + scratch) not in remaining:
+    print("  PASS the session's own breakpoint went with it")
+    passed += 1
+else:
+    print("  FAIL the session's own breakpoint went with it: still armed, and now "
+          "owned by nobody")
+    failed += 1
+
+if not baseline:
+    print("  SKIP a pre-existing breakpoint survives a session "
+          "(start the emulator with -bp to check this)")
+elif all(a in remaining for a in baseline):
+    print("  PASS every pre-existing breakpoint survived the session")
+    passed += 1
+else:
+    print("  FAIL every pre-existing breakpoint survived the session: had %s, left %s"
+          % (" ".join(baseline), " ".join(remaining) or "(none)"))
+    failed += 1
+
+after_session.close()
+time.sleep(0.3)
+
+# 14. Disconnect
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect(('127.0.0.1', 9009))
+send_dap(sock, {"seq": 1, "type": "request", "command": "initialize",
+                "arguments": {"adapterID": "test"}})
+time.sleep(0.4)
+recv_dap(sock, 1)
 send_dap(sock, {"seq": 12, "type": "request", "command": "disconnect", "arguments": {"terminateDebuggee": False}})
 time.sleep(0.3)
 msgs = recv_dap(sock, 1)
@@ -198,7 +293,7 @@ check("disconnect response", msgs, "response", "disconnect")
 
 sock.close()
 
-# 14. An oversized frame must not poison the receive buffer for later clients.
+# 15. An oversized frame must not poison the receive buffer for later clients.
 #
 # A body bigger than the buffer drops the connection -- there is no way to
 # resynchronise a stream we cannot hold. The header was left sitting in the

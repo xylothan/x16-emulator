@@ -25,7 +25,6 @@ void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
 void DEBUGBreakOnWatchpoint(void);
 int  DEBUGGetCurrentStatus(void);
-void DEBUGSetBreakPoint(struct breakpoint newBreakPoint);
 void DEBUGInitUI(SDL_Renderer *pRenderer);
 void DEBUGFreeUI();
 
@@ -34,15 +33,25 @@ void DEBUGFreeUI();
 // synthesising key presses. Safe to call whether or not the window exists.
 void DEBUGContinue(void);                   // resume free-run
 void DEBUGStepInto(void);                   // one instruction, then stop
-void DEBUGStepOver(void);                   // step over JSR/JSL; else single-step
-void DEBUGStepOut(void);                    // run to the current routine's return
+
+// The step-over/step-out target lives outside the shared breakpoint table, so
+// it carries its own owner: a session tearing down must retract a step it
+// started, and must not retract one the user started at the keyboard.
+void DEBUGStepOver(debug_owner_t owner);    // step over JSR/JSL; else single-step
+void DEBUGStepOut(debug_owner_t owner);     // run to the current routine's return
 
 // Abandon a step-over/step-out that is still running. Its breakpoint is the
 // debugger's own, so nothing else can retract it -- and left armed it stops the
 // machine later for a session that has gone away.
 void DEBUGCancelStep(void);
+
+// Who asked for the pending step, or DEBUG_OWNER_COUNT if none is pending, and
+// the retract-only-if-mine form that a session teardown wants.
+debug_owner_t DEBUGStepOwner(void);
+bool          DEBUGCancelStepFor(debug_owner_t owner);
+
 void DEBUGPause(void);                      // halt now
-void DEBUGRunTo(uint16_t pc, uint8_t bank); // run until (pc,bank), then stop
+void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner); // run until (pc,bank)
 bool DEBUGIsRunning(void);
 bool DEBUGIsPaused(void);
 
