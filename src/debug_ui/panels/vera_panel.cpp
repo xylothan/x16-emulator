@@ -519,17 +519,6 @@ read_layer_regs(int layer)
     return decode_layer_regs(r);
 }
 
-// True when two snapshots describe the same tile geometry, i.e. a per-scanline
-// snapshot can be substituted for the live one without changing image layout.
-bool
-same_layer_geometry(const LayerRegs &a, const LayerRegs &b)
-{
-    return a.color_depth == b.color_depth && a.bitmap_mode == b.bitmap_mode &&
-           a.text_mode == b.text_mode && a.text_256c == b.text_256c &&
-           a.mapw == b.mapw && a.maph == b.maph &&
-           a.tilew == b.tilew && a.tileh == b.tileh;
-}
-
 
 // ---------------------------------------------------------------------------
 // Bitmap viewer tab
