@@ -107,6 +107,15 @@ set_property(CACHE ENABLE_IMGUI PROPERTY STRINGS ON OFF AUTO)
 set(USE_IMGUI FALSE)
 if(ENABLE_IMGUI STREQUAL "OFF")
     message(STATUS "[x16] ImGui debugger explicitly disabled.")
+elseif(EMSCRIPTEN)
+    # SDL2's emscripten backend is single-window -- it renders to the one HTML
+    # canvas -- so the second SDL_CreateWindow the debugger needs cannot
+    # succeed. Forced off rather than left to fail at runtime, which also keeps
+    # ~70k lines of dead C++ out of the .wasm download.
+    if(ENABLE_IMGUI STREQUAL "ON")
+        message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON is not supported under Emscripten (single-window backend).")
+    endif()
+    message(STATUS "[x16] ImGui debugger disabled: unsupported under Emscripten.")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/extern/imgui/imgui.cpp")
     set(USE_IMGUI TRUE)
 elseif(ENABLE_IMGUI STREQUAL "ON")
