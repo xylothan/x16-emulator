@@ -407,6 +407,38 @@ main(void)
 		remove(lpath);
 	}
 
+	// ── A confirmed bank outranks a narrower guess ──────────────────────────
+	// Two segments share $A000, one per bank. Only the OUTER one has been
+	// loaded, so only its bank is known. Preferring the innermost span
+	// regardless answers with the inner segment's file and line and downgrades
+	// a confirmed match to a guess -- the wrong source, reported confidently
+	// enough to send someone debugging code that is fine.
+	//
+	// The block above learns the inner segment's bank first, which is the case
+	// that already worked, so this needs its own load to reach the other order.
+	{
+		dbg_info_free();
+		char *bpath = write_temp_banked_dbg();   // static buffer; do not free
+		if (!bpath) {
+			check(false, "could not write the banked fixture");
+		} else {
+			check(dbg_info_load(bpath) == 0, "reloads the banked fixture");
+
+			dbg_info_note_bank_load(0xA000, 0x20, 6);   // the OUTER segment only
+
+			const char *fb = NULL;
+			int         lb = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 6, &fb, &lb)
+			          == DBG_BANK_RESOLVED,
+			      "a confirmed bank is not demoted by a narrower unknown one");
+			check(fb && strstr(fb, "b_bank6") != NULL,
+			      "  ...and answers with the segment that matched");
+			check(lb == 99, "  ...and with its line");
+
+			dbg_info_free();
+			remove(bpath);
+		}
+	}
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
