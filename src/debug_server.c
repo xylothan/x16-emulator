@@ -94,12 +94,11 @@ static struct {
     char hit_cond[64];
     // The core entry was already there before any server table asked for it --
     // it belongs to -bp or the SDL debugger's F9, and removing it on teardown
-    // would delete the user's breakpoint. Recorded once at add time rather than
-    // derived from debug_bp_add()'s return, because that only says whether THIS
-    // add created it: with several server tables sharing an entry, the one that
-    // created it is usually cleared first, and the survivors would then all
-    // decline to clean up and orphan it. server_bp_wanted_elsewhere() does the
-    // refcounting between the server's own tables.
+    // would delete the user's breakpoint. Derived from whether our own add
+    // created the entry and remembered per address by ext_key_note_after_add(),
+    // so later tables at the same address inherit the answer instead of
+    // re-probing and mistaking a sibling's entry for the user's.
+    // server_bp_wanted_elsewhere() does the refcounting between our own tables.
     bool external;
 } dap_bps[MAX_DAP_BREAKPOINTS];
 static int num_dap_bps = 0;
@@ -190,10 +189,10 @@ static bool ext_key_note_after_add(uint16_t pc, uint8_t bank, int x16Bank, bool 
     if (i >= 0) return ext_keys[i].external;
     bool external = !created;
     if (num_ext_keys >= MAX_EXT_KEYS) {
-        // Full. Answering conservatively is the safe direction: treat it as
-        // somebody else's, so teardown leaves it alone rather than deleting a
-        // breakpoint that may not be ours.
-        return true;
+        // Full, so nothing is remembered for later tables. The add result is
+        // still the truth for THIS caller: if it created the entry the entry is
+        // ours, and reporting it external would leave it armed at teardown.
+        return !created;
     }
     ext_keys[num_ext_keys].pc       = pc;
     ext_keys[num_ext_keys].bank     = bank;
@@ -281,9 +280,11 @@ static void invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
                 !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
-                ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
-            dap_bps[i].verified = false;
+            // Dropped whoever owns the core entry: no server table names this
+            // address any more, so the next add works it out again.
+            ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+
             dap_bps[i].external = false;
             dap_bps[i].addr = 0;
             dap_bps[i].bank = 0;
@@ -1095,9 +1096,9 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
                 !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
                 debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
                 debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
-                ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             }
-            // Shift array
+            ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+
             for (int j = i; j < num_dap_bps - 1; j++) {
                 dap_bps[j] = dap_bps[j + 1];
             }
@@ -1429,7 +1430,15 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
                 num_dap_bps--;
             }
         }
-        if (debug_bp_remove(addr, 0, DEBUG_BANK_ANY))
+        // Through the same guards as every other removal, so this cannot delete
+        // a breakpoint the user set locally.
+        bool gone = false;
+        if (!server_bp_wanted_elsewhere(addr, 0, -1, 0, -1)) {
+            gone = debug_bp_remove(addr, 0, DEBUG_BANK_ANY);
+            if (gone) debug_bp_forget(addr, 0, DEBUG_BANK_ANY);
+        }
+        ext_key_forget(addr, 0, -1);
+        if (gone)
             snprintf(result, sizeof(result), "breakpoint removed at $%04X", addr);
         else
             snprintf(result, sizeof(result), "no breakpoint at $%04X", addr);
@@ -1448,6 +1457,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         // inherited a stale hit count -- an "ignore 5" that had already been
         // reached fired on the second arrival instead of the sixth.
         debug_bp_clear_all();
+        ext_key_reset();   // every core entry has gone; remember nothing about them
         num_dap_bps   = 0;
         num_func_bps  = 0;
         num_instr_bps = 0;
@@ -2089,14 +2099,14 @@ static bool server_bp_wanted_elsewhere(uint16_t addr, uint8_t bank, int x16Bank,
 }
 // ─── setFunctionBreakpoints (label breakpoints via .dbg) ─────────────
 static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
-    for (int i = 0; i < num_func_bps; i++)
+    for (int i = 0; i < num_func_bps; i++) {
         if (!func_bp_external[i] &&
-            !server_bp_wanted_elsewhere(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY, 1, -1))
-            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-            }
-    num_func_bps = 0;
+            !server_bp_wanted_elsewhere(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY, 1, -1)) {
+            debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+        }
+        ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+    }
 
     cJSON *body = cJSON_CreateObject();
     cJSON *arr  = cJSON_CreateArray();
@@ -2127,14 +2137,14 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
 
 // ─── setInstructionBreakpoints ───────────────────────────────────────
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
-    for (int i = 0; i < num_instr_bps; i++)
+    for (int i = 0; i < num_instr_bps; i++) {
         if (!instr_bp_external[i] &&
-            !server_bp_wanted_elsewhere(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY, 2, -1))
-            { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-            }
-    num_instr_bps = 0;
+            !server_bp_wanted_elsewhere(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY, 2, -1)) {
+            debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+            debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+        }
+        ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+    }
 
     cJSON *body = cJSON_CreateObject();
     cJSON *arr  = cJSON_CreateArray();
@@ -2429,23 +2439,29 @@ static void dap_release_session_state(void) {
             !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
             debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
             debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
-            ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
         }
+        // Cleared as we go: two entries naming the same address would otherwise
+        // each see the other still verified, both decline, and orphan it.
+        dap_bps[i].verified = false;
+        ext_key_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
     }
+
     num_dap_bps = 0;
-    for (int i = 0; i < num_func_bps; i++)
-        if (!func_bp_external[i])
-            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-            }
+    for (int i = 0; i < num_func_bps; i++) {
+        if (!func_bp_external[i]) {
+            debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+        }
+        ext_key_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+    }
     num_func_bps = 0;
-    for (int i = 0; i < num_instr_bps; i++)
-        if (!instr_bp_external[i])
-            { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-            }
+    for (int i = 0; i < num_instr_bps; i++) {
+        if (!instr_bp_external[i]) {
+            debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+            debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+        }
+        ext_key_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+    }
     num_instr_bps = 0;
     dap_clear_own_watchpoints(true);
     // A step-over or step-out THIS session started has a breakpoint of its own,

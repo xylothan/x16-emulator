@@ -236,6 +236,10 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			// A single step retires here without ever arming a step target, so
+			// this is the only place that can report it finished. Step-over on
+			// anything that is not a call lands here too.
+			debug_server_note_step_ended();
 			debug_server_notify_stopped("step");
 		}
 	}
