@@ -314,6 +314,33 @@ static const char *basename_ptr(const char *path)
 /*  Record parsers                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Maps this load's `file` IDs onto the record that ends up describing them.
+ * Needed because a file already known from an earlier load is reused rather than
+ * appended, so its ID is not this load's ID plus the usual base. Reset per load.
+ */
+static int *file_alias      = NULL;
+static int  file_alias_count = 0;
+static int  file_alias_cap   = 0;
+
+static void file_alias_set(long incoming, int resolved)
+{
+	if (incoming < 0 || incoming > 0xFFFFF)
+		return;                     /* absurd ID; the record is unusable anyway */
+	while (file_alias_count <= (int)incoming) {
+		if (!GROW_ARRAY(file_alias, file_alias_count, file_alias_cap, int))
+			return;
+		file_alias[file_alias_count++] = -1;
+	}
+	file_alias[incoming] = resolved;
+}
+
+static int file_alias_get(long incoming)
+{
+	if (incoming >= 0 && incoming < file_alias_count && file_alias[incoming] >= 0)
+		return file_alias[incoming];
+	return (int)incoming + id_base_file;    /* no alias recorded; the usual rule */
+}
+
 static void parse_file_record(const char *p)
 {
 	long id = parse_int_key(p, "id");
@@ -323,10 +350,23 @@ static void parse_file_record(const char *p)
 		return;
 	}
 
+	/* Reuse a file we already know. Unloading a range deliberately leaves file
+	 * records alone -- callers keep the path pointers we handed them -- so
+	 * appending here would add a copy of every file on every reload, and an
+	 * overlay swapped in and out repeatedly would grow the table without end. */
+	for (int i = 0; i < file_count; i++) {
+		if (files[i].name && strcmp(files[i].name, name) == 0) {
+			file_alias_set(id, files[i].id);
+			free(name);
+			return;
+		}
+	}
+
 	if (!GROW_ARRAY(files, file_count, file_cap, dbg_file_t)) { free(name); return; }
 	files[file_count].id   = (int)id + id_base_file;
 	note_id(&next_id_file, files[file_count].id);
 	files[file_count].name = name;
+	file_alias_set(id, files[file_count].id);
 	file_count++;
 }
 
@@ -392,7 +432,7 @@ static void parse_line_record(const char *p)
 	if (!GROW_ARRAY(lines, line_count, line_cap, dbg_line_t)) { free(span_ids); return; }
 	lines[line_count].id         = (int)id + id_base_line;
 	note_id(&next_id_line, lines[line_count].id);
-	lines[line_count].file       = (int)file + id_base_file;
+	lines[line_count].file       = file_alias_get(file);
 	lines[line_count].line       = (int)line;
 	lines[line_count].spans      = span_ids;
 	lines[line_count].span_count = span_n;
@@ -429,6 +469,18 @@ static void parse_sym_record(const char *p)
 			                  !strncmp(name, "BANK_", 5) ||
 			                  (l > 5 && !strcmp(name + l - 5, "_BANK"));
 			if (looks_bank) {
+				/* Replace rather than append. Nothing prunes these, and lookup
+				 * returns the first match, so appending would let a bank equate
+				 * from a module that has since been swapped out shadow the live
+				 * one for the rest of the session. */
+				for (int i = 0; i < bank_equ_count; i++) {
+					if (bank_equs[i].name && !strcasecmp(bank_equs[i].name, name)) {
+						free(bank_equs[i].name);
+						bank_equs[i].name = name;   /* takes ownership */
+						bank_equs[i].bank = (int)val;
+						return;
+					}
+				}
 				if (!GROW_ARRAY(bank_equs, bank_equ_count, bank_equ_cap, dbg_bank_equ_t)) { free(name); return; }
 				bank_equs[bank_equ_count].name = name;   /* takes ownership */
 				bank_equs[bank_equ_count].bank = (int)val;
@@ -440,6 +492,17 @@ static void parse_sym_record(const char *p)
 		 * (KERNAL vectors, hardware registers, constants), so record it for
 		 * name→value lookups without polluting the label map. */
 		if (tlen == 3 && strncmp(tv, "equ", 3) == 0) {
+			/* Replace rather than append, for the same reason as bank equates:
+			 * unloading a range never prunes these, and the lookup returns the
+			 * first match, so a stale value would win forever. */
+			for (int i = 0; i < equ_count; i++) {
+				if (equs[i].name && !strcasecmp(equs[i].name, name)) {
+					free(equs[i].name);
+					equs[i].name = name;   /* takes ownership */
+					equs[i].val  = (dbg_addr_t)val;
+					return;
+				}
+			}
 			if (!GROW_ARRAY(equs, equ_count, equ_cap, dbg_equ_t)) { free(name); return; }
 			equs[equ_count].name = name;   /* takes ownership */
 			equs[equ_count].val  = (dbg_addr_t)val;
@@ -463,24 +526,43 @@ static void parse_sym_record(const char *p)
  *  scan. With 28k+ spans the linear-only form made map rebuilds quadratic.   */
 /* ------------------------------------------------------------------ */
 
+/* Records are normally appended with increasing IDs, and compaction preserves
+ * their order, so a binary search finds them in log time. The file supplies the
+ * IDs, though, and nothing obliges it to list them in order -- so a miss falls
+ * back to a linear scan, which is correct whatever order they arrive in.
+ *
+ * The index shortcut this replaces -- `arr[id].id == id` -- only held on the
+ * very first load. Unloading a range compacts the array without resetting the ID
+ * counter, so afterwards element 0 carries a nonzero ID and the shortcut missed
+ * on every lookup, leaving the linear scan alone. build_addr_map() does one span
+ * lookup per line, so a rebuild went quadratic exactly where it mattered: the
+ * auto-load path, which runs from the emulator's main loop. */
+#define DBG_FIND_BY_ID(arr, count, id)                                    \
+	do {                                                                  \
+		int lo_ = 0, hi_ = (count) - 1;                                   \
+		while (lo_ <= hi_) {                                              \
+			const int mid_ = lo_ + (hi_ - lo_) / 2;                       \
+			if ((arr)[mid_].id == (id))                                   \
+				return &(arr)[mid_];                                      \
+			if ((arr)[mid_].id < (id))                                    \
+				lo_ = mid_ + 1;                                           \
+			else                                                          \
+				hi_ = mid_ - 1;                                           \
+		}                                                                 \
+		for (int i_ = 0; i_ < (count); i_++)                              \
+			if ((arr)[i_].id == (id))                                     \
+				return &(arr)[i_];                                        \
+		return NULL;                                                      \
+	} while (0)
+
 static const dbg_seg_t *find_seg(int id)
 {
-	if (id >= 0 && id < seg_count && segs[id].id == id)
-		return &segs[id];
-	for (int i = 0; i < seg_count; i++)
-		if (segs[i].id == id)
-			return &segs[i];
-	return NULL;
+	DBG_FIND_BY_ID(segs, seg_count, id);
 }
 
 static const dbg_span_t *find_span(int id)
 {
-	if (id >= 0 && id < span_count && spans[id].id == id)
-		return &spans[id];
-	for (int i = 0; i < span_count; i++)
-		if (spans[i].id == id)
-			return &spans[i];
-	return NULL;
+	DBG_FIND_BY_ID(spans, span_count, id);
 }
 
 static const dbg_file_t *find_file(int id)
@@ -629,6 +711,9 @@ int dbg_info_load(const char *path)
 	id_base_seg = next_id_seg;
 	id_base_span = next_id_span;
 	id_base_line = next_id_line;
+
+	// Per load: this file's `file` IDs mean nothing to the next one.
+	file_alias_count = 0;
 
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
@@ -839,6 +924,21 @@ static bool entry_bank_ok(int i, dbg_addr_t addr, int ram_bank)
 	return sg->bank == ram_bank;
 }
 
+/* How well an entry's segment matches the bank we are asking about. A confirmed
+ * match beats an unknown one, which beats a mismatch -- entry_bank_ok() treats
+ * unknown as eligible so a mapping is never lost, but eligible is not the same
+ * as equally good, and picking between two eligible entries on span size alone
+ * can swap a confirmed answer for a guess about a different segment. */
+static int entry_bank_rank(int i, dbg_addr_t addr, int ram_bank)
+{
+	if (ram_bank < 0 || addr < 0xA000 || addr > 0xBFFF)
+		return 2;
+	const dbg_seg_t *sg = find_seg(addr_map[i].seg_id);
+	if (!sg || sg->bank < 0)
+		return 1;               /* eligible, but only because we do not know */
+	return sg->bank == ram_bank ? 2 : 0;
+}
+
 bool dbg_info_addr_to_source_banked(dbg_addr_t addr, int ram_bank,
                                     const char **file_path, int *line_num)
 {
@@ -894,7 +994,13 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 	 * enclosing block/function, macro and include spans). Among those that
 	 * cover addr, pick the SMALLEST — the innermost, most specific line — so
 	 * stepping highlights the actual statement rather than an arbitrary
-	 * enclosing span. Equal-start entries are contiguous after the sort. */
+	 * enclosing span. Equal-start entries are contiguous after the sort.
+	 *
+	 * Bank confidence outranks span size. Two segments commonly share $A000,
+	 * one per bank, and only the one that has been loaded has a known bank; if
+	 * the smaller happens to be the unknown one, preferring it reports the
+	 * OTHER segment's file and line and demotes a confirmed answer to a guess.
+	 * So narrow only within the same confidence. */
 	{
 		dbg_addr_t start = addr_map[found].addr;
 		int lo2 = found, hi2 = found;
@@ -902,10 +1008,18 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 			lo2--;
 		while (hi2 + 1 < addr_map_count && addr_map[hi2 + 1].addr == start)
 			hi2++;
+		int best_rank = entry_bank_rank(found, addr, ram_bank);
 		for (int i = lo2; i <= hi2; i++) {
-			if (addr <= addr_map[i].end && addr_map[i].end < addr_map[found].end &&
-			    entry_bank_ok(i, addr, ram_bank))
-				found = i;
+			if (addr > addr_map[i].end)
+				continue;
+			const int rank = entry_bank_rank(i, addr, ram_bank);
+			if (rank == 0)
+				continue;                       /* a bank we know it is not */
+			if (rank > best_rank
+			    || (rank == best_rank && addr_map[i].end < addr_map[found].end)) {
+				found     = i;
+				best_rank = rank;
+			}
 		}
 	}
 
@@ -1252,7 +1366,14 @@ static bool build_dbg_path(const char *loaded_path, char *dbg_path, size_t dbg_p
 	return true;
 }
 
-// Helper: scan .dbg file for min/max segment addresses
+// Helper: scan .dbg file for the address range the loaded file actually occupies
+//
+// Only segments the linker wrote INTO the file count. cc65 emits `oname=` for
+// exactly those; BSS and ZEROPAGE are allocated but stored nowhere, and folding
+// them in produced one envelope running from the zero page to the top of the
+// program -- most of low RAM. Unloading that range on every auto-load destroyed
+// the mappings of every other module in it, including debug info the user named
+// explicitly with -dbgfile, which nothing ever re-merges.
 static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_addr_t *out_max) {
 	FILE *f;
 #ifdef _WIN32
@@ -1266,6 +1387,8 @@ static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_ad
 	size_t   cap = 0;
 	while (read_line(f, &buf, &cap)) {
 		if (strncmp(buf, "seg", 3) != 0) continue;
+		// Not stored in the file, so this load did not write over it.
+		if (!strstr(buf, "oname=")) continue;
 		const char *sp = strstr(buf, "start=0x");
 		const char *sz = strstr(buf, "size=0x");
 		if (!sp || !sz) continue;
@@ -1316,6 +1439,11 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 
 void dbg_info_free(void)
 {
+	free(file_alias);
+	file_alias       = NULL;
+	file_alias_count = 0;
+	file_alias_cap   = 0;
+
 	for (int i = 0; i < file_count; i++)
 		free(files[i].name);
 	free(files);

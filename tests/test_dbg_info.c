@@ -225,8 +225,7 @@ main(void)
 	// rather than accumulate a second copy of its segments -- duplicates make
 	// bank disambiguation ambiguous and it gives up.
 	{
-		int segs_before = dbg_info_file_count();
-		(void)segs_before;
+		const int files_before = dbg_info_file_count();
 		dbg_info_unload_range(0x0801, 0x0840);
 		check(dbg_info_load(path) == 0, "reloads the same module");
 		const char *file = NULL;
@@ -234,8 +233,17 @@ main(void)
 		check(dbg_info_addr_to_source(0x0801, &file, &line),
 		      "the reloaded module still resolves");
 		check(line == 10, "  ...to the original line");
+
+		// The point of the block, which it used to measure and then discard.
+		// Unloading a range deliberately leaves file records alone, so nothing
+		// stops a reload appending a second copy of every one of them; the same
+		// is true of equates, where the lookup returns the FIRST match and a
+		// stale value would therefore win for the rest of the session.
+		check(dbg_info_file_count() == files_before,
+		      "  ...without accumulating a second copy of its files");
 	}
 	// Repeated swaps must stay stable rather than degrading each time.
+	const int files_before_swaps = dbg_info_file_count();
 	for (int i = 0; i < 5; i++) {
 		dbg_info_unload_range(0x0801, 0x0840);
 		dbg_info_load(path);
@@ -245,6 +253,8 @@ main(void)
 		int         line = 0;
 		check(dbg_info_addr_to_source(0x0801, &file, &line) && line == 10,
 		      "still resolves after repeated module swaps");
+		check(dbg_info_file_count() == files_before_swaps,
+		      "and does not grow a little on every swap");
 	}
 
 	// A path with no room left for the ".dbg" extension must be declined, not
