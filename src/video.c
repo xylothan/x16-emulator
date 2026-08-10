@@ -129,6 +129,25 @@ static uint16_t irq_line;
 
 static uint8_t reg_layer[2][7];
 
+// Per-scanline record of the layer registers that were actually used to render
+// each line, so debug views can reproduce raster-split effects -- programs
+// routinely rewrite MAPBASE/TILEBASE/scroll part-way down a frame from a line
+// IRQ. Without this a debugger can only ever show one register snapshot for the
+// whole frame, which describes just one band of the screen.
+static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
+static uint16_t line_eff_y[SCREEN_HEIGHT];
+// The layer row each line actually displayed. Recorded rather than left for a
+// consumer to recompute from the registers: the renderers take the layout from
+// prev_layer_properties[1] but VSCROLL and the layer-height mask from [0]
+// (video.c: render_layer_line_text/tile via calc_layer_eff_y(props0, ...)), so
+// no single register generation describes the result. Storing the answer makes
+// the contract true instead of approximately true.
+static uint16_t line_layer_row[SCREEN_HEIGHT][2];
+static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
+static bool     line_state_valid[SCREEN_HEIGHT];
+// The raw registers on the same two-stage delay the layer properties use, so
+// the history above can record the generation that actually rendered a line.
+static uint8_t  prev_reg_layer[2][2][7];
 
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
@@ -239,10 +258,16 @@ mousegrab_toggle() {
 // register, so clearing reg_layer alone left the derived state describing the
 // pre-reset machine while the registers read zero -- and a debug view
 // correlating the two would pair zeroed registers with stale geometry.
+static void video_reset_layer_pipeline(void);
 
 void
 video_reset()
 {
+	// Drop the per-scanline debug history: it describes a machine that no
+	// longer exists. Both pipeline generations are re-seeded from the cleared
+	// registers below, so raw and derived state stay matched rather than one
+	// side reading zero while the other still holds pre-reset geometry.
+	memset(line_state_valid, 0, sizeof(line_state_valid));
 
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
@@ -258,6 +283,7 @@ video_reset()
 
 	// init Layer registers
 	memset(reg_layer, 0, sizeof(reg_layer));
+	video_reset_layer_pipeline();
 
 	// init composer registers
 	memset(reg_composer, 0, sizeof(reg_composer));
@@ -648,6 +674,16 @@ refresh_layer_properties(const uint8_t layer)
 	props->color_fields_max = (8 >> props->color_depth) - 1;
 }
 
+// See the forward declaration above video_reset() for why this exists.
+static void
+video_reset_layer_pipeline(void)
+{
+	refresh_layer_properties(0);
+	refresh_layer_properties(1);
+	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
+}
 
 struct video_sprite_properties
 {
@@ -1163,6 +1199,15 @@ render_line(uint16_t y, float scan_pos_x)
 		memcpy(prev_layer_properties[1], prev_layer_properties[0], sizeof(*layer_properties) * NUM_LAYERS);
 		memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 
+		// The raw layer registers travel down the same two-stage pipeline, so
+		// the debug history can record what a line was actually rendered with.
+		// The renderers read prev_layer_properties[1], two generations behind
+		// live: snapshotting reg_layer directly would attribute a mid-frame
+		// register change to a line two scanlines before the one it affected,
+		// which is precisely the raster-split case this history exists for.
+		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
+		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
+
 		if ((dc_video & 3) > 1) { // 480i or 240p
 			if ((y >> 1) == 0) {
 				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
@@ -1249,6 +1294,48 @@ render_line(uint16_t y, float scan_pos_x)
 		return;
 	}
 
+	// Snapshot what this line actually displayed, for debug views. Placed after
+	// the warp guard above and immediately before the layer rendering, so it
+	// describes only lines that are really drawn: under -warp 63 frames in 64
+	// return early, and publishing there would hand the VERA panel state for
+	// scanlines whose pixels were never produced.
+	if (y < SCREEN_HEIGHT) {
+		// "Enabled" has to mean "this layer actually reached the screen on this
+		// line", not just "the layer bit is set in DC_VIDEO". Outside the
+		// active window the compositor fills the line with the border colour
+		// and ignores the layers entirely (see the border branch below), and
+		// with out_mode 0 there is no output at all. Publishing those lines as
+		// enabled let a border line win the panel's "first scanline to show
+		// this row wins" race against the active line that really displayed it,
+		// so a register change during the top border decoded the visible row
+		// with the wrong registers.
+		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
+
+		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
+		line_eff_y[y]         = eff_y;
+		line_layer_enabled[y] = line_displayed
+			? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
+			: 0;
+		for (uint8_t l = 0; l < 2; l++) {
+			// The row this line showed. Recorded rather than left for the panel
+			// to recompute, because the renderers take VSCROLL and the
+			// layer-height mask from generation [0] while the layout registers
+			// above come from [1] -- so recomputing from the snapshot alone is
+			// off by whatever the scroll changed mid-frame. Bitmap mode has no
+			// scroll (VERA forces it to 0), so there the row is eff_y.
+			line_layer_row[y][l] = prev_layer_properties[1][l].bitmap_mode
+				? eff_y
+				: (uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+		}
+		line_state_valid[y] = true;
+		// Progressive modes draw only the even line of each pair, so the odd
+		// one was never rendered. Marked invalid rather than filled in: the
+		// contract is "what this scanline showed", and inventing a row for a
+		// line the beam never drew is how a debug view starts lying.
+		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+			line_state_valid[y + 1] = false;
+		}
+	}
 
 	if (layer_line_enable[0]) {
 		if (prev_layer_properties[1][0].text_mode) {
@@ -1949,6 +2036,39 @@ video_update()
 	return true;
 }
 
+// ─── Debug view accessors ──────────────────────────────────────────────────
+
+// Report the layer registers and effective layer Y that were used to render a
+// given display scanline. Debug views use this to reproduce mid-frame register
+// changes (raster splits) instead of assuming one snapshot covers the frame.
+bool
+video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
+                           uint16_t *out_eff_y, bool *out_enabled,
+                           uint16_t *out_layer_row)
+{
+	if (layer >= 2 || line >= SCREEN_HEIGHT || !line_state_valid[line]) {
+		return false;
+	}
+	if (out_regs) {
+		memcpy(out_regs, line_reg_layer[line][layer], 7);
+	}
+	if (out_eff_y) {
+		*out_eff_y = line_eff_y[line];
+	}
+	if (out_enabled) {
+		*out_enabled = (line_layer_enabled[line] & (1 << layer)) != 0;
+	}
+	if (out_layer_row) {
+		*out_layer_row = line_layer_row[line][layer];
+	}
+	return true;
+}
+
+uint16_t
+video_get_scanline_count(void)
+{
+	return SCREEN_HEIGHT;
+}
 
 // Size, in layer pixels, of the image the composer is actually putting on
 // screen: the active display window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled
@@ -2806,6 +2926,11 @@ void video_write(uint8_t reg, uint8_t value) {
 				if (((reg_composer[0] & 0x8) == 0 && (value & 0x8)) ||
 					((reg_composer[0] & 0x3) == 1 && (value & 0x3) > 1 && (value & 0x8))) {
 					memset(framebuffer, 0x00, SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+					// The picture is gone, so the per-scanline history no
+					// longer describes anything on screen. Dropped with it,
+					// or a debugger paused right after the mode change would
+					// decode rows for a blank framebuffer.
+					memset(line_state_valid, 0, sizeof(line_state_valid));
 				}
 
 				// interlace field bit is read-only

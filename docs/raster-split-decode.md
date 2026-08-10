@@ -1,103 +1,97 @@
 # Raster-split decoding in the VERA debug views
 
-## Status
+## What ships today
 
-**Not implemented.** The VERA panel's Tilemap and Bitmap views decode using the
-layer registers as they are *right now*. That is correct for any program that
-does not rewrite layer registers part-way down a frame, which is the large
-majority, and it is what other emulator debuggers do.
+The VERA panel's Tilemap and Bitmap views decode each row of the layer image
+with the layer registers that were in effect on the scanline that displayed it,
+rather than with whatever the registers happen to say when the debugger looks.
+Enable it with the **Follow raster** checkbox on those tabs (on by default).
 
-This document exists because a first implementation was attempted, went through
-nine corrected revisions, and was removed before merge. It records why, so the
-next attempt does not repeat it.
+`src/video.c` keeps a per-scanline record: the layer registers on the same
+two-stage delay the renderers consume, the composer's effective Y, the layer row
+the line displayed, and whether the layer actually reached the screen.
+`video_get_layer_line_state()` exposes it, and `build_raster_row_regs()` in
+`src/debug_ui/panels/vera_panel.cpp` indexes those snapshots by layer row.
 
-## The problem
+This is correct for the case it exists for: a program rewriting MAPBASE /
+TILEBASE / scroll part-way down a frame from a line IRQ, so that different
+horizontal bands use different values — a split-screen status bar, or a demo
+effect. Without it, a debugger reading the registers once describes only the
+band that happened to be active when it looked, and every other band decodes as
+visible garbage, because MAPBASE points somewhere else entirely.
 
-A program can rewrite VERA's layer registers mid-frame, normally from a line
-IRQ, so that different horizontal bands of the screen are drawn with different
-MAPBASE / TILEBASE / scroll values. This is a "raster split".
+## Known limits of the current implementation
 
-A debugger that reads the registers once therefore describes only the band that
-happened to be active when it looked. Every other band decodes as garbage — not
-subtly wrong, but visibly wrong, because MAPBASE points somewhere else entirely.
+These are accuracy limits, not failures. In each case the view is right for the
+common shape of the effect and can be off in a narrower one. They are listed so
+nobody has to rediscover them.
 
-To decode correctly, a debug view needs to know, for each row of the layer
-image, which register values produced it.
+**1. VSCROLL and layout come from different register generations.**
+The renderers take the layout from `prev_layer_properties[1]` but compute the
+row with `calc_layer_eff_y(props0, ...)` — generation `[0]`. The snapshot
+records the row the renderer computed, so text and tile modes land on the right
+row; but the seven register bytes handed to the panel are generation `[1]`, so
+anything the panel derives from them directly is a generation behind. Visible
+only if scroll changes at the split.
 
-## Why the removed attempt did not work
+**2. Bitmap mode is approximated.**
+`render_layer_line_bitmap()` indexes with `eff_y % tileh` from generation `[1]`,
+and takes its palette offset from the **live** `reg_layer` rather than either
+delayed copy. The snapshot records `eff_y` as the row (VERA forces scroll to 0
+in bitmap mode, so this matches in practice) and the delayed palette nibble, so
+a palette-offset change at a raster split is reported up to two lines late.
 
-The approach was to reconstruct that information *alongside* the renderer: an
-array indexed by scanline, filled in from `render_line()`, mirroring whatever
-the renderer was about to do.
+**3. One snapshot per scanline, and a mid-line change is not represented.**
+`render_line()` runs several times per scanline, once per compositor interval,
+and the last call wins — including intervals covering horizontal blanking, which
+draw nothing but may carry register writes made after the visible part of the
+line was drawn. Enabling output, or a layer, part-way along a line is therefore
+not represented faithfully.
 
-It cannot be made reliable, because the renderer does not consume one coherent
-set of registers. It consumes a mixture:
+**4. One settle point for two layers.**
+The two layers are enabled independently and can change independently mid-line;
+the record treats the line as a unit.
 
-| Renderer | Layout registers | Row calculation | Palette offset |
-|---|---|---|---|
-| `render_layer_line_text` | `prev_layer_properties[1]` | `calc_layer_eff_y(props0, y)` — generation `[0]` | from `[1]` |
-| `render_layer_line_tile` | `prev_layer_properties[1]` | `calc_layer_eff_y(props0, y)` — generation `[0]` | from `[1]` |
-| `render_layer_line_bitmap` | `prev_layer_properties[1]` | `y % props1->tileh` — a different expression | **live** `reg_layer` |
+**5. Geometry changes are declined rather than followed.**
+`same_layer_geometry()` refuses to substitute a snapshot whose tile geometry
+differs from the live registers, because that would change the texture layout
+mid-image. A split that changes colour depth or map size falls back to live
+registers for those rows.
 
-`prev_layer_properties` is a two-stage delay (`video.c`, in the `y != y_prev`
-block). So "the registers that rendered this line" is not a single generation,
-is not even a single rule, and one of the inputs is not delayed at all.
+## What "exact" would require
 
-Every revision of the mirrored approach was a further special case bolted on to
-that reconstruction, and each one was found wrong by review:
+The current design reconstructs, from `render_line()`, a decision the renderer
+makes across three functions that each consume a different mixture of two
+delayed register generations and — in bitmap mode — the live registers. Every
+limit above is a consequence of mirroring that from outside rather than
+recording it from inside.
 
-1. Snapshot live `reg_layer` — wrong generation entirely.
-2. Snapshot delayed generation `[1]` — right for layout, wrong for the row.
-3. Record `calc_layer_eff_y(props0, ...)` — right for text/tile, wrong for bitmap.
-4. Mirror the renderer's mode dispatch — but the block was duplicated rather
-   than moved, so the stale copy won on warp-skipped frames.
-5. Delete the duplicate.
-6. Border scanlines were published as having displayed a layer, so a register
-   change during the top border could beat the active line to a layer row.
-7. Capture only intervals that draw pixels — `render_line()` runs several times
-   per scanline and the trailing ones are horizontal blanking.
-8. A "nothing displayed" interval settled the line, so enabling output mid-line
-   was never recorded; and the tracker's statics survived reset and warp skips.
-9. Still finalising on intervals that drew no *layer* output, and one settle
-   flag shared by two independently-enabled layers.
-
-The pattern is not bad luck. Reconstructing a decision from outside the code
-that makes it means every branch in that code becomes a branch you must mirror,
-and nothing tells you when you have missed one.
-
-## The shape a correct implementation should have
-
-Record the decode inputs **where the renderer uses them**, so they cannot
-disagree with it by construction:
+An exact implementation should instead:
 
 1. Have each `render_layer_line_*` publish the resolved state it actually used —
    map base, tile base, bpp, tile size, palette offset, and the layer row it
-   indexed — rather than having a separate site guess at it.
+   indexed — so the record cannot disagree with the renderer by construction.
 2. Commit that record from the compositor, and only when it consumes a non-empty
    visible span for that layer. A layer function can run for a line whose output
    is never composited.
-3. Track settlement **per layer**. The two layers are enabled independently and
-   can change independently mid-line.
-4. Decide explicitly what a mid-line change means. Either record `(x0, x1,
+3. Track settlement **per layer**, not per line.
+4. Decide explicitly what a mid-line change means: either record `(x0, x1,
    state)` spans, or define "first visible span per layer wins" and flag lines
    that contained more than one state, so the view can say so rather than
    silently pick one.
 5. Invalidate through one helper used by every path that discards the picture
-   (reset, mode change, framebuffer clear), so validity and any capture-tracking
-   state can never disagree.
+   (reset, mode change, framebuffer clear), so validity and capture state can
+   never disagree.
+6. Handle a geometry change at a split by rendering the affected bands as
+   separate images, instead of declining the substitution.
 
 ## Testing
 
-None of the current test executables exercises `video.c`. Every wrong revision
-above built clean and passed all six suites; that was never evidence about this
-feature. A real attempt needs targeted tests: a scripted register change at a
-known scanline, then assertions about what the recorded state says for rows
-above and below the split — including the bitmap path, a mid-line enable, a
-reset, and a warp-skipped frame.
+**No current test executable exercises `src/video.c`.** During development every
+revision of this feature — including several that were wrong — built clean and
+passed all six ctest suites, so those suites say nothing about it either way.
 
-## What is lost meanwhile
-
-Only correct decoding of programs that change layer registers mid-frame:
-demos, and games with split-screen status bars. Static screens, which is nearly
-everything else, decode correctly today. The Tilemap and Bitmap views say which
-registers they used, so the view does not claim more than it knows.
+An exact implementation needs targeted tests: script a register change at a
+known scanline, then assert what the recorded state reports for rows above and
+below the split. Cover the bitmap path, a mid-line enable, a geometry change, a
+machine reset, a warp-skipped frame, and progressive mode.
