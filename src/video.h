@@ -39,8 +39,12 @@ void video_debug_ui_feed_event(const SDL_Event *ev);
 // L?_CONFIG..L?_VSCROLL_H; out_eff_y is the composer's effective layer Y for
 // that line, before the layer's own VSCROLL. out_layer_row is the row of the
 // layer image the line actually displayed -- recorded rather than derivable,
-// because the renderer mixes two register generations. False if the line is out
-// of range or has not been rendered yet. Every out-parameter is optional.
+// because the renderer mixes two register generations. out_enabled is false for
+// a line the layer did not reach the screen on, including border lines outside
+// the active display window, so a consumer can distinguish "this layer showed
+// this row here" from "this layer was switched on while the border was drawn".
+// False if the line is out of range or has not been rendered yet. Every
+// out-parameter is optional.
 bool video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
                                 uint16_t *out_eff_y, bool *out_enabled,
                                 uint16_t *out_layer_row);

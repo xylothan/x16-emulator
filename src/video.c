@@ -1300,9 +1300,21 @@ render_line(uint16_t y, float scan_pos_x)
 	// return early, and publishing there would hand the VERA panel state for
 	// scanlines whose pixels were never produced.
 	if (y < SCREEN_HEIGHT) {
+		// "Enabled" here has to mean "this layer actually reached the screen on
+		// this line", not just "the layer bit is set in DC_VIDEO". Outside the
+		// active window the compositor fills the line with the border colour
+		// and ignores the layers entirely (see the border branch below), and
+		// with out_mode 0 there is no output at all. Publishing those lines as
+		// enabled let a border line win the panel's "first scanline to show
+		// this row wins" race against the active line that really displayed it,
+		// so a register change during the top border decoded the visible row
+		// with the wrong registers.
+		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
 		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
 		line_eff_y[y]         = eff_y;
-		line_layer_enabled[y] = (layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0);
+		line_layer_enabled[y] = line_displayed
+			? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
+			: 0;
 		for (uint8_t l = 0; l < 2; l++) {
 			const struct video_layer_properties *p1 = &prev_layer_properties[1][l];
 			if (p1->bitmap_mode) {
