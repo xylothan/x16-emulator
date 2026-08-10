@@ -54,6 +54,14 @@ void debug_server_output(const char *category, const char *text);
 void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end);
 void debug_server_retry_unverified_breakpoints(void);
 
+// KNOWN LIMITATION: the three breakpoint kinds a client can set (source,
+// function, instruction) all land in one core table keyed on (pc, bank,
+// x16Bank), and conditions are keyed the same way. Two of them naming the same
+// address therefore share one entry AND one condition record, so a condition
+// set on the source breakpoint also gates the function breakpoint at that
+// address. Removal is refcounted between the tables, but the condition is not
+// -- separating them needs per-owner condition records in debug_core.
+
 // Clean shutdown — close sockets, free resources.
 void debug_server_shutdown(void);
 

@@ -121,6 +121,10 @@ static void dap_clear_own_watchpoints(void) {
 
 
 static bool     dap_session_active = false;
+// Whether the stop the machine is currently sitting in has been announced. A
+// breakpoint can hit while the client is still configuring, and configurationDone
+// would then report the same halt a second time under a different reason.
+static bool     dap_stop_announced = false;
 
 // Forward declarations
 static void send_dap_event(const char *event_name, cJSON *body);
@@ -355,6 +359,7 @@ static void send_dap_event(const char *event_name, cJSON *body) {
 
 // ContinuedEvent — tell the client execution resumed (all threads).
 static void send_continued_event(void) {
+    dap_stop_announced = false;   // whatever we were stopped in is over
     if (client_sock == SOCKET_INVALID) return;
     cJSON *body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "threadId", 1);
@@ -459,7 +464,11 @@ static int handle_dap_configuration_done(int seq) {
     // so the same halt is not announced twice under two different reasons.
     if (currentMode == DMODE_STOP) {
         dap_stop_on_entry = false;
-        debug_server_notify_stopped("breakpoint");
+        // Unless it has already been reported -- a breakpoint that hit while
+        // the client was still configuring emits its own stopped event, and
+        // announcing the same halt again under a different reason confuses a
+        // client into thinking it stopped twice.
+        if (!dap_stop_announced) debug_server_notify_stopped("breakpoint");
         return 1;
     }
 
@@ -1036,10 +1045,16 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             cJSON_AddStringToObject(bp_source, "path", src_path);
             cJSON_AddItemToObject(result_bp, "source", bp_source);
         } else {
-            // Can't resolve yet — report as verified to avoid VS stalling,
-            // but don't set a hardware breakpoint. Will be resolved when .dbg loads.
+            // Nothing describes this line yet -- typically the guest has not
+            // loaded the program. Say so rather than claiming it is verified:
+            // retry_unverified_breakpoints() arms it when the .dbg arrives and
+            // sends a verified event then, so the client's view catches up on
+            // its own. Reporting it verified here made an unarmable breakpoint
+            // look identical to a working one.
             cJSON_AddNumberToObject(result_bp, "id", bp_id);
-            cJSON_AddBoolToObject(result_bp, "verified", true);
+            cJSON_AddBoolToObject(result_bp, "verified", false);
+            cJSON_AddStringToObject(result_bp, "message",
+                                    "No debug info for this line yet; will arm when it loads");
             cJSON_AddNumberToObject(result_bp, "line", line);
             cJSON *bp_source = cJSON_CreateObject();
             cJSON_AddStringToObject(bp_source, "path", src_path);
@@ -1087,6 +1102,7 @@ static int handle_dap_continue(int seq, cJSON *args) {
 // collide with a breakpoint the user set at the same address.
 static int handle_dap_next(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepOver();
     send_dap_response(seq, "next", true, NULL);
     return 1;
@@ -1094,6 +1110,7 @@ static int handle_dap_next(int seq, cJSON *args) {
 
 static int handle_dap_step_in(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepInto();
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
@@ -1101,6 +1118,7 @@ static int handle_dap_step_in(int seq, cJSON *args) {
 
 static int handle_dap_step_out(int seq, cJSON *args) {
     (void)args;
+    dap_stop_announced = false;   // a new stop is owed when this step lands
     DEBUGStepOut();
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
@@ -1142,7 +1160,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
         dap_session_active = false;
         // Resume only when there is no interactive debugger UI to drive the run
         // state; otherwise leave it as the user left it (see disconnect_client).
-        if (currentMode == DMODE_STOP && !debug_window_enabled) {
+        if (currentMode == DMODE_STOP && !(debug_window_enabled && debugger_enabled)) {
             currentMode = DMODE_RUN;
         }
     }
@@ -1836,7 +1854,7 @@ static int handle_dap_terminate(int seq, cJSON *args) {
     // when there is no local debugger whose user owns the run state. Otherwise
     // "Stop Debugging" in the editor runs the emulator out from under someone
     // who is halted in the SDL debug window inspecting it.
-    if (!debug_window_enabled) {
+    if (!(debug_window_enabled && debugger_enabled)) {
         currentMode = DMODE_RUN;
     }
     return 1;
@@ -1878,7 +1896,8 @@ static bool server_bp_wanted_elsewhere(uint16_t addr, int x16Bank, int skip_tabl
 static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
     for (int i = 0; i < num_func_bps; i++)
         if (!server_bp_wanted_elsewhere(func_bp_addrs[i], DEBUG_BANK_ANY, 1, -1))
-            debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
     num_func_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -1912,7 +1931,8 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
     for (int i = 0; i < num_instr_bps; i++)
         if (!server_bp_wanted_elsewhere(instr_bp_addrs[i], DEBUG_BANK_ANY, 2, -1))
-            debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+            { debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+              debug_bp_forget(instr_bp_addrs[i], 0, DEBUG_BANK_ANY); }
     num_instr_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
@@ -2214,13 +2234,16 @@ static void disconnect_client(void) {
         }
         num_dap_bps = 0;
         for (int i = 0; i < num_func_bps; i++)
-            debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
         num_func_bps = 0;
         for (int i = 0; i < num_instr_bps; i++)
-            debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+            { debug_bp_remove(instr_bp_addrs[i], 0, DEBUG_BANK_ANY);
+              debug_bp_forget(instr_bp_addrs[i], 0, DEBUG_BANK_ANY); }
         num_instr_bps = 0;
         dap_clear_own_watchpoints();
         dap_stop_on_entry = false;
+        dap_stop_announced = false;
         dap_seq = 1;
         printf("[dap] Client disconnected\n");
 
@@ -2235,7 +2258,11 @@ static void disconnect_client(void) {
         // machine out from under them.
         if (dap_session_active) {
             dap_session_active = false;
-            bool has_ui = debug_window_enabled;
+            // A UI that was asked for AND is still running: the guest can clear
+            // debugger_enabled by writing $9FB0, which suppresses the overlay,
+            // and leaving the machine stopped for a window nobody can see would
+            // strand it.
+            bool has_ui = debug_window_enabled && debugger_enabled;
             if (currentMode == DMODE_STOP && !has_ui) {
                 printf("[dap] Session ended, resuming emulator\n");
                 currentMode = DMODE_RUN;
@@ -2442,6 +2469,7 @@ int debug_server_poll(void) {
 
 void debug_server_notify_stopped(const char *reason) {
     if (!server_enabled || client_sock == SOCKET_INVALID) return;
+    dap_stop_announced = true;
 
     cJSON *body = cJSON_CreateObject();
 
