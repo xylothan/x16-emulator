@@ -129,32 +129,6 @@ static uint16_t irq_line;
 
 static uint8_t reg_layer[2][7];
 
-// Per-scanline record of the layer registers that were actually used to render
-// each line, so debug views can reproduce raster-split effects -- programs
-// routinely rewrite MAPBASE/TILEBASE/scroll part-way down a frame from a line
-// IRQ. Without this a debugger can only ever show one register snapshot for the
-// whole frame, which describes just one band of the screen.
-static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
-static uint16_t line_eff_y[SCREEN_HEIGHT];
-// The layer row each line actually displayed. Recorded rather than left for a
-// consumer to recompute from the registers: the renderers take the layout from
-// prev_layer_properties[1] but VSCROLL and the layer-height mask from [0]
-// (video.c: render_layer_line_text/tile via calc_layer_eff_y(props0, ...)), so
-// no single register generation describes the result. Storing the answer makes
-// the contract true instead of approximately true.
-static uint16_t line_layer_row[SCREEN_HEIGHT][2];
-static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
-// Which (frame, line) the capture below is currently accumulating, and whether
-// an interval that actually drew pixels has settled it. At file scope so
-// video_reset() can clear them: as function statics they outlived a reset and
-// let a post-reset line inherit the previous machine's capture state.
-static uint32_t rl_capture_frame = 0xFFFFFFFFu;
-static int      rl_capture_line  = -1;
-static bool     rl_capture_final = false;
-static bool     line_state_valid[SCREEN_HEIGHT];
-// The raw registers on the same two-stage delay the layer properties use, so
-// the history above can record the generation that actually rendered a line.
-static uint8_t  prev_reg_layer[2][2][7];
 
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
@@ -265,16 +239,10 @@ mousegrab_toggle() {
 // register, so clearing reg_layer alone left the derived state describing the
 // pre-reset machine while the registers read zero -- and a debug view
 // correlating the two would pair zeroed registers with stale geometry.
-static void video_reset_layer_pipeline(void);
 
 void
 video_reset()
 {
-	// Drop the per-scanline debug history: it describes a machine that no
-	// longer exists. Both pipeline generations are re-seeded from the cleared
-	// registers below, so raw and derived state stay matched rather than one
-	// side reading zero while the other still holds pre-reset geometry.
-	memset(line_state_valid, 0, sizeof(line_state_valid));
 
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
@@ -290,7 +258,6 @@ video_reset()
 
 	// init Layer registers
 	memset(reg_layer, 0, sizeof(reg_layer));
-	video_reset_layer_pipeline();
 
 	// init composer registers
 	memset(reg_composer, 0, sizeof(reg_composer));
@@ -681,21 +648,6 @@ refresh_layer_properties(const uint8_t layer)
 	props->color_fields_max = (8 >> props->color_depth) - 1;
 }
 
-// See the forward declaration above video_reset() for why this exists.
-static void
-video_reset_layer_pipeline(void)
-{
-	refresh_layer_properties(0);
-	refresh_layer_properties(1);
-	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
-	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
-	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
-	// Forget which scanline the capture was mid-way through, so the first line
-	// after a reset is treated as a new occurrence rather than a continuation.
-	rl_capture_frame = 0xFFFFFFFFu;
-	rl_capture_line  = -1;
-	rl_capture_final = false;
-}
 
 struct video_sprite_properties
 {
@@ -1211,15 +1163,6 @@ render_line(uint16_t y, float scan_pos_x)
 		memcpy(prev_layer_properties[1], prev_layer_properties[0], sizeof(*layer_properties) * NUM_LAYERS);
 		memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 
-		// The raw layer registers travel down the same two-stage pipeline, so
-		// the debug history can record what a line was actually rendered with.
-		// The renderers read prev_layer_properties[1], two generations behind
-		// live: snapshotting reg_layer directly would attribute a mid-frame
-		// register change to a line two scanlines before the one it affected,
-		// which is precisely the raster-split case this history exists for.
-		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
-		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
-
 		if ((dc_video & 3) > 1) { // 480i or 240p
 			if ((y >> 1) == 0) {
 				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
@@ -1306,96 +1249,6 @@ render_line(uint16_t y, float scan_pos_x)
 		return;
 	}
 
-	// Snapshot what this line actually displayed, for debug views. Placed after
-	// the warp guard above and immediately before the layer rendering, so it
-	// describes only lines that are really drawn: under -warp 63 frames in 64
-	// return early, and publishing there would hand the VERA panel state for
-	// scanlines whose pixels were never produced.
-	if (y < SCREEN_HEIGHT) {
-		// render_line() runs several times per scanline, once per compositor
-		// interval, and the trailing intervals cover horizontal blanking and
-		// draw nothing. Capturing on every call let the last of those --
-		// carrying register writes made during blanking, after the visible part
-		// of the line was already drawn -- overwrite the snapshot that
-		// described what was actually on screen.
-		//
-		// So the interval that really puts pixels down is the one that sticks.
-		// A line with no such interval (border, or output disabled) is still
-		// recorded, as "nothing displayed", but only provisionally: output can
-		// be switched on part-way along a line, and that later interval must be
-		// able to replace the provisional record.
-		//
-		// Keyed on (frame, line), not line alone. These statics outlive both a
-		// machine reset and the warp guard above -- which returns before this
-		// point for 63 frames in 64 -- so matching on the line number alone
-		// would make a later occurrence of the same numbered line look like a
-		// continuation of an old one and keep its stale snapshot.
-		if (rl_capture_frame != (uint32_t)frame_count || rl_capture_line != (int)y) {
-			rl_capture_frame    = (uint32_t)frame_count;
-			rl_capture_line     = (int)y;
-			rl_capture_final    = false;
-			line_state_valid[y] = false;
-		}
-
-		// "Enabled" has to mean "this layer actually reached the screen on this
-		// line", not just "the layer bit is set in DC_VIDEO". Outside the
-		// active window the compositor fills the line with the border colour
-		// and ignores the layers entirely (see the border branch below), and
-		// with out_mode 0 there is no output at all. Publishing those lines as
-		// enabled let a border line win the panel's "first scanline to show
-		// this row wins" race against the active line that really displayed it,
-		// so a register change during the top border decoded the visible row
-		// with the wrong registers.
-		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
-
-		// Does this interval put any layer pixels on screen? Same clamping the
-		// compositor applies below. A vertically-bordered line has no visible
-		// interval to wait for, so it is recorded immediately as "nothing
-		// displayed" -- which is the truth about it, and keeps it from being
-		// left invalid and read as stale.
-		const uint16_t h0 = hstart < 640 ? hstart : 640;
-		const uint16_t h1 = hstop  < 640 ? hstop  : 640;
-		const bool     draws_pixels = (s_pos_x > s_pos_x_p) &&
-		                              (MAX(h0, s_pos_x_p) < (h1 < s_pos_x ? h1 : s_pos_x));
-
-		if (!rl_capture_final && (draws_pixels || !line_displayed)) {
-			// Only an interval that actually drew pixels settles the matter.
-			// A "nothing displayed" record stays replaceable, so enabling
-			// output part-way along the line still gets recorded.
-			rl_capture_final = draws_pixels;
-			memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
-			line_eff_y[y]         = eff_y;
-			line_layer_enabled[y] = line_displayed
-				? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
-				: 0;
-			for (uint8_t l = 0; l < 2; l++) {
-				const struct video_layer_properties *p1 = &prev_layer_properties[1][l];
-				if (p1->bitmap_mode) {
-					// render_layer_line_bitmap() indexes with eff_y % tileh
-					// from generation [1] -- a different generation AND a
-					// different expression from the tile/text path, so the row
-					// has to be computed the way the renderer computes it.
-					line_layer_row[y][l] = p1->tileh ? (uint16_t)(eff_y % p1->tileh) : 0;
-					// It also takes the palette offset from the LIVE register
-					// rather than either delayed generation, so the delayed
-					// copy would report a raster palette change two lines late.
-					line_reg_layer[y][l][4] = (uint8_t)((line_reg_layer[y][l][4] & 0xF0)
-					                                    | (reg_layer[l][4] & 0x0F));
-				} else {
-					line_layer_row[y][l] =
-						(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
-				}
-			}
-			line_state_valid[y] = true;
-			// Progressive modes draw only the even line of each pair, so the
-			// odd one was never rendered. Marked invalid rather than filled in:
-			// the contract is "what this scanline showed", and inventing a row
-			// for a line the beam never drew is how a debug view starts lying.
-			if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
-				line_state_valid[y + 1] = false;
-			}
-		}
-	}
 
 	if (layer_line_enable[0]) {
 		if (prev_layer_properties[1][0].text_mode) {
@@ -2096,39 +1949,6 @@ video_update()
 	return true;
 }
 
-// ─── Debug view accessors ──────────────────────────────────────────────────
-
-// Report the layer registers and effective layer Y that were used to render a
-// given display scanline. Debug views use this to reproduce mid-frame register
-// changes (raster splits) instead of assuming one snapshot covers the frame.
-bool
-video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
-                           uint16_t *out_eff_y, bool *out_enabled,
-                           uint16_t *out_layer_row)
-{
-	if (layer >= 2 || line >= SCREEN_HEIGHT || !line_state_valid[line]) {
-		return false;
-	}
-	if (out_regs) {
-		memcpy(out_regs, line_reg_layer[line][layer], 7);
-	}
-	if (out_eff_y) {
-		*out_eff_y = line_eff_y[line];
-	}
-	if (out_enabled) {
-		*out_enabled = (line_layer_enabled[line] & (1 << layer)) != 0;
-	}
-	if (out_layer_row) {
-		*out_layer_row = line_layer_row[line][layer];
-	}
-	return true;
-}
-
-uint16_t
-video_get_scanline_count(void)
-{
-	return SCREEN_HEIGHT;
-}
 
 // Size, in layer pixels, of the image the composer is actually putting on
 // screen: the active display window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled
@@ -2986,11 +2806,6 @@ void video_write(uint8_t reg, uint8_t value) {
 				if (((reg_composer[0] & 0x8) == 0 && (value & 0x8)) ||
 					((reg_composer[0] & 0x3) == 1 && (value & 0x3) > 1 && (value & 0x8))) {
 					memset(framebuffer, 0x00, SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-					// The picture is gone, so the per-scanline history no
-					// longer describes anything on screen. Dropped with it,
-					// or a debugger paused right after the mode change would
-					// decode rows for a blank framebuffer.
-					memset(line_state_valid, 0, sizeof(line_state_valid));
 				}
 
 				// interlace field bit is read-only

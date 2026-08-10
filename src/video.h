@@ -31,25 +31,6 @@ bool video_event_targets_debug_ui(const SDL_Event *ev);
 void video_debug_ui_shortcut_key(const SDL_Event *ev);
 void video_debug_ui_feed_event(const SDL_Event *ev);
 
-// ─── Debug view accessors ──────────────────────────────────────────────────
-// Per-scanline history of the layer registers each display line was actually
-// rendered with. Programs rewrite MAPBASE/TILEBASE/scroll part-way down a frame
-// from a line IRQ ("raster split"), so one register snapshot describes only one
-// band of the screen. out_regs receives the 7 layer registers
-// L?_CONFIG..L?_VSCROLL_H; out_eff_y is the composer's effective layer Y for
-// that line, before the layer's own VSCROLL. out_layer_row is the row of the
-// layer image the line actually displayed -- recorded rather than derivable,
-// because the renderer mixes two register generations. out_enabled is false for
-// a line the layer did not reach the screen on, including border lines outside
-// the active display window, so a consumer can distinguish "this layer showed
-// this row here" from "this layer was switched on while the border was drawn".
-// False if the line is out of range or has not been rendered yet. Every
-// out-parameter is optional.
-bool video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
-                                uint16_t *out_eff_y, bool *out_enabled,
-                                uint16_t *out_layer_row);
-uint16_t video_get_scanline_count(void);
-
 // Size in layer pixels of the image the composer is actually displaying: the
 // active window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled by DC_HSCALE/VSCALE.
 // Viewers use this to size themselves to the current video mode.

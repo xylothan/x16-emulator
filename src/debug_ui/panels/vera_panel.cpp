@@ -530,78 +530,6 @@ same_layer_geometry(const LayerRegs &a, const LayerRegs &b)
            a.tilew == b.tilew && a.tileh == b.tileh;
 }
 
-// ---------------------------------------------------------------------------
-// Raster-split support
-//
-// A program can rewrite the layer registers part-way down a frame (typically
-// from a line IRQ) so that different horizontal bands of the screen use a
-// different MAPBASE/TILEBASE/scroll. A single register snapshot therefore only
-// describes the band that happened to be active when the debugger looked, and
-// every band below it decodes as garbage. video_get_layer_line_state() reports
-// what each scanline actually rendered with, so we index those snapshots by the
-// layer row each scanline displayed and decode each pixel row with the
-// registers that produced it.
-// ---------------------------------------------------------------------------
-// Largest layer height VERA can produce: MAPH (256) * TILEH (16).
-constexpr int MAX_LAYER_ROWS = 256 * 16;
-
-struct RasterRowRegs {
-    uint8_t regs[MAX_LAYER_ROWS][7];
-    bool    valid[MAX_LAYER_ROWS];
-    bool    any_split; // layer registers changed part-way down the frame
-    bool    any_valid; // at least one scanline mapped onto a layer row
-};
-
-void
-build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
-{
-    memset(out.valid, 0, sizeof(out.valid));
-    out.any_split = false;
-    out.any_valid = false;
-
-    const uint16_t lines      = video_get_scanline_count();
-    bool           have_first = false;
-    uint8_t        first[7]   = {0};
-
-    for (uint16_t line = 0; line < lines; ++line) {
-        uint8_t  r[7];
-        uint16_t eff_y     = 0;
-        bool     enabled   = false;
-        uint16_t layer_row = 0;
-        if (!video_get_layer_line_state((uint8_t)layer, line, r, &eff_y, &enabled, &layer_row))
-            continue;
-        if (!enabled)
-            continue;
-
-        if (!have_first) {
-            memcpy(first, r, sizeof(first));
-            have_first = true;
-        } else if (memcmp(first, r, sizeof(first)) != 0) {
-            out.any_split = true;
-        }
-
-        // Only substitute snapshots that keep the image layout identical;
-        // anything else would change the texture geometry mid-frame.
-        const LayerRegs LL = decode_layer_regs(r);
-        if (!same_layer_geometry(LL, live))
-            continue;
-
-        // Which row of the layer image this scanline showed. Taken from the
-        // renderer rather than recomputed here: the renderer applies VSCROLL
-        // and the layer-height mask from a different register generation than
-        // the layout registers above, and in bitmap mode uses a different
-        // expression again -- so deriving it here would be wrong in exactly
-        // the raster-split case this path exists to show. Used unconditionally
-        // now, including bitmap: video.c records whichever rule applied.
-        const int ly = (int)layer_row;
-        if (ly < 0 || ly >= MAX_LAYER_ROWS || out.valid[ly])
-            continue; // first scanline to show this row wins
-
-        memcpy(out.regs[ly], r, sizeof(out.regs[ly]));
-        out.valid[ly] = true;
-        out.any_valid = true;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Bitmap viewer tab
@@ -612,7 +540,6 @@ draw_bitmap_tab(const uint32_t pal[256])
     static int   layer         = 0;
     static int   height        = 240;
     static float zoom          = 1.0f;
-    static bool  follow_raster = true;
     static bool  auto_fit      = true;
 
     // Default the height to whatever the composer is actually displaying, so a
@@ -647,19 +574,7 @@ draw_bitmap_tab(const uint32_t pal[256])
                            "Layer %d is not in bitmap mode; showing raw decode anyway.", layer);
     }
 
-    ImGui::Checkbox("Follow raster", &follow_raster);
-    ImGui::SameLine();
-    ImGui::TextDisabled("(decode each row with the registers that rendered it)");
-
-    static RasterRowRegs rr;
-    build_raster_row_regs(layer, L, rr);
-    const bool raster_active = follow_raster && rr.any_valid;
-
-    if (rr.any_split) {
-        ImGui::TextColored(raster_active ? ImVec4(0.4f, 1, 0.4f, 1) : ImVec4(1, 0.7f, 0.2f, 1),
-                           raster_active ? "Raster split detected - rows decoded per scanline."
-                                         : "Raster split detected - enable \"Follow raster\".");
-    }
+    ImGui::TextDisabled("Decoded with the current layer registers.");
 
     const int img_w = L.bitmap_w;
     const int img_h = clampi(height, 1, 480);
@@ -671,10 +586,7 @@ draw_bitmap_tab(const uint32_t pal[256])
         return;
 
     for (int y = 0; y < img_h; ++y) {
-        // Registers in effect on the scanline that displayed this bitmap row.
-        LayerRegs LR = L;
-        if (raster_active && y < MAX_LAYER_ROWS && rr.valid[y])
-            LR = decode_layer_regs(rr.regs[y]);
+        const LayerRegs &LR = L;
 
         const uint32_t row_base = LR.tile_base + (uint32_t)((y * img_w * LR.bpp) >> 3);
         for (int x = 0; x < img_w; ++x) {
@@ -707,7 +619,6 @@ draw_tilemap_tab(const uint32_t pal[256])
     static int   max_cols      = 32;
     static int   max_rows      = 32;
     static float zoom          = 1.0f;
-    static bool  follow_raster = true;
     static bool  auto_fit      = true;
 
     ImGui::PushItemWidth(120);
@@ -756,23 +667,7 @@ draw_tilemap_tab(const uint32_t pal[256])
         return;
     }
 
-    ImGui::Checkbox("Follow raster", &follow_raster);
-    ImGui::SameLine();
-    ImGui::TextDisabled("(decode each row with the registers that rendered it)");
-
-    static RasterRowRegs rr;
-    build_raster_row_regs(layer, L, rr);
-    const bool raster_active = follow_raster && rr.any_valid;
-
-    if (rr.any_split) {
-        if (raster_active)
-            ImGui::TextColored(ImVec4(0.4f, 1, 0.4f, 1),
-                               "Raster split detected - rows decoded per scanline.");
-        else
-            ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1),
-                               "Raster split detected - rows outside the active band will "
-                               "decode incorrectly. Enable \"Follow raster\".");
-    }
+    ImGui::TextDisabled("Decoded with the current layer registers.");
 
     // Clamp rendered region so the texture stays a sane size.
     int cols = clampi(max_cols < L.mapw ? max_cols : L.mapw, 1, 128);
@@ -793,11 +688,7 @@ draw_tilemap_tab(const uint32_t pal[256])
 
     for (int ty = 0; ty < rows; ++ty) {
         for (int y = 0; y < L.tileh; ++y) {
-            // Registers in effect on the scanline that displayed this pixel row.
-            const int layer_row = ty * L.tileh + y;
-            LayerRegs LR        = L;
-            if (raster_active && layer_row < MAX_LAYER_ROWS && rr.valid[layer_row])
-                LR = decode_layer_regs(rr.regs[layer_row]);
+            const LayerRegs &LR = L;
 
             uint32_t *dst = px + (size_t)(ty * L.tileh + y) * img_w;
 
