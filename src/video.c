@@ -1440,13 +1440,11 @@ video_render_all_ex(bool new_frame)
 	SDL_RenderPresent(renderer);
 }
 
-// Present the current frame without pumping the event queue. Called from the
-// Windows modal move/resize loop, which owns the message queue for the duration
-// of a drag; polling events from there would re-enter SDL's own dispatch.
 // Present a newly completed frame without pumping the event queue. Called from
-// inside the OS modal move/resize loop, where polling events would re-enter
-// SDL's own dispatch. This is a real frame, so it records and blends like any
-// other; only the event handling differs.
+// the Windows modal move/resize loop, which owns the message queue for the
+// duration of a drag; polling events from there would re-enter SDL's own
+// dispatch. This is a real frame, so it records and blends the activity LED
+// like any other -- only the event handling differs.
 void
 video_present_no_input(void)
 {
