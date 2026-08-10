@@ -457,6 +457,12 @@ static void DEBUGClearStepBreakPoint(void) {
 // practice -- and resuming afterwards would then stop at a return address the
 // user had already broken out of and said nothing more about. Continuing means
 // continuing; ask for the step again if that is what you wanted.
+void DEBUGCancelStep(void) {
+	stepBreakPoint.pc = -1;
+	stepBreakPoint.bank = 0;
+	stepBreakPoint.x16Bank = -1;
+}
+
 void DEBUGContinue(void) {
 	debug_server_note_resumed();   // a stop is owed again when this lands
 	DEBUGClearStepBreakPoint();

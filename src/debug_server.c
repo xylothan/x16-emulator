@@ -298,6 +298,7 @@ static void platform_cleanup(void) {
 // ─── DAP message sending ────────────────────────────────────────────
 
 static void disconnect_client(void);
+static void dap_release_session_state(void);
 
 static void send_dap_message(cJSON *json) {
     if (client_sock == SOCKET_INVALID) {
@@ -390,6 +391,7 @@ static void send_dap_event(const char *event_name, cJSON *body) {
 
 // ContinuedEvent — tell the client execution resumed (all threads).
 static void send_continued_event(void) {
+    dap_stop_announced = false;   // whatever we were stopped in is over
     if (client_sock == SOCKET_INVALID) return;
     cJSON *body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "threadId", 1);
@@ -1204,6 +1206,12 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
     } else {
         // Keep emulator running — prevent disconnect_client from killing it
         dap_session_active = false;
+        // Release what the session installed BEFORE resuming. Resuming first
+        // meant the machine ran on with this client's breakpoints still armed
+        // until the socket actually closed, and stopping at one of them then
+        // left it halted with the session already marked inactive -- so the
+        // socket cleanup would not resume it either.
+        dap_release_session_state();
         // Resume only when there is no interactive debugger UI to drive the run
         // state; otherwise leave it as the user left it (see disconnect_client).
         if (currentMode == DMODE_STOP && !(debug_window_enabled && debugger_enabled)) {
@@ -2331,6 +2339,35 @@ static int dispatch_dap(const char *json_body) {
 
 // ─── Connection management ──────────────────────────────────────────
 
+// Everything the session installed in the machine. Run before resuming, so a
+// breakpoint set by a client that has gone cannot stop a headless emulator with
+// nobody left to notice.
+static void dap_release_session_state(void) {
+    for (int i = 0; i < num_dap_bps; i++) {
+        if (dap_bps[i].verified && !dap_bps[i].external &&
+            !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
+            debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+            debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
+        }
+    }
+    num_dap_bps = 0;
+    for (int i = 0; i < num_func_bps; i++)
+        if (!func_bp_external[i])
+            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
+              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
+    num_func_bps = 0;
+    for (int i = 0; i < num_instr_bps; i++)
+        if (!instr_bp_external[i])
+            { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
+              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY); }
+    num_instr_bps = 0;
+    dap_clear_own_watchpoints(true);
+    // A step-over or step-out still in flight has a breakpoint of its own.
+    DEBUGCancelStep();
+    dap_stop_on_entry = false;
+    dap_stop_announced = false;
+}
+
 static void disconnect_client(void) {
     if (client_sock != SOCKET_INVALID) {
         CLOSE_SOCKET(client_sock);
@@ -2342,31 +2379,9 @@ static void disconnect_client(void) {
         // process.
         recv_buf_len = 0;
         recv_buf[0] = '\0';
-        // Remove any breakpoints that were set via DAP so the emu doesn't
-        // keep hitting stale ones after the client goes away. All four kinds:
-        // leaving the function, instruction or data ones armed would halt the
-        // machine later for a session that no longer exists.
-        for (int i = 0; i < num_dap_bps; i++) {
-            if (dap_bps[i].verified && !dap_bps[i].external &&
-                !server_bp_wanted_elsewhere(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank, 0, i)) {
-                debug_bp_remove(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
-                debug_bp_forget(dap_bps[i].addr, dap_bps[i].bank, dap_bps[i].x16Bank);
-            }
-        }
-        num_dap_bps = 0;
-        for (int i = 0; i < num_func_bps; i++)
-            if (!func_bp_external[i])
-            { debug_bp_remove(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(func_bp_addrs[i], func_bp_banks[i], DEBUG_BANK_ANY); }
-        num_func_bps = 0;
-        for (int i = 0; i < num_instr_bps; i++)
-            if (!instr_bp_external[i])
-            { debug_bp_remove(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY);
-              debug_bp_forget(instr_bp_addrs[i], instr_bp_banks[i], DEBUG_BANK_ANY); }
-        num_instr_bps = 0;
-        dap_clear_own_watchpoints(true);
-        dap_stop_on_entry = false;
-        dap_stop_announced = false;
+        // Everything the session installed goes before anything else, so a
+        // breakpoint it set cannot stop a machine it is no longer watching.
+        dap_release_session_state();
         dap_seq = 1;
         printf("[dap] Client disconnected\n");
 
@@ -2591,6 +2606,14 @@ int debug_server_poll(void) {
 }
 
 void debug_server_note_resumed(void) {
+    // A resume the client did not ask for -- someone pressed F5 or F10 in the
+    // SDL debug window while a session was attached. It is still watching a
+    // machine it believes is halted, so tell it. Resumes that came from a DAP
+    // request have already sent their own event and cleared the flag.
+    if (dap_stop_announced && server_enabled && client_sock != SOCKET_INVALID) {
+        send_continued_event();
+        return;   // send_continued_event() clears the flag
+    }
     dap_stop_announced = false;
 }
 

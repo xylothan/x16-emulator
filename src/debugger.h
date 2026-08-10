@@ -36,6 +36,11 @@ void DEBUGContinue(void);                   // resume free-run
 void DEBUGStepInto(void);                   // one instruction, then stop
 void DEBUGStepOver(void);                   // step over JSR/JSL; else single-step
 void DEBUGStepOut(void);                    // run to the current routine's return
+
+// Abandon a step-over/step-out that is still running. Its breakpoint is the
+// debugger's own, so nothing else can retract it -- and left armed it stops the
+// machine later for a session that has gone away.
+void DEBUGCancelStep(void);
 void DEBUGPause(void);                      // halt now
 void DEBUGRunTo(uint16_t pc, uint8_t bank); // run until (pc,bank), then stop
 bool DEBUGIsRunning(void);
