@@ -565,10 +565,9 @@ build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
 
     for (uint16_t line = 0; line < lines; ++line) {
         uint8_t  r[7];
-        uint16_t eff_y     = 0;
         bool     enabled   = false;
         uint16_t layer_row = 0;
-        if (!video_get_layer_line_state((uint8_t)layer, line, r, &eff_y, &enabled, &layer_row))
+        if (!video_get_layer_line_state((uint8_t)layer, line, r, nullptr, &enabled, &layer_row))
             continue;
         if (!enabled)
             continue;
@@ -589,10 +588,9 @@ build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
         // Which row of the layer image this scanline showed. Taken from the
         // renderer rather than recomputed here: the renderer applies VSCROLL
         // and the layer-height mask from a different register generation than
-        // the layout registers above, and in bitmap mode uses a different
-        // expression again -- so deriving it here would be wrong in exactly
-        // the raster-split case this path exists to show. Used unconditionally
-        // now, including bitmap: video.c records whichever rule applied.
+        // the layout registers above, so deriving it from `r` would be off by
+        // whatever the scroll changed mid-frame -- in exactly the raster-split
+        // case this path exists to show.
         const int ly = (int)layer_row;
         if (ly < 0 || ly >= MAX_LAYER_ROWS || out.valid[ly])
             continue; // first scanline to show this row wins
