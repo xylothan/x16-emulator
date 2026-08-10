@@ -42,6 +42,28 @@ static const char *k_dbg =
 	"sym\tid=1,name=\"_helper\",addrsize=absolute,size=3,scope=0,def=0,val=0x000811,type=lab\n"
 	"mod\tid=0,name=\"main.o\",file=0\n";
 
+// Two loads of the same module where an equate's value changed. Nothing prunes
+// equates, and the lookup returns the first match, so appending rather than
+// replacing lets the old value win for the rest of the session.
+static const char *k_dbg_equ_v1 =
+	"version\tmajor=2,minor=0\n"
+	"file\tid=0,name=\"equ.s\",size=10,mtime=0x00000000,mod=0\n"
+	"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
+	"span\tid=0,seg=0,start=0,size=16,type=0\n"
+	"line\tid=0,file=0,line=1,span=0\n"
+	"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+	"sym\tid=1,name=\"RAM_BANK_LEVEL\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+	"mod\tid=0,name=\"equ.o\",file=0\n";
+
+static const char *k_dbg_equ_v2 =
+	"version\tmajor=2,minor=0\n"
+	"file\tid=0,name=\"equ.s\",size=10,mtime=0x00000000,mod=0\n"
+	"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro,oname=\"e.prg\"\n"
+	"span\tid=0,seg=0,start=0,size=16,type=0\n"
+	"line\tid=0,file=0,line=1,span=0\n"
+	"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x00BEEF,type=equ\n"
+	"sym\tid=1,name=\"RAM_BANK_LEVEL\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
+	"mod\tid=0,name=\"equ.o\",file=0\n";
 static char *
 write_temp(const char *contents, const char *leaf)
 {
@@ -437,6 +459,35 @@ main(void)
 
 			dbg_info_free();
 			remove(bpath);
+		}
+	}
+	// ── A reloaded equate replaces the old value ────────────────────────────
+	// Nothing prunes equates, and the lookup returns the FIRST match, so
+	// appending on reload would let a value from a module swapped out long ago
+	// win for the rest of the session -- and the bank equates seed which RAM
+	// bank a segment lives in, so a stale one mislabels code.
+	{
+		dbg_info_free();
+		char *p1 = write_temp(k_dbg_equ_v1, "x16_dbg_info_equ.dbg");
+		if (!p1) {
+			check(false, "could not write the equate fixture");
+		} else {
+			check(dbg_info_load(p1) == 0, "loads a module with equates");
+			dbg_addr_t v = 0;
+			check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+			      "reads an equate's value");
+
+			// The same module rebuilt, with the constant moved.
+			char *p2 = write_temp(k_dbg_equ_v2, "x16_dbg_info_equ.dbg");
+			if (p2) {
+				dbg_info_unload_range(0x0801, 0x0810);
+				check(dbg_info_load(p2) == 0, "reloads it after a rebuild");
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0xBEEF,
+				      "and the new value replaces the old one");
+			}
+			remove(p1);
+			dbg_info_free();
 		}
 	}
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
