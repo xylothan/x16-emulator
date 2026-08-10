@@ -1300,8 +1300,28 @@ render_line(uint16_t y, float scan_pos_x)
 	// return early, and publishing there would hand the VERA panel state for
 	// scanlines whose pixels were never produced.
 	if (y < SCREEN_HEIGHT) {
-		// "Enabled" here has to mean "this layer actually reached the screen on
-		// this line", not just "the layer bit is set in DC_VIDEO". Outside the
+		// render_line() runs several times per scanline, once per compositor
+		// interval, and the trailing intervals cover horizontal blanking and
+		// draw no pixels at all. Capturing on every call let the last of those
+		// -- carrying register writes made during blanking, after the visible
+		// part of the line was already drawn -- overwrite the snapshot that
+		// described what was actually on screen.
+		//
+		// So: the first interval of a line that really puts pixels down is the
+		// one recorded, and later intervals leave it alone. The line is marked
+		// invalid when it begins and only becomes valid once something has been
+		// captured, so a line that never draws reads as "no data" rather than
+		// holding last frame's.
+		static int  capture_line = -1;
+		static bool capture_done = false;
+		if (capture_line != (int)y) {
+			capture_line        = (int)y;
+			capture_done        = false;
+			line_state_valid[y] = false;
+		}
+
+		// "Enabled" has to mean "this layer actually reached the screen on this
+		// line", not just "the layer bit is set in DC_VIDEO". Outside the
 		// active window the compositor fills the line with the border colour
 		// and ignores the layers entirely (see the border branch below), and
 		// with out_mode 0 there is no output at all. Publishing those lines as
@@ -1310,36 +1330,50 @@ render_line(uint16_t y, float scan_pos_x)
 		// so a register change during the top border decoded the visible row
 		// with the wrong registers.
 		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
-		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
-		line_eff_y[y]         = eff_y;
-		line_layer_enabled[y] = line_displayed
-			? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
-			: 0;
-		for (uint8_t l = 0; l < 2; l++) {
-			const struct video_layer_properties *p1 = &prev_layer_properties[1][l];
-			if (p1->bitmap_mode) {
-				// render_layer_line_bitmap() indexes with eff_y % tileh from
-				// generation [1] -- a different generation AND a different
-				// expression from the tile/text path, so the row has to be
-				// computed the same way the renderer chose to compute it.
-				line_layer_row[y][l] = p1->tileh ? (uint16_t)(eff_y % p1->tileh) : 0;
-				// It also takes the palette offset from the LIVE register
-				// rather than either delayed generation, so the delayed copy
-				// would report a raster palette change two lines late.
-				line_reg_layer[y][l][4] = (uint8_t)((line_reg_layer[y][l][4] & 0xF0)
-				                                    | (reg_layer[l][4] & 0x0F));
-			} else {
-				line_layer_row[y][l] =
-					(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+
+		// Does this interval put any layer pixels on screen? Same clamping the
+		// compositor applies below. A vertically-bordered line has no visible
+		// interval to wait for, so it is recorded immediately as "nothing
+		// displayed" -- which is the truth about it, and keeps it from being
+		// left invalid and read as stale.
+		const uint16_t h0 = hstart < 640 ? hstart : 640;
+		const uint16_t h1 = hstop  < 640 ? hstop  : 640;
+		const bool     draws_pixels = (s_pos_x > s_pos_x_p) &&
+		                              (MAX(h0, s_pos_x_p) < (h1 < s_pos_x ? h1 : s_pos_x));
+
+		if (!capture_done && (!line_displayed || draws_pixels)) {
+			capture_done = true;
+			memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
+			line_eff_y[y]         = eff_y;
+			line_layer_enabled[y] = line_displayed
+				? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
+				: 0;
+			for (uint8_t l = 0; l < 2; l++) {
+				const struct video_layer_properties *p1 = &prev_layer_properties[1][l];
+				if (p1->bitmap_mode) {
+					// render_layer_line_bitmap() indexes with eff_y % tileh
+					// from generation [1] -- a different generation AND a
+					// different expression from the tile/text path, so the row
+					// has to be computed the way the renderer computes it.
+					line_layer_row[y][l] = p1->tileh ? (uint16_t)(eff_y % p1->tileh) : 0;
+					// It also takes the palette offset from the LIVE register
+					// rather than either delayed generation, so the delayed
+					// copy would report a raster palette change two lines late.
+					line_reg_layer[y][l][4] = (uint8_t)((line_reg_layer[y][l][4] & 0xF0)
+					                                    | (reg_layer[l][4] & 0x0F));
+				} else {
+					line_layer_row[y][l] =
+						(uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+				}
 			}
-		}
-		line_state_valid[y]   = true;
-		// Progressive modes draw only the even line of each pair, so the odd
-		// one was never rendered. Marked invalid rather than filled in: the
-		// contract is "what this scanline showed", and inventing a row for a
-		// line the beam never drew is how a debug view starts lying.
-		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
-			line_state_valid[y + 1] = false;
+			line_state_valid[y] = true;
+			// Progressive modes draw only the even line of each pair, so the
+			// odd one was never rendered. Marked invalid rather than filled in:
+			// the contract is "what this scanline showed", and inventing a row
+			// for a line the beam never drew is how a debug view starts lying.
+			if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+				line_state_valid[y + 1] = false;
+			}
 		}
 	}
 
