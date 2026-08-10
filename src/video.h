@@ -16,6 +16,7 @@ void video_reset(void);
 bool video_step(float mhz, float steps, bool midline);
 bool video_update(void);
 void video_present_no_input(void);
+void video_repaint_only(void);
 void video_end(void);
 bool video_get_irq_out(void);
 void video_save(SDL_RWops *f);

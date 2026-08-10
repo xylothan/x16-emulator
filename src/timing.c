@@ -244,22 +244,34 @@ timing_update_ex(bool may_sleep)
 		// wait into slices and let the host breathe between them.
 		//
 		// SDL_PumpEvents() dispatches the OS message queue without dequeuing
-		// anything, and video_present_no_input() repaints without touching the
-		// event queue, so input still arrives intact at the next real poll.
-		// The threshold is above one frame's worth, so pacing at the machine's
-		// own clock takes the single-sleep path exactly as before.
+		// anything, and video_repaint_only() re-presents the existing frame
+		// without touching the event queue or the recorder, so input still
+		// arrives intact at the next real poll. The threshold is above one
+		// frame's worth, so pacing
+		// at the machine's own clock takes the single-sleep path exactly as
+		// before.
+		//
+		// The wait is re-derived from the clock on every slice rather than
+		// counted down from a snapshot. Sleeping may overshoot, the repaint
+		// between slices costs real time, and SDL_PumpEvents() can hand the
+		// thread to the OS -- on Windows a title-bar drag enters a modal loop
+		// that runs the emulator itself and re-bases this very clock. Counting
+		// down a local would then sleep off a surplus that had already been
+		// spent, freezing the machine for seconds just after a drag: the exact
+		// artefact this loop exists to avoid.
 		if (diff_time > THROTTLE_SLICE_THRESHOLD_US) {
-			while (diff_time > 0) {
-				const int64_t chunk = diff_time > THROTTLE_SLICE_US
-				                          ? THROTTLE_SLICE_US
-				                          : diff_time;
-				usleep(chunk);
-				diff_time -= chunk;
-				if (diff_time > 0) {
-					SDL_PumpEvents();
-					video_present_no_input();
-				}
+			for (;;) {
+				const int64_t left = scaled_emulated_us()
+				                   - (int64_t)(SDL_GetTicks() - sdlTicks_base) * 1000;
+				if (left <= 0)
+					break;
+
+				usleep(left > THROTTLE_SLICE_US ? THROTTLE_SLICE_US : left);
+
+				SDL_PumpEvents();
+				video_repaint_only();
 			}
+			diff_time = 0;
 		} else {
 			if (diff_time >= 1000000) {
 				sleep(diff_time / 1000000);
