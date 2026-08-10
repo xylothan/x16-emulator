@@ -1124,6 +1124,58 @@ main(void)
 		}
 	}
 
+	// A file that opens but parses to nothing must not take the previous
+	// generation with it. Sweeping the old equates before reading meant an
+	// empty or corrupt rebuild silently deleted them and still reported
+	// success -- the emulator writes these files while a program is running,
+	// so a half-written one is a real state, not a hypothetical.
+	{
+		dbg_info_free();
+		static const char *k_tx_good =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"tx.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+			"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"mod\tid=0,name=\"tx.o\",file=0\n";
+		char txp[512];
+		char *t3 = write_temp(k_tx_good, "x16_dbg_info_tx.dbg");
+		if (!t3) {
+			check(false, "could not write the transactional fixture");
+		} else {
+			snprintf(txp, sizeof txp, "%s", t3);
+			check(dbg_info_load(txp) == 0, "loads a module with equates");
+			dbg_addr_t v = 0;
+			check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+			      "and reads one back");
+
+			// The same path, rebuilt empty -- as a truncated write leaves it.
+			if (write_temp("", "x16_dbg_info_tx.dbg")) {
+				dbg_info_load(txp);
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "an empty rebuild does not delete what still works");
+				const char *f = NULL;
+				int         l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "and the bank it seeded survives too");
+			}
+
+			// And a file of the right shape but no recognisable records.
+			if (write_temp("nonsense\nmore nonsense\n", "x16_dbg_info_tx.dbg")) {
+				dbg_info_load(txp);
+				v = 0;
+				check(dbg_info_equate_to_value("SCORE", &v) && v == 0x1234,
+				      "nor does an unparseable one");
+			}
+			remove(txp);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

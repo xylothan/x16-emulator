@@ -99,6 +99,7 @@ typedef struct {
 	char *name;
 	int   bank;
 	int   owner;      /* which .dbg declared it; see dbg_owner_intern() */
+	unsigned gen;     /* which parse of that .dbg produced it */
 } dbg_bank_equ_t;
 
 static dbg_bank_equ_t  *bank_equs;
@@ -115,6 +116,7 @@ typedef struct {
 	char    *name;
 	dbg_addr_t val;
 	int      owner;   /* which .dbg declared it; see dbg_owner_intern() */
+	unsigned gen;     /* which parse of that .dbg produced it */
 } dbg_equ_t;
 
 static dbg_equ_t       *equs;
@@ -333,6 +335,9 @@ static char **owners      = NULL;
 static int    owner_count = 0;
 static int    owner_cap   = 0;
 static int    cur_owner   = -1;
+/* Bumped per parse, so records written by the parse in progress can be told
+ * from ones the same module left behind last time. */
+static unsigned cur_gen   = 0;
 
 static int dbg_owner_intern(const char *path)
 {
@@ -357,16 +362,19 @@ static int dbg_owner_intern(const char *path)
 	return owner_count++;
 }
 
-/* Drop every equate belonging to one module. Called when that module is about
- * to be re-parsed, so what it declares now is all that survives. Replacing them
- * one by one as they are parsed is not enough: an equate the rebuilt file no
- * longer declares would never be visited, and would go on seeding banks and
- * answering lookups on behalf of a module that has stopped defining it. */
-static void forget_owner_equates(int owner)
+/* Drop the equates a module declared in an earlier generation. Called once the
+ * file has been read, so a file that turned out to be unreadable or unparseable
+ * leaves the previous generation intact. Replacing them one by one as they are
+ * parsed is not enough on its own: an equate the rebuilt file no longer
+ * declares would never be visited, and would go on seeding banks and answering
+ * lookups on behalf of a module that has stopped defining it. */
+static void drop_stale_equates(int owner, unsigned gen)
 {
+	if (owner < 0)
+		return;
 	int w = 0;
 	for (int i = 0; i < equ_count; i++) {
-		if (equs[i].owner == owner) {
+		if (equs[i].owner == owner && equs[i].gen != gen) {
 			free(equs[i].name);
 			continue;
 		}
@@ -378,7 +386,7 @@ static void forget_owner_equates(int owner)
 
 	w = 0;
 	for (int i = 0; i < bank_equ_count; i++) {
-		if (bank_equs[i].owner == owner) {
+		if (bank_equs[i].owner == owner && bank_equs[i].gen != gen) {
 			free(bank_equs[i].name);
 			continue;
 		}
@@ -558,7 +566,9 @@ static void parse_sym_record(const char *p)
 				 * re-derived on every load, the first module's own segments
 				 * would then be re-seeded from a value it never declared. */
 				for (int i = 0; i < bank_equ_count; i++) {
-					if (bank_equs[i].owner == cur_owner && bank_equs[i].name &&
+					if (bank_equs[i].owner == cur_owner &&
+					    bank_equs[i].gen == cur_gen &&
+					    bank_equs[i].name &&
 					    !strcasecmp(bank_equs[i].name, name)) {
 						free(bank_equs[i].name);
 						bank_equs[i].name = name;   /* takes ownership */
@@ -570,6 +580,7 @@ static void parse_sym_record(const char *p)
 				bank_equs[bank_equ_count].name  = name;   /* takes ownership */
 				bank_equs[bank_equ_count].bank  = (int)val;
 				bank_equs[bank_equ_count].owner = cur_owner;
+				bank_equs[bank_equ_count].gen   = cur_gen;
 				bank_equ_count++;
 				return;
 			}
@@ -585,7 +596,8 @@ static void parse_sym_record(const char *p)
 			 * replacing across them would destroy one of the two outright,
 			 * since nothing restores it when the other module unloads. */
 			for (int i = 0; i < equ_count; i++) {
-				if (equs[i].owner == cur_owner && equs[i].name &&
+				if (equs[i].owner == cur_owner && equs[i].gen == cur_gen &&
+				    equs[i].name &&
 				    !strcasecmp(equs[i].name, name)) {
 					free(equs[i].name);
 					equs[i].name = name;   /* takes ownership */
@@ -597,6 +609,7 @@ static void parse_sym_record(const char *p)
 			equs[equ_count].name  = name;   /* takes ownership */
 			equs[equ_count].val   = (dbg_addr_t)val;
 			equs[equ_count].owner = cur_owner;
+			equs[equ_count].gen   = cur_gen;
 			equ_count++;
 			return;
 		}
@@ -803,25 +816,33 @@ int dbg_info_load(const char *path)
 	// Per load: this file's `file` IDs mean nothing to the next one.
 	file_alias_count = 0;
 
-	// Records deduplicated below are only pooled with others from this same
-	// .dbg; see dbg_owner_intern(). An intern failure yields -1; loads that hit
-	// it share that value, so under memory exhaustion two modules can still
-	// pool. Not worth guarding against -- nothing else survives that condition
-	// either.
+	// Records deduplicated below are pooled only with others from this same
+	// .dbg; see dbg_owner_intern(). Interning can only fail on allocation
+	// failure, and carrying on with -1 would pool this module with every other
+	// load that failed the same way -- and, worse, hand that shared identity to
+	// the generation sweep below, which would then discard all of them. Refuse
+	// the load instead; nothing here is destructive yet.
 	cur_owner = dbg_owner_intern(path);
+	if (cur_owner < 0) {
+		fclose(f);
+		fprintf(stderr, "dbg_info: out of memory loading '%s'\n", path);
+		return -1;
+	}
 
-	// Everything this module previously declared is discarded before re-reading
-	// it, so an equate the rebuilt file has dropped or renamed does not outlive
-	// it. The replacement loops in parse_sym_record() then only ever match
-	// records added by this same parse, which is what keeps the last definition
-	// in a file winning over an earlier one in it.
-	forget_owner_equates(cur_owner);
+	// Equates this module declared before are left in place while the file is
+	// read, and dropped only once it has been read to the end. Sweeping them
+	// first meant an empty or corrupt file -- one that opens fine and then
+	// parses to nothing -- silently deleted the previous generation and still
+	// reported success. Records from this parse are tagged with a new
+	// generation so the two can be told apart while both are present.
+	cur_gen++;
 
 	// `line` records are resolved through the alias only after the whole file
 	// is read, so a `line` that precedes its `file` still lands on the right
 	// record. cc65 emits them in the other order today, but nothing promises
 	// that, and getting it wrong silently drops source lines.
 	int line_first = line_count;
+	int records    = 0;
 
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
@@ -838,20 +859,41 @@ int dbg_info_load(const char *path)
 
 		if (strncmp(p, "file", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_file_record(p + 4);
+			records++;
 		} else if (strncmp(p, "seg", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
 			parse_seg_record(p + 3);
+			records++;
 		} else if (strncmp(p, "span", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_span_record(p + 4);
+			records++;
 		} else if (strncmp(p, "line", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
 			parse_line_record(p + 4);
+			records++;
 		} else if (strncmp(p, "sym", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
 			parse_sym_record(p + 3);
+			records++;
 		}
 		/* Other record types (version, info, scope, …) are silently skipped. */
 	}
 
 	fclose(f);
 	free(buf);
+
+	// A file that opened and then yielded nothing usable is not a description
+	// of this module -- it is most likely one being rewritten underneath us,
+	// since these are produced by the assembler while the emulator runs. Report
+	// the failure and leave the previous generation alone. The address map is
+	// still rebuilt below, because it was cleared on the way in and everything
+	// else that was loaded still needs it.
+	if (records == 0) {
+		fprintf(stderr, "dbg_info: no usable records in '%s'\n", path);
+		build_addr_map();
+		return -1;
+	}
+
+	// The file has been read, so this generation is what the module declares
+	// now. Anything it declared last time and did not declare again goes.
+	drop_stale_equates(cur_owner, cur_gen);
 
 	// Now that every `file` record has been seen, turn this load's raw file IDs
 	// into the records that actually describe them.
