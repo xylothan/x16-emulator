@@ -915,6 +915,108 @@ main(void)
 		}
 	}
 
+	// A rebuilt module that no longer declares an equate must not go on
+	// declaring it. Replacing equates one by one as they are parsed cannot see
+	// this: the record that needs removing is never visited.
+	{
+		dbg_info_free();
+		static const char *k_gone_v1 =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"gone.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"GONE\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
+			"sym\tid=1,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
+			"mod\tid=0,name=\"gone.o\",file=0\n";
+		// Same module, rebuilt with both equates removed.
+		static const char *k_gone_v2 =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"gone.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"GONE\",start=0x000800,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"mod\tid=0,name=\"gone.o\",file=0\n";
+		static const char *k_borrower =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"borrow.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"mod\tid=0,name=\"borrow.o\",file=0\n";
+		char *gp = write_temp(k_gone_v1, "x16_dbg_info_gone.dbg");
+		if (!gp) {
+			check(false, "could not write the removed-equate fixture");
+		} else {
+			check(dbg_info_load(gp) == 0, "loads a module with two equates");
+			char *bp = write_temp(k_borrower, "x16_dbg_info_borrow.dbg");
+			if (bp) {
+				check(dbg_info_load(bp) == 0, "loads a borrower with none of its own");
+				const char *f = NULL;
+				int         l = 0;
+				check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+				          == DBG_BANK_RESOLVED,
+				      "which borrows the declared bank");
+
+				char *gp2 = write_temp(k_gone_v2, "x16_dbg_info_gone.dbg");
+				if (gp2) {
+					dbg_info_unload_range(0x0800, 0x080F);
+					check(dbg_info_load(gp2) == 0, "reloads it with the equates removed");
+					dbg_addr_t v = 0;
+					check(!dbg_info_equate_to_value("SCORE", &v),
+					      "and the dropped equate stops resolving");
+					f = NULL;
+					l = 0;
+					check(dbg_info_addr_to_source_banked_ex(0xA000, 3, &f, &l)
+					          != DBG_BANK_RESOLVED,
+					      "and the borrowed bank is not still claimed");
+				}
+				remove(bp);
+			}
+			remove(gp);
+			dbg_info_free();
+		}
+	}
+
+	// Names too long to reduce are refused rather than truncated: a truncated
+	// name compares equal to anything sharing its head, inventing exact matches
+	// the full names do not support.
+	{
+		dbg_info_free();
+		// The equate's target is exactly as long as the squash buffer allows,
+		// so it is accepted. The segment name shares that whole head but runs
+		// past the buffer, so truncating it would make the two compare equal
+		// even though the full names differ.
+		char longseg[200], longequ[160];
+		memset(longseg, 'A', 130);
+		memcpy(longseg + 130, "LEFT", 5);
+		memset(longequ, 'A', 127);
+		longequ[127] = '\0';
+		char buf[1024];
+		snprintf(buf, sizeof buf,
+		         "version\tmajor=2,minor=0\n"
+		         "file\tid=0,name=\"lng.s\",size=10,mtime=0x00000000,mod=0\n"
+		         "seg\tid=0,name=\"%s\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+		         "span\tid=0,seg=0,start=0,size=16,type=0\n"
+		         "line\tid=0,file=0,line=1,span=0\n"
+		         "sym\tid=0,name=\"RAM_BANK_%s\",addrsize=absolute,size=1,scope=0,def=0,val=0x000004,type=equ\n"
+		         "mod\tid=0,name=\"lng.o\",file=0\n",
+		         longseg, longequ);
+		char *lp = write_temp(buf, "x16_dbg_info_long_names.dbg");
+		if (!lp) {
+			check(false, "could not write the long-name fixture");
+		} else {
+			check(dbg_info_load(lp) == 0, "loads a module with over-long names");
+			const char *f = NULL;
+			int         l = 0;
+			check(dbg_info_addr_to_source_banked_ex(0xA000, 4, &f, &l)
+			          != DBG_BANK_RESOLVED,
+			      "and two names that differ past the cutoff do not match");
+			remove(lp);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

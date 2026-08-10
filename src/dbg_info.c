@@ -357,6 +357,38 @@ static int dbg_owner_intern(const char *path)
 	return owner_count++;
 }
 
+/* Drop every equate belonging to one module. Called when that module is about
+ * to be re-parsed, so what it declares now is all that survives. Replacing them
+ * one by one as they are parsed is not enough: an equate the rebuilt file no
+ * longer declares would never be visited, and would go on seeding banks and
+ * answering lookups on behalf of a module that has stopped defining it. */
+static void forget_owner_equates(int owner)
+{
+	int w = 0;
+	for (int i = 0; i < equ_count; i++) {
+		if (equs[i].owner == owner) {
+			free(equs[i].name);
+			continue;
+		}
+		if (w != i)
+			equs[w] = equs[i];
+		w++;
+	}
+	equ_count = w;
+
+	w = 0;
+	for (int i = 0; i < bank_equ_count; i++) {
+		if (bank_equs[i].owner == owner) {
+			free(bank_equs[i].name);
+			continue;
+		}
+		if (w != i)
+			bank_equs[w] = bank_equs[i];
+		w++;
+	}
+	bank_equ_count = w;
+}
+
 /* Maps this load's `file` IDs onto the record that ends up describing them.
  * Needed because a file already known from an earlier load is reused rather than
  * appended, so its ID is not this load's ID plus the usual base. Reset per load.
@@ -777,6 +809,13 @@ int dbg_info_load(const char *path)
 	// pool. Not worth guarding against -- nothing else survives that condition
 	// either.
 	cur_owner = dbg_owner_intern(path);
+
+	// Everything this module previously declared is discarded before re-reading
+	// it, so an equate the rebuilt file has dropped or renamed does not outlive
+	// it. The replacement loops in parse_sym_record() then only ever match
+	// records added by this same parse, which is what keeps the last definition
+	// in a file winning over an earlier one in it.
+	forget_owner_equates(cur_owner);
 
 	// `line` records are resolved through the alias only after the whole file
 	// is read, so a `line` that precedes its `file` still lands on the right
@@ -1207,19 +1246,26 @@ bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *ad
 /*       while RAM bank B is mapped means that segment lives in bank B. */
 /* ------------------------------------------------------------------ */
 
-/* Squash a name for fuzzy comparison: uppercase, drop '_'. */
-static void squash_name(const char *src, char *dst, size_t dstsz)
+/* Squash a name for fuzzy comparison: uppercase, drop '_'. Returns false if the
+ * name did not fit, since a truncated name compares equal to anything sharing
+ * its head and would invent matches that the full names do not support. */
+static bool squash_name(const char *src, char *dst, size_t dstsz)
 {
 	size_t o = 0;
-	for (; src && *src && o + 1 < dstsz; src++) {
+	for (; src && *src; src++) {
 		if (*src == '_')
 			continue;
+		if (o + 1 >= dstsz) {
+			dst[0] = '\0';
+			return false;
+		}
 		char c = *src;
 		if (c >= 'a' && c <= 'z')
 			c = (char)(c - 'a' + 'A');
 		dst[o++] = c;
 	}
 	dst[o] = '\0';
+	return true;
 }
 
 /* Reduce a `RAM_BANK_x` / `BANK_x` / `x_BANK` equate name to the squashed
@@ -1228,22 +1274,37 @@ static bool bank_equ_target(const char *nm, char *out, size_t outsz)
 {
 	if (!nm)
 		return false;
-	char stripped[128];
-	if (!strncmp(nm, "RAM_BANK_", 9))
-		snprintf(stripped, sizeof stripped, "%s", nm + 9);
-	else if (!strncmp(nm, "BANK_", 5))
-		snprintf(stripped, sizeof stripped, "%s", nm + 5);
-	else {
+	const char *body;
+	size_t      blen;
+	if (!strncmp(nm, "RAM_BANK_", 9)) {
+		body = nm + 9;
+		blen = strlen(body);
+	} else if (!strncmp(nm, "BANK_", 5)) {
+		body = nm + 5;
+		blen = strlen(body);
+	} else {
 		size_t l = strlen(nm);
-		if (l > 5 && !strcmp(nm + l - 5, "_BANK"))
-			snprintf(stripped, sizeof stripped, "%.*s", (int)(l - 5), nm);
-		else
+		if (l > 5 && !strcmp(nm + l - 5, "_BANK")) {
+			body = nm;
+			blen = l - 5;
+		} else {
 			return false;
+		}
 	}
-	squash_name(stripped, out, outsz);
+
+	/* Truncating here would silently invent matches: two names sharing a long
+	 * enough head would reduce to the same target and compare exactly equal.
+	 * A name this long is not one of these constants, so refuse it instead. */
+	char stripped[128];
+	if (blen >= sizeof stripped)
+		return false;
+	memcpy(stripped, body, blen);
+	stripped[blen] = '\0';
+
+	if (!squash_name(stripped, out, outsz))
+		return false;
 	return out[0] != '\0';
 }
-
 /* Seed segment banks from `RAM_BANK_x` / `x_BANK` style equates parsed out of
  * the .dbg. Matching is on the squashed names.
  *
@@ -1279,6 +1340,8 @@ static void seed_banks_from_equates(void)
 	 * auto-load path, so a large .dbg must not stall emulation. */
 	char *targets = NULL;
 	if (bank_equ_count > 0) {
+		if ((size_t)bank_equ_count > SIZE_MAX / 128)
+			return;   /* not reachable with real input; the product must not wrap */
 		targets = (char *)malloc((size_t)bank_equ_count * 128);
 		if (!targets)
 			return;   /* leaves banks unknown, which callers report honestly */
@@ -1295,9 +1358,8 @@ static void seed_banks_from_equates(void)
 			continue;
 
 		char have[128];
-		squash_name(segs[i].name, have, sizeof have);
-		if (!have[0])
-			continue;
+		if (!squash_name(segs[i].name, have, sizeof have) || !have[0])
+			continue;   /* truncated names would match things they do not equal */
 		size_t lh = strlen(have);
 
 		/* Candidates are ranked by how good the name match is first and by who
