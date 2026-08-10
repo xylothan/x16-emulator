@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void timing_init();
 void timing_update();
 void timing_update_no_sleep();
@@ -32,5 +36,9 @@ void timing_step_speed(int direction);
 
 // The target as a percentage of the machine's clock, for display.
 int  timing_get_speed_percent(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

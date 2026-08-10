@@ -16,3 +16,5 @@ src/x16edit_E_labels.h
 *.ncb
 *.sdf
 *.opensdf
+
+imgui.ini

@@ -165,11 +165,22 @@ int  debug_wp_add(uint16_t addr, uint16_t len, int x16Bank);
 bool debug_wp_remove(uint16_t addr, int x16Bank);
 void debug_wp_clear_all(void);
 int  debug_wp_count(void);
+// Read-only access to watchpoint `index`, for listing them in a UI. NULL when
+// the index is out of range. The pointer is into the live table, so it is only
+// valid until the next add/remove.
+const struct watchpoint *debug_wp_at(int index);
+// Exact-identity test, the counterpart to debug_wp_covers(). Use this to decide
+// whether a toggle should add or remove, so that the decision and the removal
+// agree on the key.
+bool debug_wp_exists(uint16_t addr, int x16Bank);
 
 // Only fire when the value being written compares true against `value`, so
 // "stop when this becomes zero" does not stop on every other write to it.
 // Returns false if no watchpoint starts at (addr, x16Bank).
 bool debug_wp_set_value(uint16_t addr, int x16Bank, int op, uint8_t value);
+// Remove a value filter set by debug_wp_set_value(), so the watchpoint fires on
+// any write again.
+bool debug_wp_clear_value(uint16_t addr, int x16Bank);
 
 // Temporarily stop a watchpoint firing without forgetting how it was set up.
 bool debug_wp_set_active(uint16_t addr, int x16Bank, bool active);

@@ -157,6 +157,38 @@ static void DEBUGArmResumeSkip(void) {
 }
 
 struct breakpoint stepBreakPoint = { -1, 0, -1 };     // Single step break.
+
+// Interrupt following. followInterrupts makes a step that is interrupted stop
+// at the handler instead of running through it; breakOnInterrupt stops on every
+// interrupt entry, even while free-running. Both default off so normal stepping
+// behaves exactly as before.
+static bool followInterrupts = false;
+static bool breakOnInterrupt = false;
+
+void DEBUGSetFollowInterrupts(bool on) { followInterrupts = on; }
+bool DEBUGGetFollowInterrupts(void)    { return followInterrupts; }
+void DEBUGSetBreakOnInterrupt(bool on) { breakOnInterrupt = on; }
+bool DEBUGGetBreakOnInterrupt(void)    { return breakOnInterrupt; }
+
+// Why execution last stopped. A UI needs this to tell a step apart from an
+// arrival somewhere new: after a step the view should stay put, while a
+// breakpoint or a pause has to re-centre or the highlight lands off-screen.
+// Recorded here rather than in a debug client so it is correct whether or not
+// one is attached. Only ever set to a string literal, so there is nothing to
+// free and no buffer to overrun.
+static const char *lastStopReason = "";
+
+void
+DEBUGSetStopReason(const char *reason)
+{
+	lastStopReason = reason ? reason : "";
+}
+
+const char *
+DEBUGGetStopReason(void)
+{
+	return lastStopReason;
+}
 char cmdLine[64]= "";                                 // command line buffer
 int currentPosInLine= 0;                              // cursor position in the buffer (NOT USED _YET_)
 int currentLineLen= 0;                                // command line buffer length
@@ -214,11 +246,37 @@ int  DEBUGGetCurrentStatus(void) {
 	SDL_Event event;
 	if (currentPC < 0) currentPC = regs.pc;                                      // Initialise current PC displayed.
 
+	// Interrupt following. cpu_irq_take_entered_flag() is true exactly once per
+	// interrupt entry, and at this point the PC is already the handler's first
+	// instruction. "Break on interrupt" stops whenever one is taken; "follow
+	// interrupts" only stops if we were stepping, so that an interrupt landing
+	// in the middle of a step-over/step-out becomes visible instead of being
+	// silently run through.
+	//
+	// The flag is consumed unconditionally -- reading it is what clears it -- so
+	// that a stale entry cannot fire a stop later, after the feature is enabled.
+	{
+		const bool entered = cpu_irq_take_entered_flag();
+		const bool wasStepping = (currentMode == DMODE_STEP) || (stepBreakPoint.pc >= 0);
+		if (entered && (breakOnInterrupt
+		                || (followInterrupts && wasStepping && currentMode != DMODE_STOP))) {
+			currentPC = regs.pc;
+			currentPCBank = regs.k;
+			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+			currentMode = DMODE_STOP;
+			stepBreakPoint.pc = -1;                             // the pending step target is now unreachable
+			stepBreakPoint.bank = 0;
+			stepBreakPoint.x16Bank = -1;
+			DEBUGSetStopReason("interrupt");
+		}
+	}
+
 	// A watchpoint stopped us from inside a store. The instruction that did the
 	// write has now finished, so this is the first point at which regs.pc says
 	// where the CPU actually ended up.
 	if (watchpointStopPending) {
 		watchpointStopPending = false;
+		DEBUGSetStopReason("data breakpoint");
 		currentPC = regs.pc;
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
@@ -230,6 +288,7 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			DEBUGSetStopReason("step");
 		}
 	}
 
@@ -269,6 +328,7 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 		currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+		DEBUGSetStopReason("breakpoint");
 		stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
 		stepBreakPoint.bank = 0;
 		stepBreakPoint.x16Bank = -1;
@@ -276,6 +336,7 @@ int  DEBUGGetCurrentStatus(void) {
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
 		currentMode = DMODE_STOP;
+		DEBUGSetStopReason("user");
 		currentPC = regs.pc;                                     // Set the PC to what it is.
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
@@ -290,13 +351,70 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPCX16Bank = debug_current_x16_bank(currentPC, currentPCBank);
 	}
 
-	if (currentMode != DMODE_RUN) {                                     // Not running, we own the keyboard.
+	// Who owns the UI while the machine is not running. With -imgui and no
+	// -debug the graphical debugger does: it pumps events, repaints, and
+	// decides when to resume. Gated on the window having actually been created
+	// -- if it failed to open there is no control bar to resume from, and
+	// swallowing the loop here would park the machine unrecoverably.
+	const bool imguiOwnsUI = (!debugger_enabled && video_debug_ui_available());
+
+	// DMODE_STOP only, not "not RUN". DMODE_STEP means one instruction has been
+	// asked for and must be executed now: routing it through the pump costs it
+	// the pump's 16ms sleep, and a step stays in DMODE_STEP until the PC
+	// actually moves. Over a WAI the PC does not move for the whole wait, so
+	// stepping one instruction would run at ~60 emulated cycles a second and
+	// take tens of minutes. The classic path below has the same shape: it only
+	// sleeps once currentMode == DMODE_STOP.
+	if (currentMode == DMODE_STOP && imguiOwnsUI) {
+		showDebugOnRender = 0;                                  // no SDL overlay in this mode
+		return video_debug_ui_pump_paused();
+	}
+
+	// The classic text debugger's event pump. Skipped entirely when the ImGui
+	// window owns the UI: it drains the whole SDL queue into the text
+	// debugger's key handler and drops everything else, so letting DMODE_STEP
+	// fall in here destroys every mouse and keyboard event before ImGui or the
+	// machine sees it. That is reachable whenever a step leaves the PC where it
+	// was -- for the duration of a WAI, and permanently on a `JMP *` self-loop,
+	// which would leave the debugger input-dead with no way to quit.
+	if (currentMode != DMODE_RUN && !imguiOwnsUI) {                     // Not running, we own the keyboard.
 		showFullDisplay =                                               // Check showing screen.
 					SDL_GetKeyboardState(NULL)[DBGSCANKEY_SHOW];
 		while (SDL_PollEvent(&event)) {                                 // We now poll events here.
+			// With -debug and -imgui together this loop is the only one
+			// running while halted -- video_update() returns early whenever
+			// the text overlay is on screen -- so it has to feed the graphical
+			// debugger too. Without this the ImGui window stayed on screen but
+			// received no input at all: dead buttons, dead text fields, stale
+			// mouse state. -imgui -bp reaches this combination without asking
+			// for it, since -bp switches the text debugger on.
+			if (video_debug_ui_available()) {
+				video_debug_ui_feed_event(&event);
+				// Events aimed at the debugger window must not also drive the
+				// text debugger's command line.
+				if (video_event_targets_debug_ui(&event)) {
+					if (event.type == SDL_WINDOWEVENT &&
+					    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+						continue;   // closing the debugger must not quit
+					}
+					video_debug_ui_shortcut_key(&event);
+					continue;
+				}
+			}
 			switch(event.type) {
 				case SDL_QUIT:                                  // Time for exit
 					return -1;
+
+				case SDL_WINDOWEVENT:
+					// With the ImGui window open SDL2 no longer synthesises
+					// SDL_QUIT on a window close -- it only does that for the
+					// last window -- so a close arrives here as a bare event.
+					// Dropping it made the emulator window's [X] inert while
+					// the text debugger was on screen under -debug -imgui.
+					if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+						return -1;
+					}
+					break;
 
 				case SDL_KEYDOWN:                               // Handle key presses.
 					DEBUGHandleKeyEvent(event.key.keysym.sym, event.key.keysym.mod & (KMOD_LSHIFT|KMOD_RSHIFT));
@@ -360,6 +478,11 @@ void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
 // *******************************************************************************************
 
 void DEBUGBreakToDebugger(void) {
+	// Default reason for "something broke into the debugger". Set here, before
+	// the mode changes, so no path can leave the previous stop's reason
+	// showing; a caller with something more specific to say (the STP hook)
+	// overrides it immediately after.
+	DEBUGSetStopReason("user");
 	currentMode = DMODE_STOP;
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
@@ -526,7 +649,7 @@ void DEBUGStepOut(void) {                               // run to the return add
 }
 
 void DEBUGPause(void) {
-	DEBUGBreakToDebugger();
+	DEBUGBreakToDebugger();   // records "user"
 }
 
 void DEBUGRunTo(uint16_t pc, uint8_t bank) {

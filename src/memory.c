@@ -235,7 +235,12 @@ real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 				clockticks6502 += 3;
 			}
 			if ((address & 0x01) != 0) { // partial decoding in this range
-				audio_render();
+				// A debug read must not flush audio: audio_render() advances
+				// the render write position, and the "no side effects"
+				// guarantee is what lets the debugger sweep the I/O page.
+				if (!debugOn) {
+					audio_render();
+				}
 				return YM_read_status();
 			}
 			return 0x9f; // open bus read
@@ -533,8 +538,11 @@ emu_write(uint8_t reg, uint8_t value)
 	bool v = value != 0;
 	switch (reg) {
 		// Also told to dbg_load: it follows the debugger by default, and the
-		// machine can switch the debugger on here long after startup.
-		case 0: debugger_enabled = v; dbg_load_note_debugger(v); break;
+		// machine can switch the debugger on here long after startup. The
+		// graphical debugger counts as "a debugger is on" too, so a guest
+		// clearing this register must not switch .dbg loading off underneath
+		// a running -imgui session.
+		case 0: debugger_enabled = v; dbg_load_note_debugger(v || imgui_debugger_enabled); break;
 		case 1: log_video = v; break;
 		case 2: log_keyboard = v; break;
 		case 3: echo_mode = value; break;
