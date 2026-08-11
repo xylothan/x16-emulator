@@ -122,15 +122,24 @@ The opcode is still `$A9`, so the stale anchor survives and wins.
 
 Why it is accepted rather than fixed:
 
-- It cannot happen on the 65C02, where operand widths never vary — so it does
-  not affect the X16's default CPU at all. It needs a 65C816 in native mode.
-- It additionally needs the replacement code to repeat the same opcode byte at
-  the same address *and* to run under a different width regime.
-- The damage is bounded and self-correcting in the usual way: one over-wide
-  line, then re-sync at the next anchor whose opcode does not match.
+- It needs the replacement code to repeat the same opcode byte at the same
+  address, which the one-byte check then cannot see through.
+- The damage is bounded and self-correcting: the stale status keeps propagating
+  until the next *valid* anchor that this line — or another stale one — has not
+  swallowed, and that anchor re-establishes both the boundary and the width. (An
+  anchor whose opcode no longer matches does **not** re-sync anything; it is
+  rejected by `cm_anchor_ok()` and simply stops being evidence.)
 - The alternative — always clamping — costs the far more common case, the
   `.byte $2C` skip idiom, where two overlapping starts are both genuinely real
   and clamping renders a whole known instruction as a fragment.
+
+**Scope: the wrong-*width* flavour is 65C816-only; the swallowing is not.** On a
+65C02 operand widths never vary, so a stale anchor cannot decode wider than the
+new code. But it does not have to: a stale anchor whose opcode byte survived is
+still believed, is still exempt from the interior-anchor clamp, and can still
+cover a fresh start inside it. An old `BIT abs` at `$8000` overlaid by new code
+that also begins `$2C` will swallow a genuine instruction start at `$8001` on
+any CPU. `tests/test_code_map.c` covers both flavours.
 
 **The stale case is not distinguishable from a legitimate one.** The recorded
 state above is byte-for-byte identical to a routine that genuinely executed at
@@ -147,24 +156,31 @@ one wrong answer for another.
 Widening the staleness check — storing two or more bytes per anchor instead of
 one — is also not the clean win it looks like. It would catch *this* example
 (the operand bytes differ), but it is the same class of heuristic, so it only
-narrows the window rather than closing it; and it actively misfires on one-byte
-instructions, which are extremely common (`NOP`, `INX`, `RTS`, …). For those,
-the second byte compared is not part of the instruction at all but the *next*
-instruction's opcode, so changing the following instruction would invalidate a
-perfectly good anchor. Recording the instruction's real length at record time
-would avoid that, but the recording path runs on every executed instruction and
-computing a length there means a decode per instruction.
+narrows the window rather than closing it; replacement code with identical bytes
+stays invisible either way. It also misfires on one-byte instructions, which are
+extremely common (`NOP`, `INX`, `RTS`, …): for those the second byte compared is
+not part of the instruction at all but the *next* instruction's opcode, so
+changing the following instruction would invalidate a perfectly good anchor.
+Storing the instruction's real length would avoid that — it does not need a full
+`disasm()` call, an opcode length table plus the small M/X-dependent set would
+do — but it is per-instruction classification plus another byte of storage per
+address, and it still does not close the identical-bytes hole.
 
 What does resolve it is invalidation keyed on the **write** that replaced the
 code, because that is the event which actually differs between the two cases.
-That does not necessarily mean a hook on every CPU write: the common source of
+That does not necessarily mean a hook on every CPU write: the dominant source of
 stale anchors is a host-side load, and those already funnel through the KERNAL
-LOAD/MACPTR interception in `main.c`, so invalidating the affected address range
-there would cover overlays and second-program loads cheaply. Self-modifying code
-and in-guest decompressors would still need the general write path. Either way
-it is a change to the recording side rather than the disassembly side, and it
-would also close the width-propagation gap above, so if it is ever built both
-should be revisited together.
+LOAD/MACPTR interception in `main.c` (the bytes themselves land in `ieee.c`), so
+even a conservative `code_map_reset()` when an intercepted load completes would
+be sound for that case and needs no range or bank bookkeeping. Targeted range
+invalidation keeps more coverage but is more work. Self-modifying code and
+in-guest decompressors would still need the general write path in `memory.c`.
+Either way it is a change to the recording side rather than the disassembly
+side.
+
+(It would *not* help the PLP/RTI width gap described earlier in this document.
+That one is about status bytes restored from the stack, which is unrelated to
+code being replaced.)
 
 `tests/test_code_map.c` pins the current behaviour under checks labelled
 `KNOWN LIMITATION`, so it is visible rather than folklore. If it is ever fixed

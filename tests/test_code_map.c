@@ -107,6 +107,33 @@ check(bool cond, const char *what)
 	}
 }
 
+// `recorded` is derivable: a row is a verified whole instruction exactly when
+// it is an instruction row AND its start address is a recorded anchor. The
+// field predates the other two and is kept for callers, so the relationship is
+// checked rather than left as a comment -- if it ever stops holding, one of the
+// three is being set wrong.
+static void
+check_line_flags(const code_map_line_t *lines, int n, const char *what)
+{
+	for (int i = 0; i < n; i++) {
+		bool expect = (lines[i].kind == CM_LINE_INSTRUCTION) && lines[i].start_recorded;
+		if (lines[i].recorded != expect) {
+			printf("      line %d at $%04X: recorded=%d kind=%u start_recorded=%d\n",
+			       i, (unsigned)lines[i].addr, (int)lines[i].recorded,
+			       (unsigned)lines[i].kind, (int)lines[i].start_recorded);
+			check(false, what);
+			return;
+		}
+		if (lines[i].kind == CM_LINE_DATA && lines[i].eff_addr != -1) {
+			printf("      line %d at $%04X: data row with eff_addr $%04X\n",
+			       i, (unsigned)lines[i].addr, (unsigned)lines[i].eff_addr);
+			check(false, what);
+			return;
+		}
+	}
+	check(n >= 1, what);
+}
+
 // The property that makes a disassembly window renderable at all: the emitted
 // lines must TILE the range they cover. Every line starts exactly where the
 // previous one ended -- an overlap claims the same byte for two instructions, a
@@ -564,6 +591,7 @@ main(void)
 		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8005,
 		      "still centers on the requested address after truncating");
 		check_tiles(lines, n, "truncating onto an interior anchor leaves no gap");
+		check_line_flags(lines, n, "keeps recorded/kind/start_recorded consistent");
 
 		// Tiling alone would also be satisfied by simply not truncating, so
 		// pin the intent: the recorded start at $8003 is ground truth and must
@@ -746,6 +774,32 @@ main(void)
 		      "KNOWN LIMITATION: the line after it starts past the fresh anchor");
 
 		regs.is65c816 = false;
+	}
+
+	// The same swallowing happens on a 65C02, where no width is involved at
+	// all: it needs only a stale anchor whose opcode byte survived. Here the
+	// old code's BIT is still $2C, so the anchor is believed, is exempt from
+	// the interior clamp, and covers the fresh start the new code has at
+	// $8001. Only the WRONG-WIDTH flavour above is 65C816-specific.
+	{
+		reset_all(); // regs.is65c816 stays false
+
+		const uint8_t old_bit[] = { 0x2C, 0x8D, 0x12 }; // bit $128d
+		poke(0x8000, old_bit, sizeof(old_bit));
+		code_map_record(0x8000, 0, 0, 0, regs.status);
+
+		// Overlay: same $2C opcode byte, but the new program really starts an
+		// instruction at $8001.
+		const uint8_t new_bit[] = { 0x2C, 0xA9, 0xEA };
+		poke(0x8000, new_bit, sizeof(new_bit));
+		code_map_record(0x8001, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 3 && lines[1].addr == 0x8003,
+		      "KNOWN LIMITATION: stale-anchor swallowing is not 65C816-specific");
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────

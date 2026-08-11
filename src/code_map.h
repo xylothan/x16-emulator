@@ -43,9 +43,10 @@
 // code, without needing a hook on every memory write. It is a one-byte check,
 // not a proof: replacement code that happens to repeat the same opcode byte at
 // the same address keeps the old anchor, and with it the old recorded status.
-// On a 65C816 that stale status can imply a different operand width, so such a
-// line can decode wider than the new code really is. Bounded -- the next anchor
-// re-syncs it -- and impossible on the 65C02, where widths never vary. See
+// Such an anchor is still believed, so it can cover a genuine instruction start
+// in the new code; and on a 65C816 its stale status can also make the line
+// decode wider than the new code really is. Bounded -- the next valid anchor it
+// has not swallowed re-syncs both -- and pinned by tests. See
 // docs/code-map-width-propagation.md.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and
