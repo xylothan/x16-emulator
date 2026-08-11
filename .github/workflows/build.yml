@@ -304,12 +304,15 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
+          # setup-msys2 handles the mandatory process restart when updating
+          # msys2-runtime. A raw `pacman -Syu` cannot be retried in a shell:
+          # it deliberately terminates that shell mid-upgrade.
+          update: true
           path-type: ${{ matrix.path_type }}
       - name: Update and install MSYS2 dependencies
         run: |
           for attempt in 1 2 3; do
-            if pacman -Syu --noconfirm &&
-               pacman -S --needed --noconfirm make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake; then
+            if pacman -S --needed --noconfirm make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake; then
               exit 0
             fi
             echo "::warning::pacman attempt $attempt/3 failed"
