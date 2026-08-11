@@ -46,10 +46,18 @@ void video_debug_ui_feed_event(const SDL_Event *ev);
 // false if the line is out of range or has not been rendered yet. Every
 // out-parameter is optional.
 //
-// Accurate for the common shape of a raster split, approximate in narrower ones
-// -- notably bitmap-mode palette changes and mid-line register writes.
-// docs/raster-split-decode.md lists every known limit and what an exact
-// implementation would need; read it before extending this.
+// Accurate for the common shape of a raster split -- a program rewriting
+// MAPBASE/TILEBASE/scroll from a line IRQ so that horizontal bands differ --
+// and approximate in narrower ones. Known limits: out_regs is the layout
+// generation, one behind the generation the row was computed from, so a scroll
+// change at the split misleads anything derived from out_regs alone; bitmap
+// mode takes its palette offset from the live registers, so a palette change at
+// a split reports up to two lines late; there is one snapshot per scanline and
+// the last render_line() call wins, so a mid-line change is not represented;
+// settlement is tracked per line rather than per layer; and a split that
+// changes tile geometry falls back to the live registers for those rows.
+// Getting these exact means having each render_layer_line_* publish the state
+// it actually used, rather than reconstructing it from outside as this does.
 bool video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
                                 uint16_t *out_eff_y, bool *out_enabled,
                                 uint16_t *out_layer_row);

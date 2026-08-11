@@ -314,8 +314,7 @@ An editor attached over DAP is the exception, because it keeps its own list:
 This is a limitation of the protocol rather than an oversight: in DAP the client owns its
 breakpoint list and is expected to be authoritative about it. If you are driving the emulator
 from an editor, the least surprising approach is to manage breakpoints from the editor and treat
-F9 as a local, temporary override. See [`docs/breakpoint-ownership.md`](docs/breakpoint-ownership.md)
-for the reasoning.
+F9 as a local, temporary override.
 
 ### The ImGui debugger
 
@@ -441,8 +440,7 @@ leaves your choice alone. `-wp <address>[,<length>]` works the same way for writ
 The breakpoint belongs to the command line, not to whichever debugger displays it. It shows up
 in the Breakpoints panel and to a DAP client, and neither can take it away — a client
 disconnecting leaves it exactly where you put it. Deleting it is a deliberate act: `F9` on the
-line, or the bin in the Breakpoints panel. See
-[`docs/breakpoint-ownership.md`](docs/breakpoint-ownership.md).
+line, or the bin in the Breakpoints panel.
 
 ### Source-level debugging with cc65
 

@@ -58,10 +58,8 @@ void debug_server_retry_unverified_breakpoints(void);
 // Breakpoints are owned, not reconstructed. debug_core records which of -bp,
 // the SDL debugger's F9, and the four kinds this file can ask for wants each
 // entry, so a client session can clear everything it asked for with
-// debug_bp_clear_owner() and nothing else is disturbed. This replaced an
-// ownership model rebuilt from outside the core (ext_keys[],
-// server_bp_wanted_elsewhere(), per-table `external` flags), which is where
-// most of this file's defects were found. See docs/breakpoint-ownership.md.
+// debug_bp_clear_owner() and nothing else is disturbed. Ask the core; do not
+// rebuild that ownership out here from per-table flags or address refcounts.
 //
 // KNOWN LIMITATION, and a deliberate one: the core is the single source of
 // truth for what is ARMED, but each front end owns its own VIEW. A breakpoint
