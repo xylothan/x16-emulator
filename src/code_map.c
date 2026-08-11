@@ -346,10 +346,11 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 //     truncate onto it rather than stepping over the very ground truth this
 //     file exists to collect.
 //
-// Either clamp can leave the line shorter than the caller's boundary. The line
-// then still says what it decoded, so `text` can describe more bytes than
-// `size` covers -- deliberate, and always paired with `recorded == false` on
-// the guessed line. Covering the leftover bytes is the caller's job; see the
+// Either clamp can leave the line shorter than the decode wanted. Such a line
+// is reported with `recorded == false` and no effective address, because it no
+// longer describes a whole instruction; `text` still shows what the decode
+// attempted, which is the most useful thing to draw for bytes that cannot be
+// tiled any other way. Covering the leftover bytes is the caller's job; see the
 // tiling loop in code_map_disasm_window().
 static int
 cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
@@ -358,7 +359,8 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	int16_t xb = cm_x16bank_for(addr, rambank, rombank);
 
 	int32_t eff;
-	int     sz = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+	int     sz      = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+	int     decoded = sz;
 
 	if (max_size > 0 && sz > max_size)
 		sz = max_size;
@@ -369,6 +371,18 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 			sz = i;
 			break;
 		}
+	}
+
+	// A line the decode did not get to finish is not a faithful record of an
+	// instruction: `text` describes more bytes than `size` covers, and `eff`
+	// was computed from bytes the line does not own -- for a clamped line those
+	// bytes are the NEXT instruction's opcode. Say so, instead of letting a
+	// consumer colour the row as verified ground truth and offer an effective
+	// address assembled from someone else's bytes. `recorded` describes the
+	// line, not merely its start address.
+	if (sz < decoded) {
+		recorded = false;
+		eff      = -1;
 	}
 
 	ln->addr     = addr;
@@ -521,11 +535,9 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 		a                   = an.addr;
 	}
 
-	int n = 0;
-
-	// Phase B — render the preceding instructions lowest-first, tiling the
-	// range the backward walk resolved: each line must start exactly where the
-	// previous one ended, or the caller cannot draw the result.
+	// Phase B — render the preceding instructions, tiling the range the backward
+	// walk resolved: each line must start exactly where the previous one ended,
+	// or the caller cannot draw the result.
 	//
 	// The walk fixes where each instruction ENDS (the next line's start), but
 	// the fill can still land short of it or, left unchecked, past it:
@@ -535,30 +547,57 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	//     instruction, which is right but leaves the remaining bytes uncovered.
 	// Capping each fill at the distance to the boundary kills the overlap, and
 	// looping until the boundary is reached exactly kills the gap. Seeding
-	// run_status from the walk's decision keeps the first line identical to what
-	// the walk resolved; any follow-up line re-resolves its own evidence.
-	for (int i = collected - 1; i >= 0 && n < max_out; i--) {
+	// run_status from the walk's decision keeps the first line consistent with
+	// what the walk resolved; any follow-up line re-resolves its own evidence.
+	//
+	// Because one resolved instruction can now need more than one line, this
+	// resolves them NEAREST-THE-CENTER FIRST and places them backwards from the
+	// end of the reserved region. Filling forwards would spend the buffer on
+	// the furthest context and push `center` -- the address the caller asked to
+	// be centered on -- off the end of a full buffer, which is the one row every
+	// consumer most needs. One slot is always held back for it.
+	code_map_line_t tile[CM_MAX_INSN_LEN];
+	const int       b_cap = max_out > 1 ? max_out - 1 : 0;
+	int             write = b_cap;
+
+	for (int i = 0; i < collected && write > 0; i++) {
 		uint16_t limit      = (i > 0) ? before[i - 1].addr : center;
 		uint16_t a          = before[i].addr;
 		uint8_t  run_status = before[i].status;
 		uint8_t  run_e      = regs.e;
+		int      k          = 0;
+		bool     closed     = false;
 
-		// Terminates unconditionally: every emit covers at least one byte, and
-		// the loop stops the moment the boundary is reached. The `>=` also
-		// means that if a fill ever ignored its cap, this walks no further past
-		// the boundary -- one bad line, not a runaway.
+		// Terminates: every emit covers at least one byte and never more than
+		// the bytes left, so `a` closes on `limit` monotonically. `room` starts
+		// at before[i].size, which the walk bounds by CM_MAX_INSN_LEN.
 		do {
 			int room = (int)(uint16_t)((limit - a) & 0xFFFF);
-			int sz   = cm_emit(a, bank, rambank, rombank, &run_status, &run_e, room, &out[n]);
-			n++;
+			int sz   = cm_emit(a, bank, rambank, rombank, &run_status, &run_e, room, &tile[k]);
+			k++;
 			a = (uint16_t)((a + sz) & 0xFFFF);
-			if (sz >= room)
+			if (sz >= room) {
+				closed = true;
 				break;
-		} while (n < max_out);
+			}
+		} while (k < CM_MAX_INSN_LEN);
+
+		// Only commit a group that reached the boundary exactly and fits whole.
+		// Stopping here just starts the window later; splitting one would put
+		// back the gap this loop exists to remove.
+		if (!closed || k > write)
+			break;
+		write -= k;
+		memcpy(&out[write], tile, (size_t)k * sizeof(*tile));
 	}
 
+	int n = b_cap - write;
+	if (write > 0 && n > 0)
+		memmove(&out[0], &out[write], (size_t)n * sizeof(*out));
+
 	// Phase C — forward from `center` itself, so the center line is always
-	// present and always starts where the caller asked.
+	// present and always starts where the caller asked. The slot reserved above
+	// guarantees n < max_out here whenever the caller gave any capacity at all.
 	if (n < max_out && out_center_index)
 		*out_center_index = n;
 
