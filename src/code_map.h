@@ -142,12 +142,15 @@ typedef struct {
 //   center            : address to center on (usually regs.pc).
 //   bank              : CPU program bank (regs.k; 0 on the 65C02 / X16 gen1).
 //   rambank, rombank  : bank context for banked reads and coverage lookup.
-//   lines_before      : number of preceding rows to resolve (capped at 255;
-//                       negative is treated as none).
+//   lines_before      : number of instructions the backward walk resolves
+//                       before `center` (capped at 255; negative is treated as
+//                       none). Tiling can turn one resolved instruction into
+//                       several rows -- see the note on the returned count
+//                       below.
 //   lines_after       : number of rows from `center` onward, including the
-//                       center row itself. These are row counts, not
-//                       instruction counts: a decode forced to give way emits
-//                       a CM_LINE_DATA row, which consumes one of them.
+//                       center row itself. A row count, not an instruction
+//                       count: a decode forced to give way emits a
+//                       CM_LINE_DATA row, which consumes one of them.
 //   out               : caller-provided array receiving the lines, low->high.
 //   max_out           : capacity of `out`.
 //   out_center_index  : receives the index within `out` of the `center` line
