@@ -65,11 +65,14 @@ real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 	}
 	if (address >= 0xC000) {
 		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_rom_bank;
-		return g_brom[rb & (TEST_ROM_BANKS - 1)][address - 0xC000];
+		if (rb >= TEST_ROM_BANKS) {
+			return (uint8_t)((address >> 8) & 0xFF); // open bus, as in memory.c
+		}
+		return g_brom[rb][address - 0xC000];
 	}
 	if (address >= 0xA000) {
 		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_ram_bank;
-		return g_bram[rb & (TEST_RAM_BANKS - 1)][address - 0xA000];
+		return g_bram[rb % TEST_RAM_BANKS][address - 0xA000];
 	}
 	if (x16Bank >= 0) {
 		g_low_mem_windowed++;
@@ -127,9 +130,7 @@ check_tiles(const code_map_line_t *lines, int n, const char *what)
 		uint16_t end = (uint16_t)((lines[i - 1].addr + lines[i - 1].size) & 0xFFFF);
 		if (lines[i].addr != end) {
 			printf("      %s: line %d $%04X+%u ends at $%04X, line %d starts at $%04X\n",
-			       lines[i].addr == ((end + 1) & 0xFFFF) || (uint16_t)(lines[i].addr - end) < 0x8000
-			           ? "gap"
-			           : "overlap",
+			       (uint16_t)(lines[i].addr - end) < 0x8000 ? "gap" : "overlap",
 			       i - 1, (unsigned)lines[i - 1].addr, (unsigned)lines[i - 1].size,
 			       (unsigned)end, i, (unsigned)lines[i].addr);
 			check(false, what);
@@ -163,9 +164,9 @@ poke_banked(uint16_t addr, uint8_t window_bank, const uint8_t *bytes, size_t n)
 	for (size_t i = 0; i < n; i++) {
 		uint16_t a = (uint16_t)((addr + i) & 0xFFFF);
 		if (a >= 0xC000) {
-			g_brom[window_bank & (TEST_ROM_BANKS - 1)][a - 0xC000] = bytes[i];
+			g_brom[window_bank % TEST_ROM_BANKS][a - 0xC000] = bytes[i];
 		} else if (a >= 0xA000) {
-			g_bram[window_bank & (TEST_RAM_BANKS - 1)][a - 0xA000] = bytes[i];
+			g_bram[window_bank % TEST_RAM_BANKS][a - 0xA000] = bytes[i];
 		} else {
 			g_mem[a] = bytes[i];
 		}
