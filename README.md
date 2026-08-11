@@ -4,6 +4,7 @@
 
 [![Build Status](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/xylothan/x16-emulator)](https://github.com/xylothan/x16-emulator/releases)
+[![Dev build](https://img.shields.io/github/release-date-pre/xylothan/x16-emulator?label=dev%20build&color=orange)](https://github.com/xylothan/x16-emulator/releases/tag/dev)
 [![License: BSD-Clause](https://img.shields.io/github/license/xylothan/x16-emulator)](./LICENSE)
 [![Contributors](https://img.shields.io/github/contributors/xylothan/x16-emulator.svg)](https://github.com/xylothan/x16-emulator/graphs/contributors)
 
@@ -25,7 +26,7 @@ Everything the official emulator does, ADD does too.
 > That said it has been used successfully to carry several real Commodore 64 to X16 porting
 > projects through to completion, which is exactly the work it was built for. Anyone debugging
 > assembly on the X16 today will very likely save time with it.  This software is purpose built
-> to further personal projects and my life easier.  If it makes your life easier, great!
+> to further personal projects and make my life easier.  If it makes your life easier, great!
 >
 > **It is published as-is, and is not formally supported at this time.**
 
@@ -52,7 +53,7 @@ Relationship to the official emulator
 -------------------------------------
 
 ADD exists to add debugging tooling, not to diverge from the X16 platform. It has no relation
-to the upstream editing.  Don't bug them about it.
+to upstream development. Don't bug the upstream developers about it.
 
 **Everything about the Commander X16 itself — the KERNAL, BASIC, VERA, the hardware, the file
 formats — is documented officially, and those docs apply here unchanged:**
@@ -137,6 +138,31 @@ Windows ships in three flavours. Unless you have a reason to pick otherwise, tak
 
 All of them include the debugger and the DAP server.
 
+### Development builds
+
+Every check-in to `main` refreshes the [`dev` prerelease][dev-release], so there is always a
+current build to download without waiting for a tagged release. It is not an official release and
+carries no promises, but it is built and unit-tested by the same workflow that cuts the real ones.
+
+The tag and the file names never change, so a link keeps working as the build rolls forward:
+
+```
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_win64-dev.zip
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_linux-x86_64-dev.zip
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_macos_m1-dev.zip
+```
+
+Swap in any package name from the table above. Which build you actually have is recorded three
+ways: in the release title, in `BUILD_VERSION.txt` inside the zip, and on the last page of the
+bundled `README.pdf`. They all read the same identifier, for example:
+
+```
+r49-dev-20260810.003
+```
+
+That is the upstream release this fork sits on, the UTC date, and how many commits landed that
+day — so `.003` is the third check-in of the tenth.
+
 Two differences worth knowing about the default builds:
 
 - The non-`-midi` packages are built without FluidSynth, so they do not offer the MIDI options
@@ -156,7 +182,7 @@ You can build a ROM image yourself using the [build instructions][x16rom-build] 
 
 The emulator depends on SDL2. The debugger and DAP server add two more requirements:
 
-* a **C++17** compiler, because Dear ImGui and the debug UI are C++ (Dear ImGui itself is
+* a **C++17** compiler, because Dear ImGui and the debug UI are written in C++ (Dear ImGui itself is
   vendored in `src/extern/imgui/`, so there is nothing to install for it), and
 * **cJSON**, used by the DAP server — `libcjson-dev` on Debian/Ubuntu, `cjson` on Homebrew,
   or supplied by vcpkg on Windows.
@@ -170,7 +196,7 @@ Install SDL2 using `brew install sdl2`, and cJSON using `brew install cjson`.
 
 ### Linux Build
 
-The SDL2 development package is available as a distribution package with most major versions of Linux:
+The SDL2 development package is available from the package repositories of most major Linux distributions:
 - Red Hat: `yum install SDL2-devel cjson-devel`
 - Debian: `apt-get install libsdl2-dev libcjson-dev`
 
@@ -289,9 +315,11 @@ A good default when your source is built with cc65:
 x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 ```
 
-> ⚠️ The ImGui debugger and the DAP server are **experimental**. They have been used to complete
-> several real C64→X16 porting projects, but you should expect rough edges and occasional
-> changes to keys, layouts and DAP details between releases.
+> ⚠️ The ImGui debugger and the DAP server are **experimental and probably broken**. They have
+> helped complete several real C64→X16 porting projects, but treat the debugger like a goat that
+> eats your homework: if something looks funny, assume it is doing something wrong until you can
+> prove otherwise. Expect rough edges and occasional changes to keys, layouts and DAP details
+> between releases.
 
 #### Using the debugger and an editor at the same time
 
@@ -640,6 +668,7 @@ emulator each build is based on are [published upstream][upstream-releases].
 
 
 <!-------------------------------------------------------------------->
+[dev-release]: https://github.com/xylothan/x16-emulator/releases/tag/dev
 [releases]: https://github.com/xylothan/x16-emulator/releases
 [upstream]: https://github.com/X16Community/x16-emulator
 [upstream-readme]: https://github.com/X16Community/x16-emulator#readme
