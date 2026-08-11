@@ -330,19 +330,38 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 	return status;
 }
 
-// Fill one line at `addr`, decoded with an explicit status. Returns the size the
-// decode produced, clamped so that it never swallows an address live execution
-// proved is an instruction start: a recorded anchor is harder evidence than our
-// width estimate, so truncate onto it rather than stepping over the very ground
-// truth this file exists to collect.
+// Fill one line at `addr`, decoded with an explicit status.
+//
+// The size the decode produces is clamped twice, and both clamps exist because
+// a decode is the weakest evidence in this file:
+//
+//   * `max_size`, when positive, is a boundary the caller has already committed
+//     to -- the address the next line starts at. The backward walk resolves
+//     that boundary from evidence the fill does not have (and its last-resort
+//     fallback does not decode at all, it just backs off a byte), so a decode
+//     that disagrees has to give way rather than emit a line overlapping the
+//     next one.
+//   * a recorded anchor inside the instruction is proof from live execution
+//     that a real instruction starts there, which outranks our width estimate;
+//     truncate onto it rather than stepping over the very ground truth this
+//     file exists to collect.
+//
+// Either clamp can leave the line shorter than the caller's boundary. The line
+// then still says what it decoded, so `text` can describe more bytes than
+// `size` covers -- deliberate, and always paired with `recorded == false` on
+// the guessed line. Covering the leftover bytes is the caller's job; see the
+// tiling loop in code_map_disasm_window().
 static int
 cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
-        uint8_t st, bool recorded, code_map_line_t *ln)
+        uint8_t st, bool recorded, int max_size, code_map_line_t *ln)
 {
 	int16_t xb = cm_x16bank_for(addr, rambank, rombank);
 
 	int32_t eff;
 	int     sz = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+
+	if (max_size > 0 && sz > max_size)
+		sz = max_size;
 
 	for (int i = 1; i < sz; i++) {
 		uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
@@ -369,16 +388,17 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 }
 
 // Emit one line at `addr` and advance the running status estimate. Recorded
-// status wins; otherwise *run_status is used. Returns the instruction size.
+// status wins; otherwise *run_status is used. `max_size` is passed through to
+// cm_fill. Returns the instruction size actually emitted (always >= 1).
 static int
 cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
-        uint8_t *run_status, uint8_t *run_e, code_map_line_t *ln)
+        uint8_t *run_status, uint8_t *run_e, int max_size, code_map_line_t *ln)
 {
 	cm_context_t *c  = cm_ctx_for_addr(addr, bank, rambank, rombank);
 	bool     recorded = cm_anchor_ok(c, addr, bank, rambank, rombank);
 	uint8_t  st       = recorded ? c->status[addr] : *run_status;
 
-	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, ln);
+	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, max_size, ln);
 
 	*run_status = cm_propagate(addr, bank, cm_x16bank_for(addr, rambank, rombank), st, run_e);
 	return sz;
@@ -503,13 +523,38 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 
 	int n = 0;
 
-	// Phase B — render the preceding instructions lowest-first, exactly as the
-	// backward walk resolved them. Each one's size reaches the next start by
-	// construction, so the lines cannot overlap.
+	// Phase B — render the preceding instructions lowest-first, tiling the
+	// range the backward walk resolved: each line must start exactly where the
+	// previous one ended, or the caller cannot draw the result.
+	//
+	// The walk fixes where each instruction ENDS (the next line's start), but
+	// the fill can still land short of it or, left unchecked, past it:
+	//   * the walk's last-resort fallback backs off one byte without decoding,
+	//     so the byte there can decode wider than the one byte allowed for;
+	//   * the fill truncates onto a recorded start found inside the
+	//     instruction, which is right but leaves the remaining bytes uncovered.
+	// Capping each fill at the distance to the boundary kills the overlap, and
+	// looping until the boundary is reached exactly kills the gap. Seeding
+	// run_status from the walk's decision keeps the first line identical to what
+	// the walk resolved; any follow-up line re-resolves its own evidence.
 	for (int i = collected - 1; i >= 0 && n < max_out; i--) {
-		cm_fill(before[i].addr, bank, rambank, rombank, before[i].status,
-		        before[i].recorded, &out[n]);
-		n++;
+		uint16_t limit      = (i > 0) ? before[i - 1].addr : center;
+		uint16_t a          = before[i].addr;
+		uint8_t  run_status = before[i].status;
+		uint8_t  run_e      = regs.e;
+
+		// Terminates unconditionally: every emit covers at least one byte, and
+		// the loop stops the moment the boundary is reached. The `>=` also
+		// means that if a fill ever ignored its cap, this walks no further past
+		// the boundary -- one bad line, not a runaway.
+		do {
+			int room = (int)(uint16_t)((limit - a) & 0xFFFF);
+			int sz   = cm_emit(a, bank, rambank, rombank, &run_status, &run_e, room, &out[n]);
+			n++;
+			a = (uint16_t)((a + sz) & 0xFFFF);
+			if (sz >= room)
+				break;
+		} while (n < max_out);
 	}
 
 	// Phase C — forward from `center` itself, so the center line is always
@@ -521,7 +566,7 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	uint8_t  run_status = code_map_recorded_status(center, bank, rambank, rombank, regs.status);
 	uint8_t  run_e      = regs.e;
 	for (int i = 0; i < lines_after && n < max_out; i++) {
-		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, &out[n]);
+		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, 0, &out[n]);
 		n++;
 		addr = (uint16_t)((addr + sz) & 0xFFFF);
 	}
@@ -548,7 +593,7 @@ code_map_disasm_forward(uint16_t start, uint8_t bank, uint8_t rambank, uint8_t r
 	int      n          = 0;
 
 	while (n < count) {
-		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, &out[n]);
+		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, 0, &out[n]);
 		n++;
 		addr = (uint16_t)((addr + sz) & 0xFFFF);
 	}
