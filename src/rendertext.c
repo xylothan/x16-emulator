@@ -1,8 +1,6 @@
 #include <string.h>
 #include <SDL.h>
-#ifdef __MINGW32__
 #include <ctype.h>
-#endif
 #include "rendertext.h"
 
 #define CHARACTER_WIDTH 5

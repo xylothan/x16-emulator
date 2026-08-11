@@ -449,13 +449,13 @@ debug_ui_draw_control_bar(void)
                     "Execute one instruction, running any JSR/JSL to completion.\n"
                     "Ctrl+F10 runs to the cursor instead.\n"
                     "Only while the machine is halted."))
-        DEBUGStepOver();
+        DEBUGStepOver(DEBUG_OWNER_UI);
     ImGui::SameLine();
     if (ctrl_button("Step Out", paused,
                     "Step Out  (Shift+F11)\n"
                     "Run until the current subroutine returns.\n"
                     "Only while the machine is halted."))
-        DEBUGStepOut();
+        DEBUGStepOut(DEBUG_OWNER_UI);
 
     // ── Speed ───────────────────────────────────────────────────────────────
     // Absolute target clock, not a bare percentage: the machine's own clock is
@@ -820,7 +820,7 @@ debug_ui_run_to_cursor(void)
     if (!s_cursor_valid || !DEBUGIsPaused()) {
         return false;
     }
-    DEBUGRunTo(s_cursor_addr, s_cursor_bank);
+    DEBUGRunTo(s_cursor_addr, s_cursor_bank, DEBUG_OWNER_UI);
     return true;
 }
 
@@ -839,13 +839,11 @@ debug_ui_toggle_breakpoint_at_pc(void)
         x16 = (regs.pc < 0xC000) ? (int)memory_get_ram_bank()
                                  : (int)memory_get_rom_bank();
     }
-    if (!DEBUGRemoveBreakPoint((int)regs.pc, regs.k, x16)) {
-        struct breakpoint bp;
-        bp.pc   = (int)regs.pc;
-        bp.bank = regs.k;
-        bp.x16Bank = x16;
-        DEBUGAddBreakPoint(bp);
-    }
+    // The core's own toggle, so this window's F9 behaves exactly like the SDL
+    // debugger's: delete whatever is there whoever asked for it, or create one
+    // owned by the UI. Deleting only the UI's claim would leave a breakpoint a
+    // DAP client also wanted armed, and the key looking broken.
+    debug_bp_toggle_for((int)regs.pc, regs.k, x16, DEBUG_OWNER_UI);
 }
 
 // ── Cross-panel "goto" service ──────────────────────────────────────────────

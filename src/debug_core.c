@@ -84,10 +84,26 @@ debug_normalise_bank(int selector, int addr, uint8_t pbank)
 static bool
 bp_matches(int pc, uint8_t bank, const struct breakpoint *bp)
 {
-	return pc == bp->pc && bank == bp->bank && bank_selector_matches(bp->x16Bank, pc, bank);
+	return bp->enabled && pc == bp->pc && bank == bp->bank
+	       && bank_selector_matches(bp->x16Bank, pc, bank);
 }
 
 static void cond_forget_all(void);
+
+// ---------------------------------------------------------------------------
+//  Ownership
+// ---------------------------------------------------------------------------
+//  A bitmask per entry rather than a list: there are seven owners, the set
+//  operations wanted are exactly bit operations, and the hot path never has to
+//  look at it at all.
+
+static uint16_t
+owner_bit(debug_owner_t owner)
+{
+	if (owner < 0 || owner >= DEBUG_OWNER_COUNT)
+		return 0;
+	return (uint16_t)(1u << (unsigned)owner);
+}
 
 // ---------------------------------------------------------------------------
 //  Table management
@@ -106,45 +122,140 @@ debug_bp_find(int pc, uint8_t bank, int x16Bank)
 }
 
 int
-debug_bp_add(struct breakpoint bp)
+debug_bp_count(void)
 {
+	return numBreakpoints;
+}
+
+const struct breakpoint *
+debug_bp_at(int index)
+{
+	if (index < 0 || index >= numBreakpoints)
+		return NULL;
+	return &breakPoints[index];
+}
+
+// Drop entry `idx` from the table. The condition record is deliberately left
+// alone; see the note on counts in debug_core.h.
+static void
+bp_erase(int idx)
+{
+	for (int i = idx; i < numBreakpoints - 1; i++) {
+		breakPoints[i] = breakPoints[i + 1];
+	}
+	numBreakpoints--;
+}
+
+debug_add_result_t
+debug_bp_add_for(struct breakpoint bp, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+
 	bp.x16Bank = normalise_bank(bp.x16Bank, bp.pc, bp.bank);
-	if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0)
-		return -1;
+
+	int idx = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
+	if (idx >= 0) {
+		breakPoints[idx].owners |= bit;
+		// Asking for a breakpoint is asking for it to be armed, so a disabled
+		// entry comes back. Otherwise a client that set one, disabled it and
+		// set it again would be quietly ignored.
+		breakPoints[idx].enabled = true;
+		return DEBUG_ADD_EXISTED;
+	}
 
 	if (numBreakpoints >= bpCapacity) {
 		int                newCap = bpCapacity == 0 ? 16 : bpCapacity * 2;
 		struct breakpoint *newArr =
 		    (struct breakpoint *)realloc(breakPoints, (size_t)newCap * sizeof(struct breakpoint));
 		if (!newArr)
-			return -1;
+			return DEBUG_ADD_FULL;
 		breakPoints = newArr;
 		bpCapacity  = newCap;
 	}
-	breakPoints[numBreakpoints] = bp;
-	return numBreakpoints++;
+
+	bp.owners  = bit;
+	bp.enabled = true;
+
+	breakPoints[numBreakpoints++] = bp;
+	return DEBUG_ADD_CREATED;
 }
 
 bool
-debug_bp_remove(int pc, uint8_t bank, int x16Bank)
+debug_bp_remove_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+
+	int idx = debug_bp_find(pc, bank, x16Bank);
+	if (idx < 0 || !(breakPoints[idx].owners & bit))
+		return false;
+
+	breakPoints[idx].owners &= (uint16_t)~bit;
+	if (breakPoints[idx].owners == 0)
+		bp_erase(idx);
+	return true;
+}
+
+int
+debug_bp_clear_owner(debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+	int            disarmed = 0;
+
+	// Backwards, so erasing an entry cannot shuffle one we have not looked at
+	// yet down into a slot we have already passed.
+	for (int i = numBreakpoints - 1; i >= 0; i--) {
+		if (!(breakPoints[i].owners & bit))
+			continue;
+		breakPoints[i].owners &= (uint16_t)~bit;
+		if (breakPoints[i].owners == 0) {
+			bp_erase(i);
+			disarmed++;
+		}
+	}
+	return disarmed;
+}
+
+bool
+debug_bp_delete(int pc, uint8_t bank, int x16Bank)
 {
 	int idx = debug_bp_find(pc, bank, x16Bank);
 	if (idx < 0)
 		return false;
-	for (int i = idx; i < numBreakpoints - 1; i++) {
-		breakPoints[i] = breakPoints[i + 1];
-	}
-	numBreakpoints--;
+	bp_erase(idx);
 	return true;
 }
 
-void
-debug_bp_toggle(int pc, uint8_t bank, int x16Bank)
+bool
+debug_bp_has_owner(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
 {
-	if (!debug_bp_remove(pc, bank, x16Bank)) {
-		struct breakpoint bp = { pc, bank, x16Bank };
-		debug_bp_add(bp);
+	int idx = debug_bp_find(pc, bank, x16Bank);
+	return idx >= 0 && (breakPoints[idx].owners & owner_bit(owner)) != 0;
+}
+
+void
+debug_bp_toggle_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
+{
+	if (!debug_bp_delete(pc, bank, x16Bank)) {
+		struct breakpoint bp = { pc, bank, x16Bank, 0, false };
+		debug_bp_add_for(bp, owner);
 	}
+}
+
+bool
+debug_bp_set_enabled(int pc, uint8_t bank, int x16Bank, bool enabled)
+{
+	int idx = debug_bp_find(pc, bank, x16Bank);
+	if (idx < 0)
+		return false;
+	breakPoints[idx].enabled = enabled;
+	return true;
+}
+
+bool
+debug_bp_is_enabled(int pc, uint8_t bank, int x16Bank)
+{
+	int idx = debug_bp_find(pc, bank, x16Bank);
+	return idx >= 0 && breakPoints[idx].enabled;
 }
 
 void
@@ -504,17 +615,95 @@ debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 	return numWatchpoints++;
 }
 
-bool
-debug_wp_remove(uint16_t addr, int x16Bank)
+static void
+wp_erase(int idx)
 {
-	int idx = wp_find(addr, x16Bank);
-	if (idx < 0)
-		return false;
 	for (int i = idx; i < numWatchpoints - 1; i++) {
 		watchPoints[i] = watchPoints[i + 1];
 	}
 	numWatchpoints--;
+}
+
+debug_add_result_t
+debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+
+	int idx = wp_find(addr, x16Bank);
+	if (idx >= 0) {
+		// Length and value filter are left as the first owner set them: this
+		// owner is asking to be told about the address, not to redefine
+		// someone else's watch.
+		watchPoints[idx].owners |= bit;
+		return DEBUG_ADD_EXISTED;
+	}
+	if (numWatchpoints >= MAX_WATCHPOINTS)
+		return DEBUG_ADD_FULL;
+
+	if (len == 0)
+		len = 1;
+
+	struct watchpoint *w = &watchPoints[numWatchpoints];
+	w->addr      = addr;
+	w->len       = len;
+	w->x16Bank   = normalise_bank(x16Bank, addr, 0);
+	w->active    = true;
+	w->has_value = false;
+	w->value     = 0;
+	w->op        = BPCMP_EQ;
+	w->owners    = bit;
+	numWatchpoints++;
+	return DEBUG_ADD_CREATED;
+}
+
+bool
+debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0 || !(watchPoints[idx].owners & bit))
+		return false;
+
+	watchPoints[idx].owners &= (uint16_t)~bit;
+	if (watchPoints[idx].owners == 0)
+		wp_erase(idx);
 	return true;
+}
+
+int
+debug_wp_clear_owner(debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+	int            disarmed = 0;
+
+	for (int i = numWatchpoints - 1; i >= 0; i--) {
+		if (!(watchPoints[i].owners & bit))
+			continue;
+		watchPoints[i].owners &= (uint16_t)~bit;
+		if (watchPoints[i].owners == 0) {
+			wp_erase(i);
+			disarmed++;
+		}
+	}
+	return disarmed;
+}
+
+bool
+debug_wp_delete(uint16_t addr, int x16Bank)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	wp_erase(idx);
+	return true;
+}
+
+bool
+debug_wp_has_owner(uint16_t addr, int x16Bank, debug_owner_t owner)
+{
+	int idx = wp_find(addr, x16Bank);
+	return idx >= 0 && (watchPoints[idx].owners & owner_bit(owner)) != 0;
 }
 
 void

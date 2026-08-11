@@ -3,12 +3,14 @@
 // toggle breakpoints inline) by giving one place to review, enable/disable, and
 // clear them.
 //
-// Enable/disable is implemented panel-side (no core struct change): a disabled
-// breakpoint is removed from the debugger's live breakPoints[] but kept in this
-// panel's tracked list, so it can be re-armed later. The tracked list is
-// reconciled with breakPoints[] every frame so breakpoints added/removed from
-// the Disassembly/Source panels stay in sync. (Caveat: while disabled, a
-// breakpoint shows no gutter marker in those panels since it is not live.)
+// Enable/disable belongs to the core: a disabled breakpoint keeps its entry,
+// its owners, its condition and its hit count, and simply does not stop the
+// machine. This panel used to implement it by deleting the entry and
+// remembering it in a list of its own, which meant a disabled breakpoint
+// vanished from the table and so showed no gutter marker anywhere else.
+//
+// The list below is therefore a view of the core's table, rebuilt each frame,
+// rather than a superset of it with a lifetime of its own.
 //
 // All state is reached through the shared bridge (debug_ui_bridge.h).
 #include "imgui.h"
@@ -29,73 +31,35 @@ struct TrackedBP {
 	bool    enabled;
 };
 
-std::vector<TrackedBP> s_tracked;    // panel-owned superset of breakPoints[] (incl. disabled)
+std::vector<TrackedBP> s_tracked;    // a view of the core's table, rebuilt each frame
 int                    s_runto_addr = 0; // hex address for the "Run to" box
 
-bool
-active_bp_exists(int pc, uint8_t bank, int x16Bank)
-{
-	return debug_bp_find(pc, bank, x16Bank) >= 0;
-}
-
 // A breakpoint is identified by (pc, bank, x16Bank), because the same $A000 in
-// two RAM banks is two different breakpoints. Keying the tracker on (pc, bank)
-// alone collapsed them into one row: the count under-reported, "Clear All" left
-// the other one armed and the list repopulated itself on the next frame, and
-// the enable checkbox flipped back on by itself because sync_tracked() kept
-// finding the surviving twin.
-TrackedBP *
-tracked_find(int pc, uint8_t bank, int x16Bank)
-{
-	for (TrackedBP &t : s_tracked) {
-		if (t.pc == pc && t.bank == bank && t.x16Bank == x16Bank) {
-			return &t;
-		}
-	}
-	return nullptr;
-}
-
-// Reconcile the tracked list with the debugger's live breakPoints[] so that
-// breakpoints toggled from other panels are reflected here.
+// two RAM banks is two different breakpoints. Keying on (pc, bank) alone
+// collapsed them into one row: the count under-reported, "Clear All" left the
+// other one armed and the list repopulated itself on the next frame, and the
+// enable checkbox flipped back on by itself because the survivor was still
+// found.
 void
 sync_tracked(void)
 {
-	// Live breakpoints → ensure tracked + marked enabled.
-	for (int i = 0; i < numBreakpoints; i++) {
-		TrackedBP *t = tracked_find(breakPoints[i].pc, breakPoints[i].bank,
-		                            breakPoints[i].x16Bank);
-		if (t) {
-			t->enabled = true;
-		} else {
-			s_tracked.push_back(TrackedBP{breakPoints[i].pc, breakPoints[i].bank,
-			                              breakPoints[i].x16Bank, true});
+	s_tracked.clear();
+	const int n = debug_bp_count();
+	s_tracked.reserve((size_t)(n < 0 ? 0 : n));
+	for (int i = 0; i < n; i++) {
+		const struct breakpoint *b = debug_bp_at(i);
+		if (!b) {
+			break;
 		}
-	}
-	// Tracked-enabled entries no longer live were deleted elsewhere → drop them.
-	// (Disabled entries are intentionally absent from breakPoints[], so keep.)
-	for (size_t i = 0; i < s_tracked.size();) {
-		if (s_tracked[i].enabled && !active_bp_exists(s_tracked[i].pc, s_tracked[i].bank,
-		                                              s_tracked[i].x16Bank)) {
-			s_tracked.erase(s_tracked.begin() + (long)i);
-		} else {
-			++i;
-		}
+		s_tracked.push_back(TrackedBP{b->pc, b->bank, b->x16Bank, b->enabled});
 	}
 }
 
 void
 set_enabled(TrackedBP &t, bool enable)
 {
-	if (enable && !t.enabled) {
-		struct breakpoint bp;
-		bp.pc      = t.pc;
-		bp.bank    = t.bank;
-		bp.x16Bank = t.x16Bank;
-		DEBUGAddBreakPoint(bp);
-		t.enabled = true;
-	} else if (!enable && t.enabled) {
-		DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
-		t.enabled = false;
+	if (DEBUGSetBreakpointEnabled(t.pc, t.bank, t.x16Bank, enable)) {
+		t.enabled = enable;
 	}
 }
 
@@ -235,7 +199,7 @@ draw_breakpoints()
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!DEBUGIsPaused());
 	if (ImGui::Button("Go")) {
-		DEBUGRunTo((uint16_t)(s_runto_addr & 0xFFFF), 0);
+		DEBUGRunTo((uint16_t)(s_runto_addr & 0xFFFF), 0, DEBUG_OWNER_UI);
 	}
 	ImGui::EndDisabled();
 	if (!DEBUGIsPaused()) {
@@ -333,14 +297,12 @@ draw_breakpoints()
 	// also free the condition/hit entry (enable/disable must NOT).
 	if (clear_all) {
 		for (TrackedBP &t : s_tracked) {
-			if (t.enabled) DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
+			DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
 			DEBUGForgetBreakpoint(t.pc, t.bank, t.x16Bank);
 		}
 		s_tracked.clear();
 	} else if (remove_idx >= 0 && remove_idx < (int)s_tracked.size()) {
-		if (s_tracked[remove_idx].enabled) {
-			DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
-		}
+		DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		DEBUGForgetBreakpoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		s_tracked.erase(s_tracked.begin() + remove_idx);
 	}
@@ -516,7 +478,7 @@ draw_watchpoints()
 	}
 
 	if (remove_addr >= 0) {
-		debug_wp_remove((uint16_t)remove_addr, remove_bank);
+		debug_wp_delete((uint16_t)remove_addr, remove_bank);
 	}
 }
 

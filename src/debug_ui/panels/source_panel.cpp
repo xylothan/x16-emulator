@@ -172,7 +172,7 @@ src_toggle_bp(const char *file, int line)
                                        : (int)memory_get_rom_bank())
                       : -1;
     if (!DEBUGRemoveBreakPoint((int)addr, 0, x16Bank)) {
-        struct breakpoint bp;
+        struct breakpoint bp = {};
         bp.pc      = (int)addr;
         bp.bank    = 0;
         bp.x16Bank = x16Bank;
@@ -484,7 +484,7 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
                 bool     mappable = debug_ui_source_to_addr(file, lineNo, &addr);
                 ImGui::BeginDisabled(!mappable || !DEBUGIsPaused());
                 if (ImGui::MenuItem("Run to here"))
-                    DEBUGRunTo(addr, 0);
+                    DEBUGRunTo(addr, 0, DEBUG_OWNER_UI);
                 ImGui::EndDisabled();
                 ImGui::BeginDisabled(!mappable);
                 if (ImGui::MenuItem("Toggle breakpoint"))

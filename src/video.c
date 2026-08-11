@@ -1756,13 +1756,13 @@ video_imgui_debug_key(SDL_Keysym ks)
 			if (ctrl) {
 				debug_ui_run_to_cursor();        // Ctrl+F10 = run to cursor
 			} else if (DEBUGIsPaused()) {
-				DEBUGStepOver();
+				DEBUGStepOver(DEBUG_OWNER_UI);
 			}
 			break;
 		case SDL_SCANCODE_F11:
 			if (DEBUGIsPaused()) {
 				if (shift) {
-					DEBUGStepOut();
+					DEBUGStepOut(DEBUG_OWNER_UI);
 				} else {
 					DEBUGStepInto();
 				}

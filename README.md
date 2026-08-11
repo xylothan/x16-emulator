@@ -232,7 +232,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 |---|---|
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics and the three audio sources. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
-| `-bp <address>` | Sets a breakpoint at `<address>` (hex). Can be repeated. Implies `-debug`. |
+| `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
 | `-dbgauto` / `-no-dbgauto` | Whether to merge the `.dbg` beside each program the machine loads. Follows the debugger unless forced either way. |
 | `-srcpath <dir>` | Adds a directory to search for the source files a `.dbg` names. Can be repeated. |
@@ -291,6 +291,30 @@ x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 > ⚠️ The ImGui debugger and the DAP server are **experimental**. They have been used to complete
 > several real C64→X16 porting projects, but you should expect rough edges and occasional
 > changes to keys, layouts and DAP details between releases.
+
+#### Using the debugger and an editor at the same time
+
+Breakpoints live in one place. Whether a breakpoint came from `-bp` on the command line, F9 in
+the debugger, the ImGui breakpoints panel, or your editor over DAP, there is a single table
+deciding where the machine stops, and each of those can hold a breakpoint at the same address
+without disturbing the others. Disconnecting your editor takes away the breakpoints *it* asked
+for and leaves yours alone.
+
+The emulator's own UIs share one view of that table: a breakpoint you set with F9 appears in the
+ImGui panel, and one you disable there still shows in the Disassembly and Source gutters.
+
+An editor attached over DAP is the exception, because it keeps its own list:
+
+* A breakpoint you set with F9 will not appear in your editor's gutter.
+* A breakpoint you delete with F9 goes away in the emulator, but your editor still believes in
+  it — and because DAP clients re-send a source file's whole breakpoint list whenever you edit
+  it, your editor will usually put it back.
+
+This is a limitation of the protocol rather than an oversight: in DAP the client owns its
+breakpoint list and is expected to be authoritative about it. If you are driving the emulator
+from an editor, the least surprising approach is to manage breakpoints from the editor and treat
+F9 as a local, temporary override. See [`docs/breakpoint-ownership.md`](docs/breakpoint-ownership.md)
+for the reasoning.
 
 ### The ImGui debugger
 
@@ -385,6 +409,39 @@ Up to 64 watchpoints can be active at once.
 Conditional breakpoints and hit counts are set through a DAP client; the syntax is documented
 under [Remote debugging with DAP](#remote-debugging-with-dap), and the resulting conditions and
 hit counts are visible in the Breakpoints panel.
+
+##### Catching early boot with `-bp`
+
+Every other way of setting a breakpoint needs the machine to already be up and you to already be
+looking at it. `-bp` is the one that does not: it arms the breakpoint *before the first
+instruction runs*, which is the only way to stop inside something that has already finished by
+the time you could click a gutter — a `.prg` that runs from its load address, KERNAL or ROM code
+during start-up, or anything reached from the reset vector.
+
+The usual pairing is with the graphical debugger, so the machine is already stopped at the
+interesting place when the window appears:
+
+```
+x16emu -imgui -prg myprog.prg -run -bp C000
+```
+
+It composes the same way with the other front ends, and can be repeated:
+
+```
+x16emu -imgui -bp C000 -bp 05:A000        # several, one pinned to RAM bank 5
+x16emu -debugport -bp C000                # stop at boot, attach an editor afterwards
+x16emu -bp C000                           # no front end named, so -debug opens
+```
+
+A breakpoint is no use without something able to resume from it, so `-bp` opens the text
+debugger when you have not asked for another front end. Name `-imgui` or `-debugport` and it
+leaves your choice alone. `-wp <address>[,<length>]` works the same way for writes.
+
+The breakpoint belongs to the command line, not to whichever debugger displays it. It shows up
+in the Breakpoints panel and to a DAP client, and neither can take it away — a client
+disconnecting leaves it exactly where you put it. Deleting it is a deliberate act: `F9` on the
+line, or the bin in the Breakpoints panel. See
+[`docs/breakpoint-ownership.md`](docs/breakpoint-ownership.md).
 
 ### Source-level debugging with cc65
 

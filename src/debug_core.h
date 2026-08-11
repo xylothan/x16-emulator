@@ -36,14 +36,45 @@ extern "C" {
 // address, for the same reason.)
 #define DEBUG_BANK_ANY (-1)
 
+// Who asked for a breakpoint or watchpoint.
+//
+// Several independent things want breakpoints, they do not know about each
+// other, and more than one of them can want the same address at the same time:
+// a `-bp` on the command line, the user at the keyboard, and each of the three
+// kinds of breakpoint a DAP client can set. Without a record of who asked, the
+// first remove disarms the address for all of them -- and the entry that is
+// left behind belongs to nobody, which on a headless `-debugport` run means a
+// machine that halts with nothing able to resume it.
+//
+// The core only ever compares these, so the list can be extended freely.
+typedef enum {
+	DEBUG_OWNER_CLI = 0,        // -bp / -wp
+	DEBUG_OWNER_UI,             // the SDL debugger's F9, and the ImGui panels
+	DEBUG_OWNER_DAP_SOURCE,     // DAP setBreakpoints
+	DEBUG_OWNER_DAP_FUNCTION,   // DAP setFunctionBreakpoints
+	DEBUG_OWNER_DAP_INSTRUCTION,// DAP setInstructionBreakpoints
+	DEBUG_OWNER_DAP_CONSOLE,    // bp_add / watch_add typed in the debug console
+	DEBUG_OWNER_STEP,           // the debugger's own step-over/step-out target
+	DEBUG_OWNER_COUNT
+} debug_owner_t;
+
 // A breakpoint address. `bank` is the 65C816 program bank; `x16Bank` is the
 // bank selector described above. Breakpoints are identified by all three.
+//
+// `owners` and `enabled` are maintained by the core; a caller that builds one
+// of these to hand to debug_bp_add_for() should set only the three address
+// fields and leave the rest zeroed.
 struct breakpoint {
-	int     pc;
-	uint8_t bank;
-	int     x16Bank;
+	int      pc;
+	uint8_t  bank;
+	int      x16Bank;
+	uint16_t owners;  // bitmask of debug_owner_t; never 0 for a live entry
+	bool     enabled; // a disabled breakpoint keeps its place, and its count
 };
 
+// The live table. Read-only for everyone outside debug_core.c: everything that
+// changes it goes through the functions below, so that ownership cannot be
+// bypassed. Prefer debug_bp_count()/debug_bp_at().
 extern struct breakpoint *breakPoints;
 extern int                numBreakpoints;
 
@@ -91,14 +122,77 @@ int debug_current_x16_bank(int pc, uint8_t pbank);
 
 // ---- Table management ------------------------------------------------------
 // Breakpoints are identified by all three of (pc, bank, x16Bank), so the same
-// address in two different RAM banks is two different breakpoints. Add returns
-// the new index, or -1 if one already exists at that triple or memory ran out.
-// Remove returns whether one was there.
-int  debug_bp_add(struct breakpoint bp);
-bool debug_bp_remove(int pc, uint8_t bank, int x16Bank);
+// address in two different RAM banks is two different breakpoints.
+//
+// Every entry records which owners asked for it. Two owners wanting one address
+// share a single entry -- there is only ever one place the CPU can stop -- but
+// the entry survives until the last of them lets go. This is the whole point of
+// the API: an owner can clear everything it asked for without having to know
+// what anyone else wanted.
+
+// What debug_bp_add_for() did. "Already there" is deliberately distinct from
+// "no room": a caller that conflates them silently mishandles a full table.
+typedef enum {
+	DEBUG_ADD_CREATED = 0, // a new entry, now owned by the caller
+	DEBUG_ADD_EXISTED,     // an entry was already there; the caller now owns it too
+	DEBUG_ADD_FULL         // out of memory; nothing was armed
+} debug_add_result_t;
+
+// Add `owner`'s reference. Adding one that this owner already holds is
+// idempotent. A re-added breakpoint is re-enabled, since asking for a
+// breakpoint is a request for it to be armed.
+debug_add_result_t debug_bp_add_for(struct breakpoint bp, debug_owner_t owner);
+
+// Drop `owner`'s reference. The entry itself only goes when the last owner
+// does. Returns whether this owner held one.
+//
+// The condition and hit count survive, exactly as they do for any other
+// removal: a front end that replaces its whole breakpoint list on every edit
+// (which is how the Debug Adapter Protocol works) passes through here
+// constantly, and a hit count that reset on each keystroke would be useless.
+bool debug_bp_remove_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+
+// Drop every reference `owner` holds -- what each DAP "here is the complete
+// list" request wants, and what session teardown wants. Returns how many
+// entries were disarmed entirely (as opposed to left for another owner).
+int debug_bp_clear_owner(debug_owner_t owner);
+
+// Delete the breakpoint outright, whoever asked for it.
+//
+// This is the human's delete -- F9, or `bp_remove` typed in the console -- and
+// it is deliberately not a refcount operation. Someone at the keyboard asking
+// for a breakpoint to go and watching it stay armed because a client also
+// wanted it is worse than the confusion this ownership model exists to fix.
+// Returns whether anything was there.
+bool debug_bp_delete(int pc, uint8_t bank, int x16Bank);
+
+// Does `owner` hold a reference here? For a UI marking its own breakpoints.
+bool debug_bp_has_owner(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+
+// The human's F9: delete whatever is at this address, or create one owned by
+// `owner` if there is nothing there.
+void debug_bp_toggle_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+
 int  debug_bp_find(int pc, uint8_t bank, int x16Bank);
-void debug_bp_toggle(int pc, uint8_t bank, int x16Bank);
 void debug_bp_clear_all(void);
+
+// ---- Enable / disable ------------------------------------------------------
+// A disabled breakpoint keeps its entry, its owners, its condition and its hit
+// count, and simply does not stop the machine.
+//
+// Front ends used to implement this by removing the entry and remembering it
+// themselves, which is the same mistake as reconstructing ownership from
+// outside: the breakpoint vanishes from the table, so every other view of it
+// loses its marker and its count.
+bool debug_bp_set_enabled(int pc, uint8_t bank, int x16Bank, bool enabled);
+bool debug_bp_is_enabled(int pc, uint8_t bank, int x16Bank);
+
+// ---- Read-only view --------------------------------------------------------
+// For UIs and the DAP server listing what is set. `debug_bp_at` returns NULL if
+// `index` is out of range, and its result is valid only until the next call
+// that adds or removes a breakpoint.
+int                      debug_bp_count(void);
+const struct breakpoint *debug_bp_at(int index);
 
 // ---- The hot-path question -------------------------------------------------
 // Tell the core the CPU has arrived at (pc, bank), and get back whether to stop.
@@ -111,8 +205,10 @@ void debug_bp_clear_all(void);
 // stands still. Use debug_bp_is_set() for the read-only question.
 bool debug_bp_on_arrival(int pc, uint8_t bank);
 
-// Whether any breakpoint covers (pc, bank), asking nothing and changing
-// nothing. This is the one to use for "is there a breakpoint here?".
+// Whether any *enabled* breakpoint covers (pc, bank), asking nothing and
+// changing nothing. This is the one to use for "would the machine stop here?".
+// A disabled breakpoint is still in the table -- see debug_bp_at() for a view
+// that includes it.
 bool debug_bp_is_set(int pc, uint8_t bank);
 
 // ---- Conditions and counts -------------------------------------------------
@@ -125,9 +221,18 @@ bool debug_bp_is_set(int pc, uint8_t bank);
 //
 // A count deliberately survives removing and re-adding the same breakpoint,
 // since that is how a UI implements an enable/disable toggle and a toggle
-// should not silently reset it. The two calls that do discard it are
-// debug_bp_forget(), for one breakpoint, and debug_bp_clear_all(), which is a
-// delete of everything rather than a disable.
+// should not silently reset it. That applies to owner-scoped removal too, so a
+// client re-sending its breakpoint list does not reset the counts it is about
+// to ask about. The two calls that discard a count are debug_bp_forget(), for
+// one breakpoint, and debug_bp_clear_all(), which is a delete of everything
+// rather than a disable.
+//
+// A condition belongs to the address, not to whoever asked for it. Two owners
+// wanting different conditions at one address is a real conflict with no
+// correct answer, and per-owner conditions would mean per-owner evaluation on
+// arrival, on the hot path. The last writer wins; a front end that replaces a
+// breakpoint list should therefore state the condition it wants every time,
+// including clearing it, rather than assuming removal cleared it.
 void     debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand,
                                 uint16_t operand_addr, int op, uint32_t value);
 void     debug_bp_clear_condition(int pc, uint8_t bank, int x16Bank);
@@ -161,14 +266,23 @@ struct watchpoint {
 	bool     has_value; // when set, only fire if the written value compares true
 	uint8_t  value;
 	int      op;        // BPCMP_* comparison code
+	uint16_t owners;    // bitmask of debug_owner_t; maintained by the core
 };
 
 // Watch `len` bytes from `addr` in bank `x16Bank` (see DEBUG_BANK_ANY).
 // Identified by (addr, x16Bank), like a breakpoint, so the same address can be
-// watched in more than one bank. Returns the new index, or -1 if one already
-// covers that pair or the table is full.
-int  debug_wp_add(uint16_t addr, uint16_t len, int x16Bank);
-bool debug_wp_remove(uint16_t addr, int x16Bank);
+// watched in more than one bank.
+//
+// Ownership works exactly as it does for breakpoints, and for the same reason:
+// `-wp` on the command line, the debugger and a DAP client can all want one
+// address, and the first remove must not disarm it for the others. A watch that
+// already exists keeps its length and value filter; the new owner is asking to
+// be told about the address, not to redefine someone else's watch.
+debug_add_result_t debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner);
+bool debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner);
+int  debug_wp_clear_owner(debug_owner_t owner);
+bool debug_wp_delete(uint16_t addr, int x16Bank);
+bool debug_wp_has_owner(uint16_t addr, int x16Bank, debug_owner_t owner);
 void debug_wp_clear_all(void);
 int  debug_wp_count(void);
 // Read-only access to watchpoint `index`, for listing them in a UI. NULL when

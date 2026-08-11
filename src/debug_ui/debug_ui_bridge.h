@@ -94,12 +94,34 @@ memory_get_num_rom_banks(void)
 // supplying DEBUG_BANK_ANY on the panels' behalf. ANY is a wildcard when a
 // breakpoint is *tested* (bank_selector_matches), but debug_bp_find() compares
 // x16Bank for equality, so passing ANY as a lookup key finds only breakpoints
-// that were themselves stored as ANY. Since debug_bp_add() records a concrete
-// bank for every address at $A000 and above, keying on ANY silently matched
-// nothing for any breakpoint in banked RAM or ROM -- so they could be set, but
-// never removed, disabled, cleared, or have their hits or condition read.
-static inline int  DEBUGAddBreakPoint(struct breakpoint bp) { return debug_bp_add(bp); }
-static inline bool DEBUGRemoveBreakPoint(int pc, uint8_t bank, int x16Bank) { return debug_bp_remove(pc, bank, x16Bank); }
+// that were themselves stored as ANY. Since an add records a concrete bank for
+// every address at $A000 and above, keying on ANY silently matched nothing for
+// any breakpoint in banked RAM or ROM -- so they could be set, but never
+// removed, disabled, cleared, or have their hits or condition read.
+//
+// Everything the panels create is owned by DEBUG_OWNER_UI. The core records who
+// asked for each entry, so a breakpoint this window sets at an address a DAP
+// client also wants survives that client disconnecting, and vice versa.
+static inline bool
+DEBUGAddBreakPoint(struct breakpoint bp)
+{
+	return debug_bp_add_for(bp, DEBUG_OWNER_UI) != DEBUG_ADD_FULL;
+}
+
+// The user asking for a breakpoint to go means gone, whoever else also wanted
+// it. Dropping only this window's claim would leave it armed and the button
+// looking broken -- see docs/breakpoint-ownership.md.
+static inline bool
+DEBUGRemoveBreakPoint(int pc, uint8_t bank, int x16Bank)
+{
+	return debug_bp_delete(pc, bank, x16Bank);
+}
+
+// Disabling keeps the entry, its owners, its condition and its hit count, so
+// the breakpoint still shows in every panel's gutter while it is off.
+static inline bool DEBUGSetBreakpointEnabled(int pc, uint8_t bank, int x16Bank, bool on) { return debug_bp_set_enabled(pc, bank, x16Bank, on); }
+static inline bool DEBUGIsBreakpointEnabled(int pc, uint8_t bank, int x16Bank) { return debug_bp_is_enabled(pc, bank, x16Bank); }
+
 static inline void DEBUGForgetBreakpoint(int pc, uint8_t bank, int x16Bank) { debug_bp_forget(pc, bank, x16Bank); }
 static inline void DEBUGClearBreakpointCondition(int pc, uint8_t bank, int x16Bank) { debug_bp_clear_condition(pc, bank, x16Bank); }
 static inline uint32_t DEBUGGetBreakpointHits(int pc, uint8_t bank, int x16Bank) { return debug_bp_get_hits(pc, bank, x16Bank); }
@@ -168,8 +190,12 @@ void debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x
 // extern and indexed directly -- so the panel read every field after `len` from
 // the wrong offset, with a 12-byte stride over a 16-byte array. The table is
 // static in debug_core.c and is now read through debug_wp_at().
-static inline int  DEBUGAddWatchPoint(uint16_t addr, uint16_t len) { return debug_wp_add(addr, len, DEBUG_BANK_ANY); }
-static inline bool DEBUGRemoveWatchPoint(uint16_t addr) { return debug_wp_remove(addr, DEBUG_BANK_ANY); }
+//
+// Owned by DEBUG_OWNER_UI, like the breakpoints above: -wp on the command line
+// and a DAP client's data breakpoints can name the same address, and none of
+// them should be able to disarm another's.
+static inline bool DEBUGAddWatchPoint(uint16_t addr, uint16_t len) { return debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_UI) != DEBUG_ADD_FULL; }
+static inline bool DEBUGRemoveWatchPoint(uint16_t addr) { return debug_wp_delete(addr, DEBUG_BANK_ANY); }
 static inline bool DEBUGCheckWatchPoint(uint16_t addr) { return debug_wp_covers(addr); }
 
 // ─── Machine model (glue.h) ────────────────────────────────────────────────

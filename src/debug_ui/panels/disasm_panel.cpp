@@ -53,7 +53,7 @@ void
 toggle_breakpoint(uint16_t addr, uint8_t bank, int x16bank)
 {
 	if (!DEBUGRemoveBreakPoint((int)addr, bank, x16bank)) {
-		struct breakpoint bp;
+		struct breakpoint bp = {};
 		bp.pc      = (int)addr;
 		bp.bank    = bank;
 		bp.x16Bank = x16bank;
@@ -283,7 +283,7 @@ disasm_panel_render(bool *p_open)
 		if (ImGui::BeginPopupContextItem("disasm_ctx")) {
 			ImGui::BeginDisabled(!DEBUGIsPaused());
 			if (ImGui::MenuItem("Run to here")) {
-				DEBUGRunTo(ln.addr, bank);
+				DEBUGRunTo(ln.addr, bank, DEBUG_OWNER_UI);
 			}
 			ImGui::EndDisabled();
 			if (ImGui::MenuItem("Toggle breakpoint")) {

@@ -61,7 +61,7 @@ sym_toggle_bp(uint16_t addr)
                   ? (addr < 0xC000 ? (int)memory_get_ram_bank() : (int)memory_get_rom_bank())
                   : -1;
     if (!DEBUGRemoveBreakPoint((int)addr, 0, x16)) {
-        struct breakpoint bp;
+        struct breakpoint bp = {};
         bp.pc      = (int)addr;
         bp.bank    = 0;
         bp.x16Bank = x16;
@@ -169,7 +169,7 @@ symbols_panel_render(bool *p_open)
                         sym_toggle_bp(r.addr);
                     ImGui::BeginDisabled(!DEBUGIsPaused());
                     if (ImGui::MenuItem("Run to here"))
-                        DEBUGRunTo(r.addr, 0);
+                        DEBUGRunTo(r.addr, 0, DEBUG_OWNER_UI);
                     ImGui::EndDisabled();
                     ImGui::EndPopup();
                 }
