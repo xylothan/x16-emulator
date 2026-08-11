@@ -144,12 +144,27 @@ a legitimately recorded 3-byte `LDA` back to 2 bytes purely because the other
 width ran more recently, reintroducing the defect this branch fixed. It trades
 one wrong answer for another.
 
-Only **write invalidation** — dropping anchors when the memory under them is
-actually written — separates the two, because it keys on the event that really
-distinguishes them rather than on anything recoverable after the fact. That is
-a hook on every write to code space, which is why the one-byte opcode check
-exists in the first place. It would also close the width-propagation gap above,
-so if it is ever built, both should be revisited together.
+Widening the staleness check — storing two or more bytes per anchor instead of
+one — is also not the clean win it looks like. It would catch *this* example
+(the operand bytes differ), but it is the same class of heuristic, so it only
+narrows the window rather than closing it; and it actively misfires on one-byte
+instructions, which are extremely common (`NOP`, `INX`, `RTS`, …). For those,
+the second byte compared is not part of the instruction at all but the *next*
+instruction's opcode, so changing the following instruction would invalidate a
+perfectly good anchor. Recording the instruction's real length at record time
+would avoid that, but the recording path runs on every executed instruction and
+computing a length there means a decode per instruction.
+
+What does resolve it is invalidation keyed on the **write** that replaced the
+code, because that is the event which actually differs between the two cases.
+That does not necessarily mean a hook on every CPU write: the common source of
+stale anchors is a host-side load, and those already funnel through the KERNAL
+LOAD/MACPTR interception in `main.c`, so invalidating the affected address range
+there would cover overlays and second-program loads cheaply. Self-modifying code
+and in-guest decompressors would still need the general write path. Either way
+it is a change to the recording side rather than the disassembly side, and it
+would also close the width-propagation gap above, so if it is ever built both
+should be revisited together.
 
 `tests/test_code_map.c` pins the current behaviour under checks labelled
 `KNOWN LIMITATION`, so it is visible rather than folklore. If it is ever fixed
