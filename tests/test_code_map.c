@@ -919,8 +919,11 @@ main(void)
 		poke_banked(0xC001, 2, lda_imm, sizeof(lda_imm));
 
 		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 2, lines, 4, &next);
+		// A REP is two bytes whatever its operand says, so this only pins that
+		// the straddling instruction is sized at all -- the check below is the
+		// one that exercises the operand's window.
 		check(n == 2 && lines[0].addr == 0xBFFF && lines[0].size == 2,
-		      "sizes a REP whose operand lives in the next window");
+		      "sizes a REP that straddles the window boundary");
 		check(n == 2 && lines[1].addr == 0xC001 && lines[1].size == 3,
 		      "reads a REP operand through the window backing the operand");
 
