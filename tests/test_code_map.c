@@ -703,26 +703,36 @@ main(void)
 	// the exemption above then lets it swallow a genuinely fresh anchor inside
 	// it.
 	//
-	//   old: $8000  A9 xx xx   LDA #$xxxx  recorded with 16-bit A (3 bytes)
-	//   new: $8000  A9 xx      LDA #$xx    8-bit A, and $8002 freshly executed
+	//   old: $8000  A9 11 22   LDA #$2211  recorded with 16-bit A (3 bytes)
+	//   new: $8000  A9 EA      LDA #$EA    8-bit A, and $8002 freshly executed
 	//
 	// The opcode byte is still $A9, so the stale anchor survives and wins.
+	//
 	// This pins the CURRENT behaviour so the limitation is visible rather than
-	// folklore -- it is NOT the desired behaviour. Fixing it needs a way to
-	// tell which anchor is newer (a per-address recording epoch) or write
-	// invalidation; see docs/code-map-width-propagation.md. If you fix it, this
-	// check should fail: update it, do not delete it.
+	// folklore. Note carefully what it is NOT: the recorded state here is
+	// indistinguishable from a routine legitimately executed at two different
+	// widths, where emitting the 3-byte LDA is exactly right. Nothing derivable
+	// from the anchors alone can separate the two -- which is why a "prefer the
+	// newer anchor" rule would not fix this, it would only trade this case for
+	// that one. Only invalidating anchors on the WRITE that replaced the code
+	// distinguishes them; see docs/code-map-width-propagation.md. If you fix
+	// it, this check should fail: update it, do not delete it.
 	{
 		reset_all();
 		regs.is65c816 = true;
 		regs.e        = 0;
 
-		const uint8_t code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
-		poke(0x8000, code, sizeof(code));
-
-		// The old program ran here with a 16-bit accumulator.
+		// The old program runs here with a 16-bit accumulator, so its LDA is
+		// three bytes and the anchor records both that opcode and that status.
+		const uint8_t old_code[] = { 0xA9, 0x11, 0x22, 0x33 };
+		poke(0x8000, old_code, sizeof(old_code));
 		code_map_record(0x8000, 0, 0, 0, FLAG_INDEX_WIDTH);
-		// The new program runs with 8 bits and starts an instruction at $8002.
+
+		// An overlay replaces the code. The replacement happens to begin with
+		// $A9 as well, so the one-byte staleness check cannot see the change
+		// and the old anchor -- with its 16-bit status -- survives.
+		const uint8_t new_code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
+		poke(0x8000, new_code, sizeof(new_code));
 		code_map_record(0x8002, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
 		regs.status = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
 
@@ -1034,20 +1044,22 @@ main(void)
 		check(n == 2 && lines[1].addr == 0xA001 && lines[1].size == 3,
 		      "reads a REP operand across the $9FFF/$A000 boundary correctly");
 
-		// And at the very top of memory the operand wraps to $0000, which is a
-		// different window again (flat, unbanked).
+		// And at the very top of memory the operand wraps to $0000. That is low
+		// memory, which is unbanked, so this pins the wrapped ADDRESS rather
+		// than a window choice: reading at `addr` instead of `addr + 1` leaves
+		// M set and sizes the LDA at 2. (There is deliberately no decoy here --
+		// no window selection can be observed below $A000.)
 		reset_all();
 		regs.is65c816 = true;
 		regs.e        = 0;
 		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
-		g_rom_bank    = 0x17;
 		poke_banked(0xFFFF, 3, sep_op, sizeof(sep_op)); // REP in ROM bank 3
 		poke(0x0000, sep_arg, sizeof(sep_arg));         // operand wraps to $0000
 		poke(0x0001, lda_imm, sizeof(lda_imm));
 
 		n = code_map_disasm_forward(0xFFFF, 0, 0, 3, 2, lines, 4, &next);
 		check(n == 2 && lines[1].addr == 0x0001 && lines[1].size == 3,
-		      "reads a REP operand that wraps past $FFFF from the right window");
+		      "wraps the REP operand address past $FFFF instead of reading past the end");
 
 		regs.is65c816 = false;
 	}

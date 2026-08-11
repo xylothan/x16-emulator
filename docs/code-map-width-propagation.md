@@ -132,11 +132,24 @@ Why it is accepted rather than fixed:
   `.byte $2C` skip idiom, where two overlapping starts are both genuinely real
   and clamping renders a whole known instruction as a fragment.
 
-Fixing it properly needs a way to tell which of two anchors is *newer* — a
-per-address recording epoch (roughly +64 KB per bank context) or real write
-invalidation. Neither is warranted for a 65C816-only, narrow case, but both
-would also fix the width-propagation gap above, so they are worth revisiting
-together.
+**The stale case is not distinguishable from a legitimate one.** The recorded
+state above is byte-for-byte identical to a routine that genuinely executed at
+two different accumulator widths — an anchor at `$8000` with a 16-bit status and
+an anchor at `$8002` with an 8-bit one, over memory starting `$A9`. In that
+benign case emitting the 3-byte `LDA` is exactly correct.
+
+That rules out the obvious fix. A per-address recording *epoch* ("prefer the
+newer anchor") does not resolve this: applied to the benign case it would clamp
+a legitimately recorded 3-byte `LDA` back to 2 bytes purely because the other
+width ran more recently, reintroducing the defect this branch fixed. It trades
+one wrong answer for another.
+
+Only **write invalidation** — dropping anchors when the memory under them is
+actually written — separates the two, because it keys on the event that really
+distinguishes them rather than on anything recoverable after the fact. That is
+a hook on every write to code space, which is why the one-byte opcode check
+exists in the first place. It would also close the width-propagation gap above,
+so if it is ever built, both should be revisited together.
 
 `tests/test_code_map.c` pins the current behaviour under checks labelled
 `KNOWN LIMITATION`, so it is visible rather than folklore. If it is ever fixed
