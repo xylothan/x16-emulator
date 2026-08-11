@@ -270,8 +270,11 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // takes precedence over this estimate.
 //
 // Just five instructions change the register widths -- REP, SEP, XCE, PLP and
-// RTI -- and the first three are handled exactly here (CLC/SEC are tracked only
-// because XCE swaps carry with the emulation flag). PLP and RTI restore a
+// RTI. REP and SEP are handled exactly, since the bits are in the operand. XCE
+// is exact only given a correct emulation flag: anchors record the status byte
+// but not E, so the running E is seeded from the live CPU and an anchor
+// re-establishes the widths without re-establishing E. (CLC/SEC are tracked
+// only because XCE swaps carry with the emulation flag.) PLP and RTI restore a
 // status byte from the stack, which is unknowable until they run, so this
 // deliberately leaves the estimate alone for them rather than inventing a
 // value: the guess stays wrong only until the next recorded anchor, which
@@ -576,9 +579,17 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	//   * the fill truncates onto a recorded start found inside the
 	//     instruction, which is right but leaves the remaining bytes uncovered.
 	// Capping each fill at the distance to the boundary kills the overlap, and
-	// looping until the boundary is reached exactly kills the gap. Seeding
-	// run_status from the walk's decision keeps the first line consistent with
-	// what the walk resolved; any follow-up line re-resolves its own evidence.
+	// looping until the boundary is reached exactly kills the gap.
+	//
+	// run_status is seeded from the walk's decision, but cm_emit re-resolves
+	// the evidence at each address rather than taking before[i] verbatim, so
+	// the first line is not guaranteed to match what the walk decided. It can
+	// differ on the fallback path: the walk rejects a candidate whose decode
+	// does not land on the anchor and stores the anchor's status, while cm_emit
+	// looks up that address and may find a recorded anchor of its own. Where
+	// they differ, cm_emit's answer is the better one -- it is ground truth
+	// recorded at that exact address -- and it cannot drift, because the
+	// fallback has one byte of room and phase C reseeds independently.
 	//
 	// Because one resolved instruction can now need more than one line, this
 	// resolves them NEAREST-THE-CENTER FIRST and places them backwards from the
