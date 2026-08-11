@@ -591,17 +591,19 @@ usage()
 	printf("\tstack. Independent of -debug, and can be combined with it.\n");
 #endif
 	printf("-bp <address>\n");
-	printf("\tEnable the debugger and set a breakpoint. Unlike -debug's optional\n");
+	printf("\tSet a breakpoint before the machine starts. Unlike -debug's optional\n");
 	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
-	printf("\tbefore the machine starts.\n");
+	printf("\tup front.\n");
+	printf("\tA breakpoint needs a debugger to resume from, so this opens -debug\n");
+	printf("\tunless -imgui or -debugport is already providing one.\n");
 	printf("\tAn address on its own applies whatever bank is mapped. To pin one\n");
 	printf("\tbank of the $A000-$FFFF windows, write bb:aaaa, e.g. 05:A000 for\n");
 	printf("\t$A000 in RAM bank 5. Below $A000 nothing is banked, so no bank may\n");
 	printf("\tbe given.\n");
 	printf("-wp <address>[,<length>]\n");
-	printf("\tEnable the debugger and watch memory: stop when the program writes\n");
-	printf("\tto this address, or anywhere in <length> bytes from it. Takes the\n");
-	printf("\tsame address forms as -bp, and can be repeated.\n");
+	printf("\tWatch memory: stop when the program writes to this address, or\n");
+	printf("\tanywhere in <length> bytes from it. Takes the same address forms as\n");
+	printf("\t-bp, can be repeated, and picks a debugger the same way.\n");
 	printf("-dbgauto / -no-dbgauto\n");
 	printf("\tPick up debug info for programs the running machine loads, not\n");
 	printf("\tjust the one named by -dbgfile: when it LOADs a host file, read\n");
@@ -772,6 +774,11 @@ main(int argc, char **argv)
 	// Unset until an explicit flag says otherwise, so the default below can
 	// follow the debugger rather than the order of the arguments.
 	int dbg_auto_opt = -1;
+
+	// Whether -bp or -wp asked for something to be armed before the machine
+	// starts. Which front end ends up driving it is decided after parsing, so
+	// the answer does not depend on the order the flags were written in.
+	bool cli_stops_requested = false;
 
 	while (argc > 0) {
 		if (!strcmp(argv[0], "-rom")) {
@@ -1051,7 +1058,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
-			debug_window_enabled = true;
+			cli_stops_requested = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1071,7 +1078,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
-			debug_window_enabled = true;
+			cli_stops_requested = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1430,6 +1437,22 @@ main(int argc, char **argv)
 		} else {
 			usage();
 		}
+	}
+
+	// A breakpoint needs a front end that can resume the machine. Without one
+	// the first stop is the last: the emulator halts and nothing is listening
+	// for a key or a client to start it again.
+	//
+	// So -bp and -wp *require* a debugger rather than choosing one. They used
+	// to switch the text debugger on directly, which was right when it was the
+	// only one -- but it meant `-imgui -bp` opened the text overlay over the
+	// graphical debugger the user actually asked for, and `-debugport -bp`
+	// opened a window on a run that was meant to be headless. Deciding here
+	// rather than in the flag handler also makes it independent of the order
+	// the flags were written in.
+	if (cli_stops_requested && !debug_window_enabled && !imgui_debugger_enabled
+	    && !debug_server_is_enabled()) {
+		debug_window_enabled = true;
 	}
 
 	// Follows the debugger unless asked otherwise, which is where it sat before

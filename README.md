@@ -232,7 +232,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 |---|---|
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics and the three audio sources. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
-| `-bp <address>` | Sets a breakpoint at `<address>` (hex). Can be repeated. Implies `-debug`. |
+| `-bp <address>` | Sets a breakpoint at `<address>` (hex) before the machine starts. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
 | `-dbgauto` / `-no-dbgauto` | Whether to merge the `.dbg` beside each program the machine loads. Follows the debugger unless forced either way. |
 | `-srcpath <dir>` | Adds a directory to search for the source files a `.dbg` names. Can be repeated. |
