@@ -315,9 +315,11 @@ A good default when your source is built with cc65:
 x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 ```
 
-> ⚠️ The ImGui debugger and the DAP server are **experimental**. They have been used to complete
-> several real C64→X16 porting projects, but you should expect rough edges and occasional
-> changes to keys, layouts and DAP details between releases.
+> ⚠️ The ImGui debugger and the DAP server are **experimental and probably broken**. They have
+> helped complete several real C64→X16 porting projects, but treat the debugger like a goat that
+> eats your homework: if something looks funny, assume it is doing something wrong until you can
+> prove otherwise. Expect rough edges and occasional changes to keys, layouts and DAP details
+> between releases.
 
 #### Using the debugger and an editor at the same time
 
