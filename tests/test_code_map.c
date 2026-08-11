@@ -573,6 +573,12 @@ main(void)
 		check(starts_at_8003, "begins a line at the recorded start inside the BIT");
 		check(n >= 1 && lines[0].size == 1 && !lines[0].recorded && lines[0].eff_addr == -1,
 		      "a line cut short is not reported as a whole verified instruction");
+		// size, bytes and text must agree: a row cut short is rendered as the
+		// data bytes it actually owns, not as an instruction whose mnemonic
+		// describes bytes the next row claims.
+		check(n >= 1 && lines[0].bytes[0] == 0x2C &&
+		          strcmp(lines[0].text, ".byte $2c") == 0,
+		      "renders a cut-short line as the bytes it owns");
 
 		// Capacity is the case that used to lose the center outright: phase B
 		// now needs two lines where the walk resolved one, and with room for
@@ -583,6 +589,13 @@ main(void)
 		          lines[center_index].addr == 0x8005,
 		      "keeps the center line when phase B cannot fit as well");
 		check_tiles(lines, tight, "tiles what fits when capacity runs out");
+
+		// ...and it must spend the one remaining slot on the row NEAREST the
+		// center. A group that needs two lines and has room for one can keep
+		// its last line ($8003) and simply start the window later; dropping the
+		// whole group instead throws away context the caller has room for.
+		check(tight == 2 && center_index == 1 && lines[0].addr == 0x8003,
+		      "keeps the part of a too-large group closest to the center");
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────
@@ -825,6 +838,41 @@ main(void)
 		// rather than 2 and the text reads "sta $eaea". Fixing it means giving
 		// disasm() a per-byte reader, which is shared with the classic debugger
 		// and the DAP server. See docs/code-map-width-propagation.md.
+
+		// The width propagation, by contrast, is code_map's own and must read
+		// its operand through the right window. A REP whose opcode is the last
+		// byte of the RAM window takes its operand from the ROM window, and
+		// getting that wrong mis-sizes every following instruction until the
+		// next anchor -- exactly the drift this file exists to prevent.
+		//
+		//   $BFFF: C2 20   REP #$20   opcode in RAM bank 5, operand in ROM 2
+		//   $C001: A9 ..   LDA #imm   3 bytes once REP has cleared M
+		//
+		// ROM bank 5 holds $00 at $C000, so reading the operand through the
+		// opcode's own window clears nothing and sizes the LDA at 2.
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // 8-bit A to start
+		g_ram_bank    = 0x11;
+		g_rom_bank    = 0x17;
+
+		const uint8_t rep_op[]    = { 0xC2 };       // REP, in the RAM window
+		const uint8_t rep_arg[]   = { 0x20 };       // its operand: clear M
+		const uint8_t rep_decoy[] = { 0x00 };       // same address, wrong bank
+		const uint8_t lda_imm[]   = { 0xA9, 0xEA, 0xEA };
+		poke_banked(0xBFFF, 5, rep_op, sizeof(rep_op));
+		poke_banked(0xC000, 2, rep_arg, sizeof(rep_arg));
+		poke_banked(0xC000, 5, rep_decoy, sizeof(rep_decoy));
+		poke_banked(0xC001, 2, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 2, lines, 4, &next);
+		check(n == 2 && lines[0].addr == 0xBFFF && lines[0].size == 2,
+		      "sizes a REP whose operand lives in the next window");
+		check(n == 2 && lines[1].addr == 0xC001 && lines[1].size == 3,
+		      "reads a REP operand through the window backing the operand");
+
+		regs.is65c816 = false;
 	}
 
 	// ── Anchor staleness is judged in the right bank ────────────────────────
