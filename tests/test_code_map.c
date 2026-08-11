@@ -409,6 +409,44 @@ main(void)
 		      "keeps the center where the caller asked it despite the fallback");
 	}
 
+	// ── Truncating onto an anchor must not leave a hole ─────────────────────
+	// The `.byte $2C` skip idiom: a BIT abs opcode is planted so that it
+	// swallows the two bytes after it, and jumping to the byte *inside* it runs
+	// a different instruction than falling in at the top. Both are legal
+	// instruction starts and they deliberately overlap.
+	//
+	//   $8000: 2C EA A9   BIT $A9EA   -- only the $2C is meant; it eats the rest
+	//   $8001: EA         NOP         -- where execution actually enters
+	//   $8002: A9 EA      LDA #$EA    -- runs into the center
+	//
+	// Nothing else decodes onto $8003 (the NOP at $8001 is one byte, the LDA at
+	// $8002 is two), so the backward walk lands on the BIT. The renderer then
+	// cuts that line short at the recorded start inside it, which is right --
+	// but the two bytes it gave up still belong to the window, and dropping
+	// them leaves a hole between the line and the center.
+	{
+		reset_all();
+		const uint8_t code[] = { 0x2C, 0xEA, 0xA9, 0xEA, 0xEA };
+		poke(0x8000, code, sizeof(code));
+		code_map_record(0x8001, 0, 0, 0, regs.status); // execution jumped past the BIT
+
+		code_map_line_t lines[16];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8003, 0, 0, 0, 1, 2, lines, 16, &center_index);
+
+		check_tiles(lines, n, "a truncated line leaves no gap before the center");
+
+		bool has_entry = false;
+		for (int i = 0; i < n; i++) {
+			if (lines[i].addr == 0x8001) {
+				has_entry = true;
+			}
+		}
+		check(has_entry, "gives the skipped-to entry point its own line");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8003,
+		      "still centers on the requested address after filling the hole");
+	}
+
 	// ── Recovering from a disagreement about instruction width ──────────────
 	// The backward walk sizes candidates using the status recorded *at* each
 	// one; the forward pass carries a propagated estimate. Propagation cannot

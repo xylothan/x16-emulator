@@ -512,19 +512,43 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 
 	int n = 0;
 
-	// Phase B — render the preceding instructions lowest-first, exactly as the
-	// backward walk resolved them. The walk decided where each one starts; the
-	// renderer decodes each address again, and the two can disagree about how
-	// long the instruction is. Where the decode comes out longer than the walk's
-	// spacing -- the one-byte fallback landing on a multi-byte instruction, say
-	// -- an uncapped fill would claim bytes the next line also claims, so each
-	// fill is capped at the distance to the next start.
+	// Phase B — render the preceding instructions lowest-first. The backward
+	// walk decided where each one starts; the renderer decodes each address
+	// again, and the two can disagree about how long the instruction is. The
+	// emitted lines still have to tile the range exactly, so both directions of
+	// disagreement are handled here rather than left for a caller to notice:
+	//   - the decode comes out LONGER than the walk's spacing (the one-byte
+	//     fallback landing on a multi-byte instruction, say). The fill is capped
+	//     at the distance to the next start, so it cannot claim bytes that
+	//     another line also claims.
+	//   - the decode comes out SHORTER, because it was cut back off a recorded
+	//     start inside it -- which the `.byte $2C` skip idiom does deliberately.
+	//     The bytes it gave up are still part of the window, so keep emitting
+	//     from where it stopped until the next start is reached. Those extra
+	//     lines are real instruction starts (that is why the fill stopped), so
+	//     showing them is better than showing a hole.
+	// Each fill returns at least one byte and never more than the room left, so
+	// the walk always reaches `stop` exactly and always terminates.
 	for (int i = collected - 1; i >= 0 && n < max_out; i--) {
-		uint16_t stop = (i == 0) ? center : before[i - 1].addr;
-		int      room = (int)((uint16_t)((stop - before[i].addr) & 0xFFFF));
-		cm_fill(before[i].addr, bank, rambank, rombank, before[i].status,
-		        before[i].recorded, room, &out[n]);
-		n++;
+		uint16_t stop  = (i == 0) ? center : before[i - 1].addr;
+		uint16_t cur   = before[i].addr;
+		bool     first = true;
+
+		while (n < max_out) {
+			int room = (int)((uint16_t)((stop - cur) & 0xFFFF));
+			if (room == 0)
+				break;
+
+			cm_context_t *c   = first ? NULL : cm_ctx_for_addr(cur, bank, rambank, rombank);
+			bool          rec = first ? before[i].recorded
+			                          : cm_anchor_ok(c, cur, bank, rambank, rombank);
+			uint8_t       st  = rec && !first ? c->status[cur] : before[i].status;
+
+			int sz = cm_fill(cur, bank, rambank, rombank, st, rec, room, &out[n]);
+			n++;
+			cur   = (uint16_t)((cur + sz) & 0xFFFF);
+			first = false;
+		}
 	}
 
 	// Phase C — forward from `center` itself, so the center line is always
