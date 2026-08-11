@@ -474,11 +474,17 @@ line, or the bin in the Breakpoints panel.
 
 Build with debug info, and the emulator will show you your own source instead of raw disassembly.
 
-Build:
+Build, in assembly:
 
 ```
 ca65 --debug-info -o myprog.o myprog.s
 ld65 -C myprog.cfg --dbgfile myprog.dbg -o myprog.prg myprog.o
+```
+
+Build, in C:
+
+```
+cl65 -t cx16 -g -Wl --dbgfile,myprog.dbg -o myprog.prg myprog.c
 ```
 
 Run:
@@ -510,6 +516,23 @@ Because a `.dbg` only records source *file names*, the emulator locates the actu
 by searching, in order: the path stored in the `.dbg`, the directory of the `.dbg`, each
 `-srcpath <dir>` you passed (most recent first), the directory of the loaded program, and finally
 the current directory.
+
+**C programs show the C.** cc65 compiles `myprog.c` to `myprog.s` and assembles that, and
+with `-g` the `.dbg` describes the same bytes twice: once against your C statements and once
+against the generated assembly, instruction by instruction. The debugger prefers the C, so the
+Source panel follows your `.c` file and breakpoints set on a `.c` line land at the start of that
+statement. The generated `.s` is left out of the source panel's **Open…** list, since `cl65`
+deletes it on the way out; a `.s` you wrote yourself is still offered, and so is one you kept.
+The disassembly is unaffected — it still aligns on the real instruction boundaries.
+
+Stepping is still per instruction, as it has always been — one C statement is many of them, so
+the highlight stays on a line until execution leaves it. Step Over does step over a `JSR`, so it
+walks past a called function in one go. A step that advances a whole C statement at a time is not
+implemented.
+
+What you do *not* get for C yet is data: locals, parameters and watch expressions still have to
+be read as raw memory, because nothing here decodes cc65's software stack or its type records.
+Globals work, as they are ordinary labels.
 
 **Banked code is partly handled.** A `.dbg` does not record which RAM bank a `$A000`–`$BFFF`
 segment belongs to. When the running machine loads a program, the emulator notes which RAM bank was
