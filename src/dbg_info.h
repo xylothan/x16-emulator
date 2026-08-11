@@ -40,6 +40,11 @@ bool dbg_info_addr_to_source_nearest(dbg_addr_t addr, const char **file_path, in
 // Returns an empty string if no .dbg has been loaded or it had no directory part.
 const char *dbg_info_get_dbg_dir(void);
 
+// True when the loaded debug info carries cc65 high-level (C) line records, so
+// a source line means a whole C statement rather than one instruction. The
+// debugger uses this to decide whether stepping by line is worth offering.
+bool dbg_info_has_high_level(void);
+
 // Look up address for a given source location.
 // Returns true if found, fills in addr.
 bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *addr);
@@ -165,6 +170,13 @@ bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr);
 // recorded — usually a basename). Lets the debugger pre-open any known source
 // file to set breakpoints / run-to before the PC reaches it. `name` points to
 // internal storage — do not free. Valid for 0 <= index < dbg_info_file_count().
+//
+// When the .dbg carries cc65 high-level (C) line info, the ".s" files cc65
+// generated on the way from C to the assembler are left out: they are not what
+// the user wrote, and cl65 deletes them, so offering them opens a file that is
+// not there. A hand-written .s stays on offer — see refresh_line_type_state()
+// for exactly what has to hold before one is treated as generated. The indices
+// are dense either way, so a caller walks 0..count-1 as before.
 int  dbg_info_file_count(void);
 bool dbg_info_file_at(int index, const char **name);
 

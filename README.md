@@ -362,7 +362,7 @@ Every panel is dockable, closable and reopenable from the **View** menu.
 | **Disassembly** | Live disassembly around the PC. Hovering an operand shows the effective address and the value there. Right-click for *Run to here* and *Toggle breakpoint*. |
 | **CPU** | Registers with 65C816-aware widths, decoded status flags, and the stack with the most recent push on top. A collapsible **Virtual Regs (R0–R15)** section shows the X16 pseudo-registers at `$02`–`$21`. A collapsible **Watch** section holds your own address watches — bank-qualified, up to 16 bytes each, editable, with hex/decimal/binary tooltips. |
 | **Memory** | A hex editor with three tabs: **CPU** (the CPU map), **Banked** (browse any RAM bank at `$A000`–`$BFFF`) and **VRAM** (VERA's full 17-bit address space). Drag to select a range, search by hex bytes or ASCII with Find Next/Prev, jump to an address, and watch changed bytes flash. Right-click to *Add to watch*, *Add range to watch*, *Copy address*, *Break on write* or *Clear selection*. Edits go through the normal write path, so I/O side effects happen and watchpoints fire. |
-| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
+| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. For C, stepping moves a whole statement at a time rather than an instruction. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
 | **VERA** | Six tabs: **Registers** (all 32 registers `$9F20`–`$9F3F`, fields decoded), **Palette**, **Tiles**, **Sprites**, **Bitmap** and **Tilemap**. Each view decodes using the registers that actually rendered each scanline, so raster splits show up correctly rather than being flattened to the end-of-frame state. |
 | **Breakpoints** | Every breakpoint, with its condition and hit count. Enable, disable or delete individually. |
 | **Symbols** | A filterable list of every label from your `.dbg`, with live values. Right-click to *Go to*, *Toggle breakpoint* or *Run to here*. |
@@ -474,11 +474,17 @@ line, or the bin in the Breakpoints panel.
 
 Build with debug info, and the emulator will show you your own source instead of raw disassembly.
 
-Build:
+Build, in assembly:
 
 ```
 ca65 --debug-info -o myprog.o myprog.s
 ld65 -C myprog.cfg --dbgfile myprog.dbg -o myprog.prg myprog.o
+```
+
+Build, in C:
+
+```
+cl65 -t cx16 -g -Wl --dbgfile,myprog.dbg -o myprog.prg myprog.c
 ```
 
 Run:
@@ -510,6 +516,25 @@ Because a `.dbg` only records source *file names*, the emulator locates the actu
 by searching, in order: the path stored in the `.dbg`, the directory of the `.dbg`, each
 `-srcpath <dir>` you passed (most recent first), the directory of the loaded program, and finally
 the current directory.
+
+**C programs show the C.** cc65 compiles `myprog.c` to `myprog.s` and assembles that, and
+with `-g` the `.dbg` describes the same bytes twice: once against your C statements and once
+against the generated assembly, instruction by instruction. The debugger prefers the C, so the
+Source panel follows your `.c` file and breakpoints set on a `.c` line land at the start of that
+statement. The generated `.s` is left out of the source panel's **Open…** list, since `cl65`
+deletes it on the way out; a `.s` you wrote yourself is still offered, and so is one you kept.
+The disassembly is unaffected — it still aligns on the real instruction boundaries.
+
+Stepping runs a whole C statement per press. F10 steps over a call — `printf(...)` and
+everything it does is one press — and F11 steps into one, landing on the first line of the
+function. Both fall back to stepping one instruction at a time when the debug info has no C in
+it, so assembly projects step exactly as they always did; the Source panel has a **Step by
+line** toggle if you want the instruction-at-a-time behaviour for C too. The Disassembly panel
+is unaffected either way.
+
+What you do *not* get for C yet is data: locals, parameters and watch expressions still have to
+be read as raw memory, because nothing here decodes cc65's software stack or its type records.
+Globals work, as they are ordinary labels.
 
 **Banked code is partly handled.** A `.dbg` does not record which RAM bank a `$A000`–`$BFFF`
 segment belongs to. When the running machine loads a program, the emulator notes which RAM bank was

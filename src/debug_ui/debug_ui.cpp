@@ -440,16 +440,18 @@ debug_ui_draw_control_bar(void)
     ImGui::SameLine();
     if (ctrl_button("Step Into", paused,
                     "Step Into  (F11)\n"
-                    "Execute one instruction, entering any JSR/JSL.\n"
+                    "Execute one source line, entering any call. Without C debug\n"
+                    "info, or with \"Step by line\" off, one instruction.\n"
                     "Only while the machine is halted."))
-        DEBUGStepInto();
+        DEBUGStepIntoAuto();
     ImGui::SameLine();
     if (ctrl_button("Step Over", paused,
                     "Step Over  (F10)\n"
-                    "Execute one instruction, running any JSR/JSL to completion.\n"
-                    "Ctrl+F10 runs to the cursor instead.\n"
+                    "Execute one source line, running any call to completion.\n"
+                    "Without C debug info, or with \"Step by line\" off, one\n"
+                    "instruction. Ctrl+F10 runs to the cursor instead.\n"
                     "Only while the machine is halted."))
-        DEBUGStepOver(DEBUG_OWNER_UI);
+        DEBUGStepOverAuto(DEBUG_OWNER_UI);
     ImGui::SameLine();
     if (ctrl_button("Step Out", paused,
                     "Step Out  (Shift+F11)\n"

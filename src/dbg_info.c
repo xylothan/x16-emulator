@@ -8,11 +8,18 @@
 
 #ifdef _WIN32
 #define strcasecmp _stricmp
+#define strncasecmp _strnicmp
 #else
 // The project builds as strict C11, under which glibc leaves strcasecmp out of
 // <string.h>; it lives here.
 #include <strings.h>
 #endif
+
+/* cc65 `line` record types. The field is omitted entirely when it is zero,
+ * which is why an assembly-only .dbg appears to have no type field at all. */
+#define DBG_LI_TYPE_ASM   0
+#define DBG_LI_TYPE_EXT   1  /* high-level (C) source line */
+#define DBG_LI_TYPE_MACRO 2
 
 /* ------------------------------------------------------------------ */
 /*  Raw parsed records                                                 */
@@ -22,6 +29,7 @@ typedef struct {
 	int    id;
 	char  *name;
 	int    owner;     /* which .dbg declared it; see dbg_owner_intern() */
+	bool   hidden;    /* a cc65-generated intermediate; see refresh_line_type_state() */
 } dbg_file_t;
 
 typedef struct {
@@ -45,6 +53,7 @@ typedef struct {
 	int  id;
 	int  file;        /* file id */
 	int  line;        /* source line number */
+	int  type;        /* DBG_LI_TYPE_*; absent in the record means ASM */
 	int *spans;       /* array of span ids */
 	int  span_count;
 } dbg_line_t;
@@ -58,6 +67,7 @@ typedef struct {
 	dbg_addr_t end;     /* last address covered by this line's span (inclusive) */
 	int      file_id;
 	int      line_num;
+	int      type;    /* DBG_LI_TYPE_* of the line record this came from */
 	int      seg_id;  /* owning segment — disambiguates banked ($A000-$BFFF) code */
 } addr_map_entry_t;
 
@@ -128,6 +138,12 @@ static int               addr_map_count;
 static int               addr_map_cap;
 
 static bool              loaded;
+
+/* True when any loaded module carries cc65 high-level (C) line info. Every
+ * behaviour that treats a .dbg as a C program's is gated on this, so an
+ * assembly-only project takes exactly the code path it always did. Derived
+ * from lines[]; see refresh_line_type_state(). */
+static bool              has_high_level_lines;
 
 // Directory of the most recently loaded .dbg file (for source discovery).
 static char              dbg_dir[1024];
@@ -456,6 +472,7 @@ static void parse_file_record(const char *p)
 	note_id(&next_id_file, files[file_count].id);
 	files[file_count].name  = name;
 	files[file_count].owner = cur_owner;
+	files[file_count].hidden = false;   /* decided once the whole load is in */
 	file_alias_set(id, files[file_count].id);
 	file_count++;
 }
@@ -510,6 +527,13 @@ static void parse_line_record(const char *p)
 	if (id < 0 || file < 0 || line < 0)
 		return;
 
+	/* cc65 omits `type` when it is LI_TYPE_ASM, so an absent field means 0 --
+	 * not "unknown". Reading it as unknown would put every assembly record in
+	 * a category of its own and break the ranking that depends on it. */
+	long type = parse_int_key(p, "type");
+	if (type < 0)
+		type = DBG_LI_TYPE_ASM;
+
 	int  span_n = 0;
 	int *span_ids = parse_span_list(p, &span_n);
 	if (span_n == 0) {
@@ -526,6 +550,7 @@ static void parse_line_record(const char *p)
 	note_id(&next_id_line, lines[line_count].id);
 	lines[line_count].file       = (int)file;   /* raw; resolved after the load */
 	lines[line_count].line       = (int)line;
+	lines[line_count].type       = (int)type;
 	lines[line_count].spans      = span_ids;
 	lines[line_count].span_count = span_n;
 	line_count++;
@@ -570,26 +595,56 @@ static void forget_current_bank_equate(const char *name)
 	bank_equ_count = w;
 }
 
-/* Returns true if the record was structurally complete -- it had a name and a
- * usable value -- whether or not we ended up keeping it. The caller counts
- * those to tell a file that was written to the end from one still being
- * written; it is not a measure of how many records we stored. */
+/* Returns true if the record was structurally complete -- it had a name, and
+ * either a value or a good reason not to -- whether or not we ended up keeping
+ * it. The caller counts those to tell a file that was written to the end from
+ * one still being written; it is not a measure of how many records we stored.
+ * Conflating the two is what made whole files be refused over records that were
+ * perfectly well-formed and simply not ours to keep. */
 static bool parse_sym_record(const char *p)
 {
 	char *name = parse_str_key(p, "name");
 	if (!name)
 		return false;
 
-	long val = parse_int_key(p, "val");
-	if (val < 0 || val > 0xFFFFFF) {   /* no usable address value */
+	const char *tv;
+	int tlen = find_value(p, "type", &tv);
+
+	/* An import names a symbol that another module defines, so it carries no
+	 * `val` of its own -- but it is a complete record, not a truncated one.
+	 * Counting it as incomplete made the caller reject the whole file: ld65
+	 * states every `sym` record in its `info` count, imports included, so any
+	 * program that links against anything at all -- and every cc65 C program,
+	 * which imports the C runtime -- declared more symbols than it appeared to
+	 * deliver and was refused. */
+	if (tlen == 3 && strncmp(tv, "imp", 3) == 0) {
+		free(name);
+		return true;
+	}
+
+	/* Absent `val` is the signal of a half-written record; a `val` we cannot
+	 * use is not. Telling those apart matters because cc65 emits constants
+	 * that are not addresses at all: C's EOF is -1, written as 0xFFFFFFFF, so
+	 * every program that includes <stdio.h> carries one, and treating it as
+	 * truncation refused the entire file over it. */
+	const char *vv;
+	if (find_value(p, "val", &vv) <= 0) {
 		free(name);
 		return false;
 	}
 
+	long val = parse_int_key(p, "val");
+	if (val < 0 || val > 0xFFFFFF) {
+		/* Complete, but outside the 24-bit space the label and equate tables
+		 * describe, so it is counted and then dropped. (`long` is 32-bit on
+		 * Windows and 64-bit elsewhere, so 0xFFFFFFFF arrives here as either -1
+		 * or 4294967295; both are caught.) */
+		free(name);
+		return true;
+	}
+
 	/* Keep only labels. If a `type` field is present it must be "lab"; records
 	 * without a type field are accepted (older/leaner emitters). */
-	const char *tv;
-	int tlen = find_value(p, "type", &tv);
 	if (tlen > 0 && !(tlen == 3 && strncmp(tv, "lab", 3) == 0)) {
 		/* Not a label. Equates that look like a RAM-bank constant
 		 * (RAM_BANK_x / BANK_x / x_BANK with a 0..255 value) are kept aside to
@@ -723,6 +778,177 @@ static const dbg_file_t *find_file(int id)
 	return NULL;
 }
 
+static int find_file_index(int id)
+{
+	if (id >= 0 && id < file_count && files[id].id == id)
+		return id;
+	for (int i = 0; i < file_count; i++)
+		if (files[i].id == id)
+			return i;
+	return -1;
+}
+
+/* True if `name` can be opened, either exactly as the .dbg recorded it or as a
+ * basename under the .dbg's own directory. That mirrors how source_view.c
+ * resolves a source file, without making this file depend on it -- dbg_info.c
+ * links on its own in the tests. */
+static bool source_file_on_disk(const char *name)
+{
+	if (!name || !name[0])
+		return false;
+
+	FILE *f = NULL;
+#ifdef _WIN32
+	if (fopen_s(&f, name, "rb") == 0 && f) {
+#else
+	f = fopen(name, "rb");
+	if (f) {
+#endif
+		fclose(f);
+		return true;
+	}
+
+	if (!dbg_dir[0])
+		return false;
+
+	char path[1024];
+	int  n = snprintf(path, sizeof path, "%s/%s", dbg_dir, basename_ptr(name));
+	if (n <= 0 || n >= (int)sizeof path)
+		return false;
+
+	f = NULL;
+#ifdef _WIN32
+	if (fopen_s(&f, path, "rb") == 0 && f) {
+#else
+	f = fopen(path, "rb");
+	if (f) {
+#endif
+		fclose(f);
+		return true;
+	}
+	return false;
+}
+
+/* True if `base` ends in an extension cc65 compiles from, i.e. the sort of file
+ * that produces a generated `.s` on its way to the assembler. */
+static bool has_c_extension(const char *base)
+{
+	static const char *const exts[] = { ".c", ".cc", ".cpp", ".cxx", ".c++" };
+	size_t blen = strlen(base);
+	for (size_t i = 0; i < sizeof exts / sizeof exts[0]; i++) {
+		size_t elen = strlen(exts[i]);
+		if (blen > elen && strcasecmp(base + blen - elen, exts[i]) == 0)
+			return true;
+	}
+	return false;
+}
+
+/* Recompute the state that depends on the loaded set as a whole rather than on
+ * any one record: whether high-level (C) line info is present, and which files
+ * are cc65-generated intermediates that the source picker should not offer.
+ *
+ * Always recomputed from scratch. A module swap can remove the only C module,
+ * or add one, and the answer to both questions changes with it.
+ *
+ * A file is treated as a generated intermediate only when ALL of the following
+ * hold, because a hand-written .s in a mixed C/assembly project is a real
+ * source and hiding it would be worse than showing one file too many:
+ *   1. some module carries high-level line info at all;
+ *   2. its name ends in ".s";
+ *   3. it is referenced by at least one line record and every one of them is
+ *      an assembly record -- a file the C compiler emitted line info for is by
+ *      definition not an intermediate;
+ *   4. another file in the same .dbg is the C source it was generated from.
+ *      cl65 names the intermediate two different ways: `foo.s` when you drive
+ *      cc65 and ca65 yourself, and a temporary `foo.c.<pid>.<n>.s` when it does
+ *      the whole job in one step -- so a match is either the same basename stem
+ *      as the C file, or the C file's whole name followed by a dot. Requiring
+ *      the pairing is what protects a hand-written util.s that has no C source
+ *      behind it at all, and a hand-written foo.s could not coexist with a
+ *      compiled foo.c anyway (they collide at foo.o);
+ *   5. it is not on disk. cl65 deletes the intermediate by default, so a .s
+ *      that IS present is one the user kept or wrote, and stays on offer.
+ * Condition 5 is tested last because it is the only one that touches the
+ * filesystem, and this runs once per load rather than per UI frame. */
+static void refresh_line_type_state(void)
+{
+	has_high_level_lines = false;
+	for (int i = 0; i < line_count; i++) {
+		if (lines[i].type == DBG_LI_TYPE_EXT) {
+			has_high_level_lines = true;
+			break;
+		}
+	}
+
+	for (int i = 0; i < file_count; i++)
+		files[i].hidden = false;
+
+	if (!has_high_level_lines || file_count <= 0)
+		return;
+
+	/* Per file: how many assembly line records name it, and how many
+	 * high-level ones. Allocation failure just leaves everything visible. */
+	int *refs_asm = (int *)calloc((size_t)file_count, sizeof(int));
+	int *refs_hl  = (int *)calloc((size_t)file_count, sizeof(int));
+	if (!refs_asm || !refs_hl) {
+		free(refs_asm);
+		free(refs_hl);
+		return;
+	}
+
+	for (int i = 0; i < line_count; i++) {
+		int fi = find_file_index(lines[i].file);
+		if (fi < 0)
+			continue;
+		if (lines[i].type == DBG_LI_TYPE_EXT)
+			refs_hl[fi]++;
+		else
+			refs_asm[fi]++;
+	}
+
+	for (int i = 0; i < file_count; i++) {
+		if (!files[i].name || refs_hl[i] > 0 || refs_asm[i] == 0)
+			continue;
+
+		const char *base = basename_ptr(files[i].name);
+		size_t      blen = strlen(base);
+		if (blen <= 2 || strcasecmp(base + blen - 2, ".s") != 0)
+			continue;
+		size_t stem = blen - 2;
+
+		bool paired = false;
+		for (int j = 0; j < file_count && !paired; j++) {
+			if (j == i || !files[j].name || refs_hl[j] == 0)
+				continue;
+			const char *cbase = basename_ptr(files[j].name);
+			if (!has_c_extension(cbase))
+				continue;
+			size_t clen = strlen(cbase);
+
+			/* cc65 and ca65 driven separately: foo.c -> foo.s, same stem. */
+			const char *dot = strrchr(cbase, '.');
+			if (dot && dot != cbase && (size_t)(dot - cbase) == stem &&
+			    strncasecmp(cbase, base, stem) == 0) {
+				paired = true;
+				break;
+			}
+
+			/* cl65 in one step: foo.c -> foo.c.<pid>.<n>.s, so the whole C file
+			 * name is the head of the intermediate's, followed by a dot. */
+			if (stem > clen && base[clen] == '.' &&
+			    strncasecmp(cbase, base, clen) == 0)
+				paired = true;
+		}
+		if (!paired)
+			continue;
+
+		files[i].hidden = !source_file_on_disk(files[i].name);
+	}
+
+	free(refs_asm);
+	free(refs_hl);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Build the sorted address map                                       */
 /* ------------------------------------------------------------------ */
@@ -787,6 +1013,7 @@ static void build_addr_map(void)
 			addr_map[addr_map_count].end      = (dbg_addr_t)abs_end;
 			addr_map[addr_map_count].file_id  = ln->file;
 			addr_map[addr_map_count].line_num = ln->line;
+			addr_map[addr_map_count].type     = ln->type;
 			addr_map[addr_map_count].seg_id   = sp->seg;
 			addr_map_count++;
 		}
@@ -996,6 +1223,16 @@ int dbg_info_load(const char *path)
 
 	seed_banks_from_equates();
 	build_addr_map();
+	/* Deliberately NOT done inside build_addr_map(): the refusal path above
+	 * rebuilds the map too, and its module's records are still in lines[]. A
+	 * half-written C .dbg -- exactly what that check exists to catch, and what
+	 * the auto-load path sees while cl65 is still writing -- would otherwise
+	 * announce high-level info on behalf of a load that was rejected, and
+	 * switch every already-loaded assembly module to the C lookup for the rest
+	 * of the session. Only an accepted load may move this. It also has to run
+	 * after the file-ID resolution above, since it counts line records per
+	 * file. */
+	refresh_line_type_state();
 	loaded = true;
 
 	fprintf(stderr, "dbg_info: loaded %d files, %d segs, %d spans, %d lines, %d addr entries, %d symbols, %d equates\n",
@@ -1116,6 +1353,53 @@ bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr)
 	return true;
 }
 
+/* How much a line record's own type recommends it for DISPLAY. cc65 records the
+ * same bytes twice for a C program: once against the C statement (EXT) and once
+ * against the generated .s that ca65 actually assembled (ASM). The user is
+ * looking at the C, and cl65 deletes the .s by default, so the high-level record
+ * wins; a macro record still beats the raw assembly under it.
+ *
+ * This is a display preference only. Every ASM entry stays in the address map,
+ * because dbg_info_is_span_start() -- the anchored disassembler's alignment
+ * anchor -- needs the per-instruction precision they and only they carry. */
+static int entry_source_rank(int i)
+{
+	switch (addr_map[i].type) {
+	case DBG_LI_TYPE_EXT:   return 3;
+	case DBG_LI_TYPE_MACRO: return 2;
+	default:                return 1;
+	}
+}
+
+/* The tightest high-level entry whose span covers `addr`, or -1 if none does.
+ * Used where an address has an entry of its own but that entry is generated
+ * assembly: the C statement it belongs to began at an earlier address, so
+ * nothing anchored at `addr` can find it. The backward horizon matches the one
+ * dbg_info_addr_to_source_banked_ex() uses. */
+static int find_covering_high_level(dbg_addr_t addr)
+{
+	int lo = 0, hi = addr_map_count - 1, last = -1;
+	while (lo <= hi) {
+		int mid = lo + (hi - lo) / 2;
+		if (addr_map[mid].addr <= addr) {
+			last = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	int pick = -1;
+	for (int i = last; i >= 0 && addr_map[i].addr + 256 >= addr; i--) {
+		if (addr_map[i].type != DBG_LI_TYPE_EXT || addr > addr_map[i].end)
+			continue;
+		if (pick < 0 || (addr_map[i].end - addr_map[i].addr)
+		                    < (addr_map[pick].end - addr_map[pick].addr))
+			pick = i;
+	}
+	return pick;
+}
+
 bool dbg_info_addr_to_source(dbg_addr_t addr, const char **file_path, int *line_num)
 {
 	if (!loaded || addr_map_count == 0)
@@ -1126,13 +1410,43 @@ bool dbg_info_addr_to_source(dbg_addr_t addr, const char **file_path, int *line_
 	while (lo <= hi) {
 		int mid = lo + (hi - lo) / 2;
 		if (addr_map[mid].addr == addr) {
-			const dbg_file_t *fi = find_file(addr_map[mid].file_id);
+			int pick = mid;
+			/* Several entries share this address in a C program: the statement
+			 * and the generated-assembly line for its first instruction. Which
+			 * one the binary search happened to land on is arbitrary, so pick
+			 * deliberately -- the DAP disassembly view attributes instructions
+			 * with this, and must not name a file the picker hides. */
+			if (has_high_level_lines) {
+				int lo2 = mid, hi2 = mid;
+				while (lo2 > 0 && addr_map[lo2 - 1].addr == addr)
+					lo2--;
+				while (hi2 + 1 < addr_map_count && addr_map[hi2 + 1].addr == addr)
+					hi2++;
+				for (int i = lo2; i <= hi2; i++) {
+					const int rank = entry_source_rank(i);
+					const int best = entry_source_rank(pick);
+					if (rank > best || (rank == best && addr_map[i].end < addr_map[pick].end))
+						pick = i;
+				}
+				/* Only the first instruction of a C statement has a high-level
+				 * entry starting on it; every later one carries nothing but the
+				 * generated assembly. Reach out to the statement that encloses
+				 * it rather than naming a file cl65 deleted. Whether an address
+				 * resolves at all is still decided above, so this changes which
+				 * source is reported and never how many addresses have one. */
+				if (entry_source_rank(pick) < 3) {
+					int hl = find_covering_high_level(addr);
+					if (hl >= 0)
+						pick = hl;
+				}
+			}
+			const dbg_file_t *fi = find_file(addr_map[pick].file_id);
 			if (!fi)
 				return false;
 			if (file_path)
 				*file_path = fi->name;
 			if (line_num)
-				*line_num = addr_map[mid].line_num;
+				*line_num = addr_map[pick].line_num;
 			return true;
 		} else if (addr_map[mid].addr < addr) {
 			lo = mid + 1;
@@ -1234,7 +1548,7 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 	 * the smaller happens to be the unknown one, preferring it reports the
 	 * OTHER segment's file and line and demotes a confirmed answer to a guess.
 	 * So narrow only within the same confidence. */
-	{
+	if (!has_high_level_lines) {
 		dbg_addr_t start = addr_map[found].addr;
 		int lo2 = found, hi2 = found;
 		while (lo2 > 0 && addr_map[lo2 - 1].addr == start)
@@ -1252,6 +1566,48 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
 			    || (rank == best_rank && addr_map[i].end < addr_map[found].end)) {
 				found     = i;
 				best_rank = rank;
+			}
+		}
+	} else {
+		/* A C program needs a wider search than the equal-start window above.
+		 * The C statement's span opens at its first instruction, but the PC
+		 * spends most of its time at the interior instruction boundaries that
+		 * follow -- and each of those is the start of its own tiny assembly
+		 * span. At such an address the equal-start window holds nothing but
+		 * assembly entries, so the statement that encloses them, having begun
+		 * earlier, would never be considered and stepping would crawl through
+		 * the generated .s.
+		 *
+		 * So consider every entry that covers addr, over the same backward
+		 * horizon the covering-entry walk above already uses. Ranking is
+		 * bank confidence first (unchanged, and for the same reason), then the
+		 * line type, then the tightest span -- comparing span LENGTH here,
+		 * since these candidates no longer share a start address.
+		 *
+		 * A C statement compiling to more than the horizon's worth of code
+		 * falls outside this and degrades to reporting the generated assembly.
+		 * Widening the horizon would make the scan cost scale with the largest
+		 * span in the map, and this runs per disassembly row per frame. */
+		int lo2 = found;
+		while (lo2 > 0 && addr_map[lo2 - 1].addr + 256 >= addr)
+			lo2--;
+		int best_bank_rank = entry_bank_rank(found, addr, ram_bank);
+		int best_src_rank  = entry_source_rank(found);
+		for (int i = lo2; i <= best; i++) {
+			if (addr < addr_map[i].addr || addr > addr_map[i].end)
+				continue;
+			const int rank = entry_bank_rank(i, addr, ram_bank);
+			if (rank == 0)
+				continue;                       /* a bank we know it is not */
+			const int src = entry_source_rank(i);
+			const bool tighter = (addr_map[i].end - addr_map[i].addr)
+			                     < (addr_map[found].end - addr_map[found].addr);
+			if (rank > best_bank_rank
+			    || (rank == best_bank_rank && src > best_src_rank)
+			    || (rank == best_bank_rank && src == best_src_rank && tighter)) {
+				found          = i;
+				best_bank_rank = rank;
+				best_src_rank  = src;
 			}
 		}
 	}
@@ -1286,18 +1642,37 @@ const char *dbg_info_get_dbg_dir(void)
 	return dbg_dir;
 }
 
+bool dbg_info_has_high_level(void)
+{
+	return has_high_level_lines;
+}
+
 int dbg_info_file_count(void)
 {
-	return file_count;
+	int n = 0;
+	for (int i = 0; i < file_count; i++)
+		if (!files[i].hidden)
+			n++;
+	return n;
 }
 
 bool dbg_info_file_at(int index, const char **name)
 {
-	if (index < 0 || index >= file_count)
+	if (index < 0)
 		return false;
-	if (name)
-		*name = files[index].name;
-	return true;
+	/* `index` counts only the files on offer, so that callers can walk
+	 * 0..dbg_info_file_count()-1 without ever seeing a gap. The hidden flag is
+	 * decided once per load; see refresh_line_type_state(). */
+	for (int i = 0; i < file_count; i++) {
+		if (files[i].hidden)
+			continue;
+		if (index-- == 0) {
+			if (name)
+				*name = files[i].name;
+			return true;
+		}
+	}
+	return false;
 }
 
 int dbg_info_scan_dbg_files(const char *dir, char out[][DBG_INFO_PATH_MAX], int max)
@@ -1334,6 +1709,11 @@ bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *ad
 
 	const char *query_base = basename_ptr(file_path);
 
+	/* addr_map is sorted by address, so the first entry that matches is the
+	 * lowest address this line generated code at. That is what a line
+	 * breakpoint wants: the start of the statement, not some later fragment of
+	 * it. A C statement usually owns several spans, so this matters more for a
+	 * C program than it ever did for assembly. */
 	for (int i = 0; i < addr_map_count; i++) {
 		if (addr_map[i].line_num != line_num)
 			continue;
@@ -1693,6 +2073,12 @@ void dbg_info_unload_range(dbg_addr_t start, dbg_addr_t end)
 		}
 		seg_count = gdst;
 	}
+
+	/* The line records that were just dropped may have been the only high-level
+	 * ones, or the only reason a generated .s was recognised as one. This path
+	 * prunes and compacts in place rather than calling build_addr_map(), so it
+	 * has to refresh that derived state itself. */
+	refresh_line_type_state();
 }
 
 // Helper: build .dbg path from a loaded file path. Returns false if the result
@@ -1878,4 +2264,5 @@ void dbg_info_free(void)
 
 	dbg_dir[0] = '\0';
 	loaded = false;
+	has_high_level_lines = false;
 }

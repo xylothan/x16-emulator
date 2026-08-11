@@ -1477,6 +1477,333 @@ main(void)
 		}
 	}
 
+	// ── Complete records that are simply not ours to keep ───────────────────
+	// ld65 counts every `sym` record in its `info` line, so the check for a
+	// half-written file has to count the records it SAW, not the ones it chose
+	// to store. Two shapes broke that, and either one refused the whole file:
+	// an import, which names a symbol another module defines and so carries no
+	// `val`; and a constant outside the 24-bit space the tables describe --
+	// C's EOF is -1, written as 0xFFFFFFFF, so every program that includes
+	// <stdio.h> has one.
+	{
+		dbg_info_free();
+		static const char *k_dbg_imp =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=3,type=0\n"
+			"file\tid=0,name=\"imp.s\",size=10,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=3,span=0\n"
+			"sym\tid=0,name=\"_start\",addrsize=absolute,size=3,scope=0,def=0,val=0x000801,type=lab\n"
+			"sym\tid=1,name=\"_puts\",addrsize=absolute,scope=0,def=0,ref=7,type=imp,exp=4\n"
+			"sym\tid=2,name=\"EOF\",addrsize=long,scope=5,def=9,val=0xFFFFFFFF,type=equ\n"
+			"mod\tid=0,name=\"imp.o\",file=0\n";
+		char *ip = write_temp(k_dbg_imp, "x16_dbg_info_imp.dbg");
+		if (!ip) {
+			check(false, "could not write the import fixture");
+		} else {
+			check(dbg_info_load(ip) == 0,
+			      "merges a .dbg whose declared symbol count includes imports "
+			      "and out-of-range constants");
+			const char *f = NULL;
+			int         n = 0;
+			check(dbg_info_addr_to_source(0x0801, &f, &n) && n == 3,
+			      "  ...and its mappings are usable");
+			dbg_addr_t a = 0;
+			check(dbg_info_label_to_addr("_start", &a) && a == 0x0801,
+			      "  ...and its labels survived");
+			check(!dbg_info_equate_to_value("EOF", &a),
+			      "  ...while the out-of-range constant is counted, not kept");
+			remove(ip);
+			dbg_info_free();
+		}
+	}
+
+	// ── cc65 C: high-level lines outrank the generated assembly ─────────────
+	// Compiling C goes hello.c -> hello.s -> ca65, and with -g ca65 records BOTH
+	// line infos over the same bytes: a type=1 record naming the C statement and
+	// a type=0 record per instruction naming the generated .s. The per-
+	// instruction assembly spans are always the smaller, so the "innermost span
+	// wins" rule that is right for assembly inverts here and would step through
+	// a generated file that cl65 deletes on the way out.
+	//
+	// Layout, all in CODE at $0801:
+	//   $0801-$080C  x16hello.c:5   over four assembly spans
+	//   $080D-$0814  x16hello.c:6   over two
+	//   $0815-$0818  x16hello.c:5   again, later (a loop's second half)
+	//   $0819-$081E  x16util.s:10   a macro record over an assembly one
+	//   $081F-$0824  x16mixed.c:7   over x16mixed.s
+	//   $0825-$082A  x16gen.c:9     over cl65's one-step temporary name
+	{
+		dbg_info_free();
+		static const char *k_dbg_cc65 =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=7,lib=0,line=16,mod=1,scope=1,seg=1,span=16,sym=2,type=0\n"
+			"file\tid=0,name=\"x16hello.c\",size=200,mtime=0x00000000,mod=0\n"
+			"file\tid=1,name=\"x16hello.s\",size=900,mtime=0x00000000,mod=0\n"
+			"file\tid=2,name=\"x16util.s\",size=100,mtime=0x00000000,mod=0\n"
+			"file\tid=3,name=\"x16mixed.c\",size=100,mtime=0x00000000,mod=0\n"
+			"file\tid=4,name=\"x16mixed.s\",size=100,mtime=0x00000000,mod=0\n"
+			"file\tid=5,name=\"x16gen.c\",size=100,mtime=0x00000000,mod=0\n"
+			"file\tid=6,name=\"x16gen.c.81128.0.s\",size=900,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0040,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=12,type=0\n"
+			"span\tid=1,seg=0,start=0,size=3,type=0\n"
+			"span\tid=2,seg=0,start=3,size=2,type=0\n"
+			"span\tid=3,seg=0,start=5,size=3,type=0\n"
+			"span\tid=4,seg=0,start=8,size=4,type=0\n"
+			"span\tid=5,seg=0,start=12,size=8,type=0\n"
+			"span\tid=6,seg=0,start=12,size=4,type=0\n"
+			"span\tid=7,seg=0,start=16,size=4,type=0\n"
+			"span\tid=8,seg=0,start=20,size=4,type=0\n"
+			"span\tid=9,seg=0,start=20,size=4,type=0\n"
+			"span\tid=10,seg=0,start=24,size=6,type=0\n"
+			"span\tid=11,seg=0,start=24,size=2,type=0\n"
+			"span\tid=12,seg=0,start=30,size=6,type=0\n"
+			"span\tid=13,seg=0,start=30,size=3,type=0\n"
+			"span\tid=14,seg=0,start=36,size=6,type=0\n"
+			"span\tid=15,seg=0,start=36,size=3,type=0\n"
+			"line\tid=0,file=0,line=5,type=1,span=0\n"
+			"line\tid=1,file=1,line=100,span=1\n"
+			"line\tid=2,file=1,line=101,span=2\n"
+			"line\tid=3,file=1,line=102,span=3\n"
+			"line\tid=4,file=1,line=103,span=4\n"
+			"line\tid=5,file=0,line=6,type=1,span=5\n"
+			"line\tid=6,file=1,line=104,span=6\n"
+			"line\tid=7,file=1,line=105,span=7\n"
+			"line\tid=8,file=0,line=5,type=1,span=8\n"
+			"line\tid=9,file=1,line=106,span=9\n"
+			"line\tid=10,file=2,line=10,type=2,count=1,span=10\n"
+			"line\tid=11,file=2,line=20,span=11\n"
+			"line\tid=12,file=3,line=7,type=1,span=12\n"
+			"line\tid=13,file=4,line=200,span=13\n"
+			"line\tid=14,file=5,line=9,type=1,span=14\n"
+			"line\tid=15,file=6,line=300,span=15\n"
+			"sym\tid=0,name=\"_main\",addrsize=absolute,size=3,scope=0,def=0,val=0x000801,type=lab\n"
+			"sym\tid=1,name=\"_printf\",addrsize=absolute,scope=0,def=0,ref=9,type=imp,exp=6\n"
+			"mod\tid=0,name=\"x16hello.o\",file=0\n";
+
+		// A hand-written .s that IS on disk must survive the picker filter, so
+		// it has to exist next to the .dbg before the load looks for it.
+		char *mixed_asm = write_temp("; hand-written\n", "x16mixed.s");
+		char *cpath     = write_temp(k_dbg_cc65, "x16_dbg_info_cc65.dbg");
+		if (!cpath) {
+			check(false, "could not write the cc65 fixture");
+		} else {
+			check(dbg_info_load(cpath) == 0, "loads a cc65 C .dbg");
+
+			const char *f = NULL;
+			int         n = 0;
+
+			// The start of a C statement, where a tiny assembly span starts too.
+			check(dbg_info_addr_to_source_nearest(0x0801, &f, &n),
+			      "maps the first address of a C statement");
+			check(f && strstr(f, "x16hello.c") != NULL, "  ...to the C source");
+			check(n == 5, "  ...to the C line");
+
+			// The case an equal-start-only preference cannot reach: an interior
+			// instruction boundary. The C statement's span opened at $0801, so
+			// nothing that starts at $0804 knows about it -- and $0804 is where
+			// stepping actually lands.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x0804, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
+			      "an interior instruction boundary still reports the C line");
+
+			// And mid-instruction, which is where a multi-byte operand puts it.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x0807, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
+			      "an address inside an instruction reports the C line");
+
+			// The last byte of the statement belongs to it, not to the next.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x080C, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
+			      "the last byte of a C statement is still that statement");
+
+			// Stepping on: the next statement, not a smeared-out first one.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x080D, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 6,
+			      "the next C statement is reported at its own address");
+
+			// The exact-match form feeds the DAP disassembly view, which must
+			// not name a file the picker hides.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source(0x0804, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
+			      "the exact-address lookup also prefers the C line");
+
+			// A C statement and an assembly span with identical bounds: the
+			// type has to decide, since the span size cannot.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x0815, &f, &n)
+			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
+			      "a C line wins a same-size tie with the generated assembly");
+
+			// type=1 > type=2 > type=0: a macro record still beats the raw
+			// assembly underneath it.
+			f = NULL; n = 0;
+			check(dbg_info_addr_to_source_nearest(0x0819, &f, &n)
+			          && f && strstr(f, "x16util.s") != NULL && n == 10,
+			      "a macro record outranks the assembly line inside it");
+
+			// Line breakpoints. This C line generated code twice; the
+			// breakpoint belongs at the start of the statement.
+			{
+				dbg_addr_t a = 0;
+				check(dbg_info_source_to_addr("x16hello.c", 5, &a) && a == 0x0801,
+				      "a C line breakpoint resolves to the lowest of its spans");
+				a = 0;
+				check(dbg_info_source_to_addr("x16hello.c", 6, &a) && a == 0x080D,
+				      "and each statement resolves to its own start");
+			}
+
+			// The per-instruction assembly spans are the anchored
+			// disassembler's alignment anchors and must stay in the map, however
+			// little the source view wants to display them.
+			check(dbg_info_is_span_start(0x0804), "keeps an assembly span start as an anchor");
+			check(dbg_info_is_span_start(0x0809), "keeps the later ones too");
+			check(!dbg_info_is_span_start(0x0807), "and still rejects a mid-span address");
+
+			// The picker offers what the user wrote. x16hello.s is generated and
+			// gone; x16util.s has no C source it could have been generated from;
+			// x16mixed.s is paired with a C file but is on disk, so somebody
+			// wanted it.
+			{
+				int  fc      = dbg_info_file_count();
+				bool has_c   = false, has_gen = false, has_util = false;
+				bool has_mixed_c = false, has_mixed_s = false;
+				bool has_gen_c = false, has_gen_tmp = false;
+				for (int i = 0; i < fc; i++) {
+					const char *nm = NULL;
+					if (!dbg_info_file_at(i, &nm) || !nm)
+						continue;
+					if (!strcmp(nm, "x16hello.c")) has_c = true;
+					if (!strcmp(nm, "x16hello.s")) has_gen = true;
+					if (!strcmp(nm, "x16util.s")) has_util = true;
+					if (!strcmp(nm, "x16mixed.c")) has_mixed_c = true;
+					if (!strcmp(nm, "x16mixed.s")) has_mixed_s = true;
+					if (!strcmp(nm, "x16gen.c")) has_gen_c = true;
+					if (!strcmp(nm, "x16gen.c.81128.0.s")) has_gen_tmp = true;
+				}
+				check(fc == 5, "the picker drops only the generated intermediates");
+				check(has_c, "  ...keeps the C source");
+				check(!has_gen, "  ...hides the .s cc65 generated and deleted");
+				check(has_util, "  ...keeps a .s with no C source behind it");
+				check(has_mixed_c && has_mixed_s,
+				      "  ...keeps a hand-written .s that is on disk");
+				// cl65 doing compile-and-assemble in one step names the
+				// intermediate after the whole C file plus a temporary suffix,
+				// which shares no stem with it. This is what a real
+				// `cl65 -t cx16 -g` build produces.
+				check(has_gen_c, "  ...keeps the C source of a one-step build");
+				check(!has_gen_tmp, "  ...hides cl65's temporary intermediate");
+
+				// Indices stay dense: a caller walking 0..count-1 must not hit
+				// a gap where the hidden file used to be.
+				const char *nm = NULL;
+				check(dbg_info_file_at(fc - 1, &nm) && nm, "the last visible index resolves");
+				check(!dbg_info_file_at(fc, &nm), "and one past the end does not");
+			}
+
+			// Unloading the C module takes the high-level info with it, so
+			// nothing stays hidden on account of a module that has gone.
+			dbg_info_unload_range(0x0801, 0x0840);
+			check(dbg_info_file_count() == 7,
+			      "unloading the C module puts every file back on offer");
+
+			remove(cpath);
+			if (mixed_asm)
+				remove(mixed_asm);
+			dbg_info_free();
+		}
+	}
+
+	// An assembly-only .dbg must be untouched by all of the above: no high-level
+	// records, so nothing is preferred and nothing is hidden. cc65's own runtime
+	// files (cbm/loadaddr.s and friends) are exactly the ".s referenced only by
+	// assembly records and not on disk" shape the filter looks for, and they
+	// must keep showing up for an assembly project.
+	{
+		dbg_info_free();
+		char *apath = write_temp(k_dbg, "x16_dbg_info_asmonly.dbg");
+		if (!apath) {
+			check(false, "could not write the assembly-only fixture");
+		} else {
+			check(dbg_info_load(apath) == 0, "reloads the assembly-only fixture");
+			check(dbg_info_file_count() == 2,
+			      "an assembly-only .dbg still offers every file it names");
+			const char *f = NULL;
+			int         n = 0;
+			check(dbg_info_addr_to_source_nearest(0x0805, &f, &n) && n == 10,
+			      "and still resolves by innermost span");
+			remove(apath);
+			dbg_info_free();
+		}
+	}
+
+	// ── A refused load must not speak for the ones that succeeded ───────────
+	// A .dbg caught mid-write is refused, but its records are already in the
+	// tables and the address map is rebuilt on the way out. If deciding
+	// "this program is written in C" happened there, a half-written C .dbg --
+	// which is exactly what the auto-load path finds while cl65 is still
+	// writing -- would switch every already-loaded assembly module over to the
+	// C lookup, for good: the refused records stay behind, so every later
+	// rebuild would keep agreeing with it.
+	{
+		dbg_info_free();
+		// An assembly module with two overlapping spans opening at different
+		// addresses, so which one gets reported depends on the lookup taken.
+		static const char *k_dbg_asm_two =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"two.s\",size=100,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0020,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=8,type=0\n"
+			"span\tid=1,seg=0,start=3,size=17,type=0\n"
+			"line\tid=0,file=0,line=10,span=0\n"
+			"line\tid=1,file=0,line=11,span=1\n"
+			"mod\tid=0,name=\"two.o\",file=0\n";
+		// A C module cut off mid-write: its `info` line promises two symbols
+		// and only one arrived.
+		static const char *k_dbg_c_cut =
+			"version\tmajor=2,minor=0\n"
+			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
+			"file\tid=0,name=\"cut.c\",size=100,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"OTHER\",start=0x002000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"line\tid=0,file=0,line=3,type=1,span=0\n"
+			"sym\tid=0,name=\"_cut\",addrsize=absolute,size=3,scope=0,def=0,val=0x002000,type=lab\n";
+
+		char *apath = write_temp(k_dbg_asm_two, "x16_dbg_info_two.dbg");
+		char *cpath = write_temp(k_dbg_c_cut, "x16_dbg_info_cut.dbg");
+		if (!apath || !cpath) {
+			check(false, "could not write the refused-load fixtures");
+		} else {
+			check(dbg_info_load(apath) == 0, "loads an assembly module");
+			const char *f = NULL;
+			int         before = 0, after = 0;
+			check(dbg_info_addr_to_source_nearest(0x0806, &f, &before),
+			      "  ...and resolves an address inside two overlapping spans");
+
+			check(dbg_info_load(cpath) != 0, "refuses a half-written C .dbg");
+
+			f = NULL;
+			check(dbg_info_addr_to_source_nearest(0x0806, &f, &after),
+			      "the assembly module still resolves afterwards");
+			check(before == after,
+			      "  ...to the same line: a refused load does not change how "
+			      "another module is read");
+			check(dbg_info_file_count() == 2,
+			      "  ...and hides nothing on a refused load's say-so");
+
+			remove(apath);
+			remove(cpath);
+			dbg_info_free();
+		}
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

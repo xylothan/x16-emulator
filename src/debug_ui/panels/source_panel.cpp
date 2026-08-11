@@ -624,13 +624,32 @@ source_panel_render(bool *p_open)
     }
 
     if ((mapping || viaCaller) && pcf) {
-        s_pcFile = pcf;
-        s_pcLine = pcl;
         if (!s_addedDbgPath) {
             source_view_add_path(dbg_info_get_dbg_dir());
             s_addedDbgPath = true;
         }
-        src_ensure_tab(s_pcFile.c_str()); // keep the PC's file open as a tab
+        // A caller-derived file is a hint about where execution came from, not
+        // where it is. Opening a tab for one that is not on disk replaces
+        // whatever the user was reading with an error page -- which is exactly
+        // what a C program does the moment it returns to BASIC: the PC lands in
+        // the KERNAL and the stack still holds the C runtime's frames, whose
+        // sources (cbm/write.s and friends) ship with cc65 rather than sitting
+        // beside the program. Decline the hint entirely in that case, so the
+        // header goes on saying there is no source rather than claiming to show
+        // a caller it is not showing. The PC's OWN file is still opened when it
+        // cannot be found, because there "missing" is the answer to "where am I".
+        if (viaCaller) {
+            const source_file_t *sf = source_view_get(pcf);
+            if (!sf || !sf->found) {
+                viaCaller = false;
+                pcf       = nullptr;
+            }
+        }
+        if (pcf) {
+            s_pcFile = pcf;
+            s_pcLine = pcl;
+            src_ensure_tab(s_pcFile.c_str()); // keep the PC's file open as a tab
+        }
     }
 
     bool pcMoved = (mapping || viaCaller) && (s_pcLine != s_lastPcLine || s_pcFile != s_lastPcFile);
@@ -658,6 +677,21 @@ source_panel_render(bool *p_open)
 
     // --- Toolbar ---
     ImGui::Checkbox("Follow PC", &s_follow);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Select and scroll to the PC's file and line on every stop.");
+    if (dbg_info_has_high_level()) {
+        // Only offered where a line is more than an instruction. For assembly
+        // the two are the same thing, and stepping a whole macro expansion per
+        // keypress would change how every existing project steps.
+        ImGui::SameLine();
+        bool byLine = DEBUGGetSourceStep();
+        if (ImGui::Checkbox("Step by line", &byLine))
+            DEBUGSetSourceStep(byLine);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("F10/F11 run a whole C statement instead of one\n"
+                              "6502 instruction. Off steps by instruction, which\n"
+                              "is what the Disassembly panel shows.");
+    }
     ImGui::SameLine();
     if (ImGui::Button("Go to PC")) {
         // Jump to wherever the PC maps right now, without changing Follow PC.
