@@ -40,6 +40,11 @@ bool dbg_info_addr_to_source_nearest(dbg_addr_t addr, const char **file_path, in
 // Returns an empty string if no .dbg has been loaded or it had no directory part.
 const char *dbg_info_get_dbg_dir(void);
 
+// True when the loaded debug info carries cc65 high-level (C) line records, so
+// a source line means a whole C statement rather than one instruction. The
+// debugger uses this to decide whether stepping by line is worth offering.
+bool dbg_info_has_high_level(void);
+
 // Look up address for a given source location.
 // Returns true if found, fills in addr.
 bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *addr);

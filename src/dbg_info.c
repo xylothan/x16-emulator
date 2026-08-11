@@ -1642,6 +1642,11 @@ const char *dbg_info_get_dbg_dir(void)
 	return dbg_dir;
 }
 
+bool dbg_info_has_high_level(void)
+{
+	return has_high_level_lines;
+}
+
 int dbg_info_file_count(void)
 {
 	int n = 0;

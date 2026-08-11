@@ -24,6 +24,7 @@
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "debug_server.h"
+#include "dbg_info.h"
 #include "rendertext.h"
 
 static void DEBUGHandleKeyEvent(SDL_Keycode key,int isShift);
@@ -121,6 +122,12 @@ int currentPCX16Bank = -1;                            // Current disassembly X16
 int currentX16Bank = -1;                              // Current data display (memory dump) X16 RAM/ROM bank
 int currentMode = DMODE_RUN;                          // Start running.
 uint32_t debugCPUClocks = 0;
+
+// Stepping by source line. Defined with the rest of the source-step machinery
+// further down; declared here because DEBUGGetCurrentStatus(), which retires
+// each instruction step, has to ask whether one is still in progress.
+static bool srcStepActive;
+static bool DEBUGSourceStepContinue(void);
 
 int dumpmode          = DDUMP_RAM;
 
@@ -296,6 +303,7 @@ int  DEBUGGetCurrentStatus(void) {
 			stepBreakPoint.pc = -1;                             // the pending step target is now unreachable
 			stepBreakPoint.bank = 0;
 			stepBreakPoint.x16Bank = -1;
+			srcStepActive = false;   // and any step-by-line it was driving
 			DEBUGAnnounceStop("interrupt");
 		}
 	}
@@ -318,11 +326,17 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPC = regs.pc;                                    // Update current PC
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
-			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
-			// A single step retires here without ever arming a step target, so
-			// there is none to retract: the owner of a pending step is derived
-			// from whether one is armed at all.
-			DEBUGAnnounceStop("step");
+			// A step by source line is this step repeated until the line
+			// changes, so while it has not, arm the next one instead of
+			// stopping. Announcing here and resuming would report a stop per
+			// instruction to a DAP client for a step the user asked once for.
+			if (!DEBUGSourceStepContinue()) {
+				currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+				// A single step retires here without ever arming a step target, so
+				// there is none to retract: the owner of a pending step is derived
+				// from whether one is armed at all.
+				DEBUGAnnounceStop("step");
+			}
 		}
 	}
 
@@ -365,19 +379,30 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPC = regs.pc;                                    // Update current PC
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
-			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
 			DEBUGClearStepBreakPoint();                             // and the step target is retired
-			// A step-over or step-out finishing is a completed step, not a
-			// breakpoint nobody set. Both the graphical debugger and a DAP
-			// client key off this: a step leaves the view where it is, an
-			// arrival re-centres it.
-			DEBUGAnnounceStop(viaStep ? "step" : "breakpoint");
+			// A step-over that a source step is driving lands here every time
+			// it runs over a call. Keep going while the line has not changed;
+			// a breakpoint the user set always wins and ends the source step.
+			bool keepStepping = false;
+			if (viaUser)
+				srcStepActive = false;
+			else
+				keepStepping = DEBUGSourceStepContinue();
+			if (!keepStepping) {
+				currentMode = DMODE_STOP;                           // So now stop, as we've done it.
+				// A step-over or step-out finishing is a completed step, not a
+				// breakpoint nobody set. Both the graphical debugger and a DAP
+				// client key off this: a step leaves the view where it is, an
+				// arrival re-centres it.
+				DEBUGAnnounceStop(viaStep ? "step" : "breakpoint");
+			}
 		}
 	}
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
 		const bool wasRunning = (currentMode != DMODE_STOP);
 		currentMode = DMODE_STOP;
+		srcStepActive = false;                                   // the user has taken over
 		DEBUGSetStopReason("user");                              // store only: this test is level-triggered
 		currentPC = regs.pc;                                     // Set the PC to what it is.
 		currentPCBank = regs.k;
@@ -540,6 +565,7 @@ void DEBUGFreeUI() {
 
 void DEBUGBreakToDebugger(void) {
 	const bool wasRunning = (currentMode != DMODE_STOP);
+	srcStepActive = false;   // whatever we were mid-way through, the user wins
 	// Default reason for "something broke into the debugger". Set before the
 	// mode changes, so no path can leave the previous stop's reason showing; a
 	// caller with something more specific to say (the STP hook) overrides it
@@ -598,9 +624,137 @@ static void DEBUGClearStepBreakPoint(void) {
 	stepBreakPoint.x16Bank = -1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Stepping by source line
+ *
+ * The machine steps by instruction, which is what the disassembly wants. One
+ * line of C is many instructions, so in the Source panel a step key appeared to
+ * do nothing for several presses running -- `total = 0;` alone is a call and
+ * three more instructions.
+ *
+ * A source step is the instruction step repeated until the PC lands on a
+ * DIFFERENT source line. Nothing about the underlying step changes: step-over
+ * still runs calls to completion, step-into still enters them, and both still
+ * stop on any breakpoint they run into on the way.
+ * ------------------------------------------------------------------------- */
+
+#define SRC_STEP_MAX_INSNS 500000   /* a line that never ends must not hang the UI */
+
+/* srcStepActive is declared with the module state at the top: the instruction
+ * step retires inside DEBUGGetCurrentStatus(), well before this point. */
+static bool          srcStepOver    = false;
+static debug_owner_t srcStepOwner   = DEBUG_OWNER_UI;
+static char          srcStepFile[260];
+static int           srcStepLine    = -1;
+static uint16_t      srcStepSP      = 0;
+static long          srcStepBudget  = 0;
+static bool          sourceStepPref = true;
+
+void DEBUGSetSourceStep(bool on) { sourceStepPref = on; }
+bool DEBUGGetSourceStep(void)    { return sourceStepPref; }
+
+/* The source line the PC is on, or false when the debug info does not cover it. */
+static bool debug_line_at_pc(char *file, size_t size, int *line)
+{
+	const char *f = NULL;
+	int         l = 0;
+	if (!dbg_info_addr_to_source_banked(regs.pc, (int)memory_get_ram_bank(), &f, &l) || !f)
+		return false;
+	snprintf(file, size, "%s", f);
+	*line = l;
+	return true;
+}
+
+/* Stepping by line is only offered where a line means more than one
+ * instruction. For assembly the two are usually the same thing, and quietly
+ * running a whole macro expansion per keypress would change how every existing
+ * project steps -- so it takes effect only for cc65 high-level (C) debug info. */
+static bool debug_source_step_available(void)
+{
+	if (!sourceStepPref || !dbg_info_has_high_level())
+		return false;
+	char f[260];
+	int  l = 0;
+	return debug_line_at_pc(f, sizeof f, &l);
+}
+
+void DEBUGCancelSourceStep(void) { srcStepActive = false; }
+
+static void DEBUGBeginSourceStep(bool over, debug_owner_t owner)
+{
+	srcStepActive = false;
+	if (!debug_line_at_pc(srcStepFile, sizeof srcStepFile, &srcStepLine)) {
+		if (over) DEBUGStepOver(owner); else DEBUGStepInto();
+		return;
+	}
+	srcStepOver   = over;
+	srcStepOwner  = owner;
+	srcStepSP     = regs.sp;
+	srcStepBudget = SRC_STEP_MAX_INSNS;
+	srcStepActive = true;
+	if (over) DEBUGStepOver(owner); else DEBUGStepInto();
+}
+
+/* Called where an instruction step has just retired. Returns true when the step
+ * was one of ours and the PC has not reached a new line yet, having armed the
+ * next one -- so the caller must NOT stop or announce. */
+static bool DEBUGSourceStepContinue(void)
+{
+	if (!srcStepActive)
+		return false;
+
+	if (--srcStepBudget <= 0) {
+		srcStepActive = false;   // give the UI back rather than spin forever
+		return false;
+	}
+
+	char f[260];
+	int  l = 0;
+	if (!debug_line_at_pc(f, sizeof f, &l)) {
+		// No source here. Stepping INTO a routine the debug info does not
+		// describe -- the C runtime, the KERNAL -- is not somewhere to strand
+		// the user one instruction at a time, so run to where it returns and
+		// carry on from there. The stack having grown is what says we were
+		// called rather than having jumped.
+		if (regs.sp < srcStepSP) {
+			DEBUGStepOut(srcStepOwner);
+			return true;
+		}
+		srcStepActive = false;   // jumped somewhere unmapped; show it
+		return false;
+	}
+
+	if (l == srcStepLine && strcmp(f, srcStepFile) == 0) {
+		if (srcStepOver) DEBUGStepOver(srcStepOwner); else DEBUGStepInto();
+		return true;
+	}
+
+	srcStepActive = false;       // a new line: this is where the step ends
+	return false;
+}
+
+/* What the UI and DAP call: by line where that means anything, by instruction
+ * otherwise. */
+void DEBUGStepIntoAuto(void)
+{
+	if (debug_source_step_available())
+		DEBUGBeginSourceStep(false, DEBUG_OWNER_UI);
+	else
+		DEBUGStepInto();
+}
+
+void DEBUGStepOverAuto(debug_owner_t owner)
+{
+	if (debug_source_step_available())
+		DEBUGBeginSourceStep(true, owner);
+	else
+		DEBUGStepOver(owner);
+}
+
 // Public form of the same thing: a DAP session tearing down has to retract a
 // step it started, and nothing outside this file can reach stepBreakPoint.
 void DEBUGCancelStep(void) {
+	srcStepActive = false;
 	DEBUGClearStepBreakPoint();
 }
 
@@ -631,6 +785,7 @@ bool DEBUGCancelStepFor(debug_owner_t owner) {
 // user had already broken out of and said nothing more about. Continuing means
 // continuing; ask for the step again if that is what you wanted.
 void DEBUGContinue(void) {
+	srcStepActive = false;   // continuing ends any step-by-line in progress
 	DEBUGClearStepBreakPoint();
 	DEBUGArmResumeSkip();
 	currentMode = DMODE_RUN;
@@ -766,6 +921,7 @@ void DEBUGPause(void) {
 }
 
 void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner) {
+	srcStepActive = false;   // an explicit destination ends any step-by-line
 	stepBreakPoint.pc = pc;
 	stepBreakPoint.bank = bank;
 	stepBreakPoint.x16Bank = getCurrentBank(pc, bank);

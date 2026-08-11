@@ -362,7 +362,7 @@ Every panel is dockable, closable and reopenable from the **View** menu.
 | **Disassembly** | Live disassembly around the PC. Hovering an operand shows the effective address and the value there. Right-click for *Run to here* and *Toggle breakpoint*. |
 | **CPU** | Registers with 65C816-aware widths, decoded status flags, and the stack with the most recent push on top. A collapsible **Virtual Regs (R0–R15)** section shows the X16 pseudo-registers at `$02`–`$21`. A collapsible **Watch** section holds your own address watches — bank-qualified, up to 16 bytes each, editable, with hex/decimal/binary tooltips. |
 | **Memory** | A hex editor with three tabs: **CPU** (the CPU map), **Banked** (browse any RAM bank at `$A000`–`$BFFF`) and **VRAM** (VERA's full 17-bit address space). Drag to select a range, search by hex bytes or ASCII with Find Next/Prev, jump to an address, and watch changed bytes flash. Right-click to *Add to watch*, *Add range to watch*, *Copy address*, *Break on write* or *Clear selection*. Edits go through the normal write path, so I/O side effects happen and watchpoints fire. |
-| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
+| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. For C, stepping moves a whole statement at a time rather than an instruction. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
 | **VERA** | Six tabs: **Registers** (all 32 registers `$9F20`–`$9F3F`, fields decoded), **Palette**, **Tiles**, **Sprites**, **Bitmap** and **Tilemap**. Each view decodes using the registers that actually rendered each scanline, so raster splits show up correctly rather than being flattened to the end-of-frame state. |
 | **Breakpoints** | Every breakpoint, with its condition and hit count. Enable, disable or delete individually. |
 | **Symbols** | A filterable list of every label from your `.dbg`, with live values. Right-click to *Go to*, *Toggle breakpoint* or *Run to here*. |
@@ -525,10 +525,12 @@ statement. The generated `.s` is left out of the source panel's **Open…** list
 deletes it on the way out; a `.s` you wrote yourself is still offered, and so is one you kept.
 The disassembly is unaffected — it still aligns on the real instruction boundaries.
 
-Stepping is still per instruction, as it has always been — one C statement is many of them, so
-the highlight stays on a line until execution leaves it. Step Over does step over a `JSR`, so it
-walks past a called function in one go. A step that advances a whole C statement at a time is not
-implemented.
+Stepping runs a whole C statement per press. F10 steps over a call — `printf(...)` and
+everything it does is one press — and F11 steps into one, landing on the first line of the
+function. Both fall back to stepping one instruction at a time when the debug info has no C in
+it, so assembly projects step exactly as they always did; the Source panel has a **Step by
+line** toggle if you want the instruction-at-a-time behaviour for C too. The Disassembly panel
+is unaffected either way.
 
 What you do *not* get for C yet is data: locals, parameters and watch expressions still have to
 be read as raw memory, because nothing here decodes cc65's software stack or its type records.

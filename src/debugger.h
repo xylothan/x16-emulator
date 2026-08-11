@@ -44,6 +44,24 @@ void DEBUGStepInto(void);                   // one instruction, then stop
 void DEBUGStepOver(debug_owner_t owner);    // step over JSR/JSL; else single-step
 void DEBUGStepOut(debug_owner_t owner);     // run to the current routine's return
 
+// Step by SOURCE LINE rather than by instruction: repeat the step above until
+// the PC reaches a different line. One C statement is many instructions, so in
+// the Source panel a plain step looks like it does nothing for several presses.
+//
+// These are what the UI and DAP should call. They fall back to the instruction
+// step whenever stepping by line would mean nothing -- the preference is off,
+// the .dbg carries no high-level (C) line info, or the PC is not on a line at
+// all -- so an assembly project steps exactly as it always did.
+void DEBUGStepIntoAuto(void);
+void DEBUGStepOverAuto(debug_owner_t owner);
+
+// Whether stepping by line is wanted. On by default; only consulted where the
+// debug info makes it meaningful. Abandoning a source step in progress is what
+// DEBUGCancelSourceStep() is for -- pausing, or hitting a breakpoint, ends it.
+void DEBUGSetSourceStep(bool on);
+bool DEBUGGetSourceStep(void);
+void DEBUGCancelSourceStep(void);
+
 // Abandon a step-over/step-out that is still running. Its breakpoint is the
 // debugger's own, so nothing else can retract it -- and left armed it stops the
 // machine later for a session that has gone away.

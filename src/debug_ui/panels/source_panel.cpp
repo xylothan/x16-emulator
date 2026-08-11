@@ -677,6 +677,21 @@ source_panel_render(bool *p_open)
 
     // --- Toolbar ---
     ImGui::Checkbox("Follow PC", &s_follow);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Select and scroll to the PC's file and line on every stop.");
+    if (dbg_info_has_high_level()) {
+        // Only offered where a line is more than an instruction. For assembly
+        // the two are the same thing, and stepping a whole macro expansion per
+        // keypress would change how every existing project steps.
+        ImGui::SameLine();
+        bool byLine = DEBUGGetSourceStep();
+        if (ImGui::Checkbox("Step by line", &byLine))
+            DEBUGSetSourceStep(byLine);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("F10/F11 run a whole C statement instead of one\n"
+                              "6502 instruction. Off steps by instruction, which\n"
+                              "is what the Disassembly panel shows.");
+    }
     ImGui::SameLine();
     if (ImGui::Button("Go to PC")) {
         // Jump to wherever the PC maps right now, without changing Follow PC.

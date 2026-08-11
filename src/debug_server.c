@@ -1176,7 +1176,7 @@ static int handle_dap_continue(int seq, cJSON *args) {
 static int handle_dap_next(int seq, cJSON *args) {
     (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    DEBUGStepOver(DEBUG_OWNER_DAP_SOURCE);
+    DEBUGStepOverAuto(DEBUG_OWNER_DAP_SOURCE);
     send_dap_response(seq, "next", true, NULL);
     return 1;
 }
@@ -1184,7 +1184,7 @@ static int handle_dap_next(int seq, cJSON *args) {
 static int handle_dap_step_in(int seq, cJSON *args) {
     (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    DEBUGStepInto();
+    DEBUGStepIntoAuto();
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
 }
