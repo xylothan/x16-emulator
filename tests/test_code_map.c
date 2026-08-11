@@ -1175,13 +1175,14 @@ main(void)
 		is_gen2 = false;
 	}
 
-	// ── KNOWN LIMITATION: the carry feeding XCE is only tracked for CLC/SEC ──
+	// ── KNOWN LIMITATION: the carry feeding XCE is not tracked through data ──
 	// XCE swaps the carry and emulation flags, so predicting it needs the
-	// incoming CARRY as well as the incoming E. cm_propagate models carry for
-	// CLC and SEC only -- every other way the carry moves (ADC, SBC, CMP/CPX/
-	// CPY, the shifts and rotates, PLP, RTI) leaves the estimate untouched. A
-	// stale carry therefore mispredicts the emulation flag, and with it the
-	// widths, WITHOUT any PLP or RTI being involved.
+	// incoming CARRY as well as the incoming E. cm_propagate carries the carry
+	// through CLC, SEC and whatever REP/SEP/XCE themselves do to it, but every
+	// data-dependent change (ADC, SBC, CMP/CPX/CPY, the shifts and rotates) and
+	// the stack restores (PLP, RTI) leave the estimate untouched. A stale carry
+	// therefore mispredicts the emulation flag, and with it the widths, WITHOUT
+	// any PLP or RTI being involved.
 	//
 	//   $8000: 4A       LSR A   really clears C; the estimate keeps it set
 	//   $8001: FB       XCE     estimate: C set -> enter emulation, force 8-bit
