@@ -75,6 +75,12 @@ enum {
 // disagreeing about what -1 means.
 bool debug_bank_selector_matches(int selector, int addr, uint8_t pbank);
 
+// What the core will actually record for a selector at this address. Outside a
+// banked window there is nothing to select, so it stores DEBUG_BANK_ANY. A
+// caller that keeps its own copy of the key must normalise the same way, or its
+// copy will not match the entry the core created.
+int debug_normalise_bank(int selector, int addr, uint8_t pbank);
+
 // Which RAM/ROM window `pc` sits in given program bank `pbank`, or
 // DEBUG_BANK_ANY where a bank means nothing there. Exported so callers that
 // produce selectors use the same rule as the matcher above: a second copy will
@@ -187,6 +193,11 @@ bool debug_wp_set_active(uint16_t addr, int x16Bank, bool active);
 
 // Does any watchpoint cover `addr`? Read-only; for a UI marking watched bytes.
 bool debug_wp_covers(uint16_t addr);
+
+// Read-only view of the watchpoint table, for UIs and the DAP server that need
+// to list what is being watched. Returns NULL if `index` is out of range.
+// Valid until the next call that adds or removes a watchpoint.
+const struct watchpoint *debug_wp_at(int index);
 
 // The CPU is writing `value` to `addr`: should execution stop? Honours the
 // value filter. Called from the store path, so callers should test

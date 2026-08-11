@@ -338,7 +338,7 @@ jobs:
           sudo cp /etc/apt/sources.list /etc/apt/sources.list~
           sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
           sudo apt-get update
-          sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev cmake
+          sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -410,7 +410,7 @@ jobs:
           copy_artifact_path: emu_binaries
           commands: |
             apt-get update
-            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev cmake
+            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
             git reset --hard
@@ -471,7 +471,7 @@ jobs:
           copy_artifact_path: emu_binaries
           commands: |
             apt-get update
-            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev cmake
+            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
             git reset --hard

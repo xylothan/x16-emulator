@@ -23,6 +23,7 @@
 #include "video.h"
 #include "cpu/fake6502.h"
 #include "debugger.h"
+#include "debug_server.h"
 #include "rendertext.h"
 
 static void DEBUGHandleKeyEvent(SDL_Keycode key,int isShift);
@@ -150,6 +151,8 @@ static uint32_t resumeSkipClock = 0;
 // DEBUGBreakOnWatchpoint().
 static bool watchpointStopPending = false;
 
+static void DEBUGClearStepBreakPoint(void);
+
 static void DEBUGArmResumeSkip(void) {
 	resumeSkipPC    = regs.pc;
 	resumeSkipBank  = regs.k;
@@ -182,6 +185,13 @@ void
 DEBUGSetStopReason(const char *reason)
 {
 	lastStopReason = reason ? reason : "";
+	// One recorder, one notification. The DAP server and the graphical
+	// debugger both want to know why execution stopped, and before this they
+	// each had their own call at every stop site -- two sources of truth that
+	// could disagree (a completed step-over reported as "breakpoint" to one and
+	// "step" to the other). Recording it here and notifying from here keeps
+	// them in step. A no-DAP build compiles this to nothing.
+	debug_server_notify_stopped(lastStopReason);
 }
 
 const char *
@@ -280,6 +290,9 @@ int  DEBUGGetCurrentStatus(void) {
 		currentPC = regs.pc;
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+		// Reported here rather than from the store itself, for the same reason:
+		// only now does regs.pc name the instruction after the write.
+		DEBUGSetStopReason("data breakpoint");
 	}
 
 	if (currentMode == DMODE_STEP) {                                // Single step before
@@ -288,6 +301,7 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			debug_server_note_step_ended();
 			DEBUGSetStopReason("step");
 		}
 	}
@@ -322,24 +336,33 @@ int  DEBUGGetCurrentStatus(void) {
 	// Both ways out stay correct: a masked interrupt clears `waiting` without
 	// vectoring, so the next poll sees the PC still on the breakpoint and stops
 	// there; a vectored one arrives after the handler returns.
-	if (!stopped && !justResumed && !waiting
-	    && (debug_bp_on_arrival(regs.pc, regs.k) || hitBreakpoint(regs.pc, regs.k, stepBreakPoint))) {       // Hit a breakpoint.
-		currentPC = regs.pc;                                    // Update current PC
-		currentPCBank = regs.k;
-		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
-		currentMode = DMODE_STOP;                               // So now stop, as we've done it.
-		DEBUGSetStopReason("breakpoint");
-		stepBreakPoint.pc = -1;                                 // Clear step breakpoint.
-		stepBreakPoint.bank = 0;
-		stepBreakPoint.x16Bank = -1;
+	if (!stopped && !justResumed && !waiting) {
+		// Order matters: debug_bp_on_arrival() counts the hit and spends the
+		// ignore budget, so it has to be reached exactly as often as before.
+		const bool viaUser = debug_bp_on_arrival(regs.pc, regs.k);
+		const bool viaStep = !viaUser && hitBreakpoint(regs.pc, regs.k, stepBreakPoint);
+		if (viaUser || viaStep) {                               // Hit a breakpoint.
+			currentPC = regs.pc;                                    // Update current PC
+			currentPCBank = regs.k;
+			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
+			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
+			DEBUGClearStepBreakPoint();                             // and the step target is retired
+			// A step-over or step-out finishing is a completed step, not a
+			// breakpoint the user set.
+			DEBUGSetStopReason(viaStep ? "step" : "breakpoint");
+		}
 	}
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
+		const bool wasRunning = (currentMode != DMODE_STOP);
 		currentMode = DMODE_STOP;
 		DEBUGSetStopReason("user");
 		currentPC = regs.pc;                                     // Set the PC to what it is.
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
+		if (wasRunning) {                                        // Tell a DAP client too; see DEBUGBreakToDebugger().
+			DEBUGSetStopReason("pause");
+		}
 	}
 
 	// Repair the bank when it is unset: currentPC moves independently of
@@ -357,6 +380,16 @@ int  DEBUGGetCurrentStatus(void) {
 	// -- if it failed to open there is no control bar to resume from, and
 	// swallowing the loop here would park the machine unrecoverably.
 	const bool imguiOwnsUI = (!debugger_enabled && video_debug_ui_available());
+
+	// A DAP client can drive the run state while we are halted, so give it a
+	// turn before any front end blocks: continue/step arriving over the socket
+	// has to be able to get us moving again, whichever UI is up.
+	if (currentMode != DMODE_RUN) {
+		debug_server_poll();
+		if (currentMode == DMODE_RUN || currentMode == DMODE_STEP) {
+			return 0;                                                   // Mode changed remotely — execute.
+		}
+	}
 
 	// DMODE_STOP only, not "not RUN". DMODE_STEP means one instruction has been
 	// asked for and must be executed now: routing it through the pump costs it
@@ -434,6 +467,20 @@ int  DEBUGGetCurrentStatus(void) {
 		return 1;
 	}
 
+	// While running, a client still has to be able to connect and ask us to
+	// break. This runs per instruction, so polling the socket every time would
+	// cost more than the emulation; once every few thousand is still well
+	// inside a frame.
+	{
+		static int poll_counter = 0;
+		if (++poll_counter >= 1000) {
+			poll_counter = 0;
+			if (debug_server_poll()) {
+				return (currentMode == DMODE_STOP) ? 1 : 0;
+			}
+		}
+	}
+
 	return 0;                                                               // Run wild, run free.
 }
 
@@ -478,15 +525,22 @@ void DEBUGSetBreakPoint(struct breakpoint newBreakPoint) {
 // *******************************************************************************************
 
 void DEBUGBreakToDebugger(void) {
-	// Default reason for "something broke into the debugger". Set here, before
-	// the mode changes, so no path can leave the previous stop's reason
-	// showing; a caller with something more specific to say (the STP hook)
-	// overrides it immediately after.
+	const bool wasRunning = (currentMode != DMODE_STOP);
+	// Default reason for "something broke into the debugger". Set before the
+	// mode changes, so no path can leave the previous stop's reason showing; a
+	// caller with something more specific to say (the STP hook) overrides it
+	// immediately after.
 	DEBUGSetStopReason("user");
 	currentMode = DMODE_STOP;
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
 	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+	// A DAP client only refreshes its view -- stack, variables, step controls --
+	// when it is told execution stopped. Halting without saying so leaves it
+	// believing the machine is still running.
+	if (wasRunning) {
+		DEBUGSetStopReason("pause");
+	}
 }
 
 // A watched address was written. Called from the CPU store path, so it does as
@@ -522,9 +576,17 @@ void DEBUGBreakOnWatchpoint(void) {
 // *******************************************************************************************
 
 static void DEBUGClearStepBreakPoint(void) {
+	// Whoever owned the pending step no longer does.
+	debug_server_note_step_ended();
 	stepBreakPoint.pc = -1;
 	stepBreakPoint.bank = 0;
 	stepBreakPoint.x16Bank = -1;
+}
+
+// Public form of the same thing: a DAP session tearing down has to retract a
+// step it started, and nothing outside this file can reach stepBreakPoint.
+void DEBUGCancelStep(void) {
+	DEBUGClearStepBreakPoint();
 }
 
 // F5 — run until break.
@@ -541,6 +603,10 @@ void DEBUGContinue(void) {
 	currentMode = DMODE_RUN;
 	debugCPUClocks = clockticks6502;
 	timing_init();
+	// Last, so the run state and any step target are settled before a client
+	// can see them: this can reach the socket, and a peer that has stopped
+	// reading is dropped from inside it.
+	debug_server_note_resumed();
 }
 
 void DEBUGStepInto(void) {                              // F11 — single instruction
@@ -550,6 +616,10 @@ void DEBUGStepInto(void) {                              // F11 — single instru
 	currentPCBank = regs.k;
 	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
 	debugCPUClocks = clockticks6502;
+	// Last, so the run state and any step target are settled before a client
+	// can see them: this can reach the socket, and a peer that has stopped
+	// reading is dropped from inside it.
+	debug_server_note_resumed();
 }
 
 void DEBUGStepOver(void) {                              // F10 — step over calls
@@ -586,6 +656,10 @@ void DEBUGStepOver(void) {                              // F10 — step over cal
 		currentPCX16Bank = x16Bank;
 		debugCPUClocks = clockticks6502;
 	}
+	// Last, so the run state and any step target are settled before a client
+	// can see them: this can reach the socket, and a peer that has stopped
+	// reading is dropped from inside it.
+	debug_server_note_resumed();
 }
 
 void DEBUGStepOut(void) {                               // run to the return address
@@ -646,6 +720,10 @@ void DEBUGStepOut(void) {                               // run to the return add
 	currentMode = DMODE_RUN;
 	debugCPUClocks = clockticks6502;
 	timing_init();
+	// Last, so the run state and any step target are settled before a client
+	// can see them: this can reach the socket, and a peer that has stopped
+	// reading is dropped from inside it.
+	debug_server_note_resumed();
 }
 
 void DEBUGPause(void) {
@@ -660,6 +738,10 @@ void DEBUGRunTo(uint16_t pc, uint8_t bank) {
 	currentMode = DMODE_RUN;
 	debugCPUClocks = clockticks6502;
 	timing_init();
+	// Last, so the run state and any step target are settled before a client
+	// can see them: this can reach the socket, and a peer that has stopped
+	// reading is dropped from inside it.
+	debug_server_note_resumed();
 }
 
 bool DEBUGIsRunning(void) {

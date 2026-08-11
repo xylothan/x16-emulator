@@ -36,6 +36,7 @@
 #include "debugger.h"
 #include "dbg_info.h"
 #include "dbg_load.h"
+#include "debug_server.h"
 #include "source_view.h"
 #include "code_map.h"
 #include "utf8.h"
@@ -100,6 +101,10 @@ bool debugger_enabled = false;
 // the two UIs can be used together or separately. Always defined, even in a
 // build without the UI, so the emulator loop needs no #ifdef.
 bool imgui_debugger_enabled = false;
+// True when a local interactive debugger was asked for (-debug/-bp/-wp), as
+// distinct from the machinery merely being switched on. A DAP client uses this
+// to decide whether anyone is left to resume the machine if it disconnects.
+bool debug_window_enabled = false;
 char *paste_text = NULL;
 char *clipboard_buffer = NULL;
 char paste_text_data[65536];
@@ -610,6 +615,11 @@ usage()
 	printf("-srcpath <dir>\n");
 	printf("\tAdd a directory to search for the source files a .dbg file names.\n");
 	printf("\tCan be repeated.\n");
+	printf("-debugport [port]\n");
+	printf("\tServe the Debug Adapter Protocol on <port> (default %d), so an\n",
+	       DEBUG_SERVER_DEFAULT_PORT);
+	printf("\teditor can set breakpoints and step through source. The emulator\n");
+	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-zeroram\n");
@@ -1010,6 +1020,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (argc && argv[0][0] != '-') {
 				// Adds rather than replaces, so it composes with -bp instead of
 				// depending on which came first on the command line.
@@ -1036,6 +1047,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1052,6 +1064,7 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			debugger_enabled = true;
+			debug_window_enabled = true;
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
@@ -1099,6 +1112,34 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			dbg_auto_opt = 0;
+		} else if (!strcmp(argv[0], "-debugport")) {
+			argc--;
+			argv++;
+			// The breakpoint machinery lives behind debugger_enabled, and a DAP
+			// client needs it whether or not the SDL debug window is up. It is
+			// deliberately NOT debug_window_enabled: there is no local UI here,
+			// which is what lets the server resume the machine when its client
+			// disconnects rather than leaving it halted with nobody to drive it.
+			debugger_enabled = true;
+			int port = DEBUG_SERVER_DEFAULT_PORT;
+			if (argc && argv[0][0] != '-') {
+				port = atoi(argv[0]);
+				argc--;
+				argv++;
+			}
+#ifdef HAS_DAP
+			// The CPU keeps running; a client attaches when it is ready, and
+			// breakpoints it sets are what stop execution.
+			if (debug_server_init(port) != 0) {
+				fprintf(stderr, "Failed to start debug server on port %d\n", port);
+				return 1;
+			}
+#else
+			(void)port;
+			fprintf(stderr, "-debugport requires a build with the DAP server "
+			                "(cJSON was not available at configure time)\n");
+			return 1;
+#endif
 		} else if (!strcmp(argv[0], "-dbgfile")) {
 			argc--;
 			argv++;
@@ -1558,6 +1599,7 @@ main(int argc, char **argv)
 	emulator_loop(NULL);
 #endif
 
+	debug_server_shutdown();
 	source_view_free();
 	dbg_info_free();
 	main_shutdown();
@@ -2030,7 +2072,12 @@ emulator_step_during_move(void)
 	// Dragging with -debug therefore behaves as it always has -- and the same
 	// has to hold for -imgui, whose window is move-hooked too, so a drag of
 	// either window cannot run the CPU behind the UI's back.
-	if (debugger_enabled || imgui_debugger_enabled) {
+	//
+	// The DAP server counts too, and for the same reason -- a client's
+	// breakpoints are the same breakpoints. The guest can clear
+	// debugger_enabled by writing $9FB0, so testing that alone would let a drag
+	// step past a breakpoint a client is waiting on.
+	if (debugger_enabled || imgui_debugger_enabled || debug_server_is_enabled()) {
 		return;
 	}
 
@@ -2121,7 +2168,17 @@ emulator_loop(void *param)
 		// pause loop to whichever UI is up. Tested against the window rather
 		// than the flag alone, so that no path can park the machine in a pause
 		// loop that has no UI to resume it.
-		if (debugger_enabled || (imgui_debugger_enabled && video_debug_ui_available())) {
+		//
+		// The guest can clear debugger_enabled by writing $9FB0. With a DAP
+		// client attached that must not take the debugger down with it: nothing
+		// would poll the socket again, breakpoints would stop being tested, and
+		// the client would hang with no way back. Running the status hook here
+		// rather than polling separately also keeps the socket work behind the
+		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
+		// syscall per emulated instruction.
+		if (debugger_enabled
+		    || (imgui_debugger_enabled && video_debug_ui_available())
+		    || debug_server_is_enabled()) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;

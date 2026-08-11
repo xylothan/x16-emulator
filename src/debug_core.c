@@ -75,6 +75,12 @@ normalise_bank(int selector, int addr, uint8_t pbank)
 	return addr_is_banked(addr, pbank) ? selector : DEBUG_BANK_ANY;
 }
 
+int
+debug_normalise_bank(int selector, int addr, uint8_t pbank)
+{
+	return normalise_bank(selector, addr, pbank);
+}
+
 static bool
 bp_matches(int pc, uint8_t bank, const struct breakpoint *bp)
 {
