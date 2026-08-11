@@ -65,6 +65,41 @@ check(bool cond, const char *what)
 	}
 }
 
+// The property that makes a disassembly window renderable at all: the emitted
+// lines must TILE the range they cover. Every line starts exactly where the
+// previous one ended -- an overlap claims the same byte for two instructions, a
+// gap describes no instruction at all for the bytes in between, and nothing
+// downstream can draw either. Asserted directly, rather than against golden
+// text, because this is the actual invariant; golden strings pass for the wrong
+// reasons and fail for cosmetic ones.
+static void
+check_tiles(const code_map_line_t *lines, int n, const char *what)
+{
+	for (int i = 0; i < n; i++) {
+		if (lines[i].size < 1) {
+			printf("      line %d at $%04X has size %u\n",
+			       i, (unsigned)lines[i].addr, (unsigned)lines[i].size);
+			check(false, what);
+			return;
+		}
+		if (i == 0) {
+			continue;
+		}
+		uint16_t end = (uint16_t)((lines[i - 1].addr + lines[i - 1].size) & 0xFFFF);
+		if (lines[i].addr != end) {
+			printf("      %s: line %d $%04X+%u ends at $%04X, line %d starts at $%04X\n",
+			       lines[i].addr == ((end + 1) & 0xFFFF) || (uint16_t)(lines[i].addr - end) < 0x8000
+			           ? "gap"
+			           : "overlap",
+			       i - 1, (unsigned)lines[i - 1].addr, (unsigned)lines[i - 1].size,
+			       (unsigned)end, i, (unsigned)lines[i].addr);
+			check(false, what);
+			return;
+		}
+	}
+	check(n >= 1, what);
+}
+
 static void
 reset_all(void)
 {
@@ -378,15 +413,68 @@ main(void)
 		// The real damage from drift is contradictory output: a line claiming
 		// bytes that the next line also claims. Nothing downstream can render
 		// that sensibly, so the window must never emit it.
-		bool overlap = false;
-		for (int i = 1; i < n; i++) {
-			if (lines[i].addr < lines[i - 1].addr + lines[i - 1].size) {
-				overlap = true;
-			}
-		}
-		check(!overlap, "never emits overlapping instructions");
+		check_tiles(lines, n, "never emits overlapping instructions");
 
 		regs.is65c816 = false;
+	}
+
+	// ── The one-byte fallback must not overlap the line after it ────────────
+	// When no backoff decodes cleanly onto the anchor, the backward walk gives
+	// up and backs off a single byte so the caller still makes progress. That
+	// is a guess about where the previous instruction STARTS -- it is not a
+	// decode -- so the byte sitting there can still decode wider than the one
+	// byte the walk allowed for, and the rendered line then runs straight into
+	// the line the caller actually asked for.
+	//
+	//   $7FFF: A9 ..   LDA #imm -- 2 bytes, so its operand IS $8000
+	//   $8000: the requested center
+	//
+	// Everything else is NOP, so no backoff of 2..4 decodes onto $8000 either;
+	// the walk has nothing to align to and falls back.
+	{
+		reset_all();
+		g_mem[0x7FFF] = 0xA9; // LDA #imm: 2 bytes, operand at $8000
+
+		code_map_line_t lines[8];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8000, 0, 0, 0, 1, 2, lines, 8, &center_index);
+
+		check(n >= 2 && lines[0].addr == 0x7FFF,
+		      "backs off a single byte when nothing decodes onto the anchor");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8000,
+		      "keeps the center where the caller asked despite the fallback");
+		check_tiles(lines, n, "the one-byte fallback tiles the range instead of overlapping");
+	}
+
+	// ── Truncating onto an interior anchor must not leave a hole ────────────
+	// Overlapping-but-legal instruction starts are ordinary on this CPU. The
+	// `.byte $2C` skip idiom hides a real entry point inside a BIT abs operand,
+	// so the BIT and the byte after it are BOTH genuine instruction starts, and
+	// live execution can record either.
+	//
+	//   $8002: 2C 8D 12   BIT $128D -- 3 bytes, lands exactly on $8005
+	//   $8003: 8D ..      STA abs   -- the hidden entry point, recorded
+	//
+	// The inner start is not itself a candidate (STA abs from $8003 runs to
+	// $8006, past the anchor), so the backward walk picks the BIT. The fill then
+	// truncates the BIT onto the recorded start at $8003 -- correctly, an anchor
+	// outranks a decode -- and the two operand bytes end up described by no line
+	// at all unless the truncation is followed up.
+	{
+		reset_all();
+		const uint8_t skip_idiom[] = { 0x2C, 0x8D, 0x12 };
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[8];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8005, 0, 0, 0, 1, 2, lines, 8, &center_index);
+
+		check(n >= 2 && lines[0].addr == 0x8002,
+		      "walks back onto the wider of two overlapping starts");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8005,
+		      "still centers on the requested address after truncating");
+		check_tiles(lines, n, "truncating onto an interior anchor leaves no gap");
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────
