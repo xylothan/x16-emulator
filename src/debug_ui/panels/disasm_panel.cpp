@@ -249,12 +249,13 @@ disasm_panel_render(bool *p_open)
 			// explains the instruction and — on the PC's row — predicts what it
 			// will do. Followed by the operand's live value.
 			//
-			// Gated on the lookup succeeding, not merely on a token being
-			// extracted: code_map renders a line whose decode had to be cut
-			// short as its raw data bytes (".byte $2c"), which yields a token
-			// that is not an instruction. Opening a tooltip for it would show
-			// an empty box, since the body returns immediately and those lines
-			// carry no effective address either.
+			// Gated on the row being an instruction at all, and on the lookup
+			// succeeding -- not merely on a token being extracted. code_map
+			// renders a row whose decode had to be cut short as its raw data
+			// bytes (".byte $2c"), which yields a token that is not an
+			// instruction. Opening a tooltip for it would show an empty box,
+			// since the body returns immediately and those rows carry no
+			// effective address either.
 			//
 			// This cannot hide a tooltip that had content: the body draws
 			// nothing at all unless the lookup succeeds, and the operand-value
@@ -263,7 +264,8 @@ disasm_panel_render(bool *p_open)
 			// table lacks: only "dbg" ($DB), which is implied and so has no
 			// effective address -- it too used to open an empty box.
 			char mnem[16];
-			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem) &&
+			const bool have_mnem = ln.kind == CM_LINE_INSTRUCTION &&
+			                       dbgui_mnemonic_of(ln.text, mnem, sizeof mnem) &&
 			                       insn_info_lookup(mnem) != nullptr;
 
 			if (have_mnem || ln.eff_addr >= 0) {

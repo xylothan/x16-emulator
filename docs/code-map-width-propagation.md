@@ -98,6 +98,52 @@ ever tracked properly, that check should be replaced, not deleted quietly.
 
 ---
 
+# Related: a stale anchor that kept its opcode byte
+
+**Known limitation, pinned by tests, not fixed.**
+
+An anchor is believed while the opcode byte it recorded is still in memory. That
+one-byte check catches overlay loads, a second program over the first, and
+self-modifying code without needing a hook on every write — but replacement code
+that happens to repeat the same opcode byte at the same address keeps the old
+anchor, and with it the old recorded **status**.
+
+On a 65C816 that stale status can imply a different operand width, so the line
+decodes wider than the new code really is. Because a recorded line is exempt
+from the interior-anchor clamp (see the overlap policy in `cm_fill`), it can
+then swallow a genuinely fresh anchor inside it:
+
+```
+old: $8000  A9 xx xx   LDA #$xxxx   recorded with 16-bit A -> 3 bytes
+new: $8000  A9 xx      LDA #$xx     8-bit A, and $8002 freshly executed
+```
+
+The opcode is still `$A9`, so the stale anchor survives and wins.
+
+Why it is accepted rather than fixed:
+
+- It cannot happen on the 65C02, where operand widths never vary — so it does
+  not affect the X16's default CPU at all. It needs a 65C816 in native mode.
+- It additionally needs the replacement code to repeat the same opcode byte at
+  the same address *and* to run under a different width regime.
+- The damage is bounded and self-correcting in the usual way: one over-wide
+  line, then re-sync at the next anchor whose opcode does not match.
+- The alternative — always clamping — costs the far more common case, the
+  `.byte $2C` skip idiom, where two overlapping starts are both genuinely real
+  and clamping renders a whole known instruction as a fragment.
+
+Fixing it properly needs a way to tell which of two anchors is *newer* — a
+per-address recording epoch (roughly +64 KB per bank context) or real write
+invalidation. Neither is warranted for a 65C816-only, narrow case, but both
+would also fix the width-propagation gap above, so they are worth revisiting
+together.
+
+`tests/test_code_map.c` pins the current behaviour under checks labelled
+`KNOWN LIMITATION`, so it is visible rather than folklore. If it is ever fixed
+those checks will fail — update them, do not delete them.
+
+---
+
 # Related: a window-straddling instruction is decoded through one bank
 
 **Not fixed. Not covered by a passing test.** Found while adding banking

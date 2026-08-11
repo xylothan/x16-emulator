@@ -424,9 +424,11 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	// This is the honest rendering of a genuine ambiguity rather than a
 	// failure: the `.byte $2C` skip idiom really does put two overlapping
 	// instruction starts in memory, both real and both executed, and no linear
-	// non-overlapping tiling can show both whole. The policy is that the
-	// interior recorded start wins -- it is the harder evidence -- and the
-	// bytes leading up to it are shown as the data they are on that path.
+	// non-overlapping tiling can show both whole. The policy is that the start
+	// the caller selected wins -- forward from the outer one shows the outer
+	// instruction, forward from the inner one shows the inner -- and only a
+	// guessed decode, or one crossing a boundary the window already committed
+	// to, is reduced to the bytes it owns on that path.
 	if (sz < decoded) {
 		recorded = false;
 		eff      = -1;
@@ -448,6 +450,11 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	ln->status   = st;
 	ln->eff_addr = eff;
 	ln->recorded = recorded;
+	ln->kind     = (uint8_t)(sz < decoded ? CM_LINE_DATA : CM_LINE_INSTRUCTION);
+	// Whether the ADDRESS was executed is separate from whether this row could
+	// be shown as a whole instruction: a boundary can force a recorded start to
+	// be emitted as data, and a consumer still wants to know it is real code.
+	ln->start_recorded = cm_anchor_ok(self, addr, bank, rambank, rombank);
 	memset(ln->bytes, 0, sizeof(ln->bytes));
 	// Each byte is read through the window that backs its own address, so an
 	// instruction straddling $BFFF/$C000 shows the ROM bank's bytes for the part

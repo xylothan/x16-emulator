@@ -584,6 +584,14 @@ main(void)
 		check(n >= 1 && lines[0].bytes[0] == 0x2C &&
 		          strcmp(lines[0].text, ".byte $2c") == 0,
 		      "renders a cut-short line as the bytes it owns");
+		// The row kind says what the row IS, so a consumer need not parse the
+		// text to find out; start_recorded still says the address was executed,
+		// which `recorded` cannot express once the row became data.
+		check(n >= 1 && lines[0].kind == CM_LINE_DATA,
+		      "marks a cut-short line as data rather than an instruction");
+		check(center_index >= 0 && center_index < n &&
+		          lines[center_index].kind == CM_LINE_INSTRUCTION,
+		      "marks a whole line as an instruction");
 
 		// Capacity is the case that used to lose the center outright: phase B
 		// now needs two lines where the walk resolved one, and with room for
@@ -601,6 +609,13 @@ main(void)
 		// whole group instead throws away context the caller has room for.
 		check(tight == 2 && center_index == 1 && lines[0].addr == 0x8003,
 		      "keeps the part of a too-large group closest to the center");
+		// That row is the recorded start at $8003 cut short by the boundary, so
+		// it reports as data while still saying its address was executed --
+		// "never ran" and "ran, but cannot be shown whole here" are different
+		// things, and `recorded` alone cannot say which.
+		check(tight == 2 && lines[0].kind == CM_LINE_DATA && lines[0].start_recorded &&
+		          !lines[0].recorded,
+		      "a row cut by a boundary still reports its start as executed");
 	}
 
 	// ── Two overlapping starts that are BOTH ground truth ───────────────────
@@ -648,6 +663,79 @@ main(void)
 		n = code_map_disasm_forward(0x8002, 0, 0, 0, 2, lines, 8, &next);
 		check(n == 2 && lines[0].size == 1 && !lines[0].recorded,
 		      "an unrecorded decode still gives way to a recorded start inside it");
+
+		// A row forced to data by a window boundary still reports that its
+		// address was executed -- "never ran" and "ran, but cannot be shown
+		// whole on this path" are different things, and `recorded` alone
+		// cannot say which.
+		reset_all();
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8002, 0, 0, 0, regs.status);
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		int             center_index = -99;
+		code_map_line_t win[8];
+		int             wn = code_map_disasm_window(0x8005, 0, 0, 0, 1, 1, win, 8, &center_index);
+		check(wn >= 2 && win[0].addr == 0x8002 && win[0].size == 3 &&
+		          win[0].kind == CM_LINE_INSTRUCTION && win[0].start_recorded,
+		      "the window shows the outer instruction whole when both are recorded");
+		check_tiles(win, wn, "tiles when both overlapping starts are recorded");
+
+		// Centering on each overlapping start gives that start's own path.
+		center_index = -99;
+		wn = code_map_disasm_window(0x8002, 0, 0, 0, 0, 2, win, 8, &center_index);
+		check(wn >= 1 && center_index == 0 && win[0].addr == 0x8002 &&
+		          win[0].size == 3 && win[0].kind == CM_LINE_INSTRUCTION,
+		      "centering on the outer start shows the outer instruction whole");
+		center_index = -99;
+		wn = code_map_disasm_window(0x8003, 0, 0, 0, 0, 2, win, 8, &center_index);
+		check(wn >= 1 && center_index == 0 && win[0].addr == 0x8003 &&
+		          win[0].size == 3 && win[0].kind == CM_LINE_INSTRUCTION,
+		      "centering on the inner start shows the inner instruction whole");
+	}
+
+	// ── KNOWN LIMITATION: a stale anchor that kept its opcode byte ──────────
+	// Anchors are validated by comparing one byte -- the opcode that was
+	// executing -- against memory. Replacement code that happens to repeat that
+	// byte at the same address keeps the old anchor, and with it the old
+	// recorded STATUS. On a 65C816 that status can imply a different operand
+	// width, so the stale line decodes wider than the new code really is, and
+	// the exemption above then lets it swallow a genuinely fresh anchor inside
+	// it.
+	//
+	//   old: $8000  A9 xx xx   LDA #$xxxx  recorded with 16-bit A (3 bytes)
+	//   new: $8000  A9 xx      LDA #$xx    8-bit A, and $8002 freshly executed
+	//
+	// The opcode byte is still $A9, so the stale anchor survives and wins.
+	// This pins the CURRENT behaviour so the limitation is visible rather than
+	// folklore -- it is NOT the desired behaviour. Fixing it needs a way to
+	// tell which anchor is newer (a per-address recording epoch) or write
+	// invalidation; see docs/code-map-width-propagation.md. If you fix it, this
+	// check should fail: update it, do not delete it.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		const uint8_t code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
+		poke(0x8000, code, sizeof(code));
+
+		// The old program ran here with a 16-bit accumulator.
+		code_map_record(0x8000, 0, 0, 0, FLAG_INDEX_WIDTH);
+		// The new program runs with 8 bits and starts an instruction at $8002.
+		code_map_record(0x8002, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
+		regs.status = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 3,
+		      "KNOWN LIMITATION: a stale same-opcode anchor still swallows a fresh one");
+		check(n == 2 && lines[1].addr == 0x8003,
+		      "KNOWN LIMITATION: the line after it starts past the fresh anchor");
+
+		regs.is65c816 = false;
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────

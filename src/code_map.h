@@ -15,8 +15,10 @@
 //   2. cc65 .dbg span starts (compiler-emitted boundaries),
 //   3. a backward self-sync heuristic (try candidate offsets, keep the one that
 //      decodes cleanly onto the anchor).
-// A decode is never allowed to swallow a recorded start, so an over-wide guess
-// is corrected at the next piece of hard evidence rather than drifting on.
+// A decode is never allowed to swallow a recorded start UNLESS it is itself
+// recorded -- two recorded starts that overlap are two real execution paths,
+// not a bad guess straddling a good one -- so an over-wide guess is corrected
+// at the next piece of hard evidence rather than drifting on.
 //
 // WHERE THE WIDTHS ARE STILL A GUESS, so callers know what they are getting:
 // only five instructions change the 65C816 register widths -- REP, SEP, XCE,
@@ -40,8 +42,11 @@
 // overlay loads, a second program loaded over the first, and self-modifying
 // code, without needing a hook on every memory write. It is a one-byte check,
 // not a proof: replacement code that happens to repeat the same opcode byte at
-// the same address keeps the old anchor. That costs nothing when the byte is
-// genuinely still an instruction start, and the next execution re-records it.
+// the same address keeps the old anchor, and with it the old recorded status.
+// On a 65C816 that stale status can imply a different operand width, so such a
+// line can decode wider than the new code really is. Bounded -- the next anchor
+// re-syncs it -- and impossible on the 65C02, where widths never vary. See
+// docs/code-map-width-propagation.md.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and
 // the C++ ImGui panel (via debug_ui_bridge.h).
@@ -78,15 +83,27 @@ bool code_map_is_recorded_start(uint16_t pc, uint8_t pbank, uint8_t rambank, uin
 // recorded in this context).
 uint8_t code_map_recorded_status(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank, uint8_t fallback);
 
+typedef enum {
+	CM_LINE_INSTRUCTION = 0, // a whole instruction: text is its disassembly
+	CM_LINE_DATA        = 1, // raw bytes: text is ".byte $xx,..." over exactly
+	                         // `size` bytes, and there is no effective address
+} code_map_line_kind_t;
+
 // One disassembled line produced by the anchored disassembler.
 typedef struct {
-	uint16_t addr;         // instruction start address
-	uint8_t  size;         // instruction length in bytes (always >= 1)
+	uint16_t addr;         // start address of this line
+	uint8_t  size;         // bytes this line covers (always >= 1)
 	uint8_t  status;       // implied_status actually used to decode it
 	int32_t  eff_addr;     // effective address, or -1 if none
-	bool     recorded;     // backed by live-execution coverage
-	uint8_t  bytes[4];     // raw instruction bytes (first `size` valid)
-	char     text[48];     // mnemonic + operands
+	bool     recorded;     // a whole instruction, backed by live-execution
+	                       // coverage. False for every CM_LINE_DATA row.
+	uint8_t  kind;         // code_map_line_kind_t: instruction or raw data
+	bool     start_recorded; // this ADDRESS is a recorded instruction start,
+	                         // even where the row had to be emitted as data.
+	                         // Distinguishes "never executed" from "executed,
+	                         // but cannot be shown whole on this path".
+	uint8_t  bytes[4];     // raw bytes (first `size` valid)
+	char     text[48];     // mnemonic + operands, or ".byte $xx,..."
 } code_map_line_t;
 
 // Produce an aligned disassembly window centered on `center`.
