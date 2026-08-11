@@ -446,8 +446,13 @@ main(void)
 		check(n >= 1 && lines[0].addr == 0x8001, "starts the window before the center");
 
 		// A window that cannot fit must still be safe and still locate center.
+		center_index = -99;
 		n = code_map_disasm_window(0x8004, 0, 0, 0, 3, 3, lines, 2, &center_index);
-		check(n <= 2, "honours the output capacity");
+		check(n == 2, "honours the output capacity");
+		check(center_index == 1 && lines[center_index].addr == 0x8004,
+		      "still locates the center in a window that cannot fit");
+		check(n == 2 && lines[0].addr == 0x8003,
+		      "spends a too-small window on the lines nearest the center");
 	}
 
 	// ── Recovering from a disagreement about instruction width ──────────────
