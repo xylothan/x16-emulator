@@ -673,6 +673,65 @@ main(void)
 
 		regs.is65c816 = false;
 	}
+
+	// ── The same bound applies to RTI ───────────────────────────────────────
+	// RTI restores a status byte the interrupt pushed, so like PLP it changes
+	// the M/X widths by an amount no static analysis recovers -- and unlike
+	// PLP there is not even a matching push in the instruction stream to walk
+	// back to. cm_propagate() therefore leaves the estimate alone for it.
+	//
+	// This pins the two things that make that safe, and it is deliberately
+	// written so that "fixing" RTI by inventing a plausible width would fail
+	// it: the line decoded from the stale estimate must be reported as a guess,
+	// and the next anchor must be reached rather than stepped over.
+	//
+	//   $8000: 40         RTI       recorded with 8-bit A
+	//   $8001: A9 EA A9   LDA #...  2 bytes on the stale estimate, 3 in truth
+	//   $8004: EA         NOP       recorded with 16-bit A -- the anchor
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		const uint8_t code[] = { 0x40, 0xA9, 0xEA, 0xA9, 0xEA };
+		poke(0x8000, code, sizeof(code));
+		const uint8_t st_8bit  = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		const uint8_t st_16bit = FLAG_INDEX_WIDTH;
+		regs.status = st_8bit;
+		code_map_record(0x8000, 0, 0, 0, st_8bit);
+		code_map_record(0x8004, 0, 0, 0, st_16bit);
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+
+		check(n >= 2 && lines[0].recorded && lines[0].size == 1,
+		      "decodes RTI itself from its own anchor");
+
+		// The contract: cm_propagate leaves the estimate alone for RTI, so the
+		// next line is decoded on the pre-RTI width. Pinned explicitly, because
+		// substituting a plausible width is the tempting "fix" and it would be
+		// a guess dressed up as knowledge.
+		check(n >= 2 && lines[1].addr == 0x8001 && lines[1].size == 2 &&
+		          lines[1].status == st_8bit,
+		      "leaves the width estimate alone across RTI instead of guessing");
+
+		// The two properties that make leaving it alone acceptable: the guess
+		// is labelled as one, and it cannot run on -- the next anchor is
+		// reached rather than stepped over, and it restores the real width.
+		check(n >= 2 && !lines[1].recorded,
+		      "reports a line decoded across RTI as a guess, not as known");
+		bool resynced = false;
+		for (int i = 0; i < n; i++) {
+			if (lines[i].addr == 0x8004 && lines[i].recorded && lines[i].status == st_16bit) {
+				resynced = true;
+			}
+		}
+		check(resynced, "reaches the anchor after RTI and recovers the real width");
+		check_tiles(lines, n, "tiles the range either side of an RTI");
+
+		regs.is65c816 = false;
+	}
 	// ── Reads go through the window that backs each address ─────────────────
 	// Every read code_map makes has to name the bank that actually backs the
 	// address: the ROM bank above $C000, the RAM bank in $A000-$BFFF, and the
