@@ -185,12 +185,23 @@ void
 DEBUGSetStopReason(const char *reason)
 {
 	lastStopReason = reason ? reason : "";
-	// One recorder, one notification. The DAP server and the graphical
-	// debugger both want to know why execution stopped, and before this they
-	// each had their own call at every stop site -- two sources of truth that
-	// could disagree (a completed step-over reported as "breakpoint" to one and
-	// "step" to the other). Recording it here and notifying from here keeps
-	// them in step. A no-DAP build compiles this to nothing.
+}
+
+// Record the reason AND tell a DAP client execution stopped.
+//
+// Split from the plain setter deliberately. Some sites run on every poll while
+// already halted -- the F12 key test reads the physical key state, so it fires
+// ~60-100 times a second while the key is held -- and others set a default that
+// a more specific caller then overrides. Those must only store. Announcing is
+// edge-triggered: exactly once per RUN->STOP transition, at the site that knows
+// it is a transition. Folding the notify into the setter turned per-poll string
+// assignments into per-poll socket writes.
+//
+// Compiles to a bare store in a build without the DAP server.
+void
+DEBUGAnnounceStop(const char *reason)
+{
+	DEBUGSetStopReason(reason);
 	debug_server_notify_stopped(lastStopReason);
 }
 
@@ -277,7 +288,7 @@ int  DEBUGGetCurrentStatus(void) {
 			stepBreakPoint.pc = -1;                             // the pending step target is now unreachable
 			stepBreakPoint.bank = 0;
 			stepBreakPoint.x16Bank = -1;
-			DEBUGSetStopReason("interrupt");
+			DEBUGAnnounceStop("interrupt");
 		}
 	}
 
@@ -286,13 +297,12 @@ int  DEBUGGetCurrentStatus(void) {
 	// where the CPU actually ended up.
 	if (watchpointStopPending) {
 		watchpointStopPending = false;
-		DEBUGSetStopReason("data breakpoint");
 		currentPC = regs.pc;
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
-		// Reported here rather than from the store itself, for the same reason:
-		// only now does regs.pc name the instruction after the write.
-		DEBUGSetStopReason("data breakpoint");
+		// Reported here rather than from the store itself: only now does
+		// regs.pc name the instruction after the write.
+		DEBUGAnnounceStop("data breakpoint");
 	}
 
 	if (currentMode == DMODE_STEP) {                                // Single step before
@@ -302,7 +312,7 @@ int  DEBUGGetCurrentStatus(void) {
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);     // Update the bank if we are in upper memory.
 			currentMode = DMODE_STOP;                               // So now stop, as we've done it.
 			debug_server_note_step_ended();
-			DEBUGSetStopReason("step");
+			DEBUGAnnounceStop("step");
 		}
 	}
 
@@ -349,19 +359,19 @@ int  DEBUGGetCurrentStatus(void) {
 			DEBUGClearStepBreakPoint();                             // and the step target is retired
 			// A step-over or step-out finishing is a completed step, not a
 			// breakpoint the user set.
-			DEBUGSetStopReason(viaStep ? "step" : "breakpoint");
+			DEBUGAnnounceStop(viaStep ? "step" : "breakpoint");
 		}
 	}
 
 	if (SDL_GetKeyboardState(NULL)[DBGSCANKEY_BRK]) {            // Stop on break pressed.
 		const bool wasRunning = (currentMode != DMODE_STOP);
 		currentMode = DMODE_STOP;
-		DEBUGSetStopReason("user");
+		DEBUGSetStopReason("user");                              // store only: this test is level-triggered
 		currentPC = regs.pc;                                     // Set the PC to what it is.
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);      // Update the bank if we are in upper memory.
 		if (wasRunning) {                                        // Tell a DAP client too; see DEBUGBreakToDebugger().
-			DEBUGSetStopReason("pause");
+			DEBUGAnnounceStop("pause");
 		}
 	}
 
@@ -379,7 +389,7 @@ int  DEBUGGetCurrentStatus(void) {
 	// decides when to resume. Gated on the window having actually been created
 	// -- if it failed to open there is no control bar to resume from, and
 	// swallowing the loop here would park the machine unrecoverably.
-	const bool imguiOwnsUI = (!debugger_enabled && video_debug_ui_available());
+	const bool imguiOwnsUI = (!debug_window_enabled && video_debug_ui_available());
 
 	// A DAP client can drive the run state while we are halted, so give it a
 	// turn before any front end blocks: continue/step arriving over the socket
@@ -530,16 +540,17 @@ void DEBUGBreakToDebugger(void) {
 	// mode changes, so no path can leave the previous stop's reason showing; a
 	// caller with something more specific to say (the STP hook) overrides it
 	// immediately after.
-	DEBUGSetStopReason("user");
+	DEBUGSetStopReason("user");   // store only; the transition notify is below
 	currentMode = DMODE_STOP;
 	currentPC = regs.pc;
 	currentPCBank = regs.k;
 	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
 	// A DAP client only refreshes its view -- stack, variables, step controls --
 	// when it is told execution stopped. Halting without saying so leaves it
-	// believing the machine is still running.
+	// believing the machine is still running. Announced only on the transition,
+	// so re-entering an already-halted debugger does not re-announce.
 	if (wasRunning) {
-		DEBUGSetStopReason("pause");
+		DEBUGAnnounceStop("pause");
 	}
 }
 
