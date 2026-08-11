@@ -10,8 +10,76 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The platform jobs are grouped by operating system rather than listed one per
+# architecture: windows, windows-legacy, linux, macos and wasm. Each group is a
+# matrix, so the run summary collapses to five boxes instead of a wall of
+# fourteen, and the legs of a group share one copy of their steps.
 jobs:
+  # Everything this workflow produces is stamped with a single build
+  # identifier, worked out once here so no two artifacts in a run can disagree.
+  #
+  # A tag build is simply the tag. Anything else is a rolling development build
+  # named <base>-dev-<YYYYMMDD>.<NNN>, e.g. r49-dev-20260810.003, where:
+  #
+  #   * <base> is the upstream release this fork sits on. It is read from the
+  #     newest R<n>.<m> tag once one exists, so cutting R49.001 makes this
+  #     self-maintaining; until then it falls back to DEV_BASE_FALLBACK. It is
+  #     deliberately not read from src/version.h, which carries upstream's
+  #     in-development number (50 / "next") rather than the release we sit on.
+  #   * <NNN> counts the commits that landed on this branch that UTC day, so
+  #     the name means "the third check-in of the tenth" and can be worked out
+  #     again later from the history alone.
+  version:
+    runs-on: ubuntu-22.04
+    env:
+      # Only bump this if the first tag ends up cut against a different
+      # upstream release; after that the tags themselves take over.
+      DEV_BASE_FALLBACK: r49
+    outputs:
+      build: ${{ steps.v.outputs.build }}
+      release: ${{ steps.v.outputs.release }}
+      dev: ${{ steps.v.outputs.dev }}
+    steps:
+      - name: Work out the build identifier
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            {
+              echo "dev=false"
+              echo "release=$GITHUB_REF_NAME"
+              echo "build=$GITHUB_REF_NAME"
+            } >> "$GITHUB_OUTPUT"
+            echo "Build identifier: $GITHUB_REF_NAME (tag)"
+            exit 0
+          fi
+
+          # Newest R<n>.<m> tag wins; sort -V so R10 beats R9.
+          base="$(gh api "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' \
+                  | grep -Ei '^r[0-9]+\.' | sort -V | tail -n1 || true)"
+          if [ -n "$base" ]; then
+            base="$(printf '%s' "${base%%.*}" | tr '[:upper:]' '[:lower:]')"
+          else
+            base="$DEV_BASE_FALLBACK"
+          fi
+
+          # --paginate emits one array per page, so sum the lengths.
+          seq="$(gh api --paginate \
+                   "repos/$GITHUB_REPOSITORY/commits?sha=$GITHUB_SHA&since=$(date -u +%Y-%m-%d)T00:00:00Z" \
+                   --jq 'length' | awk '{ s += $1 } END { print s + 0 }')"
+          [ "$seq" -gt 0 ] || seq=1
+
+          build="$(printf '%s-dev-%s.%03d' "$base" "$(date -u +%Y%m%d)" "$seq")"
+          {
+            echo "dev=true"
+            echo "release=dev"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+          echo "Build identifier: $build"
   README:
+    needs: [version]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -30,9 +98,16 @@ jobs:
         run: |
           mkdir artifacts
       - name: Create README
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
         run: |
+          set -euo pipefail
           export PATH=$(pwd)/node_modules/.bin:$PATH
-          cat header_footer.md README.md RELEASES.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
+          # The build identifier goes into the PDF as well as into the zip, so
+          # a README that has been copied out of a package still says which
+          # build it came from.
+          printf '\n---\n\nBuild `%s` (%s)\n' "$BUILD_VERSION" "${GITHUB_SHA:0:7}" > build_stamp.md
+          cat header_footer.md README.md RELEASES.md build_stamp.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
       - uses: actions/upload-artifact@v4
         with:
           name: readme-pdf
@@ -70,8 +145,9 @@ jobs:
         run: ctest --test-dir build --output-on-failure
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
-  # with no redistributable to install. The MinGW jobs below still run, and
-  # still publish, as a fallback: they keep -trace, which MSVC cannot build.
+  # with no redistributable to install. The MinGW jobs in windows-legacy still
+  # run, and still publish, as a fallback: they keep -trace, which MSVC cannot
+  # build.
   #
   # Each architecture is built twice, with and without FluidSynth. The MIDI
   # build has the runtime loader compiled in and ships libfluidsynth-3.dll
@@ -79,9 +155,9 @@ jobs:
   # the MIDI options at all, which is the honest thing to hand someone who did
   # not ask for MIDI. The 32-bit and ARM64 legs also catch pointer and size_t
   # assumptions that an x86_64-only build hides.
-  build-win-msvc:
-    name: build-win-msvc-${{ matrix.arch }}${{ matrix.suffix }}
-    needs: [README]
+  windows:
+    name: windows (${{ matrix.arch }}${{ matrix.suffix }})
+    needs: [version, README]
     runs-on: windows-2022
     strategy:
       # One combination failing should not hide the state of the others.
@@ -105,7 +181,6 @@ jobs:
           release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure
-        shell: pwsh
         # The generator has to be named explicitly: without it CMake falls back
         # to "NMake Makefiles", which rejects -A. Dependencies come from the
         # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest
@@ -114,7 +189,7 @@ jobs:
         # ENABLE_TRACE stays off: the generated src/rom_lst.h contains a string
         # literal of about 17 KB, and MSVC caps string literals at 16380 bytes
         # (C2026), so a trace-enabled build cannot compile. GCC has no such
-        # limit, so the MinGW packages below still ship -trace.
+        # limit, so the MinGW packages in windows-legacy still ship -trace.
         #
         # FluidSynth is a manifest feature, so only the MIDI legs pay for
         # building it.
@@ -128,10 +203,8 @@ jobs:
           -DENABLE_FLUIDSYNTH=${{ matrix.midi }}
           -DENABLE_TRACE=OFF
       - name: Build
-        shell: pwsh
         run: cmake --build build --config Release
       - name: Package Emulator
-        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force emu_binaries | Out-Null
           Copy-Item build/Release/x16emu.exe   emu_binaries/
@@ -153,27 +226,43 @@ jobs:
         # The docs artifact lives in another repository and expires, so it is
         # advisory only: never fail an emulator build because it is unavailable.
         continue-on-error: true
-        shell: pwsh
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stamp build version
+        run: Set-Content -Path emu_binaries/BUILD_VERSION.txt -Value '${{ needs.version.outputs.build }}'
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
-  build-win-x86_64:
-    needs: [README]
+  # The original MinGW packages, kept because they are the only Windows builds
+  # with -trace and because they are what long-time users already have. They
+  # ship a couple of dozen DLLs beside the executable, which is exactly what
+  # the MSVC builds above exist to avoid.
+  windows-legacy:
+    name: windows-legacy (${{ matrix.arch }})
+    needs: [version, README]
     runs-on: windows-2022
     defaults:
       run:
         shell: msys2 {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # path-type inherit on the 32-bit leg exposes the runner's own PATH
+          # inside MSYS2; minimal is the action's default and what the 64-bit
+          # leg has always used.
+          - { arch: x86_64, msystem: MINGW64, prefix: x86_64, path_type: minimal, package: x16emu_win64-mingw }
+          - { arch: i686,   msystem: MINGW32, prefix: i686,   path_type: inherit, package: x16emu_win32-mingw }
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
           update: true
-          install: make git mingw-w64-x86_64-toolchain mingw-w64-x86_64-SDL2 mingw-w64-x86_64-fluidsynth mingw-w64-x86_64-cmake
+          install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake
+          path-type: ${{ matrix.path_type }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -234,111 +323,53 @@ jobs:
       - name: Fetch x16-docs PDFs
         # The docs artifact lives in another repository and expires, so it is
         # advisory only: never fail an emulator build because it is unavailable.
+        #
+        # Run from cmd rather than the MSYS2 shell so it does not depend on
+        # gh being visible inside MSYS2, which varies with path-type.
         continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         shell: cmd
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: x16emu_win64-mingw
-          path: emu_binaries/*
-  build-win-i686:
-    needs: [README]
-    runs-on: windows-2022
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW32
-          update: true
-          install: make git mingw-w64-i686-toolchain mingw-w64-i686-SDL2 mingw-w64-i686-fluidsynth mingw-w64-i686-cmake
-          path-type: inherit
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-      - name: Fetch ROM
-        uses: ./.github/actions/fetch-rom
-        with:
-          release: ${{ github.ref_type == 'tag' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Copy ROM symbols
-        run: |
-          cp latest_rom/*.h src/.
-      - name: Build Emulator
-        run: |
-          git reset --hard
-          git diff
-          mkdir build
-          cd build
-          cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
-          cmake --build .
-      - name: Package Emulator
-        run: |
-          mkdir emu_binaries
-          cp $(which SDL2.dll) emu_binaries/.
-          cp $(which zlib1.dll) emu_binaries/.
-          cp $(which libwinpthread-1.dll) emu_binaries/.
-          cp $(which libfluidsynth-3.dll) emu_binaries/.
-          cp $(which libgcc_s_seh-1.dll) emu_binaries/.
-          cp $(which libglib-2.0-0.dll) emu_binaries/.
-          cp $(which libgmodule-2.0-0.dll) emu_binaries/.
-          cp $(which libportaudio.dll) emu_binaries/.
-          cp $(which libintl-8.dll) emu_binaries/.
-          cp $(which libstdc++-6.dll) emu_binaries/.
-          cp $(which libgomp-1.dll) emu_binaries/.
-          cp $(which libreadline8.dll) emu_binaries/.
-          cp $(which libsndfile-1.dll) emu_binaries/.
-          cp $(which libpcre2-8-0.dll) emu_binaries/.
-          cp $(which libiconv-2.dll) emu_binaries/.
-          cp $(which libtermcap-0.dll) emu_binaries/.
-          cp $(which libFLAC.dll) emu_binaries/.
-          cp $(which libmp3lame-0.dll) emu_binaries/.
-          cp $(which libmpg123-0.dll) emu_binaries/.
-          cp $(which libogg-0.dll) emu_binaries/.
-          cp $(which libopus-0.dll) emu_binaries/.
-          cp $(which libvorbis-0.dll) emu_binaries/.
-          cp $(which libvorbisenc-2.dll) emu_binaries/.
-          cp sdcard.img.zip emu_binaries/.
-          cp build/x16emu.exe emu_binaries/.
-          cp build/makecart.exe emu_binaries/.
-          file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
-        with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stamp build version
+        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: x16emu_win32-mingw
+          name: ${{ matrix.package }}
           path: emu_binaries/*
-  build-linux-x86_64:
-    needs: [README]
+  # x86_64 builds natively on the runner. The two ARM legs cannot, so they are
+  # built inside a Raspberry Pi OS image under qemu, which is slow but is the
+  # only way to get a genuinely native ARM binary out of a GitHub runner.
+  linux:
+    name: linux (${{ matrix.arch }})
+    needs: [version, README]
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,  emulated: false, package: x16emu_linux-x86_64 }
+          - { arch: aarch64, emulated: true,  base_image: 'raspios_lite_arm64:2022-04-04', cpu: cortex-a53, package: x16emu_linux-aarch64 }
+          - { arch: armhf,   emulated: true,  base_image: 'raspios_lite:2022-04-04',       cpu: cortex-a7,  package: x16emu_linux-armhf }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
       - name: Install Dependencies
+        if: ${{ !matrix.emulated }}
         run: |
           sudo cp /etc/apt/sources.list /etc/apt/sources.list~
           sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
+      - name: Install Dependencies
+        # The emulated legs need only enough to run the ARM image; the build
+        # dependencies are installed inside it.
+        if: ${{ matrix.emulated }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential make qemu-user-static
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -348,6 +379,7 @@ jobs:
         run: |
           cp latest_rom/*.h src/.
       - name: Build Emulator
+        if: ${{ !matrix.emulated }}
         run: |
           git reset --hard
           git diff
@@ -356,57 +388,20 @@ jobs:
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
           cmake --build .
       - name: Package Emulator
+        if: ${{ !matrix.emulated }}
         run: |
           mkdir emu_binaries
           cp sdcard.img.zip emu_binaries/.
           cp build/x16emu emu_binaries/.
           cp build/makecart emu_binaries/.
           file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
-        with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: x16emu_linux-x86_64
-          path: emu_binaries/*
-  build-linux-aarch64:
-    needs: [README]
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update 
-          sudo apt-get install -y build-essential make qemu-user-static
-      - name: Fetch ROM
-        uses: ./.github/actions/fetch-rom
-        with:
-          release: ${{ github.ref_type == 'tag' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Copy ROM symbols
-        run: |
-          cp latest_rom/*.h src/.
       - name: Build Emulator
+        if: ${{ matrix.emulated }}
         uses: pguyot/arm-runner-action@v2
         with:
-          base_image: raspios_lite_arm64:2022-04-04
+          base_image: ${{ matrix.base_image }}
           image_additional_mb: 8192
-          cpu: cortex-a53
+          cpu: ${{ matrix.cpu }}
           copy_artifact_path: emu_binaries
           commands: |
             apt-get update
@@ -424,6 +419,7 @@ jobs:
             file emu_binaries/*
       - name: Copy ROM
         run: |
+          # arm-runner-action copies its artifacts back out owned by root.
           sudo chown -R runner emu_binaries
           cp latest_rom/rom.bin emu_binaries/.
           cp latest_rom/*.sym emu_binaries/.
@@ -438,75 +434,23 @@ jobs:
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stamp build version
+        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: x16emu_linux-aarch64
+          name: ${{ matrix.package }}
           path: emu_binaries/*
-  build-linux-armhf:
-    needs: [README]
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update 
-          sudo apt-get install -y build-essential make qemu-user-static
-      - name: Fetch ROM
-        uses: ./.github/actions/fetch-rom
-        with:
-          release: ${{ github.ref_type == 'tag' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Copy ROM symbols
-        run: |
-          cp latest_rom/*.h src/.
-      - name: Build Emulator
-        uses: pguyot/arm-runner-action@v2
-        with:
-          base_image: raspios_lite:2022-04-04
-          image_additional_mb: 8192
-          cpu: cortex-a7
-          copy_artifact_path: emu_binaries
-          commands: |
-            apt-get update
-            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
-            mkdir build
-            cd build
-            git reset --hard
-            cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
-            cmake --build .
-            cd ..
-            mkdir emu_binaries
-            cp sdcard.img.zip emu_binaries/.
-            cp build/x16emu emu_binaries/.
-            cp build/makecart emu_binaries/.
-            file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          sudo chown -R runner emu_binaries
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
-        with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: x16emu_linux-armhf
-          path: emu_binaries/*
-  build-macos-x86_64:
-    needs: [README]
-    # this is currently macos-15, Sequoia
-    runs-on: macos-15-intel
+  macos:
+    name: macos (${{ matrix.arch }})
+    needs: [version, README]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15-intel is currently Sequoia.
+          - { arch: x86_64, runner: macos-15-intel, python: '3.9',  package: x16emu_macos_intel }
+          - { arch: arm64,  runner: macos-14,       python: '3.10', package: x16emu_macos_m1 }
     steps:
       - uses: actions/checkout@v4
       - name: Install Dependencies
@@ -514,7 +458,7 @@ jobs:
           brew install make sdl2 fluid-synth # cmake is likely here or pulled in
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: ${{ matrix.python }}
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -551,62 +495,14 @@ jobs:
         run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stamp build version
+        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: x16emu_macos_intel
+          name: ${{ matrix.package }}
           path: emu_binaries/*
-  build-macos-arm64:
-    needs: [README]
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Dependencies
-        run: | 
-          brew install make sdl2 fluid-synth
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Fetch ROM
-        uses: ./.github/actions/fetch-rom
-        with:
-          release: ${{ github.ref_type == 'tag' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Copy ROM symbols
-        run: |
-          cp latest_rom/*.h src/.
-      - name: Build Emulator
-        run: |
-          mkdir build
-          cd build
-          cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
-          cmake --build .
-      - name: Package Emulator
-        run: |
-          mkdir emu_binaries
-          cp sdcard.img.zip emu_binaries/.
-          cp build/x16emu emu_binaries/.
-          cp build/makecart emu_binaries/.
-          file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
-        with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: x16emu_macos_m1
-          path: emu_binaries/*
-  build-wasm:
+  wasm:
+    needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -638,6 +534,8 @@ jobs:
           mkdir emu_binaries/webassembly
           cp webassembly/styles.css webassembly/main.js webassembly/jszip.min.js emu_binaries/webassembly/
           file emu_binaries/*
+      - name: Stamp build version
+        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
       - uses: actions/upload-artifact@v4
         with:
           name: x16emu_wasm
@@ -653,11 +551,10 @@ jobs:
   #     there is always a current build to download without it ever looking
   #     like an official one.
   #
-  # Until now neither existed: the workflow only uploaded workflow artifacts,
-  # and publishing meant downloading each one by hand, renaming it and
-  # uploading it to a release. That is easy to get wrong and, because artifacts
-  # expire, impossible to redo later. Asset naming reproduces exactly what has
-  # been published to date, e.g. x16emu_win64 -> x16emu_win64-R49.001.zip.
+  # The dev release keeps a fixed tag and fixed asset names, so a link to
+  # .../releases/download/dev/x16emu_win64-dev.zip is good forever. Which build
+  # it actually is shows up in the release title and notes, in BUILD_VERSION.txt
+  # inside every package, and on the last page of the bundled README.
   publish:
     if: >-
       github.ref_type == 'tag' ||
@@ -667,32 +564,23 @@ jobs:
       # Every build, not just the ones that produce assets: a red compile means
       # the tree is broken, and nothing broken should reach a release. The unit
       # tests gate it for the same reason.
+      - version
       - unit-tests
-      - build-win-msvc
-      - build-win-x86_64
-      - build-win-i686
-      - build-linux-x86_64
-      - build-linux-aarch64
-      - build-linux-armhf
-      - build-macos-x86_64
-      - build-macos-arm64
-      - build-wasm
+      - windows
+      - windows-legacy
+      - linux
+      - macos
+      - wasm
     runs-on: ubuntu-22.04
     permissions:
       # The default token is read-only, and creating a release needs to write.
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IS_DEV: ${{ needs.version.outputs.dev }}
+      RELEASE_NAME: ${{ needs.version.outputs.release }}
+      BUILD_VERSION: ${{ needs.version.outputs.build }}
     steps:
-      - name: Work out which kind of release this is
-        id: kind
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "dev=false"                >> "$GITHUB_OUTPUT"
-            echo "name=$GITHUB_REF_NAME"    >> "$GITHUB_OUTPUT"
-          else
-            echo "dev=true"                 >> "$GITHUB_OUTPUT"
-            echo "name=dev"                 >> "$GITHUB_OUTPUT"
-          fi
       - name: Collect the platform artifacts
         uses: actions/download-artifact@v4
         with:
@@ -701,8 +589,6 @@ jobs:
           # bundled inside each platform zip rather than published on its own.
           pattern: x16emu_*
       - name: Zip each platform as <artifact>-<name>.zip
-        env:
-          RELEASE_NAME: ${{ steps.kind.outputs.name }}
         run: |
           set -euo pipefail
           cd dist
@@ -712,33 +598,86 @@ jobs:
           done
           ls -l ./*.zip
       - name: Publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_DEV: ${{ steps.kind.outputs.dev }}
-          RELEASE_NAME: ${{ steps.kind.outputs.name }}
         run: |
           set -euo pipefail
+
+          # The API returns the occasional 5xx, and losing a complete set of
+          # platform builds to one of them is not acceptable: a full run costs
+          # the better part of an hour. Every write goes through here.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::attempt ${attempt}/3 failed: $*"
+              sleep $(( attempt * 10 ))
+            done
+            echo "::error::giving up after 3 attempts: $*"
+            return 1
+          }
+
+          notes="$(printf '%s\n\n%s\n\n%s' \
+            "Automated build \`${BUILD_VERSION}\` of ${GITHUB_SHA}. Not an official release." \
+            "Windows: \`x16emu_win*\` is a single self-contained exe; take a \`-midi\` package for MIDI support, or a \`-mingw\` one for \`-trace\`." \
+            "Every package carries \`BUILD_VERSION.txt\` naming the build it came from. Asset names are stable, so these download links stay valid as the build rolls forward.")"
+
           if [ "$IS_DEV" = "true" ]; then
-            # Rolling prerelease: replace it wholesale so stale assets from an
-            # earlier build can never linger alongside the current ones.
-            gh release delete "$RELEASE_NAME" --yes --cleanup-tag \
-              --repo "$GITHUB_REPOSITORY" || true
-            gh release create "$RELEASE_NAME" dist/*.zip \
+            # The rolling prerelease is updated in place. It used to be deleted
+            # and recreated, which left a window with no dev release at all --
+            # and a 502 on the create call turned that window permanent.
+            if ! gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              retry gh release create "$RELEASE_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --target "$GITHUB_SHA" \
+                --title "Development build $BUILD_VERSION" \
+                --notes "$notes" \
+                --prerelease
+            fi
+
+            retry gh release upload "$RELEASE_NAME" dist/*.zip \
+              --repo "$GITHUB_REPOSITORY" --clobber
+
+            # Asset names are stable, so --clobber replaced them in place. Only
+            # a package that has gone away entirely needs cleaning up, which is
+            # what the old delete-and-recreate was really for.
+            keep="$(cd dist && ls ./*.zip | sed 's#^\./##')"
+            gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" \
+              --json assets --jq '.assets[].name' > published_assets.txt
+            while read -r asset; do
+              [ -n "$asset" ] || continue
+              if ! grep -Fxq "$asset" <<<"$keep"; then
+                echo "Removing stale asset $asset"
+                retry gh release delete-asset "$RELEASE_NAME" "$asset" \
+                  --repo "$GITHUB_REPOSITORY" --yes
+              fi
+            done < published_assets.txt
+
+            # gh release edit --target will not move a tag that already exists,
+            # so move the ref directly; otherwise the dev tag drifts behind the
+            # build its release names.
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_NAME" >/dev/null 2>&1; then
+              retry gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_NAME" \
+                -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            else
+              retry gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                -f ref="refs/tags/$RELEASE_NAME" -f sha="$GITHUB_SHA" >/dev/null
+            fi
+
+            retry gh release edit "$RELEASE_NAME" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "Development build (${GITHUB_SHA:0:7})" \
-              --notes "Automated build of ${GITHUB_SHA}. Not an official release. Windows: x16emu_win* is a single self-contained exe; take a -midi package for MIDI support, or a -mingw one for \`-trace\`." \
+              --title "Development build $BUILD_VERSION" \
+              --notes "$notes" \
               --prerelease
           elif gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Re-running the workflow for a tag refreshes its assets rather
             # than failing, and leaves the release's draft state alone.
-            gh release upload "$RELEASE_NAME" dist/*.zip \
+            retry gh release upload "$RELEASE_NAME" dist/*.zip \
               --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$RELEASE_NAME" dist/*.zip \
+            retry gh release create "$RELEASE_NAME" dist/*.zip \
               --repo "$GITHUB_REPOSITORY" \
               --title "$RELEASE_NAME" \
               --draft \
               --generate-notes
           fi
-

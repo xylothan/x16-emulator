@@ -137,6 +137,31 @@ Windows ships in three flavours. Unless you have a reason to pick otherwise, tak
 
 All of them include the debugger and the DAP server.
 
+### Development builds
+
+Every check-in to `main` refreshes the [`dev` prerelease][dev-release], so there is always a
+current build to download without waiting for a tagged release. It is not an official release and
+carries no promises, but it is built and unit-tested by the same workflow that cuts the real ones.
+
+The tag and the file names never change, so a link keeps working as the build rolls forward:
+
+```
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_win64-dev.zip
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_linux-x86_64-dev.zip
+https://github.com/xylothan/x16-emulator/releases/download/dev/x16emu_macos_m1-dev.zip
+```
+
+Swap in any package name from the table above. Which build you actually have is recorded three
+ways: in the release title, in `BUILD_VERSION.txt` inside the zip, and on the last page of the
+bundled `README.pdf`. They all read the same identifier, for example:
+
+```
+r49-dev-20260810.003
+```
+
+That is the upstream release this fork sits on, the UTC date, and how many commits landed that
+day — so `.003` is the third check-in of the tenth.
+
 Two differences worth knowing about the default builds:
 
 - The non-`-midi` packages are built without FluidSynth, so they do not offer the MIDI options
@@ -640,6 +665,7 @@ emulator each build is based on are [published upstream][upstream-releases].
 
 
 <!-------------------------------------------------------------------->
+[dev-release]: https://github.com/xylothan/x16-emulator/releases/tag/dev
 [releases]: https://github.com/xylothan/x16-emulator/releases
 [upstream]: https://github.com/X16Community/x16-emulator
 [upstream-readme]: https://github.com/X16Community/x16-emulator#readme
