@@ -36,9 +36,12 @@
 // re-syncs both the boundary and the width, so a wrong guess cannot run on.
 //
 // Anchors do not outlive the code they describe: each one stores the opcode byte
-// that was executing, and is ignored once memory no longer matches. That covers
+// that was executing, and is ignored once memory no longer matches. That catches
 // overlay loads, a second program loaded over the first, and self-modifying
-// code, without needing a hook on every memory write.
+// code, without needing a hook on every memory write. It is a one-byte check,
+// not a proof: replacement code that happens to repeat the same opcode byte at
+// the same address keeps the old anchor. That costs nothing when the byte is
+// genuinely still an instruction start, and the next execution re-records it.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and
 // the C++ ImGui panel (via debug_ui_bridge.h).

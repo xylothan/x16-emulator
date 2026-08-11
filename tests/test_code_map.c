@@ -924,6 +924,40 @@ main(void)
 		check(n == 2 && lines[1].addr == 0xC001 && lines[1].size == 3,
 		      "reads a REP operand through the window backing the operand");
 
+		// The same split exists at $9FFF/$A000: an opcode below $A000 follows
+		// the live bank while its operand sits in the caller's RAM window.
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		g_ram_bank    = 0x11;
+		const uint8_t sep_op[]  = { 0xC2 };
+		const uint8_t sep_arg[] = { 0x20 };
+		const uint8_t sep_bad[] = { 0x00 };
+		poke_banked(0x9FFF, 0, sep_op, sizeof(sep_op));   // below $A000: flat
+		poke_banked(0xA000, 4, sep_arg, sizeof(sep_arg)); // requested RAM bank
+		poke_banked(0xA000, 0x11, sep_bad, sizeof(sep_bad)); // live bank decoy
+		poke_banked(0xA001, 4, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0x9FFF, 0, 4, 0, 2, lines, 4, &next);
+		check(n == 2 && lines[1].addr == 0xA001 && lines[1].size == 3,
+		      "reads a REP operand across the $9FFF/$A000 boundary correctly");
+
+		// And at the very top of memory the operand wraps to $0000, which is a
+		// different window again (flat, unbanked).
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		g_rom_bank    = 0x17;
+		poke_banked(0xFFFF, 3, sep_op, sizeof(sep_op)); // REP in ROM bank 3
+		poke(0x0000, sep_arg, sizeof(sep_arg));         // operand wraps to $0000
+		poke(0x0001, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0xFFFF, 0, 0, 3, 2, lines, 4, &next);
+		check(n == 2 && lines[1].addr == 0x0001 && lines[1].size == 3,
+		      "reads a REP operand that wraps past $FFFF from the right window");
+
 		regs.is65c816 = false;
 	}
 
