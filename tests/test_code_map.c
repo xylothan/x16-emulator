@@ -603,6 +603,53 @@ main(void)
 		      "keeps the part of a too-large group closest to the center");
 	}
 
+	// ── Two overlapping starts that are BOTH ground truth ───────────────────
+	// The `.byte $2C` skip idiom really can have both starts executed: entering
+	// at the BIT swallows the next two bytes, entering at the hidden address
+	// runs the instruction they spell. When only the inner one is recorded, the
+	// outer decode is a guess and gives way to it (above). When BOTH are
+	// recorded they are evidence of the same rank, and the caller asked for one
+	// of them specifically -- clipping it there would throw away a whole known
+	// instruction to show a different execution path than the one requested.
+	//
+	//   $8002: 2C 8D 12   BIT $128D   recorded -- the skip
+	//   $8003:    8D 12 EA  STA $EA12  recorded -- the hidden entry point
+	{
+		reset_all();
+		const uint8_t skip_idiom[] = { 0x2C, 0x8D, 0x12 };
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8002, 0, 0, 0, regs.status);
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+
+		int n = code_map_disasm_forward(0x8002, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].addr == 0x8002 && lines[0].size == 3 &&
+		          lines[0].recorded,
+		      "emits a recorded instruction whole over a recorded start inside it");
+		check(n == 2 && strstr(lines[0].text, "bit") != NULL,
+		      "keeps the mnemonic of a recorded instruction spanning another start");
+		check(n == 2 && lines[1].addr == 0x8005,
+		      "continues past a swallowed start on the path the caller asked for");
+		check_tiles(lines, n, "tiles the path entered at the outer start");
+
+		// Entering at the hidden address gives the other real path, whole.
+		n = code_map_disasm_forward(0x8003, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].addr == 0x8003 && lines[0].size == 3 &&
+		          lines[0].recorded && strstr(lines[0].text, "sta") != NULL,
+		      "emits the hidden entry point whole when entered there");
+		check_tiles(lines, n, "tiles the path entered at the hidden start");
+
+		// A guessed width still gives way, so the protection above cannot be
+		// used to step over ground truth.
+		code_map_reset();
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+		n = code_map_disasm_forward(0x8002, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].size == 1 && !lines[0].recorded,
+		      "an unrecorded decode still gives way to a recorded start inside it");
+	}
+
 	// ── Recorded starts are respected while decoding forward ────────────────
 	// A wrong width estimate can size an instruction so that it swallows an
 	// address live execution proved was an instruction start. The recorded

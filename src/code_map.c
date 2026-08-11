@@ -357,15 +357,21 @@ cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 //     that disagrees has to give way rather than emit a line overlapping the
 //     next one.
 //   * a recorded anchor inside the instruction is proof from live execution
-//     that a real instruction starts there, which outranks our width estimate;
+//     that a real instruction starts there, which outranks a width ESTIMATE;
 //     truncate onto it rather than stepping over the very ground truth this
-//     file exists to collect.
+//     file exists to collect. This applies only when the line being decoded is
+//     itself a guess. When the line is recorded too, its width came from the
+//     status captured as it executed and is ground truth in its own right, so
+//     the two anchors are simply two real, overlapping instruction starts --
+//     the `.byte $2C` skip idiom -- and the one the caller asked for wins.
+//     Clipping it there would discard a whole known instruction to display a
+//     different execution path than the one requested.
 //
 // Either clamp can leave the line shorter than the decode wanted. Such a line
-// is reported with `recorded == false` and no effective address, because it no
-// longer describes a whole instruction; `text` still shows what the decode
-// attempted, which is the most useful thing to draw for bytes that cannot be
-// tiled any other way. Covering the leftover bytes is the caller's job; see the
+// no longer describes a whole instruction, so it is not reported as one: it
+// comes back with `recorded == false`, no effective address, and `text`
+// rewritten as the raw data bytes it actually owns, so `size`, `bytes` and
+// `text` always agree. Covering the leftover bytes is the caller's job; see the
 // tiling loop in code_map_disasm_window().
 static int
 cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
@@ -380,11 +386,17 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	if (max_size > 0 && sz > max_size)
 		sz = max_size;
 
-	for (int i = 1; i < sz; i++) {
-		uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
-		if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
-			sz = i;
-			break;
+	// Only a guessed width gives way to an interior anchor. A recorded line's
+	// width came from the status captured as it executed, so it is evidence of
+	// the same rank -- two overlapping real instruction starts, not a bad guess
+	// straddling a good one.
+	if (!recorded) {
+		for (int i = 1; i < sz; i++) {
+			uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
+			if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
+				sz = i;
+				break;
+			}
 		}
 	}
 
