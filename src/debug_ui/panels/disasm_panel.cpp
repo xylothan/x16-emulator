@@ -230,10 +230,14 @@ disasm_panel_render(bool *p_open)
 
 		// Row on the same line as the gutter; the Selectable also toggles the
 		// breakpoint so clicking anywhere on the address line works.
+		// Colour by whether the ADDRESS was executed, not by whether the row is
+		// a whole instruction. A row cut short by a boundary carries
+		// start_recorded = true with recorded = false, and tinting it as
+		// "inferred" would claim the code never ran when it demonstrably did.
 		ImGui::SameLine(0.0f, 0.0f);
-		ImVec4 col = is_pc       ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
-		           : ln.recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // executed
-		                         : ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // inferred
+		ImVec4 col = is_pc             ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
+		           : ln.start_recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // executed
+		                               : ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // inferred
 		ImGui::PushStyleColor(ImGuiCol_Text, col);
 		if (ImGui::Selectable(text, is_pc)) {
 			toggle_breakpoint(ln.addr, bank, x16bank_for(ln.addr, bank, rambank, rombank));

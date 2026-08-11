@@ -18,15 +18,24 @@ the 65C816 register widths:
 | `PLP`      | **no** | restores a status byte pulled off the stack |
 | `RTI`      | **no** | restores the status the interrupt pushed |
 
-`XCE` is modelled exactly *given* a correct emulation flag, and that is a real
-caveat: anchors record the effective status byte but **not** `E`. The running
-`E` estimate is seeded from the live `regs.e` and is never re-established by an
-anchor the way the status byte is. So landing on an anchor re-syncs the widths
-but not `E`, and a window drawn over code that last ran under a different
-emulation mode can propagate the wrong `E` through an `XCE`. In practice `E` is
-set once during boot and never touched again, and the emulation-mode fold-in
-(`if (e) status |= INDEX|MEMORY`) is applied after the recorded status is
-restored, so the widths still come out right on any anchored line.
+`XCE` is exact only when **both** of its inputs are right, and neither is
+guaranteed.
+
+*The carry* is tracked only across `CLC` and `SEC`. Every other way the carry
+moves — `ADC`, `SBC`, the compares, the shifts and rotates, and of course `PLP`
+and `RTI` — leaves the estimate untouched. So an `LSR A` that really clears the
+carry, followed by `XCE`, makes the model predict a switch into emulation mode
+that does not happen, forcing the widths to 8-bit for every following line. That
+needs no `PLP` or `RTI` at all; `tests/test_code_map.c` pins it under
+`KNOWN LIMITATION`.
+
+*The emulation flag* is not recorded by anchors at all — they store the
+effective status byte but **not** `E`. The running `E` is seeded from the live
+`regs.e`, so landing on an anchor re-syncs the widths but not `E`, and a wrong
+`E` then affects the emulation-mode fold-in (`if (e) status |= INDEX|MEMORY`)
+after *every* propagated instruction, not only through an `XCE`. In practice `E`
+is set once during boot and never touched again, and the fold-in is applied
+after the recorded status is restored, so anchored lines still come out right.
 
 For `PLP` and `RTI` the file leaves the running estimate untouched. Operand
 widths for lines decoded after one of them can therefore be wrong, and with
@@ -71,8 +80,11 @@ It costs nothing unless *all* of these hold at once:
   drawn.
 
 That last point is the important one: the mechanism that would recover the value
-is the same mechanism that makes the gap irrelevant. Code that has executed has
-anchors; code that has not has no interrupt frame to consult either.
+is largely the same mechanism that makes the gap irrelevant. Code that has
+executed has anchors. The correspondence is not perfect — a handler paused
+before its own, not-yet-executed `RTI` does have a live interrupt frame — but
+associating a particular on-screen `RTI` with a particular frame is exactly the
+part that is not solved.
 
 Every line this can affect already reports `recorded == false`, so a UI can say
 so, and the next anchor re-establishes both the boundary and the width — the
@@ -186,6 +198,15 @@ code being replaced.)
 `KNOWN LIMITATION`, so it is visible rather than folklore. If it is ever fixed
 those checks will fail — update them, do not delete them.
 
+One caveat on that tripwire: it fires for a fix *inside* code_map (a wider
+staleness check, a stored instruction length, an epoch), but **not** for the
+write-invalidation fix recommended above. The unit test models the overlay with
+its own `poke()`, which writes the harness's memory arrays directly, and
+code_map exposes no write-notification entry point for it to call. Anyone
+adding one should route `poke()` through it, or these checks will stay green
+while this note quietly becomes a description of behaviour that no longer
+exists.
+
 ---
 
 # Related: a window-straddling instruction is decoded through one bank
@@ -206,8 +227,8 @@ With the test fixture that means `bytes[]` correctly reads `8D 34 12` while
 mis-read only: the CPU's own fetch goes through the real banking hardware and
 is correct, so the program runs fine — it is the disassembly shown to the user
 that is wrong. The same wrong bytes come back from the host-side read on a real
-machine's memory image (`ROM[rambank * 16384 + …]`, or open bus when the RAM
-bank number is ≥ 32).
+machine's memory image (`ROM[rambank * 16384 + …]`; for a bank number ≥ 32 it is
+open bus, or the cartridge's bytes when one supplies that bank).
 
 Note the width propagation had the *same* bug and **is** fixed: `cm_propagate()`
 now reads a REP/SEP operand through the window backing the operand's own

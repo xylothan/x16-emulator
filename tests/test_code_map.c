@@ -747,7 +747,12 @@ main(void)
 	// case where the replacement bytes are identical; only invalidating anchors
 	// on the write that replaced the code closes it in general. See
 	// docs/code-map-width-propagation.md. If you fix it, this check should
-	// fail: update it, do not delete it.
+	// fail -- but only for a fix INSIDE code_map (a wider staleness check, a
+	// stored length, an epoch). A write-invalidation fix would not be reached
+	// from here at all, because poke() writes the test's memory directly and
+	// code_map has no write-notification entry point; route poke() through
+	// whatever hook you add, or this tripwire will stay green while the note
+	// above it goes stale. Update these checks, do not delete them.
 	{
 		reset_all();
 		regs.is65c816 = true;
@@ -1168,6 +1173,52 @@ main(void)
 		      "reads a Gen2 program bank as flat RAM, ignoring the ROM window");
 
 		is_gen2 = false;
+	}
+
+	// ── KNOWN LIMITATION: the carry feeding XCE is only tracked for CLC/SEC ──
+	// XCE swaps the carry and emulation flags, so predicting it needs the
+	// incoming CARRY as well as the incoming E. cm_propagate models carry for
+	// CLC and SEC only -- every other way the carry moves (ADC, SBC, CMP/CPX/
+	// CPY, the shifts and rotates, PLP, RTI) leaves the estimate untouched. A
+	// stale carry therefore mispredicts the emulation flag, and with it the
+	// widths, WITHOUT any PLP or RTI being involved.
+	//
+	//   $8000: 4A       LSR A   really clears C; the estimate keeps it set
+	//   $8001: FB       XCE     estimate: C set -> enter emulation, force 8-bit
+	//                           reality:  C clear -> stay native, A stays 16-bit
+	//   $8002: A9 xx xx LDA #   3 bytes in reality, 2 on the estimate
+	//
+	// Pinned so the gap is visible, and paired with the recovery that bounds
+	// it. If XCE's inputs are ever tracked properly this first check should
+	// fail: update it, do not delete it.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		// 16-bit A, and carry set going in.
+		regs.status = FLAG_INDEX_WIDTH | FLAG_CARRY;
+
+		const uint8_t code[] = { 0x4A, 0xFB, 0xA9, 0xEA, 0xEA };
+		poke(0x8000, code, sizeof(code));
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 3, lines, 8, &next);
+
+		check(n == 3 && lines[2].addr == 0x8002 && lines[2].size == 2,
+		      "KNOWN LIMITATION: a stale carry into XCE mispredicts the widths");
+		check(n == 3 && !lines[2].recorded,
+		      "the mispredicted line is still reported as a guess");
+
+		// The bound: an anchor at that address restores the real width, exactly
+		// as it does for PLP and RTI.
+		code_map_record(0x8002, 0, 0, 0, FLAG_INDEX_WIDTH);
+		n = code_map_disasm_forward(0x8000, 0, 0, 0, 3, lines, 8, &next);
+		check(n == 3 && lines[2].addr == 0x8002 && lines[2].size == 3 &&
+		          lines[2].recorded,
+		      "an anchor recovers the width after a mispredicted XCE");
+
+		regs.is65c816 = false;
 	}
 
 	// ── Degenerate input ────────────────────────────────────────────────────

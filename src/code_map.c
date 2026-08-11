@@ -173,10 +173,14 @@ cm_bit(const cm_context_t *c, uint16_t addr)
 // so it can confidently place an instruction boundary in the middle of a real
 // instruction.
 //
-// Comparing the recorded opcode byte against memory catches all of those for
-// the price of one byte per address, and it costs nothing on the hot recording
-// path -- staleness is detected when an anchor is *used*, not when memory is
-// written, so no write hook is needed.
+// Comparing the recorded opcode byte against memory catches most of those for
+// the price of one byte per address, and it keeps the DETECTION off the hot
+// path -- staleness is noticed when an anchor is *used*, not when memory is
+// written, so no write hook is needed. (Recording still pays one read and one
+// store per executed instruction to capture the byte.) It is a heuristic, not a
+// proof: replacement code that repeats the same opcode byte at the same address
+// slips through. See the note in code_map.h and the KNOWN LIMITATION checks in
+// tests/test_code_map.c.
 static bool
 cm_anchor_ok(const cm_context_t *c, uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank)
 {
@@ -270,15 +274,24 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // takes precedence over this estimate.
 //
 // Just five instructions change the register widths -- REP, SEP, XCE, PLP and
-// RTI. REP and SEP are handled exactly, since the bits are in the operand. XCE
-// is exact only given a correct emulation flag: anchors record the status byte
-// but not E, so the running E is seeded from the live CPU and an anchor
-// re-establishes the widths without re-establishing E. (CLC/SEC are tracked
-// only because XCE swaps carry with the emulation flag.) PLP and RTI restore a
-// status byte from the stack, which is unknowable until they run, so this
-// deliberately leaves the estimate alone for them rather than inventing a
-// value: the guess stays wrong only until the next recorded anchor, which
-// re-establishes both the boundary and the width.
+// RTI. REP and SEP are handled exactly, since the bits are in the operand.
+//
+// XCE is exact only when BOTH of its inputs are right, and neither is
+// guaranteed. It swaps the carry and emulation flags, so it needs the incoming
+// carry -- tracked here for CLC and SEC only, since every other way the carry
+// moves (ADC, SBC, the compares, the shifts and rotates) is not modelled -- and
+// the incoming E, which anchors do not record at all, so E is seeded from the
+// live CPU and an anchor re-establishes the widths without re-establishing it.
+// A stale carry or E therefore mispredicts emulation mode, and with it the
+// widths, without any PLP or RTI being involved.
+//
+// PLP and RTI restore a status byte from the stack, which is not recoverable
+// from the instruction stream, so this deliberately leaves the estimate alone
+// for them rather than inventing a value.
+//
+// Every one of those gaps has the same bound: the estimate stays wrong only
+// until the next recorded anchor, which re-establishes both the boundary and
+// the width, and every line drawn from the estimate reports recorded = false.
 static uint8_t
 cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
              uint8_t status, uint8_t *e_inout)
@@ -487,9 +500,12 @@ cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 //  Anchored alignment
 // ---------------------------------------------------------------------------
 
-// The decision the backward walk made about one instruction, so a caller can
-// render exactly that instruction instead of re-deriving it from a different
-// status estimate and disagreeing about where it ends.
+// The decision the backward walk made about one instruction: where it starts,
+// how long it is, and the status it was sized with. Phase B seeds itself from
+// this rather than re-deriving the boundary from a propagated estimate, which
+// is what used to make the walk step over `center`. It does NOT render the line
+// verbatim -- cm_emit re-resolves the evidence at each address, and on the
+// fallback path can reach a different answer; see the note in phase B.
 typedef struct {
 	uint16_t addr;
 	uint8_t  status;

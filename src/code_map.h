@@ -23,23 +23,26 @@
 // WHERE THE WIDTHS ARE STILL A GUESS, so callers know what they are getting:
 // only five instructions change the 65C816 register widths -- REP, SEP, XCE,
 // PLP and RTI. REP and SEP are modelled exactly -- the bits are in the operand.
-// XCE is modelled exactly given a correct emulation flag, which is a real
-// caveat: anchors record the status byte but not E, so E is seeded from the
-// live CPU and is never re-established by an anchor the way the status byte is.
-// The last two restore a
-// status byte pulled off the stack, so what they will do cannot be known until
-// they actually run; no amount of static analysis recovers it.
+// XCE is exact only when both of its inputs are right, and neither is
+// guaranteed: it swaps the carry and emulation flags, and the carry is tracked
+// only across CLC/SEC (not the arithmetic, compare, shift or rotate
+// instructions), while E is not recorded by anchors at all -- it is seeded from
+// the live CPU and an anchor re-establishes the widths without re-establishing
+// it. The last two restore a status byte pulled off the stack, so what they
+// will do cannot be known until they actually run; this linear analysis does
+// not recover it.
 //
 // This costs nothing in practice unless all of the following hold at once: the
 // machine is a 65C816 in native mode (in emulation mode the widths are forced
-// to 8-bit and always right), the code has never executed, and a PLP or RTI
-// sits between the last recorded anchor and the line being drawn. Every line
-// this could affect already reports `recorded = false`, and the next anchor
-// re-syncs both the boundary and the width, so a wrong guess cannot run on.
+// to 8-bit and always right), the code has never executed, and one of those
+// unmodelled cases sits between the last recorded anchor and the line being
+// drawn. Every line this could affect already reports `recorded = false`, and
+// the next anchor re-syncs both the boundary and the width, so a wrong guess
+// cannot run on.
 //
 // Anchors do not outlive the code they describe: each one stores the opcode byte
 // that was executing, and is ignored once memory no longer matches. That catches
-// overlay loads, a second program loaded over the first, and self-modifying
+// most overlay loads, a second program loaded over the first, and self-modifying
 // code, without needing a hook on every memory write. It is a one-byte check,
 // not a proof: replacement code that happens to repeat the same opcode byte at
 // the same address keeps the old anchor, and with it the old recorded status.
@@ -73,15 +76,17 @@ extern "C" {
 //   status   : effective processor status. The caller folds the emulation-mode
 //              width bits in (E set => M/X forced to 8-bit) so the value can be
 //              fed straight into disasm()'s implied_status.
-// Cheap: one bitset set plus one status store. Safe to call every instruction.
+// Cheap: one bitset set, one status store and one opcode read/store. Safe to
+// call every instruction.
 void code_map_record(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank, uint8_t status);
 
 // True if `pc` has been recorded as a real instruction start in the given bank
-// context.
+// context AND the opcode byte recorded there still matches memory.
 bool code_map_is_recorded_start(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank);
 
-// The effective status recorded at `pc` (or `fallback` if `pc` was never
-// recorded in this context).
+// The effective status recorded at `pc`, or `fallback` if `pc` was never
+// recorded in this context -- or if its anchor is no longer believed, because
+// the opcode byte under it has changed.
 uint8_t code_map_recorded_status(uint16_t pc, uint8_t pbank, uint8_t rambank, uint8_t rombank, uint8_t fallback);
 
 typedef enum {
@@ -139,10 +144,13 @@ int code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8
                            int lines_before, int lines_after,
                            code_map_line_t *out, int max_out, int *out_center_index);
 
-// Disassemble a run of `count` instructions starting at `start`, aligned via
-// the flag map. Fills `out` low->high and returns the count written. Used by the
-// DAP `disassemble` request. `next_addr` (may be NULL) receives the address just
-// past the last decoded instruction.
+// Disassemble a run of `count` rows starting at `start`, aligned via the flag
+// map. Fills `out` low->high and returns the count written. Used by the DAP
+// `disassemble` request. `next_addr` (may be NULL) receives the address just
+// past the last row. Rows are normally whole instructions, but a decode forced
+// to give way to a recorded start inside it comes back as CM_LINE_DATA, so a
+// caller asking for N rows may get fewer than N instructions' worth of address
+// range.
 int code_map_disasm_forward(uint16_t start, uint8_t bank, uint8_t rambank, uint8_t rombank,
                             int count, code_map_line_t *out, int max_out, uint16_t *next_addr);
 
