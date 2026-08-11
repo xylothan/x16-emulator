@@ -633,6 +633,19 @@ debug_ui_slot_node(DebugDockSlot slot)
     return 0;
 }
 
+// The tab id ImGui will mint for a window, without needing the window to exist.
+// ImGuiWindow's constructor does TabId = GetID("#TAB") seeded with the window
+// id (imgui.cpp), and on a first run no panel has been submitted yet at the
+// point the default layout is built.
+static ImGuiID
+debug_ui_window_tab_id(const char *window)
+{
+    if (ImGuiWindow *w = ImGui::FindWindowByName(window)) {
+        return w->TabId;
+    }
+    return ImHashStr("#TAB", 0, ImHashStr(window));
+}
+
 // Give a panel its intended home, but ONLY when imgui.ini has no entry for it.
 //
 // This is the fix for "I updated and the new panels were all floating": a panel
@@ -658,6 +671,12 @@ debug_ui_place_new_panel(const char *window)
 // layout instead of a pile of overlapping windows. Disassembly + Source tabbed
 // in the center, CPU + Breakpoints tabbed on the right, Memory + VERA + the
 // audio panels tabbed across the bottom.
+//
+// Which tab each group *opens on* is set explicitly at the end. Left alone,
+// ImGui selects whichever tab was added last (DockNodeUpdateTabBar), and that
+// order is an accident of static registration order across the panel
+// translation units — which is why a fresh layout came up showing PCM at the
+// bottom and Call Stack on the right rather than Memory and CPU.
 static void
 debug_ui_build_default_layout(ImGuiID dockspace_id)
 {
@@ -674,6 +693,26 @@ debug_ui_build_default_layout(ImGuiID dockspace_id)
         ImGui::DockBuilderDockWindow(p.window, node[p.slot]);
     }
     ImGui::DockBuilderFinish(dockspace_id);
+
+    // The first panel listed for a slot is the one that slot opens on.
+    const char *front[DOCK_SLOT_COUNT] = {};
+    for (const DebugPanelPlacement &p : s_placement) {
+        if (front[p.slot] != nullptr) {
+            continue;
+        }
+        front[p.slot] = p.window;
+        if (ImGuiDockNode *n = ImGui::DockBuilderGetNode(node[p.slot])) {
+            n->SelectedTabId = debug_ui_window_tab_id(p.window);
+        }
+    }
+
+    // On a reset the previously focused panel is still the nav window, and
+    // DockNodeUpdateTabBar hands its node's selection back to it — which would
+    // undo the choice above for whichever group it sits in. Focusing the center
+    // panel keeps that override on the one node whose default it agrees with.
+    if (front[DOCK_CENTER]) {
+        ImGui::SetWindowFocus(front[DOCK_CENTER]);
+    }
 }
 
 extern "C" void
