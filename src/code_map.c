@@ -390,7 +390,20 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	// width came from the status captured as it executed, so it is evidence of
 	// the same rank -- two overlapping real instruction starts, not a bad guess
 	// straddling a good one.
-	if (!recorded) {
+	//
+	// The exemption is re-derived here rather than taken from the `recorded`
+	// argument, because it is only sound while `st` really is the status the
+	// anchor recorded: a caller that passed `recorded` with some other status
+	// would be decoding at a guessed width and would then be allowed to step
+	// over the very ground truth this clamp protects. The one caller does
+	// satisfy that today; checking it locally means a second one cannot quietly
+	// break it. (Defensive: no current path violates it, so this is not
+	// exercised by a test.)
+	cm_context_t *self  = cm_ctx_for_addr(addr, bank, rambank, rombank);
+	bool          truth = cm_anchor_ok(self, addr, bank, rambank, rombank) &&
+	                      self->status[addr] == st;
+
+	if (!truth) {
 		for (int i = 1; i < sz; i++) {
 			uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
 			if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
