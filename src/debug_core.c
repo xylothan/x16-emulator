@@ -456,12 +456,30 @@ debug_wp_count(void)
 	return numWatchpoints;
 }
 
+// Read-only access to one watchpoint, for UIs that list them. Returns NULL for
+// an out-of-range index rather than trusting the caller's bound, since the
+// table shrinks as watchpoints are removed and a UI's cached count can outlive
+// it. The table itself stays private: handing out a mutable pointer would let a
+// caller change addr or x16Bank behind wp_find()'s back, and the identity of a
+// watchpoint is exactly those two fields.
 const struct watchpoint *
 debug_wp_at(int index)
 {
 	if (index < 0 || index >= numWatchpoints)
 		return NULL;
 	return &watchPoints[index];
+}
+
+// Is there a watchpoint with exactly this identity? The counterpart to
+// debug_wp_covers(), which asks the different question "would a write to this
+// address fire something" and treats DEBUG_BANK_ANY as a wildcard. A UI that
+// offers a toggle needs this one: deciding with covers() and then removing with
+// an exact key means the control can report a watchpoint it is unable to
+// remove, and the button does nothing.
+bool
+debug_wp_exists(uint16_t addr, int x16Bank)
+{
+	return wp_find(addr, x16Bank) >= 0;
 }
 
 int
@@ -524,6 +542,20 @@ debug_wp_set_active(uint16_t addr, int x16Bank, bool active)
 	if (idx < 0)
 		return false;
 	watchPoints[idx].active = active;
+	return true;
+}
+
+// Drop the value filter, so the watchpoint fires on any write again. The
+// counterpart to debug_wp_set_value(); without it a UI that offers a "only when
+// the written value is..." toggle can turn the filter on but never off, since
+// has_value is not otherwise reachable from outside.
+bool
+debug_wp_clear_value(uint16_t addr, int x16Bank)
+{
+	int idx = wp_find(addr, x16Bank);
+	if (idx < 0)
+		return false;
+	watchPoints[idx].has_value = false;
 	return true;
 }
 

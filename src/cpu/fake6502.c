@@ -86,6 +86,7 @@
  *                                                   *
  *****************************************************/
 
+#include "fake6502.h"
 #include "registers.h"
 #include "irq_ctx.h"
 

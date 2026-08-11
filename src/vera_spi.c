@@ -60,6 +60,21 @@ vera_spi_read(uint8_t reg)
 	return 0;
 }
 
+// The same registers, without the side effect. Reading $9F3E normally starts
+// the next autotx transfer; a debugger showing memory must be able to look at
+// it without taking a byte out of the transfer the machine is in the middle of.
+uint8_t
+vera_spi_peek(uint8_t reg)
+{
+	switch (reg) {
+		case 0:
+			return received_byte;
+		case 1:
+			return busy << 7 | autotx << 2 | ss;
+	}
+	return 0;
+}
+
 void
 vera_spi_write(uint8_t reg, uint8_t value)
 {

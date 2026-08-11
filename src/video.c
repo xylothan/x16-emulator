@@ -14,6 +14,11 @@
 #include "memory.h"
 #include "glue.h"
 #include "debugger.h"
+#ifdef HAS_IMGUI
+#include "smc.h" // smc_requested_reset (Ctrl+Shift+F5 restart)
+#include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
+#include "debug_ui/debug_ui.h"
+#endif
 #include "keyboard.h"
 #include "gif.h"
 #include "joystick.h"
@@ -96,6 +101,12 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *sdlTexture;
 static bool is_fullscreen = false;
+#ifdef HAS_IMGUI
+// ImGui debugger window (separate; created only when -imgui is passed).
+static SDL_Window *imgui_window = NULL;
+static SDL_Renderer *imgui_renderer = NULL;
+static Uint32 imgui_window_id = 0;
+#endif
 bool mouse_grabbed = false;
 bool no_keyboard_capture = false;
 bool kernal_mouse_enabled = false;
@@ -117,6 +128,26 @@ static uint8_t isr;
 static uint16_t irq_line;
 
 static uint8_t reg_layer[2][7];
+
+// Per-scanline record of the layer registers that were actually used to render
+// each line, so debug views can reproduce raster-split effects -- programs
+// routinely rewrite MAPBASE/TILEBASE/scroll part-way down a frame from a line
+// IRQ. Without this a debugger can only ever show one register snapshot for the
+// whole frame, which describes just one band of the screen.
+static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
+static uint16_t line_eff_y[SCREEN_HEIGHT];
+// The layer row each line actually displayed. Recorded rather than left for a
+// consumer to recompute from the registers: the renderers take the layout from
+// prev_layer_properties[1] but VSCROLL and the layer-height mask from [0]
+// (video.c: render_layer_line_text/tile via calc_layer_eff_y(props0, ...)), so
+// no single register generation describes the result. Storing the answer makes
+// the contract true instead of approximately true.
+static uint16_t line_layer_row[SCREEN_HEIGHT][2];
+static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
+static bool     line_state_valid[SCREEN_HEIGHT];
+// The raw registers on the same two-stage delay the layer properties use, so
+// the history above can record the generation that actually rendered a line.
+static uint8_t  prev_reg_layer[2][2][7];
 
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
@@ -221,9 +252,23 @@ mousegrab_toggle() {
 	video_update_title(window_title);
 }
 
+// Re-derive the layer properties from the raw layer registers and seed both
+// generations of the render pipeline from them. Called on reset: the derived
+// properties are otherwise refreshed only when the guest writes a layer
+// register, so clearing reg_layer alone left the derived state describing the
+// pre-reset machine while the registers read zero -- and a debug view
+// correlating the two would pair zeroed registers with stale geometry.
+static void video_reset_layer_pipeline(void);
+
 void
 video_reset()
 {
+	// Drop the per-scanline debug history: it describes a machine that no
+	// longer exists. Both pipeline generations are re-seeded from the cleared
+	// registers below, so raw and derived state stay matched rather than one
+	// side reading zero while the other still holds pre-reset geometry.
+	memset(line_state_valid, 0, sizeof(line_state_valid));
+
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
 	memset(io_inc, 0, sizeof(io_inc));
@@ -238,6 +283,7 @@ video_reset()
 
 	// init Layer registers
 	memset(reg_layer, 0, sizeof(reg_layer));
+	video_reset_layer_pipeline();
 
 	// init composer registers
 	memset(reg_composer, 0, sizeof(reg_composer));
@@ -423,6 +469,56 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 		DEBUGInitUI(renderer);
 	}
 
+#ifdef HAS_IMGUI
+	// ImGui debugger window -- additive, independent of the -debug SDL debugger.
+	if (imgui_debugger_enabled) {
+		int mainX, mainY, mainW;
+		SDL_GetWindowPosition(window, &mainX, &mainY);
+		SDL_GetWindowSize(window, &mainW, NULL);
+
+		imgui_window = SDL_CreateWindow("Commander X16 - ImGui Debugger",
+			mainX + mainW + 4, mainY,
+			960, 720,
+			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+		if (imgui_window) {
+			// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
+			// presented from the emulator thread, so a vsync'd present would
+			// block it for up to a refresh interval every frame -- capping the
+			// machine at the monitor's rate and defeating warp mode entirely.
+			// The main window does not vsync either; timing.c does the
+			// throttling. debug_ui_render() is rate-limited instead (see
+			// video_render_all_ex).
+			imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+		}
+		if (imgui_window && imgui_renderer) {
+			imgui_window_id = SDL_GetWindowID(imgui_window);
+			debug_ui_init(imgui_window, imgui_renderer);
+#ifdef _WIN32
+			// Keep both windows painted while the OS holds us in a modal
+			// move/resize loop dragging the debugger window. Emulation does
+			// *not* continue through a drag once a debugger is up --
+			// emulator_step_during_move() returns early for exactly that
+			// reason, so breakpoints cannot be stepped past behind the UI's
+			// back -- but without this the windows would freeze mid-drag.
+			video_win32_install_move_hook(imgui_window);
+#endif
+		} else {
+			printf("Warning: Failed to create debugger window: %s\n", SDL_GetError());
+			if (imgui_renderer) { SDL_DestroyRenderer(imgui_renderer); imgui_renderer = NULL; }
+			if (imgui_window) { SDL_DestroyWindow(imgui_window); imgui_window = NULL; }
+			// Stop claiming the UI exists. Left set, -imgui alone would still
+			// route the emulator loop through DEBUGGetCurrentStatus() and stop
+			// at breakpoints, with no window to resume from and no text
+			// debugger either -- the machine would simply hang.
+			imgui_debugger_enabled = false;
+			printf("The graphical debugger is disabled for this session.\n");
+			// Same reasoning as the headless path in main.c: the .dbg policy
+			// was noted from a flag that has just been cleared.
+			dbg_load_note_debugger(debugger_enabled);
+		}
+	}
+#endif
+
 	if (grab_mouse && !mouse_grabbed)
 		mousegrab_toggle();
 
@@ -576,6 +672,17 @@ refresh_layer_properties(const uint8_t layer)
 	props->first_color_pos  = 8 - props->bits_per_pixel;
 	props->color_mask       = (1 << props->bits_per_pixel) - 1;
 	props->color_fields_max = (8 >> props->color_depth) - 1;
+}
+
+// See the forward declaration above video_reset() for why this exists.
+static void
+video_reset_layer_pipeline(void)
+{
+	refresh_layer_properties(0);
+	refresh_layer_properties(1);
+	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
+	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
 }
 
 struct video_sprite_properties
@@ -1092,6 +1199,15 @@ render_line(uint16_t y, float scan_pos_x)
 		memcpy(prev_layer_properties[1], prev_layer_properties[0], sizeof(*layer_properties) * NUM_LAYERS);
 		memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
 
+		// The raw layer registers travel down the same two-stage pipeline, so
+		// the debug history can record what a line was actually rendered with.
+		// The renderers read prev_layer_properties[1], two generations behind
+		// live: snapshotting reg_layer directly would attribute a mid-frame
+		// register change to a line two scanlines before the one it affected,
+		// which is precisely the raster-split case this history exists for.
+		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
+		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
+
 		if ((dc_video & 3) > 1) { // 480i or 240p
 			if ((y >> 1) == 0) {
 				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
@@ -1142,6 +1258,7 @@ render_line(uint16_t y, float scan_pos_x)
 	layer_line_enable[1] = dc_video & 0x20;
 	sprite_line_enable   = dc_video & 0x40;
 
+
 	// clear layer_line if layer gets disabled
 	for (uint8_t layer = 0; layer < 2; layer++) {
 		if (!layer_line_enable[layer] && old_layer_line_enable[layer]) {
@@ -1175,6 +1292,49 @@ render_line(uint16_t y, float scan_pos_x)
 		// sprites were needed for the collision IRQ, but we can skip
 		// everything else if we're in warp mode, most of the time
 		return;
+	}
+
+	// Snapshot what this line actually displayed, for debug views. Placed after
+	// the warp guard above and immediately before the layer rendering, so it
+	// describes only lines that are really drawn: under -warp 63 frames in 64
+	// return early, and publishing there would hand the VERA panel state for
+	// scanlines whose pixels were never produced.
+	if (y < SCREEN_HEIGHT) {
+		// "Enabled" has to mean "this layer actually reached the screen on this
+		// line", not just "the layer bit is set in DC_VIDEO". Outside the
+		// active window the compositor fills the line with the border colour
+		// and ignores the layers entirely (see the border branch below), and
+		// with out_mode 0 there is no output at all. Publishing those lines as
+		// enabled let a border line win the panel's "first scanline to show
+		// this row wins" race against the active line that really displayed it,
+		// so a register change during the top border decoded the visible row
+		// with the wrong registers.
+		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
+
+		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
+		line_eff_y[y]         = eff_y;
+		line_layer_enabled[y] = line_displayed
+			? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
+			: 0;
+		for (uint8_t l = 0; l < 2; l++) {
+			// The row this line showed. Recorded rather than left for the panel
+			// to recompute, because the renderers take VSCROLL and the
+			// layer-height mask from generation [0] while the layout registers
+			// above come from [1] -- so recomputing from the snapshot alone is
+			// off by whatever the scroll changed mid-frame. Bitmap mode has no
+			// scroll (VERA forces it to 0), so there the row is eff_y.
+			line_layer_row[y][l] = prev_layer_properties[1][l].bitmap_mode
+				? eff_y
+				: (uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
+		}
+		line_state_valid[y] = true;
+		// Progressive modes draw only the even line of each pair, so the odd
+		// one was never rendered. Marked invalid rather than filled in: the
+		// contract is "what this scanline showed", and inventing a row for a
+		// line the beam never drew is how a debug view starts lying.
+		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+			line_state_valid[y + 1] = false;
+		}
 	}
 
 	if (layer_line_enable[0]) {
@@ -1438,6 +1598,26 @@ video_render_all_ex(bool new_frame)
 	}
 
 	SDL_RenderPresent(renderer);
+
+#ifdef HAS_IMGUI
+	// Rebuild the debugger window's frame. Deliberately decoupled from the
+	// emulated frame rate, which spans four orders of magnitude here: under
+	// -warp or a 100MHz target this is reached far more often than a display
+	// can show, and at 25kHz a new frame may be seconds apart -- so pacing the
+	// UI off it would either burn the CPU rebuilding invisible frames or leave
+	// the debugger unresponsive. Wall-clock 60Hz is right at both ends. The
+	// throttle's repaint path (new_frame == false) calls in too, which is what
+	// keeps the UI live while the machine is running slowly.
+	if (imgui_renderer != NULL) {
+		static Uint32 last_ui_ticks = 0;
+		const Uint32 now = SDL_GetTicks();
+		// Unsigned subtraction, so this stays correct across the 49-day wrap.
+		if (now - last_ui_ticks >= 16) {
+			last_ui_ticks = now;
+			debug_ui_render();
+		}
+	}
+#endif
 }
 
 // Present a newly completed frame without pumping the event queue. Called from
@@ -1472,6 +1652,193 @@ video_render_all(void)
 	video_render_all_ex(true);
 }
 
+#ifdef HAS_IMGUI
+// True only once the debugger window AND renderer were actually created.
+//
+// This is the authority on whether the UI exists; imgui_debugger_enabled is the
+// authority on whether it was *asked* for. The two agree from video_init()
+// onward -- both the creation-failure path below and the headless path in
+// main.c clear the flag -- but callers that must not park the machine still
+// test this one, so the answer does not depend on that agreement holding.
+bool
+video_debug_ui_available(void)
+{
+	return imgui_window != NULL && imgui_renderer != NULL;
+}
+
+static void video_imgui_debug_key(SDL_Keysym ks);
+
+// Whether an SDL window id belongs to the debugger window. Callers outside
+// video.c use this to tell "close the debugger" from "close the emulator".
+bool
+video_is_debug_ui_window(Uint32 window_id)
+{
+	return imgui_window != NULL && window_id == imgui_window_id;
+}
+
+// Whether an event is addressed to the debugger window, and so must not also
+// reach the emulated machine or the text debugger's command line. Events with
+// no window id (SDL_QUIT, joystick, audio) are never the debugger's.
+//
+// Shared by both event loops rather than copied into each: the running loop in
+// video_update() and the paused loop in DEBUGGetCurrentStatus() have to agree
+// about which events belong to the debugger, and two copies of this switch
+// would be two places to forget an event type.
+bool
+video_event_targets_debug_ui(const SDL_Event *ev)
+{
+	if (imgui_window == NULL) {
+		return false;
+	}
+	switch (ev->type) {
+		case SDL_WINDOWEVENT:      return ev->window.windowID == imgui_window_id;
+		case SDL_KEYDOWN:
+		case SDL_KEYUP:            return ev->key.windowID    == imgui_window_id;
+		case SDL_TEXTINPUT:        return ev->text.windowID   == imgui_window_id;
+		case SDL_TEXTEDITING:      return ev->edit.windowID   == imgui_window_id;
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONUP:    return ev->button.windowID == imgui_window_id;
+		case SDL_MOUSEMOTION:      return ev->motion.windowID == imgui_window_id;
+		case SDL_MOUSEWHEEL:       return ev->wheel.windowID  == imgui_window_id;
+		default:                   return false;
+	}
+}
+
+// Hand an event to the debugger UI. Wrapped here so debugger.c can feed the
+// graphical debugger without including its C++ headers -- video.c already owns
+// the window and is the only place that knows the UI exists.
+void
+video_debug_ui_feed_event(const SDL_Event *ev)
+{
+	if (imgui_window != NULL) {
+		debug_ui_process_event(ev);
+	}
+}
+
+// Apply the VS-style debug shortcuts for a keydown already known to target the
+// debugger window. A focused text field (goto/search) suppresses them; a merely
+// focused panel does not.
+void
+video_debug_ui_shortcut_key(const SDL_Event *ev)
+{
+	if (ev->type == SDL_KEYDOWN && !debug_ui_want_text_input()) {
+		video_imgui_debug_key(ev->key.keysym);
+	}
+}
+
+// Map a keydown on the debugger window to a Visual-Studio-style debug action.
+// Shared by the running event loop (video_update) and the paused pump
+// (video_debug_ui_pump_paused) so the shortcuts behave identically whether the
+// machine is running or halted. The caller has already confirmed the event
+// targets the debugger window and that no text field has focus.
+//   F5   continue          Ctrl+Shift+F5  restart (reset)
+//   F9   toggle bp at PC   Ctrl+F10       run to cursor
+//   F10  step over         F11            step into
+//   Shift+F11 step out     Break/Pause    pause
+// Step/continue are inert while running; pause is inert while halted.
+static void
+video_imgui_debug_key(SDL_Keysym ks)
+{
+	const bool shift = (ks.mod & KMOD_SHIFT) != 0;
+	const bool ctrl  = (ks.mod & KMOD_CTRL) != 0;
+	switch (ks.scancode) {
+		case SDL_SCANCODE_F5:
+			if (ctrl && shift) {
+				smc_requested_reset = true;      // Ctrl+Shift+F5 = restart
+			} else if (DEBUGIsPaused()) {
+				DEBUGContinue();                 // F5 = continue
+			}
+			break;
+		case SDL_SCANCODE_F9:
+			debug_ui_toggle_breakpoint_at_pc();
+			break;
+		case SDL_SCANCODE_F10:
+			if (ctrl) {
+				debug_ui_run_to_cursor();        // Ctrl+F10 = run to cursor
+			} else if (DEBUGIsPaused()) {
+				DEBUGStepOver();
+			}
+			break;
+		case SDL_SCANCODE_F11:
+			if (DEBUGIsPaused()) {
+				if (shift) {
+					DEBUGStepOut();
+				} else {
+					DEBUGStepInto();
+				}
+			}
+			break;
+		case SDL_SCANCODE_PAUSE:
+			if (DEBUGIsRunning()) {
+				DEBUGPause();
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+// Keep the debugger window live and interactive while the machine is halted
+// under -imgui. Called from DEBUGGetCurrentStatus() when it owns the pause loop.
+// Mirrors the SDL debugger's stopped behaviour -- pump events, re-render,
+// throttle -- but drives the ImGui window instead. Returns the
+// DEBUGGetCurrentStatus contract:
+//   -1 = quit, 1 = stay paused, 0 = a control-bar action resumed/stepped the CPU.
+int
+video_debug_ui_pump_paused(void)
+{
+	SDL_Event event;
+	while (SDL_PollEvent(&event)) {
+		// Feed everything to ImGui so its buttons and inputs work while paused.
+		debug_ui_process_event(&event);
+
+		if (event.type == SDL_QUIT) {
+			return -1;
+		}
+		if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE) {
+			// Closing the debugger window must not kill the emulator; only a
+			// close of the main emulator window quits.
+			if (imgui_window && event.window.windowID == imgui_window_id) {
+				continue;
+			}
+			return -1;
+		}
+
+		// Only an active text field (goto/search) suppresses the shortcuts; a
+		// merely focused panel does not, so F5/F10/F11 work while just viewing.
+		if (event.type == SDL_KEYDOWN && imgui_window &&
+		    event.key.windowID == imgui_window_id &&
+		    !debug_ui_want_text_input()) {
+			video_imgui_debug_key(event.key.keysym);
+		}
+	}
+
+	// Re-present the main window's existing frame and rebuild the debugger's.
+	// The machine is halted, so no new emulated frame exists -- rendering one
+	// would re-blend the activity LED and record a duplicate GIF frame. This is
+	// also where the control-bar buttons are evaluated and may change
+	// currentMode.
+	video_repaint_only();
+
+	SDL_Delay(16); // ~60fps; don't spin hot while parked
+
+	// If a control action resumed or single-stepped, tell emulator_loop to
+	// execute rather than stay parked. DMODE_STOP is the only mode that keeps
+	// us here; run and step both mean "go".
+	if (!DEBUGIsPaused()) {
+		return 0;
+	}
+	return 1;
+}
+#else
+bool video_debug_ui_available(void) { return false; }
+int  video_debug_ui_pump_paused(void) { return 1; }
+bool video_is_debug_ui_window(Uint32 window_id) { (void)window_id; return false; }
+bool video_event_targets_debug_ui(const SDL_Event *ev) { (void)ev; return false; }
+void video_debug_ui_shortcut_key(const SDL_Event *ev) { (void)ev; }
+void video_debug_ui_feed_event(const SDL_Event *ev) { (void)ev; }
+#endif
+
 bool
 video_update()
 {
@@ -1491,9 +1858,42 @@ video_update()
 
 	SDL_Event event;
 	while (SDL_PollEvent(&event)) {
+#ifdef HAS_IMGUI
+		// Feed every event to the debugger UI first. If it targets the debugger
+		// window, consume it here so it never reaches the emulated machine --
+		// otherwise typing in a search box would also type into BASIC.
+		if (imgui_window) {
+			debug_ui_process_event(&event);
+			if (video_event_targets_debug_ui(&event)) {
+				// Closing the debugger window must not kill the emulator.
+				if (event.type == SDL_WINDOWEVENT &&
+				    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+					continue;
+				}
+				// The VS-style shortcuts also work while the machine is running
+				// and the debugger window has focus (F9 to set a breakpoint,
+				// Break to pause). Step/continue are inert until paused.
+				video_debug_ui_shortcut_key(&event);
+				continue;
+			}
+		}
+#endif
 		if (event.type == SDL_QUIT) {
 			return false;
 		}
+#ifdef HAS_IMGUI
+		// SDL2 only synthesises SDL_QUIT for a window close when that window is
+		// the last one open. With the debugger window up there are two, so
+		// closing the emulator window delivers a bare SDL_WINDOWEVENT_CLOSE and
+		// nothing else -- which used to fall through here and be dropped,
+		// leaving the [X] button inert. A close of the debugger window has
+		// already been consumed above, so anything reaching this point is a
+		// close of the emulator window and does mean quit.
+		if (event.type == SDL_WINDOWEVENT &&
+		    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+			return false;
+		}
+#endif
 		if (event.type == SDL_KEYDOWN) {
 			bool consumed = false;
 			if (cmd_down && !(disable_emu_cmd_keys || mouse_grabbed)) {
@@ -1636,12 +2036,181 @@ video_update()
 	return true;
 }
 
+// ─── Debug view accessors ──────────────────────────────────────────────────
+
+// Report the layer registers and effective layer Y that were used to render a
+// given display scanline. Debug views use this to reproduce mid-frame register
+// changes (raster splits) instead of assuming one snapshot covers the frame.
+bool
+video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7],
+                           uint16_t *out_eff_y, bool *out_enabled,
+                           uint16_t *out_layer_row)
+{
+	if (layer >= 2 || line >= SCREEN_HEIGHT || !line_state_valid[line]) {
+		return false;
+	}
+	if (out_regs) {
+		memcpy(out_regs, line_reg_layer[line][layer], 7);
+	}
+	if (out_eff_y) {
+		*out_eff_y = line_eff_y[line];
+	}
+	if (out_enabled) {
+		*out_enabled = (line_layer_enabled[line] & (1 << layer)) != 0;
+	}
+	if (out_layer_row) {
+		*out_layer_row = line_layer_row[line][layer];
+	}
+	return true;
+}
+
+uint16_t
+video_get_scanline_count(void)
+{
+	return SCREEN_HEIGHT;
+}
+
+// Size, in layer pixels, of the image the composer is actually putting on
+// screen: the active display window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled
+// by DC_HSCALE/DC_VSCALE. The composer advances the layer by scale/128 of a
+// pixel per output pixel, so this is what a 320x200-style mode really shows.
+// Debug viewers use it to size themselves to the current video mode.
+void
+video_get_active_layer_size(int *out_w, int *out_h)
+{
+	int hstart = reg_composer[4] << 2;
+	int hstop  = reg_composer[5] << 2;
+	int vstart = reg_composer[6] << 1;
+	int vstop  = reg_composer[7] << 1;
+
+	if (hstart > SCREEN_WIDTH)  hstart = SCREEN_WIDTH;
+	if (hstop  > SCREEN_WIDTH)  hstop  = SCREEN_WIDTH;
+	if (vstart > SCREEN_HEIGHT) vstart = SCREEN_HEIGHT;
+	if (vstop  > SCREEN_HEIGHT) vstop  = SCREEN_HEIGHT;
+
+	const int screen_w = hstop > hstart ? hstop - hstart : 0;
+	const int screen_h = vstop > vstart ? vstop - vstart : 0;
+
+	if (out_w) {
+		*out_w = (screen_w * reg_composer[1]) >> 7;
+	}
+	if (out_h) {
+		*out_h = (screen_h * reg_composer[2]) >> 7;
+	}
+}
+
+// Predict the next VERA interrupt.
+//
+// VERA raises VSYNC when the scan reaches line SCREEN_HEIGHT and LINE when it
+// reaches IRQLINE, so with the current scan position both are predictable. The
+// debugger uses this for its "cycles until the next IRQ" readout. Returns false
+// when neither a line nor a vsync interrupt is enabled in IEN. out_cycles
+// receives CPU cycles (at `mhz`) until the next one; out_source receives the
+// ISR bit that will be set (1 = VSYNC, 2 = LINE).
+bool
+video_next_irq(float mhz, uint32_t *out_cycles, uint8_t *out_source)
+{
+	const bool ntsc_mode = reg_composer[0] & 2;
+	const bool vsync_en  = (ien & 1) != 0;
+	const bool line_en   = (ien & 2) != 0;
+
+	if (!vsync_en && !line_en) {
+		return false;
+	}
+
+	// Scanline the renderer is currently on, in the same space as the compares
+	// in update_isr_and_coll().
+	const int cur = ntsc_mode ? (int)(ntsc_scan_pos_y % SCAN_HEIGHT) - NTSC_Y_OFFSET_LOW
+	                          : (int)vga_scan_pos_y - VGA_Y_OFFSET;
+
+	// Lines from `cur` to `target`, wrapping through the end of the frame.
+	#define LINES_UNTIL(target) \
+		((((int)(target) - cur) + SCAN_HEIGHT) % SCAN_HEIGHT)
+
+	int     best_lines  = SCAN_HEIGHT + 1;
+	uint8_t best_source = 0;
+
+	if (vsync_en) {
+		const int d = LINES_UNTIL(SCREEN_HEIGHT);
+		if (d < best_lines) {
+			best_lines  = d;
+			best_source = 1;
+		}
+	}
+	if (line_en) {
+		const int d = LINES_UNTIL(irq_line);
+		if (d < best_lines) {
+			best_lines  = d;
+			best_source = 2;
+		}
+	}
+	#undef LINES_UNTIL
+
+	if (!best_source) {
+		return false;
+	}
+
+	// video_step() advances the scan by PIXEL_FREQ * cycles / mhz pixels, so a
+	// whole scanline costs scan_width * mhz / PIXEL_FREQ CPU cycles. Subtract
+	// how far into the current line we already are.
+	const float scan_width      = ntsc_mode ? NTSC_HALF_SCAN_WIDTH : VGA_SCAN_WIDTH;
+	const float cycles_per_line = scan_width * mhz / (float)PIXEL_FREQ;
+	const float into_line       = ntsc_mode ? ntsc_half_cnt : vga_scan_pos_x;
+	float       cycles          = best_lines * cycles_per_line
+	                              - into_line * mhz / (float)PIXEL_FREQ;
+	if (cycles < 0) {
+		cycles = 0;
+	}
+
+	if (out_cycles) {
+		*out_cycles = (uint32_t)cycles;
+	}
+	if (out_source) {
+		*out_source = best_source;
+	}
+	return true;
+}
+
+// Raw VERA interrupt state, for debug views: enable mask, pending mask and the
+// programmed IRQ line.
+void
+video_get_irq_state(uint8_t *out_ien, uint8_t *out_isr, uint16_t *out_irq_line)
+{
+	if (out_ien)
+		*out_ien = ien;
+	if (out_isr)
+		*out_isr = isr | (pcm_is_fifo_almost_empty() ? 8 : 0);
+	if (out_irq_line)
+		*out_irq_line = irq_line;
+}
+
 void
 video_end()
 {
 	if (debugger_enabled) {
 		DEBUGFreeUI();
 	}
+
+#ifdef HAS_IMGUI
+	// Tear the UI down before its renderer and window: the ImGui SDL backends
+	// hold both and free renderer-owned textures on shutdown. Safe no-ops if
+	// -imgui was never passed or the window failed to open.
+	if (imgui_window && imgui_renderer) {
+		debug_ui_shutdown();
+	}
+	if (imgui_renderer) {
+		SDL_DestroyRenderer(imgui_renderer);
+		imgui_renderer = NULL;
+	}
+	if (imgui_window) {
+#ifdef _WIN32
+		extern void video_win32_remove_move_hook(SDL_Window *window);
+		video_win32_remove_move_hook(imgui_window);
+#endif
+		SDL_DestroyWindow(imgui_window);
+		imgui_window = NULL;
+	}
+#endif
 
 	if (record_gif != RECORD_GIF_DISABLED) {
 		GifEnd(&gif_writer);
@@ -2054,7 +2623,13 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 	uint16_t scanline = ntsc_mode ? ntsc_scan_pos_y % SCAN_HEIGHT : vga_scan_pos_y;
 	if (scanline >= 512) scanline=511;
 
-	check_not_writeonly(reg);
+	// A debug read is the debugger looking, not the program reading: it must
+	// neither warn about the guest's behaviour nor change any state. The rest
+	// of this function already honours debugOn for the data ports; SPI did not,
+	// and the warning fired for the debugger's own reads.
+	if (!debugOn) {
+		check_not_writeonly(reg);
+	}
 
 	switch (reg & 0x1F) {
 		case 0x00: return io_addr[io_addrsel] & 0xff;
@@ -2165,12 +2740,27 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 		case 0x19:
 		case 0x1A: return reg_layer[1][reg - 0x14];
 
-		case 0x1B: audio_render(); return pcm_read_ctrl();
+		case 0x1B:
+			// Same rule as the YM status read: a debug read must not flush
+			// audio, so the debugger sees the control byte as of the last
+			// render rather than advancing the render position itself.
+			if (!debugOn) {
+				audio_render();
+			}
+			return pcm_read_ctrl();
 		case 0x1C: return pcm_read_rate();
 		case 0x1D: return 0;
 
 		case 0x1E:
-		case 0x1F: return vera_spi_read(reg & 1);
+		case 0x1F:
+			// Reading $9F3E is not passive: with autotx armed and SS asserted
+			// it clocks another byte out to the SD card. A debug read must not,
+			// or simply having the debugger's memory view open steals bytes
+			// from the block the KERNAL is in the middle of reading.
+			if (debugOn) {
+				return vera_spi_peek(reg & 1);
+			}
+			return vera_spi_read(reg & 1);
 	}
 	return 0;
 }
@@ -2336,6 +2926,11 @@ void video_write(uint8_t reg, uint8_t value) {
 				if (((reg_composer[0] & 0x8) == 0 && (value & 0x8)) ||
 					((reg_composer[0] & 0x3) == 1 && (value & 0x3) > 1 && (value & 0x8))) {
 					memset(framebuffer, 0x00, SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+					// The picture is gone, so the per-scanline history no
+					// longer describes anything on screen. Dropped with it,
+					// or a debugger paused right after the mode change would
+					// decode rows for a blank framebuffer.
+					memset(line_state_valid, 0, sizeof(line_state_valid));
 				}
 
 				// interlace field bit is read-only
@@ -2528,11 +3123,20 @@ bool video_is_special_address(int addr)
 
 void
 stop6502(uint16_t address, uint8_t bank) {
-	if (debugger_enabled) {
-		DEBUGBreakToDebugger();
-	} else if (testbench) {
+	// Testbench first: it is headless and scripted, so an STP there must report
+	// the result on stdout, not stop for a human. Putting the debugger check
+	// ahead of it made -testbench -imgui park invisibly with nothing to resume
+	// it and no "STP" line for the harness to read.
+	if (testbench) {
 		printf("STP\n");
-        fflush(stdout);
+		fflush(stdout);
+	} else if (debugger_enabled || imgui_debugger_enabled) {
+		// STP is the 6502-side "break into the debugger". Either debugger will
+		// do: with -imgui alone this used to fall through to the modal message
+		// box below, which blocks inside instruction dispatch and whose "Reset
+		// Machine" button resets the machine mid-instruction.
+		DEBUGBreakToDebugger();
+		DEBUGSetStopReason("breakpoint");   // overrides the default "user"
 	} else {
 		int return_btn;
 		char error_message[80];

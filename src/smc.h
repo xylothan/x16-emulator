@@ -11,11 +11,19 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern void nmi6502();
 void smc_i2c_data(uint8_t v);
 uint8_t smc_read();
 void smc_write();
 
 extern bool smc_requested_reset;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

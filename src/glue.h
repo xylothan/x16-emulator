@@ -11,6 +11,10 @@
 
 #include "cpu/registers.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //#define TRACE
 //#define PERFSTAT
 
@@ -64,7 +68,9 @@ extern uint8_t *CART;
 extern uint16_t num_banks;
 extern uint16_t num_ram_banks;
 
+extern int  instruction_counter;  // instructions retired (main.c)
 extern bool debugger_enabled;
+extern bool imgui_debugger_enabled;
 // True only when a local interactive debugger was requested (-debug/-bp/-wp).
 // Distinct from debugger_enabled, which -debugport also sets.
 extern bool debug_window_enabled;
@@ -118,4 +124,8 @@ extern bool kernal_mouse_enabled;
 extern char window_title[];
 extern bool pwr_long_press;
 extern bool is_gen2;
+#ifdef __cplusplus
+}
+#endif
+
 #endif

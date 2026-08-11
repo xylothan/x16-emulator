@@ -97,6 +97,10 @@ uint32_t stat[65536];
 #endif
 
 bool debugger_enabled = false;
+// -imgui: the graphical debugger window. Independent of debugger_enabled, so
+// the two UIs can be used together or separately. Always defined, even in a
+// build without the UI, so the emulator loop needs no #ifdef.
+bool imgui_debugger_enabled = false;
 // True when a local interactive debugger was asked for (-debug/-bp/-wp), as
 // distinct from the machinery merely being switched on. A DAP client uses this
 // to decide whether anyone is left to resume the machine if it disconnects.
@@ -579,6 +583,12 @@ usage()
 	printf("\tSet the opacity value (0.0 for transparent, 1.0 for opaque) of the window. (default: %.1f)\n", window_opacity);
 	printf("-debug [<address>]\n");
 	printf("\tEnable debugger. Optionally, set a breakpoint\n");
+#ifdef HAS_IMGUI
+	printf("-imgui\n");
+	printf("\tOpen the graphical debugger in a second window: memory,\n");
+	printf("\tdisassembly, CPU, VERA, source, breakpoints, symbols and call\n");
+	printf("\tstack. Independent of -debug, and can be combined with it.\n");
+#endif
 	printf("-bp <address>\n");
 	printf("\tEnable the debugger and set a breakpoint. Unlike -debug's optional\n");
 	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
@@ -1022,6 +1032,17 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-imgui")) {
+			argc--;
+			argv++;
+#ifdef HAS_IMGUI
+			imgui_debugger_enabled = true;
+#else
+			// Fail loudly rather than starting with a flag that silently does
+			// nothing: this build was configured with -DENABLE_IMGUI=OFF.
+			printf("This build has no graphical debugger; -imgui is unavailable.\n");
+			exit(1);
+#endif
 		} else if (!strcmp(argv[0], "-bp")) {
 			argc--;
 			argv++;
@@ -1406,7 +1427,11 @@ main(int argc, char **argv)
 	// someone just running a game gains nothing from reading .dbg files. A
 	// policy rather than a snapshot, because the running machine can switch the
 	// debugger on itself (emu_write register 0).
-	dbg_load_note_debugger(debugger_enabled);
+	//
+	// Either debugger counts. The graphical one's Source and Symbols panels are
+	// exactly the things that need this, and gating on -debug alone left them
+	// permanently empty under -imgui.
+	dbg_load_note_debugger(debugger_enabled || imgui_debugger_enabled);
 	dbg_load_set_policy(dbg_auto_opt);
 
 	if (is_gen2) {
@@ -1513,6 +1538,24 @@ main(int argc, char **argv)
 #ifdef __EMSCRIPTEN__
 	emscripten_set_main_loop(emscripten_main_loop, 0, 0);
 #endif
+	// The graphical debugger needs a window, and headless mode never opens one:
+	// video_init() below is skipped entirely, so the self-disable inside it
+	// never runs. Clearing the flag here keeps the invariant the rest of the
+	// code relies on -- the flag is set only if the window exists -- true on
+	// this path as well as on the creation-failure path. Left set, the emulator
+	// loop routes through DEBUGGetCurrentStatus(), and a breakpoint parks the
+	// machine in DMODE_STOP with no window, no events and nothing able to
+	// resume it: a silent spin at 100% of a core. (STP is handled separately --
+	// stop6502() reports it to the testbench harness instead of stopping.)
+	if (headless && imgui_debugger_enabled) {
+		imgui_debugger_enabled = false;
+		printf("The graphical debugger needs a window; -imgui is ignored in headless mode.\n");
+		// Re-state the .dbg policy: it was noted above from a flag that has
+		// just been cleared, and without this a headless run would keep loading
+		// debug info for a debugger that is not there.
+		dbg_load_note_debugger(debugger_enabled || imgui_debugger_enabled);
+	}
+
 	if (!headless) {
 		// Shows up in the power management area of Linux desktops of applications inhibiting the screensaver
 		// As well as the audio mixer
@@ -2022,17 +2065,19 @@ emulator_step_during_move(void)
 	if (in_step) {
 		return;
 	}
-	// Leave the machine alone whenever the debugger is in play. Breakpoints are
+	// Leave the machine alone whenever any debugger is in play. Breakpoints are
 	// honoured by DEBUGGetCurrentStatus(), which also drives the debugger's own
 	// window and event pump and so cannot be called from inside the OS modal
 	// loop; stepping here without it would run straight through breakpoints.
-	// Dragging with -debug therefore behaves as it always has.
+	// Dragging with -debug therefore behaves as it always has -- and the same
+	// has to hold for -imgui, whose window is move-hooked too, so a drag of
+	// either window cannot run the CPU behind the UI's back.
 	//
 	// The DAP server counts too, and for the same reason -- a client's
 	// breakpoints are the same breakpoints. The guest can clear
 	// debugger_enabled by writing $9FB0, so testing that alone would let a drag
 	// step past a breakpoint a client is waiting on.
-	if (debugger_enabled || debug_server_is_enabled()) {
+	if (debugger_enabled || imgui_debugger_enabled || debug_server_is_enabled()) {
 		return;
 	}
 
@@ -2118,6 +2163,12 @@ emulator_loop(void *param)
 			testbench_init();
 		}
 
+		// The graphical debugger needs this too: DEBUGGetCurrentStatus() is what
+		// detects breakpoint arrival and completes a step, and it delegates the
+		// pause loop to whichever UI is up. Tested against the window rather
+		// than the flag alone, so that no path can park the machine in a pause
+		// loop that has no UI to resume it.
+		//
 		// The guest can clear debugger_enabled by writing $9FB0. With a DAP
 		// client attached that must not take the debugger down with it: nothing
 		// would poll the socket again, breakpoints would stop being tested, and
@@ -2125,7 +2176,9 @@ emulator_loop(void *param)
 		// rather than polling separately also keeps the socket work behind the
 		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
 		// syscall per emulated instruction.
-		if (debugger_enabled || debug_server_is_enabled()) {
+		if (debugger_enabled
+		    || (imgui_debugger_enabled && video_debug_ui_available())
+		    || debug_server_is_enabled()) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
@@ -2253,7 +2306,11 @@ emulator_loop(void *param)
 
 		instruction_counter += waiting ^ 0x1;
 
-		if (debugger_enabled && !waiting) {
+		// The code map is what the disassembly views anchor on: without it every
+		// line above the PC is decoded from a mid-instruction byte. The ImGui
+		// Disassembly panel is built entirely on it, so it has to be recorded
+		// for -imgui too, not just -debug.
+		if ((debugger_enabled || imgui_debugger_enabled) && !waiting) {
 			code_map_record_current();
 		}
 		step6502();

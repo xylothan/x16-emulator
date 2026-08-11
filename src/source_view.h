@@ -7,6 +7,10 @@
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // A loaded source file, split into individual lines.
 typedef struct {
 	char  *name;      // the file name as referenced by the .dbg (key)
@@ -33,5 +37,9 @@ void source_view_invalidate(void);
 
 // Free everything (cached files and registered paths). Call on shutdown.
 void source_view_free(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
