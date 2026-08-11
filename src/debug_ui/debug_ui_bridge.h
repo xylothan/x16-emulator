@@ -110,7 +110,7 @@ DEBUGAddBreakPoint(struct breakpoint bp)
 
 // The user asking for a breakpoint to go means gone, whoever else also wanted
 // it. Dropping only this window's claim would leave it armed and the button
-// looking broken -- see docs/breakpoint-ownership.md.
+// looking broken.
 static inline bool
 DEBUGRemoveBreakPoint(int pc, uint8_t bank, int x16Bank)
 {
