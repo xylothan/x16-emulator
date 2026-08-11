@@ -337,8 +337,12 @@ main(void)
 		check(next == 0x8006, "reports the address just past the last instruction");
 		check(n == 3 && lines[0].bytes[0] == 0xA9 && lines[0].bytes[1] == 0x12,
 		      "captures the raw instruction bytes");
-		check(n == 3 && strstr(lines[1].text, "8d") == NULL && lines[1].text[0] != '\0',
-		      "renders instruction text");
+		// The text must be a disassembly, not a hex dump: pin the mnemonic that
+		// belongs to the opcode. (Asserting only that "8d" is absent cannot
+		// fail -- the mnemonics are alphabetic and the operand here is $1234.)
+		check(n == 3 && strstr(lines[1].text, "sta") != NULL &&
+		          strstr(lines[1].text, "$1234") != NULL,
+		      "renders the mnemonic and operand for the opcode it decoded");
 
 		// Coverage is reported so a UI can distinguish "known good" from "guess".
 		check(n == 3 && !lines[0].recorded, "marks unexecuted lines as unrecorded");
@@ -403,12 +407,17 @@ main(void)
 		int             center_index = -99;
 		int             n = code_map_disasm_window(0x8004, 0, 0, 0, 2, 2, lines, 16, &center_index);
 
-		check(n > 0, "still produces a window when the walks disagree");
-		check(center_index >= 0, "does not lose the center line to width drift");
+		check(n > 0 && center_index >= 0, "does not lose the center line to width drift");
 		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8004,
 		      "re-aligns onto the center address after drifting");
 		check(n == 4, "returns exactly the requested line count despite the drift");
 		check(center_index == 2, "puts exactly the requested number of lines before center");
+
+		// The width the backward walk settled on is the whole point: read with
+		// the 8-bit status the LDA is 2 bytes and the walk lands on $8003, then
+		// $8005, jumping the center. Only the 16-bit reading reaches $8004.
+		check(n == 4 && lines[1].addr == 0x8001 && lines[1].size == 3,
+		      "sizes the drifting instruction from the status that reaches center");
 
 		// The real damage from drift is contradictory output: a line claiming
 		// bytes that the next line also claims. Nothing downstream can render
@@ -609,20 +618,51 @@ main(void)
 		      "treats a negative count as nothing to do");
 
 		// Negative "lines before" must be clamped, not used as an array size.
-		check(code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index) >= 1,
-		      "clamps a negative lines_before");
+		// Asserting only that a line comes back proves nothing -- phase C
+		// always emits the center -- so pin where the center actually lands.
+		center_index = -99;
+		int n = code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index);
+		check(n == 1 && center_index == 0 && lines[0].addr == 0x8000,
+		      "treats a negative lines_before as none at all");
+
+		// An absurd one must be capped too: the backward walk collects into a
+		// fixed 256-entry buffer, so an uncapped count writes off the end of
+		// it. 255 preceding lines is the ceiling, and the cap is only worth
+		// asserting if the count it produces is actually pinned -- a bare
+		// "did not overrun" passes for any cap at all.
+		static code_map_line_t wide[300];
+		center_index = -99;
+		n = code_map_disasm_window(0x8000, 0, 0, 0, 100000, 1, wide, 300, &center_index);
+		check(n == 256 && center_index == 255,
+		      "caps an absurd lines_before at the backward-walk ceiling");
+		check_tiles(wide, n, "tiles a window capped by the backward-walk ceiling");
 	}
 
 	// ── Wrapping at the top of the address space ────────────────────────────
-	// Decoding off the end of memory must wrap rather than read past the end of
-	// the address space.
+	// Decoding off the end of memory must wrap to $0000 and read the bytes that
+	// are really there. Asserting only that the address stayed below $0100
+	// proves nothing: code_map_line_t::addr is a uint16_t, so no arithmetic in
+	// the file can produce anything else.
 	{
 		reset_all();
+		// $FFFE: A9 12     LDA #$12   -- 2 bytes, ends exactly on the wrap
+		// $0000: 8D 34 12  STA $1234  -- must be decoded from the bottom of RAM
+		const uint8_t tail[] = { 0xA9, 0x12 };
+		const uint8_t head[] = { 0x8D, 0x34, 0x12 };
+		poke(0xFFFE, tail, sizeof(tail));
+		poke(0x0000, head, sizeof(head));
+
 		code_map_line_t lines[4];
 		uint16_t        next = 0;
-		int             n = code_map_disasm_forward(0xFFFE, 0, 0, 0, 3, lines, 4, &next);
-		check(n == 3, "keeps disassembling across the $FFFF boundary");
-		check(n == 3 && lines[2].addr < 0x0100, "wraps to the bottom of memory");
+		int             n = code_map_disasm_forward(0xFFFE, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].addr == 0xFFFE && lines[0].size == 2,
+		      "decodes the instruction at the very top of memory");
+		check(n == 2 && lines[1].addr == 0x0000 && lines[1].size == 3 &&
+		          lines[1].bytes[0] == 0x8D && lines[1].bytes[2] == 0x12,
+		      "wraps to $0000 and decodes the bytes actually there");
+		check(next == 0x0003, "reports the wrapped next address");
+		check_tiles(lines, n, "tiles across the $FFFF wrap");
 	}
 
 	if (failures) {
