@@ -87,13 +87,31 @@ jobs:
         with:
           python-version: '3.14'
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make fonts-dejavu
+        run: |
+          # Mirrors occasionally return 503 or reset a package download. apt
+          # cleans up incomplete archives, so retrying the complete transaction
+          # is safe and much cheaper than throwing away a successful workflow.
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y build-essential make fonts-dejavu; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - uses: actions/setup-node@v4
         with:
           node-version: 18
       - name: Install md-to-pdf (npm)
         run: |
-          npm i md-to-pdf
+          for attempt in 1 2 3; do
+            if npm i md-to-pdf; then
+              exit 0
+            fi
+            echo "::warning::npm attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - name: Create output directory
         run: |
           mkdir artifacts
@@ -138,8 +156,14 @@ jobs:
         # disasm.c pulls in SDL headers, so they are needed even though nothing
         # here links the emulator.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
@@ -199,15 +223,29 @@ jobs:
         #
         # FluidSynth is a manifest feature, so only the MIDI legs pay for
         # building it.
-        run: >
-          cmake -B build -G "Visual Studio 17 2022" -A ${{ matrix.platform }}
-          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          -DVCPKG_MANIFEST_FEATURES=${{ matrix.features }}
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-          -DENABLE_FLUIDSYNTH=${{ matrix.midi }}
-          -DENABLE_TRACE=OFF
+        run: |
+          # Manifest-mode vcpkg downloads ports during configure. That makes a
+          # configure failure just as likely to be a transient CDN 503 as a
+          # CMake error, and CMake/vcpkg can safely resume on the next attempt.
+          $arguments = @(
+            '-B', 'build', '-G', 'Visual Studio 17 2022', '-A', '${{ matrix.platform }}',
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake",
+            '-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets',
+            '-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}',
+            '-DVCPKG_MANIFEST_FEATURES=${{ matrix.features }}',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            '-DENABLE_FLUIDSYNTH=${{ matrix.midi }}',
+            '-DENABLE_TRACE=OFF'
+          )
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & cmake @arguments
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+            Write-Warning "CMake/vcpkg attempt $attempt/3 failed"
+            Start-Sleep -Seconds ($attempt * 10)
+          }
+          exit 1
       - name: Build
         run: cmake --build build --config Release
       - name: Package Emulator
@@ -266,9 +304,18 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
-          update: true
-          install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake
           path-type: ${{ matrix.path_type }}
+      - name: Update and install MSYS2 dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if pacman -Syu --noconfirm &&
+               pacman -S --needed --noconfirm make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake; then
+              exit 0
+            fi
+            echo "::warning::pacman attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -367,15 +414,27 @@ jobs:
         run: |
           sudo cp /etc/apt/sources.list /etc/apt/sources.list~
           sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
-          sudo apt-get update
-          sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - name: Install Dependencies
         # The emulated legs need only enough to run the ARM image; the build
         # dependencies are installed inside it.
         if: ${{ matrix.emulated }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential make qemu-user-static
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y build-essential make qemu-user-static; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -410,8 +469,14 @@ jobs:
           cpu: ${{ matrix.cpu }}
           copy_artifact_path: emu_binaries
           commands: |
-            apt-get update
-            apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
+            for attempt in 1 2 3; do
+              if apt-get update && apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake; then
+                break
+              fi
+              echo "apt attempt $attempt/3 failed"
+              sleep $(( attempt * 10 ))
+              [ "$attempt" -eq 3 ] && exit 1
+            done
             mkdir build
             cd build
             git reset --hard
@@ -461,7 +526,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Dependencies
         run: |
-          brew install make sdl2 fluid-synth # cmake is likely here or pulled in
+          for attempt in 1 2 3; do
+            if brew install make sdl2 fluid-synth; then # cmake is likely here or pulled in
+              exit 0
+            fi
+            echo "::warning::Homebrew attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -513,7 +585,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make libsdl2-dev cmake
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y build-essential make libsdl2-dev cmake; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt/3 failed"
+            sleep $(( attempt * 10 ))
+          done
+          exit 1
       - uses: mymindstorm/setup-emsdk@v14
       - uses: actions/setup-python@v5
         with:
