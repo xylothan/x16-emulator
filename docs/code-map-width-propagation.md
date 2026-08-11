@@ -133,5 +133,8 @@ debugger and the DAP server, so that is a wider change than the code_map
 defects this work covers.
 
 Scope: one instruction per window boundary, and only when code is laid across
-`$BFFF`/`$C000`. Rare, but it renders as confidently wrong text rather than as
-an admitted unknown, which is the worst failure mode this file has.
+one. There are two such boundaries, not one — `$9FFF`/`$A000` as well as
+`$BFFF`/`$C000` — since an opcode below `$A000` follows the live bank while its
+operand in the RAM window needs the caller's RAM bank. Rare, but it renders as
+confidently wrong text rather than as an admitted unknown, which is the worst
+failure mode this file has.
