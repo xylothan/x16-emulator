@@ -82,6 +82,53 @@ poke(uint16_t addr, const uint8_t *bytes, size_t n)
 	}
 }
 
+// A window of lines has to TILE the range it covers: every line starts exactly
+// where the one before it ended. Two ways that breaks, and neither can be
+// rendered sensibly by anything downstream:
+//   - an OVERLAP, where two lines both claim the same byte, so the same memory
+//     is shown as part of two different instructions;
+//   - a GAP, where a byte inside the window belongs to no line at all and
+//     simply vanishes from the listing.
+// This is the property worth asserting -- not the exact text of each line --
+// because it is what "the disassembler is still aligned" actually means.
+// Compared in 16-bit arithmetic so a window that runs over $FFFF is judged by
+// the same rule as any other.
+static bool
+lines_tile(const code_map_line_t *lines, int n, char *why, size_t why_sz)
+{
+	for (int i = 0; i < n; i++) {
+		if (lines[i].size < 1) {
+			snprintf(why, why_sz, "line %d at $%04X has zero size", i, lines[i].addr);
+			return false;
+		}
+	}
+	for (int i = 1; i < n; i++) {
+		uint16_t end = (uint16_t)(lines[i - 1].addr + lines[i - 1].size);
+		if (lines[i].addr != end) {
+			snprintf(why, why_sz, "line %d at $%04X ends at $%04X but line %d starts at $%04X (%s)",
+			         i - 1, lines[i - 1].addr, end, i, lines[i].addr,
+			         (uint16_t)(lines[i].addr - end) < 0x8000 ? "gap" : "overlap");
+			return false;
+		}
+	}
+	return true;
+}
+
+static void
+check_tiles(const code_map_line_t *lines, int n, const char *what)
+{
+	char why[160] = "";
+	bool ok       = lines_tile(lines, n, why, sizeof(why));
+	check(ok, what);
+	if (!ok) {
+		printf("      %s\n", why);
+		for (int i = 0; i < n; i++) {
+			printf("      [%d] $%04X +%u  %s\n", i, lines[i].addr,
+			       (unsigned)lines[i].size, lines[i].text);
+		}
+	}
+}
+
 int
 main(void)
 {
@@ -334,6 +381,32 @@ main(void)
 		// A window that cannot fit must still be safe and still locate center.
 		n = code_map_disasm_window(0x8004, 0, 0, 0, 3, 3, lines, 2, &center_index);
 		check(n <= 2, "honours the output capacity");
+	}
+
+	// ── The fallback path must still tile the window ────────────────────────
+	// When nothing decodes to land exactly on the anchor, the backward walk
+	// gives up and backs up a single byte so the caller still makes progress.
+	// It reports that byte as a one-byte instruction -- but the renderer
+	// decodes the address again, and if what actually lives there is longer,
+	// the line it emits runs straight into the line after it and the two claim
+	// the same memory.
+	//
+	// $7FFF holds an LDA #imm whose operand byte IS the center address. Every
+	// byte before it is a one-byte NOP, so no backoff decodes onto $8000, the
+	// fallback fires, and the emitted LDA covers $7FFF-$8000 -- overlapping the
+	// center line.
+	{
+		reset_all();
+		g_mem[0x7FFF] = 0xA9; // LDA #$EA: its operand is $8000 itself
+
+		code_map_line_t lines[16];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8000, 0, 0, 0, 1, 2, lines, 16, &center_index);
+
+		check(n >= 2, "still produces a window when nothing aligns onto the center");
+		check_tiles(lines, n, "the fallback path emits no overlapping lines");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8000,
+		      "keeps the center where the caller asked it despite the fallback");
 	}
 
 	// ── Recovering from a disagreement about instruction width ──────────────

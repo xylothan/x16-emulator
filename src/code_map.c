@@ -331,18 +331,27 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 }
 
 // Fill one line at `addr`, decoded with an explicit status. Returns the size the
-// decode produced, clamped so that it never swallows an address live execution
-// proved is an instruction start: a recorded anchor is harder evidence than our
-// width estimate, so truncate onto it rather than stepping over the very ground
-// truth this file exists to collect.
+// decode produced, clamped by two things:
+//   - `max_size` (0 = no limit): the room the caller has between this line and
+//     the next one it is going to emit. A decode is only ever a best guess at a
+//     length, and the backward walk may have spaced the lines more tightly than
+//     the decode wants; without this cap the line would claim bytes the next
+//     line also claims, and two lines would show the same memory;
+//   - a recorded anchor inside the instruction: live execution proved that
+//     address is an instruction start, which is harder evidence than our width
+//     estimate, so truncate onto it rather than stepping over the very ground
+//     truth this file exists to collect.
 static int
 cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
-        uint8_t st, bool recorded, code_map_line_t *ln)
+        uint8_t st, bool recorded, int max_size, code_map_line_t *ln)
 {
 	int16_t xb = cm_x16bank_for(addr, rambank, rombank);
 
 	int32_t eff;
 	int     sz = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+
+	if (max_size > 0 && sz > max_size)
+		sz = max_size;
 
 	for (int i = 1; i < sz; i++) {
 		uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
@@ -378,7 +387,7 @@ cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	bool     recorded = cm_anchor_ok(c, addr, bank, rambank, rombank);
 	uint8_t  st       = recorded ? c->status[addr] : *run_status;
 
-	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, ln);
+	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, 0, ln);
 
 	*run_status = cm_propagate(addr, bank, cm_x16bank_for(addr, rambank, rombank), st, run_e);
 	return sz;
@@ -504,11 +513,17 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	int n = 0;
 
 	// Phase B — render the preceding instructions lowest-first, exactly as the
-	// backward walk resolved them. Each one's size reaches the next start by
-	// construction, so the lines cannot overlap.
+	// backward walk resolved them. The walk decided where each one starts; the
+	// renderer decodes each address again, and the two can disagree about how
+	// long the instruction is. Where the decode comes out longer than the walk's
+	// spacing -- the one-byte fallback landing on a multi-byte instruction, say
+	// -- an uncapped fill would claim bytes the next line also claims, so each
+	// fill is capped at the distance to the next start.
 	for (int i = collected - 1; i >= 0 && n < max_out; i--) {
+		uint16_t stop = (i == 0) ? center : before[i - 1].addr;
+		int      room = (int)((uint16_t)((stop - before[i].addr) & 0xFFFF));
 		cm_fill(before[i].addr, bank, rambank, rombank, before[i].status,
-		        before[i].recorded, &out[n]);
+		        before[i].recorded, room, &out[n]);
 		n++;
 	}
 
