@@ -1,7 +1,7 @@
 // Breakpoints panel — central manager for the debugger's breakpoints, plus a
 // "run to address" control. Complements the Disassembly/Source panels (which
-// toggle breakpoints inline) by giving one place to review, enable/disable, and
-// clear them.
+// toggle breakpoints inline) by giving one place to add, review, enable/disable,
+// and clear them.
 //
 // Enable/disable belongs to the core: a disabled breakpoint keeps its entry,
 // its owners, its condition and its hit count, and simply does not stop the
@@ -33,6 +33,11 @@ struct TrackedBP {
 
 std::vector<TrackedBP> s_tracked;    // a view of the core's table, rebuilt each frame
 int                    s_runto_addr = 0; // hex address for the "Run to" box
+
+// "Add breakpoint" row state. See add_breakpoint_row().
+int  s_add_addr         = 0;
+int  s_add_bank         = 0;
+bool s_add_bank_touched = false; // has the user chosen a bank by hand?
 
 // A breakpoint is identified by (pc, bank, x16Bank), because the same $A000 in
 // two RAM banks is two different breakpoints. Keying on (pc, bank) alone
@@ -185,27 +190,109 @@ cond_editor_popup(const TrackedBP &t)
 // ---------------------------------------------------------------------------
 // Breakpoints - break when execution reaches an address.
 // ---------------------------------------------------------------------------
+
+// Highest bank number that exists for the window `addr` falls in. RAM banking is
+// sized at runtime by -ram, so this is a real limit, not a constant.
+int
+max_bank_for(uint16_t addr)
+{
+	const int n = (addr >= 0xC000) ? memory_get_num_rom_banks() : (int)num_ram_banks;
+	return (n > 0 ? n : 1) - 1;
+}
+
+int
+clamp_bank(int bank, uint16_t addr)
+{
+	const int hi = max_bank_for(addr);
+	return bank < 0 ? 0 : (bank > hi ? hi : bank);
+}
+
+// Add a breakpoint by typing its address.
+//
+// Everywhere else in the debugger a breakpoint is set by pointing at a line -
+// the gutter, or F9 on the cursor - which is no help for an address you cannot
+// currently see: ROM, a bank that is not mapped in, or code that has not been
+// reached yet and so has no disassembly to click. The Memory-writes section
+// below has always had a row like this; execution breakpoints did not, and the
+// only address box on this panel drove "Run to", which is a one-shot resume and
+// not a breakpoint at all.
+void
+add_breakpoint_row(void)
+{
+	const uint16_t addr   = (uint16_t)(s_add_addr & 0xFFFF);
+	const bool     banked = addr >= 0xA000;
+	const int      live   = debug_current_x16_bank((int)addr, 0);
+
+	// Until the user picks a bank the field tracks the mapping the machine is
+	// in, so typing an address alone sets exactly the breakpoint clicking the
+	// gutter would have set. Leaving the banked window forgets the choice; a
+	// chosen bank is re-clamped because the address can move between the RAM
+	// and ROM windows under it, and those are different depths.
+	if (!banked) {
+		s_add_bank_touched = false;
+	} else if (!s_add_bank_touched) {
+		s_add_bank = live >= 0 ? live : 0;
+	} else {
+		s_add_bank = clamp_bank(s_add_bank, addr);
+	}
+
+	ImGui::TextUnformatted("Break at $");
+	ImGui::SameLine(0.0f, 0.0f);
+	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
+	const bool submit = ImGui::InputScalar("##bpaddr", ImGuiDataType_S32, &s_add_addr, nullptr, nullptr, "%04X",
+	                                       ImGuiInputTextFlags_CharsHexadecimal |
+	                                           ImGuiInputTextFlags_AutoSelectAll |
+	                                           ImGuiInputTextFlags_EnterReturnsTrue);
+	ImGui::SetItemTooltip("Address to break at, in HEX. \"10\" means $10 (16), not ten.\n"
+	                      "Press Enter to add.");
+
+	// $A000 and up is read through a bank window, so an address there is not one
+	// breakpoint but one per bank. Below it there is nothing to choose.
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!banked);
+	ImGui::TextUnformatted("in bank");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_field_width("255") + ImGui::GetFrameHeight() * 2.0f);
+	int bank = s_add_bank;
+	if (ImGui::InputInt("##bpbank", &bank)) {
+		s_add_bank         = clamp_bank(bank, addr);
+		s_add_bank_touched = true;
+	}
+	ImGui::SetItemTooltip("Which bank the address lives in, in DECIMAL. Defaults to the bank\n"
+	                      "mapped in right now - the one the gutter would have used.\n"
+	                      "$A000-$BFFF selects a RAM bank, $C000-$FFFF a ROM bank.");
+	ImGui::EndDisabled();
+
+	ImGui::SameLine();
+	const bool add = ImGui::Button("Add##bp") || submit;
+	ImGui::SetItemTooltip("You can also click the gutter in the Disassembly or Source panel,\n"
+	                      "or press F9 on the cursor line.");
+	ImGui::SameLine();
+	if (addr >= 0xC000) {
+		ImGui::TextDisabled("(ROM)");
+	} else if (banked) {
+		ImGui::TextDisabled("(RAM)");
+	} else {
+		ImGui::TextDisabled("(unbanked)");
+	}
+	ImGui::SetItemTooltip("Addresses below $A000 are the same memory whatever is banked in,\n"
+	                      "so the bank does not apply to them.");
+
+	if (add) {
+		struct breakpoint bp = {};
+		bp.pc                = (int)addr;
+		bp.bank              = 0;
+		bp.x16Bank           = banked ? s_add_bank : DEBUG_BANK_ANY;
+		DEBUGAddBreakPoint(bp);
+		sync_tracked(); // show it in the table below this frame, not next
+	}
+}
+
 void
 draw_breakpoints()
 {
-	// --- Run to address ---------------------------------------------------
-	// Sets a one-shot internal breakpoint and resumes; the CPU halts when
-	// it reaches the address. Only meaningful while paused.
-	ImGui::TextUnformatted("Run to $");
-	ImGui::SameLine(0.0f, 0.0f);
-	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
-	ImGui::InputScalar("##runto", ImGuiDataType_S32, &s_runto_addr,
-	                   nullptr, nullptr, "%04X", ImGuiInputTextFlags_CharsHexadecimal);
-	ImGui::SameLine();
-	ImGui::BeginDisabled(!DEBUGIsPaused());
-	if (ImGui::Button("Go")) {
-		DEBUGRunTo((uint16_t)(s_runto_addr & 0xFFFF), 0, DEBUG_OWNER_UI);
-	}
-	ImGui::EndDisabled();
-	if (!DEBUGIsPaused()) {
-		ImGui::SameLine();
-		ImGui::TextDisabled("(pause first)");
-	}
+	// --- Add by address ---------------------------------------------------
+	add_breakpoint_row();
 
 	ImGui::Separator();
 
@@ -290,7 +377,8 @@ draw_breakpoints()
 
 	if (s_tracked.empty()) {
 		ImGui::TextDisabled("No breakpoints.");
-		ImGui::SetItemTooltip("Click the gutter in the Disassembly or Source panel to add one.");
+		ImGui::SetItemTooltip("Type an address above, or click the gutter in the Disassembly\n"
+		                      "or Source panel.");
 	}
 
 	// Apply deferred mutations after the table is built. Explicit deletes
@@ -305,6 +393,36 @@ draw_breakpoints()
 		DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		DEBUGForgetBreakpoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		s_tracked.erase(s_tracked.begin() + remove_idx);
+	}
+
+	// --- Run to address ---------------------------------------------------
+	// Sets a one-shot internal breakpoint and resumes; the CPU halts when it
+	// reaches the address. Only meaningful while paused.
+	//
+	// Below the list, not above it: this leaves nothing behind and never
+	// appears in the table, so leading with it made the panel's only address
+	// box the one thing on it that does not set a breakpoint.
+	ImGui::Separator();
+	ImGui::TextUnformatted("Run to $");
+	ImGui::SetItemTooltip("One-shot: resume, stop once at this address, and forget it.\n"
+	                      "Nothing is added to the list above.");
+	ImGui::SameLine(0.0f, 0.0f);
+	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
+	const bool runto_submit = ImGui::InputScalar("##runto", ImGuiDataType_S32, &s_runto_addr,
+	                                             nullptr, nullptr, "%04X",
+	                                             ImGuiInputTextFlags_CharsHexadecimal |
+	                                                 ImGuiInputTextFlags_AutoSelectAll |
+	                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+	ImGui::SetItemTooltip("Address to run to, in HEX. Press Enter to go.");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!DEBUGIsPaused());
+	if (ImGui::Button("Go") || (runto_submit && DEBUGIsPaused())) {
+		DEBUGRunTo((uint16_t)(s_runto_addr & 0xFFFF), 0, DEBUG_OWNER_UI);
+	}
+	ImGui::EndDisabled();
+	if (!DEBUGIsPaused()) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("(pause first)");
 	}
 }
 
@@ -501,8 +619,9 @@ breakpoints_panel_render(bool *p_open)
 		snprintf(exec_hdr, sizeof exec_hdr, "Execution (%d)###exec", (int)s_tracked.size());
 		const bool exec_open = ImGui::CollapsingHeader(exec_hdr, ImGuiTreeNodeFlags_DefaultOpen);
 		ImGui::SetItemTooltip("Break when the PC reaches an address.\n\n"
-		                      "Click the gutter in the Disassembly or Source panel to add one,\n"
-		                      "or use \"Run to $\" below for a one-shot stop.");
+		                      "Type an address below, click the gutter in the Disassembly or\n"
+		                      "Source panel, or press F9 on the cursor line. \"Run to $\" at the\n"
+		                      "bottom is a one-shot stop that sets nothing.");
 		if (exec_open) {
 			draw_breakpoints();
 		}
