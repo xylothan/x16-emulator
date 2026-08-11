@@ -289,15 +289,22 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // PLP and RTI restore a status byte from the stack, so this deliberately leaves
 // the estimate alone for them rather than inventing a value.
 //
-// HOW WELL EACH GAP IS BOUNDED differs, and the difference matters:
-//   - a wrong STATUS estimate is fully corrected by the next recorded anchor,
-//     which supplies both the boundary and the width and carries forward;
-//   - a wrong E is not. Anchors store the status byte but not E, so an anchor
-//     fixes the width of its OWN line and then propagation folds the stale E
-//     back in (`if (e) status |= INDEX|MEMORY`), mis-sizing the next unanchored
-//     line again. Recovery from a bad E is anchor-local, not persistent.
+// HOW WELL EACH GAP IS BOUNDED differs, and none is bounded unconditionally:
+//   - a wrong STATUS estimate is corrected when an accurate, believed anchor is
+//     reached, which supplies both the boundary and the width and carries
+//     forward. Not "the next recorded anchor": a same-opcode stale anchor is
+//     still believed and hands back its old status, and there may be no
+//     accurate anchor ahead at all;
+//   - a wrong E is weaker. Anchors store the status byte but not E, so an
+//     anchor fixes the width of its OWN line and then propagation folds the
+//     stale E back in (`if (e) status |= INDEX|MEMORY`), mis-sizing the next
+//     unanchored line again. Recovery from a bad E is anchor-local.
+// That fold-in also means "emulation mode is always right" holds for the real
+// CPU but NOT for this estimate: a diverged E sizes operands as though native
+// while the machine is really in emulation mode.
 // Either way every line drawn from the estimate reports recorded = false, so a
-// consumer is never told a guess is ground truth. Both are pinned by tests.
+// consumer is never told a guess is ground truth. All of this is pinned by
+// tests.
 static uint8_t
 cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
              uint8_t status, uint8_t *e_inout)

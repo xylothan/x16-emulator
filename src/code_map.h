@@ -31,17 +31,24 @@
 // restore a status byte pulled off the stack; this linear, instruction-stream
 // analysis does not recover it.
 //
-// The gaps are not equally well bounded. A wrong STATUS estimate is corrected
-// by the next recorded anchor, which supplies the boundary and the width and
-// carries forward. A wrong E is not: anchors do not store E, so an anchor fixes
-// its own line and propagation then folds the stale E back in, mis-sizing the
-// next unanchored line. Recovery from a bad E is anchor-local.
+// The gaps are not equally well bounded, and none of them is bounded
+// unconditionally. A wrong STATUS estimate is corrected when an accurate,
+// believed anchor is reached -- but only then: a same-opcode stale anchor is
+// "recorded" and supplies its old status, and there may be no accurate anchor
+// ahead at all. A wrong E is weaker still: anchors do not store E, so an anchor
+// fixes its own line and propagation then folds the stale E back in, mis-sizing
+// the next unanchored line. Recovery from a bad E is anchor-local.
+//
+// Note the emulation-mode escape clause applies to the ESTIMATE, not the
+// machine: the real CPU in emulation mode always has 8-bit widths, but the
+// fold-in here uses the estimated E, so a diverged estimate can size operands
+// as though native while the machine is really in emulation. Pinned by tests.
 //
 // This costs nothing in practice unless all of the following hold at once: the
-// machine is a 65C816 in native mode (in emulation mode the widths are forced
-// to 8-bit and always right), the line being drawn has no currently believed
-// anchor, and one of the unmodelled cases above sits between the last anchor
-// and it. Every line this could affect already reports `recorded = false`.
+// machine is a 65C816 (on the 65C02 widths never vary), the line being drawn
+// has no currently believed anchor, and one of the unmodelled cases above sits
+// between the last anchor and it. Every line this could affect already reports
+// `recorded = false`.
 //
 // Anchors are not deleted when the code under them changes -- there is no write
 // hook -- so each stores the opcode byte that was executing and is ignored once
@@ -108,10 +115,13 @@ typedef struct {
 	bool     recorded;     // a whole instruction, backed by live-execution
 	                       // coverage. False for every CM_LINE_DATA row.
 	uint8_t  kind;         // code_map_line_kind_t: instruction or raw data
-	bool     start_recorded; // this ADDRESS is a recorded instruction start,
-	                         // even where the row had to be emitted as data.
-	                         // Distinguishes "never executed" from "executed,
-	                         // but cannot be shown whole on this path".
+	bool     start_recorded; // this ADDRESS carries a currently believed anchor.
+	                         // Distinguishes "no live-execution evidence here"
+	                         // from "there is, but the row could not be shown
+	                         // whole on this path". Not proof the current code
+	                         // ran: an anchor can be evicted with its bank
+	                         // context (false negative) or survive a same-opcode
+	                         // overwrite (false confidence).
 	uint8_t  bytes[4];     // raw bytes (first `size` valid)
 	char     text[48];     // mnemonic + operands, or ".byte $xx,..."
 } code_map_line_t;

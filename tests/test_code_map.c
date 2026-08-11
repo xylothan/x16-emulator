@@ -1230,7 +1230,81 @@ main(void)
 		regs.is65c816 = false;
 	}
 
-	// ── Degenerate input ────────────────────────────────────────────────────
+	// ── KNOWN LIMITATION: "emulation mode is always right" is not true of the
+	//    ESTIMATE ──────────────────────────────────────────────────────────────
+	// The real CPU in emulation mode forces 8-bit widths, so its widths are
+	// always right. code_map's fold-in (`if (e) status |= INDEX|MEMORY`) uses
+	// the ESTIMATED e, though, and that can diverge from the real one through
+	// the same unmodelled carry -- after which the estimate believes it is in
+	// native mode and sizes operands accordingly, while the machine is really
+	// still in emulation.
+	//
+	//   real:  E=1, C=0; ASL A sets C; XCE (C=1,E=1) stays in emulation
+	//   model: C is not tracked through ASL, so XCE sees C=0,E=1 -> NATIVE
+	//   then:  REP #$20 clears M. Real: emulation still forces 8-bit.
+	//   so:    the LDA # is really 2 bytes and the estimate sizes it 3.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 1; // the machine really IS in emulation mode
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // as emulation forces
+
+		const uint8_t code[] = {
+			0x0A,             // $8000 ASL A -- really sets C; not modelled
+			0xFB,             // $8001 XCE   -- really stays in emulation
+			0xC2, 0x20,       // $8002 REP #$20
+			0xA9, 0xEA, 0xEA, // $8004 LDA # -- really 2 bytes in emulation
+		};
+		poke(0x8000, code, sizeof(code));
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+
+		check(n == 4 && lines[3].addr == 0x8004 && lines[3].size == 3,
+		      "KNOWN LIMITATION: a stale carry mis-sizes even in emulation mode");
+		check(n == 4 && !lines[3].recorded,
+		      "that mis-sized line is still reported as a guess");
+
+		regs.is65c816 = false;
+		regs.e        = 0;
+	}
+
+	// ── KNOWN LIMITATION: a stale anchor can also decode too SHORT ───────────
+	// The stale-anchor cases above all decode too WIDE and swallow a fresh
+	// start. The opposite is just as reachable and is quieter: an anchor
+	// recorded when the accumulator was 8 bits sizes its LDA # at two bytes, so
+	// if the replacement code runs with a 16-bit accumulator the row stops one
+	// byte early and the NEXT row starts inside the real instruction's operand.
+	// Nothing is swallowed, so nothing looks wrong -- the rows still tile.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		// Old code, 8-bit A: LDA #$11 is two bytes.
+		const uint8_t old_code[] = { 0xA9, 0x11 };
+		poke(0x8000, old_code, sizeof(old_code));
+		code_map_record(0x8000, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
+
+		// Replacement keeps the $A9 opcode but runs with a 16-bit accumulator,
+		// so the real instruction is three bytes.
+		const uint8_t new_code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
+		poke(0x8000, new_code, sizeof(new_code));
+		regs.status = FLAG_INDEX_WIDTH;
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 2,
+		      "KNOWN LIMITATION: a stale anchor can size an instruction too short");
+		check(n == 2 && lines[1].addr == 0x8002,
+		      "KNOWN LIMITATION: the next row then starts inside a real operand");
+		check_tiles(lines, n, "the too-short reading still tiles, so it looks correct");
+
+		regs.is65c816 = false;
+	}
 	{
 		reset_all();
 		code_map_line_t lines[4];

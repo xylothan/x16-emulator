@@ -36,8 +36,10 @@ effective status byte but **not** `E`. The running `E` is seeded from the live
 propagating past the anchor folds the stale `E` back in
 (`if (e) status |= INDEX|MEMORY`) — mis-sizing the next unanchored line. This is
 why recovery from a bad `E` is anchor-local rather than persistent, and it is
-pinned by a test. In practice `E` is set once during boot and never touched
-again, so this is latent rather than routine.
+pinned by a test. Most X16 software sets `E` once during startup and leaves it
+alone, which is why this is latent rather than routine — but nothing enforces
+that, and the divergence above needs no `XCE` written by the guest at all, only
+a carry the estimate did not track.
 
 For `PLP` and `RTI` the file leaves the running estimate untouched. Operand
 widths for lines decoded after one of them can therefore be wrong, and with
@@ -45,7 +47,8 @@ them the instruction boundaries that follow.
 
 ## Why it is not fixed
 
-The value is not recoverable from the instruction stream. What `PLP` restores
+The value is not recoverable by this analysis, which sees only the instruction
+stream. What `PLP` restores
 depends on what was pushed, which depends on the path taken to get there; what
 `RTI` restores is the status at the moment an interrupt was taken, which is not
 in the code at all.
@@ -73,8 +76,8 @@ exist, and adding it is a larger change than the defect warrants.
 
 It costs nothing unless *all* of these hold at once:
 
-- the machine is a 65C816 in native mode (in emulation mode the widths are
-  forced to 8-bit and are always right);
+- the machine is a 65C816 (on the 65C02 operand widths never vary, so the
+  estimate cannot change a length);
 - the line being drawn has no currently believed anchor — usually because that
   code has never executed, but also if its anchor was evicted with its bank
   context (the cache is capped, see `CM_MAX_CONTEXTS`) or is no longer believed
@@ -83,6 +86,14 @@ It costs nothing unless *all* of these hold at once:
   is *not* only `PLP` and `RTI`: a data-dependent carry change feeding an `XCE`
   does it too, and so does a stale `E` on its own.
 
+Note what is **not** on that list: native mode. The real CPU in emulation mode
+does force 8-bit widths and is always right — but the fold-in here
+(`if (e) status |= INDEX|MEMORY`) uses the *estimated* `E`, not the machine's.
+Once the estimate diverges it will size operands as though native while the
+machine is really in emulation. A test pins exactly that (`ASL A` sets the real
+carry, the estimate misses it, the following `XCE` is predicted backwards, and a
+later `LDA #` is sized 3 where reality is 2).
+
 The mechanism that would recover the value is largely the same mechanism that
 makes the gap irrelevant: code that has executed has anchors. The correspondence
 is not perfect — a handler paused before its own, not-yet-executed `RTI` does
@@ -90,15 +101,18 @@ have a live interrupt frame — but associating a particular on-screen `RTI` wit
 a particular frame is exactly the part that is not solved.
 
 Every line this can affect already reports `recorded == false`, so a UI can say
-so. **The strength of the recovery differs by which input was wrong**, and this
-is worth being precise about:
+so. **The strength of the recovery differs by which input was wrong**, and none
+of it is unconditional:
 
-- a wrong **status** estimate is fully corrected at the next recorded anchor,
-  which supplies both the boundary and the width and then carries forward;
-- a wrong **E** is not. Anchors store the effective status byte but not `E`, so
-  an anchor fixes the width of its own line and propagation past it folds the
-  stale `E` straight back in, mis-sizing the next unanchored line again.
-  Recovery from a bad `E` is anchor-local, not persistent.
+- a wrong **status** estimate is corrected once an accurate, believed anchor is
+  reached, which supplies both the boundary and the width and then carries
+  forward. Not simply "the next recorded anchor": a same-opcode stale anchor is
+  still believed and hands back its *old* status, and there is no guarantee an
+  accurate anchor exists ahead at all;
+- a wrong **E** is weaker still. Anchors store the effective status byte but not
+  `E`, so an anchor fixes the width of its own line and propagation past it
+  folds the stale `E` straight back in, mis-sizing the next unanchored line
+  again. Recovery from a bad `E` is anchor-local, not persistent.
 
 In both cases the decode is not allowed to swallow a recorded start (unless it
 is itself recorded — see the overlap policy in `cm_fill`), so a wrong guess
@@ -149,6 +163,15 @@ new: $8000  A9 xx      LDA #$xx     8-bit A, and $8002 freshly executed
 ```
 
 The opcode is still `$A9`, so the stale anchor survives and wins.
+
+**It cuts both ways.** The example above decodes too *wide* and swallows a fresh
+anchor, which is the loud failure. The opposite is quieter and just as
+reachable: an anchor recorded when the accumulator was 8 bits sizes its `LDA #`
+at two bytes, so if the replacement code runs with a 16-bit accumulator the row
+stops a byte early and the *next* row starts inside the real instruction's
+operand. Nothing is swallowed and the rows still tile perfectly, so there is no
+visible seam — the disassembly is simply misaligned from there until an accurate
+anchor is reached. Both directions are pinned by tests.
 
 Why it is accepted rather than fixed:
 

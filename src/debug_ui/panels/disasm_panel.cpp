@@ -230,10 +230,12 @@ disasm_panel_render(bool *p_open)
 
 		// Row on the same line as the gutter; the Selectable also toggles the
 		// breakpoint so clicking anywhere on the address line works.
-		// Colour by whether the ADDRESS was executed, not by whether the row is
-		// a whole instruction. A row cut short by a boundary carries
-		// start_recorded = true with recorded = false, and tinting it as
-		// "inferred" would claim the code never ran when it demonstrably did.
+		// Colour by whether the address carries live-execution evidence, not by
+		// whether the row is a whole instruction. A row cut short by a boundary
+		// carries start_recorded = true with recorded = false, and tinting it
+		// as "inferred" would deny evidence that exists. The tint tracks a
+		// currently believed anchor, which is the best signal available -- not
+		// proof the code on screen is what ran.
 		ImGui::SameLine(0.0f, 0.0f);
 		ImVec4 col = is_pc             ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
 		           : ln.start_recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // executed
