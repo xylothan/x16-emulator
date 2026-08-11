@@ -740,11 +740,14 @@ main(void)
 	// folklore. Note carefully what it is NOT: the recorded state here is
 	// indistinguishable from a routine legitimately executed at two different
 	// widths, where emitting the 3-byte LDA is exactly right. Nothing derivable
-	// from the anchors alone can separate the two -- which is why a "prefer the
-	// newer anchor" rule would not fix this, it would only trade this case for
-	// that one. Only invalidating anchors on the WRITE that replaced the code
-	// distinguishes them; see docs/code-map-width-propagation.md. If you fix
-	// it, this check should fail: update it, do not delete it.
+	// from the anchors AS RECORDED -- one opcode byte -- can separate the two,
+	// which is why a "prefer the newer anchor" rule would not fix this; it
+	// would only trade this case for that one. A wider staleness check would
+	// catch this particular fixture, whose operand bytes do differ, but not the
+	// case where the replacement bytes are identical; only invalidating anchors
+	// on the write that replaced the code closes it in general. See
+	// docs/code-map-width-propagation.md. If you fix it, this check should
+	// fail: update it, do not delete it.
 	{
 		reset_all();
 		regs.is65c816 = true;
