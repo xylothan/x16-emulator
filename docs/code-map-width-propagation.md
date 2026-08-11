@@ -12,30 +12,32 @@ the 65C816 register widths:
 
 | Instruction | Modelled? | Why |
 |---|---|---|
-| `REP #imm` | yes, exactly | the bits to clear are in the operand |
-| `SEP #imm` | yes, exactly | the bits to set are in the operand |
-| `XCE`      | yes, but see below | swaps carry and the emulation flag |
+| `REP #imm` | its status bits, exactly | the bits to clear are in the operand |
+| `SEP #imm` | its status bits, exactly | the bits to set are in the operand |
+| `XCE`      | only if C and E are right | swaps carry and the emulation flag |
 | `PLP`      | **no** | restores a status byte pulled off the stack |
 | `RTI`      | **no** | restores the status the interrupt pushed |
 
 `XCE` is exact only when **both** of its inputs are right, and neither is
 guaranteed.
 
-*The carry* is tracked only across `CLC` and `SEC`. Every other way the carry
-moves — `ADC`, `SBC`, the compares, the shifts and rotates, and of course `PLP`
-and `RTI` — leaves the estimate untouched. So an `LSR A` that really clears the
-carry, followed by `XCE`, makes the model predict a switch into emulation mode
-that does not happen, forcing the widths to 8-bit for every following line. That
+*The carry* is not tracked through any data-dependent change. `CLC` and `SEC`
+are modelled, and `REP`/`SEP`/`XCE` naturally update it as part of what they do,
+but `ADC`, `SBC`, the compares, and the shifts and rotates all move the carry
+without the estimate noticing. So an `LSR A` that really clears the carry,
+followed by `XCE`, makes the model predict a switch into emulation mode that
+does not happen, forcing the widths to 8-bit for every following line. That
 needs no `PLP` or `RTI` at all; `tests/test_code_map.c` pins it under
 `KNOWN LIMITATION`.
 
 *The emulation flag* is not recorded by anchors at all — they store the
 effective status byte but **not** `E`. The running `E` is seeded from the live
-`regs.e`, so landing on an anchor re-syncs the widths but not `E`, and a wrong
-`E` then affects the emulation-mode fold-in (`if (e) status |= INDEX|MEMORY`)
-after *every* propagated instruction, not only through an `XCE`. In practice `E`
-is set once during boot and never touched again, and the fold-in is applied
-after the recorded status is restored, so anchored lines still come out right.
+`regs.e`, so landing on an anchor re-syncs that line's widths but not `E`, and
+propagating past the anchor folds the stale `E` back in
+(`if (e) status |= INDEX|MEMORY`) — mis-sizing the next unanchored line. This is
+why recovery from a bad `E` is anchor-local rather than persistent, and it is
+pinned by a test. In practice `E` is set once during boot and never touched
+again, so this is latent rather than routine.
 
 For `PLP` and `RTI` the file leaves the running estimate untouched. Operand
 widths for lines decoded after one of them can therefore be wrong, and with
@@ -73,28 +75,40 @@ It costs nothing unless *all* of these hold at once:
 
 - the machine is a 65C816 in native mode (in emulation mode the widths are
   forced to 8-bit and are always right);
-- the code in question has never executed (once it runs, `code_map_record()`
-  captures the real effective status at every instruction, which is ground
-  truth and outranks the estimate);
-- a `PLP` or `RTI` sits between the last recorded anchor and the line being
-  drawn.
+- the line being drawn has no currently believed anchor — usually because that
+  code has never executed, but also if its anchor was evicted with its bank
+  context (the cache is capped, see `CM_MAX_CONTEXTS`) or is no longer believed
+  because the opcode byte under it changed;
+- one of the unmodelled cases sits between the last anchor and that line. That
+  is *not* only `PLP` and `RTI`: a data-dependent carry change feeding an `XCE`
+  does it too, and so does a stale `E` on its own.
 
-That last point is the important one: the mechanism that would recover the value
-is largely the same mechanism that makes the gap irrelevant. Code that has
-executed has anchors. The correspondence is not perfect — a handler paused
-before its own, not-yet-executed `RTI` does have a live interrupt frame — but
-associating a particular on-screen `RTI` with a particular frame is exactly the
-part that is not solved.
+The mechanism that would recover the value is largely the same mechanism that
+makes the gap irrelevant: code that has executed has anchors. The correspondence
+is not perfect — a handler paused before its own, not-yet-executed `RTI` does
+have a live interrupt frame — but associating a particular on-screen `RTI` with
+a particular frame is exactly the part that is not solved.
 
 Every line this can affect already reports `recorded == false`, so a UI can say
-so, and the next anchor re-establishes both the boundary and the width — the
-decode is not allowed to swallow a recorded start, so a wrong guess cannot run
-on past the next piece of hard evidence.
+so. **The strength of the recovery differs by which input was wrong**, and this
+is worth being precise about:
+
+- a wrong **status** estimate is fully corrected at the next recorded anchor,
+  which supplies both the boundary and the width and then carries forward;
+- a wrong **E** is not. Anchors store the effective status byte but not `E`, so
+  an anchor fixes the width of its own line and propagation past it folds the
+  stale `E` straight back in, mis-sizing the next unanchored line again.
+  Recovery from a bad `E` is anchor-local, not persistent.
+
+In both cases the decode is not allowed to swallow a recorded start (unless it
+is itself recorded — see the overlap policy in `cm_fill`), so a wrong guess
+cannot silently run past hard evidence about *boundaries*, even where it keeps
+getting *widths* wrong.
 
 ## What is pinned by tests
 
-`tests/test_code_map.c` covers the bound rather than the missing value, for both
-instructions:
+`tests/test_code_map.c` covers the bound rather than the missing value, for all
+three cases:
 
 - `PLP`: "reports a line decoded from a guessed width as unrecorded",
   "re-syncs onto the next anchor after a bad width guess", "recovers the real
@@ -102,6 +116,10 @@ instructions:
 - `RTI`: "leaves the width estimate alone across RTI instead of guessing",
   "reports a line decoded across RTI as a guess, not as known", "reaches the
   anchor after RTI and recovers the real width".
+- `XCE` with a stale carry: "KNOWN LIMITATION: a stale carry into XCE
+  mispredicts the widths", "an anchor recovers the width of its own line after a
+  bad XCE", and — pinning the *weaker* bound described above — "KNOWN
+  LIMITATION: past that anchor a stale E mis-sizes again".
 
 The first `RTI` check is deliberately written to fail if someone substitutes a
 plausible width without also building the known/unknown machinery. It is a

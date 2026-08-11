@@ -22,34 +22,38 @@
 //
 // WHERE THE WIDTHS ARE STILL A GUESS, so callers know what they are getting:
 // only five instructions change the 65C816 register widths -- REP, SEP, XCE,
-// PLP and RTI. REP and SEP are modelled exactly -- the bits are in the operand.
-// XCE is exact only when both of its inputs are right, and neither is
-// guaranteed: it swaps the carry and emulation flags, and the carry is tracked
-// only across CLC/SEC (not the arithmetic, compare, shift or rotate
-// instructions), while E is not recorded by anchors at all -- it is seeded from
-// the live CPU and an anchor re-establishes the widths without re-establishing
-// it. The last two restore a status byte pulled off the stack, so what they
-// will do cannot be known until they actually run; this linear analysis does
-// not recover it.
+// PLP and RTI. REP and SEP apply their own status bits exactly (the bits are in
+// the operand), though the widths those imply are still subject to the E
+// estimate below. XCE is exact only when both of its inputs are right, and
+// neither is guaranteed: it swaps the carry and emulation flags, and the carry
+// is not tracked through any data-dependent change (ADC, SBC, the compares, the
+// shifts and rotates), while E is not recorded by anchors at all. The last two
+// restore a status byte pulled off the stack; this linear, instruction-stream
+// analysis does not recover it.
+//
+// The gaps are not equally well bounded. A wrong STATUS estimate is corrected
+// by the next recorded anchor, which supplies the boundary and the width and
+// carries forward. A wrong E is not: anchors do not store E, so an anchor fixes
+// its own line and propagation then folds the stale E back in, mis-sizing the
+// next unanchored line. Recovery from a bad E is anchor-local.
 //
 // This costs nothing in practice unless all of the following hold at once: the
 // machine is a 65C816 in native mode (in emulation mode the widths are forced
-// to 8-bit and always right), the code has never executed, and one of those
-// unmodelled cases sits between the last recorded anchor and the line being
-// drawn. Every line this could affect already reports `recorded = false`, and
-// the next anchor re-syncs both the boundary and the width, so a wrong guess
-// cannot run on.
+// to 8-bit and always right), the line being drawn has no currently believed
+// anchor, and one of the unmodelled cases above sits between the last anchor
+// and it. Every line this could affect already reports `recorded = false`.
 //
-// Anchors do not outlive the code they describe: each one stores the opcode byte
-// that was executing, and is ignored once memory no longer matches. That catches
-// most overlay loads, a second program loaded over the first, and self-modifying
-// code, without needing a hook on every memory write. It is a one-byte check,
-// not a proof: replacement code that happens to repeat the same opcode byte at
-// the same address keeps the old anchor, and with it the old recorded status.
-// Such an anchor is still believed, so it can cover a genuine instruction start
-// in the new code; and on a 65C816 its stale status can also make the line
-// decode wider than the new code really is. Bounded -- the next valid anchor it
-// has not swallowed re-syncs both -- and pinned by tests. See
+// Anchors are not deleted when the code under them changes -- there is no write
+// hook -- so each stores the opcode byte that was executing and is ignored once
+// memory no longer matches. That catches most overlay loads, a second program
+// loaded over the first, and self-modifying code, without needing a hook on
+// every memory write. It is a one-byte check, not a proof: replacement code
+// that happens to repeat the same opcode byte at the same address keeps the old
+// anchor, and with it the old recorded status. Such an anchor is still
+// believed, so it can cover a genuine instruction start in the new code; and on
+// a 65C816 its stale status can also make the line decode wider than the new
+// code really is. Bounded -- the next valid anchor it has not swallowed
+// re-syncs both -- and pinned by tests. See
 // docs/code-map-width-propagation.md.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and

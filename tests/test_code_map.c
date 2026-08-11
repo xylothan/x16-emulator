@@ -1198,7 +1198,7 @@ main(void)
 		// 16-bit A, and carry set going in.
 		regs.status = FLAG_INDEX_WIDTH | FLAG_CARRY;
 
-		const uint8_t code[] = { 0x4A, 0xFB, 0xA9, 0xEA, 0xEA };
+		const uint8_t code[] = { 0x4A, 0xFB, 0xA9, 0xEA, 0xEA, 0xA9, 0xEA, 0xEA };
 		poke(0x8000, code, sizeof(code));
 
 		code_map_line_t lines[8];
@@ -1210,13 +1210,21 @@ main(void)
 		check(n == 3 && !lines[2].recorded,
 		      "the mispredicted line is still reported as a guess");
 
-		// The bound: an anchor at that address restores the real width, exactly
-		// as it does for PLP and RTI.
-		code_map_record(0x8002, 0, 0, 0, FLAG_INDEX_WIDTH);
-		n = code_map_disasm_forward(0x8000, 0, 0, 0, 3, lines, 8, &next);
-		check(n == 3 && lines[2].addr == 0x8002 && lines[2].size == 3 &&
+		// The bound is ANCHOR-LOCAL, and only that. An anchor supplies the
+		// status for its own line, so that line is sized correctly -- but
+		// nothing re-establishes E, so propagating past the anchor folds the
+		// widths back to 8-bit and the next unanchored line is wrong again.
+		// This is weaker than the PLP/RTI bound, where the anchor's status
+		// carries forward correctly.
+		const uint8_t st_16 = FLAG_INDEX_WIDTH;
+		code_map_record(0x8002, 0, 0, 0, st_16);
+		n = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+		check(n == 4 && lines[2].addr == 0x8002 && lines[2].size == 3 &&
 		          lines[2].recorded,
-		      "an anchor recovers the width after a mispredicted XCE");
+		      "an anchor recovers the width of its own line after a bad XCE");
+		check(n == 4 && lines[3].addr == 0x8005 && lines[3].size == 2 &&
+		          !lines[3].recorded,
+		      "KNOWN LIMITATION: past that anchor a stale E mis-sizes again");
 
 		regs.is65c816 = false;
 	}

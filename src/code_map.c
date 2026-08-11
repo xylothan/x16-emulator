@@ -162,8 +162,8 @@ cm_bit(const cm_context_t *c, uint16_t addr)
 	return c && (c->cover[addr >> 3] & (uint8_t)(1u << (addr & 7))) != 0;
 }
 
-// True if `addr` is a recorded instruction start AND the code it described is
-// still there.
+// True if `addr` is a recorded instruction start AND the opcode byte recorded
+// there still matches memory.
 //
 // Anchors are only ever added; nothing removes them when memory changes, and on
 // this machine memory under code changes all the time -- an overlay LOAD, a
@@ -274,24 +274,30 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // takes precedence over this estimate.
 //
 // Just five instructions change the register widths -- REP, SEP, XCE, PLP and
-// RTI. REP and SEP are handled exactly, since the bits are in the operand.
+// RTI. REP and SEP apply their own status bits exactly, since the bits are in
+// the operand; the WIDTHS they imply are still only as good as the E estimate
+// below, because emulation mode overrides them.
 //
 // XCE is exact only when BOTH of its inputs are right, and neither is
 // guaranteed. It swaps the carry and emulation flags, so it needs the incoming
-// carry -- tracked here for CLC and SEC only, since every other way the carry
-// moves (ADC, SBC, the compares, the shifts and rotates) is not modelled -- and
-// the incoming E, which anchors do not record at all, so E is seeded from the
-// live CPU and an anchor re-establishes the widths without re-establishing it.
-// A stale carry or E therefore mispredicts emulation mode, and with it the
-// widths, without any PLP or RTI being involved.
+// carry -- which is carried through the instructions handled in this switch
+// (CLC, SEC, and whatever REP/SEP/XCE themselves do to it), but NOT through any
+// data-dependent change: ADC, SBC, the compares, the shifts and rotates all
+// move the carry without this estimate noticing. It also needs the incoming E,
+// which anchors do not record at all.
 //
-// PLP and RTI restore a status byte from the stack, which is not recoverable
-// from the instruction stream, so this deliberately leaves the estimate alone
-// for them rather than inventing a value.
+// PLP and RTI restore a status byte from the stack, so this deliberately leaves
+// the estimate alone for them rather than inventing a value.
 //
-// Every one of those gaps has the same bound: the estimate stays wrong only
-// until the next recorded anchor, which re-establishes both the boundary and
-// the width, and every line drawn from the estimate reports recorded = false.
+// HOW WELL EACH GAP IS BOUNDED differs, and the difference matters:
+//   - a wrong STATUS estimate is fully corrected by the next recorded anchor,
+//     which supplies both the boundary and the width and carries forward;
+//   - a wrong E is not. Anchors store the status byte but not E, so an anchor
+//     fixes the width of its OWN line and then propagation folds the stale E
+//     back in (`if (e) status |= INDEX|MEMORY`), mis-sizing the next unanchored
+//     line again. Recovery from a bad E is anchor-local, not persistent.
+// Either way every line drawn from the estimate reports recorded = false, so a
+// consumer is never told a guess is ground truth. Both are pinned by tests.
 static uint8_t
 cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
              uint8_t status, uint8_t *e_inout)
