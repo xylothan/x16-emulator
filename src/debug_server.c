@@ -114,6 +114,24 @@ static bool     dap_session_active = false;
 // would then report the same halt a second time under a different reason.
 static bool     dap_stop_announced = false;
 
+// Is there a local debugger UI whose user owns the run state?
+//
+// When there is, a client connecting or going away must not resume the machine:
+// somebody is sitting at a breakpoint looking at it. When there is not -- a
+// headless -debugport run -- nothing else can ever resume it, so a session
+// ending has to.
+//
+// Both front ends count, and both need their own test. -imgui does not set
+// debug_window_enabled, and -debugport sets debugger_enabled by itself, so
+// neither flag alone answers the question: testing only the first ignored the
+// graphical debugger entirely and resumed the machine out from under it.
+static bool
+dap_local_ui_owns_run_state(void)
+{
+	return (debug_window_enabled && debugger_enabled)
+	       || (imgui_debugger_enabled && video_debug_ui_available());
+}
+
 // Forward declarations
 static void send_dap_event(const char *event_name, cJSON *body);
 static void send_dap_message(cJSON *json);
@@ -1221,7 +1239,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
         dap_release_session_state();
         // Resume only when there is no interactive debugger UI to drive the run
         // state; otherwise leave it as the user left it (see disconnect_client).
-        if (currentMode == DMODE_STOP && !(debug_window_enabled && debugger_enabled)) {
+        if (currentMode == DMODE_STOP && !dap_local_ui_owns_run_state()) {
             currentMode = DMODE_RUN;
         }
     }
@@ -1967,7 +1985,7 @@ static int handle_dap_terminate(int seq, cJSON *args) {
     // when there is no local debugger whose user owns the run state. Otherwise
     // "Stop Debugging" in the editor runs the emulator out from under someone
     // who is halted in the SDL debug window inspecting it.
-    if (!(debug_window_enabled && debugger_enabled)) {
+    if (!dap_local_ui_owns_run_state()) {
         currentMode = DMODE_RUN;
     }
     return 1;
@@ -2370,7 +2388,7 @@ static void disconnect_client(void) {
             // debugger_enabled by writing $9FB0, which suppresses the overlay,
             // and leaving the machine stopped for a window nobody can see would
             // strand it.
-            bool has_ui = debug_window_enabled && debugger_enabled;
+            bool has_ui = dap_local_ui_owns_run_state();
             if (currentMode == DMODE_STOP && !has_ui) {
                 printf("[dap] Session ended, resuming emulator\n");
                 currentMode = DMODE_RUN;

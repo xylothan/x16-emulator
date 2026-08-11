@@ -85,7 +85,8 @@ The same gap produced a fifth reconstruction elsewhere: the ImGui breakpoints
 panel kept `s_tracked`, a "panel-owned superset of `breakPoints[]`", because the
 core could not represent a *disabled* breakpoint. Its own header noted the
 consequence — a disabled breakpoint showed no gutter marker anywhere, because it
-was simply absent from the table.
+was simply absent from the table. That table is now gone too; see
+[Enable and disable](#enable-and-disable).
 
 ## The design
 
@@ -165,7 +166,10 @@ machine. `debug_bp_on_arrival` and `debug_bp_is_set` honour it, while
 `debug_bp_at()` still shows it — so a UI can draw it greyed instead of losing
 the marker entirely.
 
-This is what lets the ImGui panel delete `s_tracked` when it rebases.
+This is what retired the ImGui panel's `s_tracked`. That list is now a view of
+the core's table, rebuilt each frame from `debug_bp_count()` / `debug_bp_at()`,
+rather than a superset with a lifetime of its own — so a breakpoint disabled
+from the panel still shows in the Disassembly and Source gutters.
 
 Re-adding a disabled breakpoint re-arms it: asking for a breakpoint is asking
 for it to be armed, and a client that set one, disabled it, and set it again
@@ -201,6 +205,10 @@ Two defects went with them that were not in the original list:
 - A full `dap_bps[]` table armed the breakpoint in the core anyway and did not
   record it, so it outlived the session that asked for it — the orphan case,
   reached without any ownership confusion at all.
+
+From `src/debug_ui/panels/breakpoints_panel.cpp`: `s_tracked`'s independent
+lifetime, `tracked_find()` and `active_bp_exists()`, and the delete-and-remember
+implementation of enable/disable.
 
 ## One thing deliberately not done: bidirectional sync
 

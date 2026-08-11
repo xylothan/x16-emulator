@@ -392,11 +392,19 @@ int  DEBUGGetCurrentStatus(void) {
 	}
 
 	// Who owns the UI while the machine is not running. With -imgui and no
-	// -debug the graphical debugger does: it pumps events, repaints, and
+	// text debugger the graphical one does: it pumps events, repaints, and
 	// decides when to resume. Gated on the window having actually been created
 	// -- if it failed to open there is no control bar to resume from, and
 	// swallowing the loop here would park the machine unrecoverably.
-	const bool imguiOwnsUI = (!debugger_enabled && video_debug_ui_available());
+	//
+	// Tested on debug_window_enabled, not debugger_enabled: -debugport turns
+	// debugger_enabled on by itself to get the breakpoint machinery, so keying
+	// on it handed -imgui -debugport to the text debugger -- drawing its
+	// overlay over a session that never asked for one, and swallowing the
+	// emulator window's keys. debug_window_enabled means -debug/-bp/-wp, which
+	// is the question being asked. (-imgui -bp still goes to the text pump, as
+	// before: -bp does ask for it.)
+	const bool imguiOwnsUI = (!debug_window_enabled && video_debug_ui_available());
 
 	// DMODE_STOP only, not "not RUN". DMODE_STEP means one instruction has been
 	// asked for and must be executed now: routing it through the pump costs it

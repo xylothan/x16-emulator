@@ -295,11 +295,15 @@ x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 #### Using the debugger and an editor at the same time
 
 Breakpoints live in one place. Whether a breakpoint came from `-bp` on the command line, F9 in
-the debugger, or your editor over DAP, there is a single table deciding where the machine stops,
-and each of those can hold a breakpoint at the same address without disturbing the others.
-Disconnecting your editor takes away the breakpoints *it* asked for and leaves yours alone.
+the debugger, the ImGui breakpoints panel, or your editor over DAP, there is a single table
+deciding where the machine stops, and each of those can hold a breakpoint at the same address
+without disturbing the others. Disconnecting your editor takes away the breakpoints *it* asked
+for and leaves yours alone.
 
-What is **not** shared is the view. Each front end shows the breakpoints it knows about:
+The emulator's own UIs share one view of that table: a breakpoint you set with F9 appears in the
+ImGui panel, and one you disable there still shows in the Disassembly and Source gutters.
+
+An editor attached over DAP is the exception, because it keeps its own list:
 
 * A breakpoint you set with F9 will not appear in your editor's gutter.
 * A breakpoint you delete with F9 goes away in the emulator, but your editor still believes in
