@@ -107,7 +107,13 @@ jobs:
           # a README that has been copied out of a package still says which
           # build it came from.
           printf '\n---\n\nBuild `%s` (%s)\n' "$BUILD_VERSION" "${GITHUB_SHA:0:7}" > build_stamp.md
-          cat header_footer.md README.md RELEASES.md build_stamp.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
+          # .gh/header_footer.md is front matter for md-to-pdf -- page size,
+          # margins, running header and page numbers -- so it has to come
+          # first. It used to be catted as "header_footer.md", which does not
+          # exist; cat failed, the pipeline swallowed it because only md-to-pdf's
+          # status was checked, and every PDF shipped without any of it. Hence
+          # the pipefail above.
+          cat .gh/header_footer.md README.md RELEASES.md build_stamp.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
       - uses: actions/upload-artifact@v4
         with:
           name: readme-pdf
