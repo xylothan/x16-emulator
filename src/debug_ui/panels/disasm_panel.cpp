@@ -248,8 +248,16 @@ disasm_panel_render(bool *p_open)
 			// Same instruction help the Source panel gives, so hovering here
 			// explains the instruction and — on the PC's row — predicts what it
 			// will do. Followed by the operand's live value.
+			//
+			// Gated on the lookup succeeding, not merely on a token being
+			// extracted: code_map renders a line whose decode had to be cut
+			// short as its raw data bytes (".byte $2c"), which yields a token
+			// that is not an instruction. Opening a tooltip for it would show
+			// an empty box, since the body returns immediately and those lines
+			// carry no effective address either.
 			char mnem[16];
-			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem);
+			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem) &&
+			                       insn_info_lookup(mnem) != nullptr;
 
 			if (have_mnem || ln.eff_addr >= 0) {
 				ImGui::BeginTooltip();
