@@ -238,7 +238,7 @@ disasm_panel_render(bool *p_open)
 		// proof the code on screen is what ran.
 		ImGui::SameLine(0.0f, 0.0f);
 		ImVec4 col = is_pc             ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
-		           : ln.start_recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // executed
+		           : ln.start_recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // anchored
 		                               : ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // inferred
 		ImGui::PushStyleColor(ImGuiCol_Text, col);
 		if (ImGui::Selectable(text, is_pc)) {

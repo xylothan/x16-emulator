@@ -1234,19 +1234,29 @@ main(void)
 	//    ESTIMATE ──────────────────────────────────────────────────────────────
 	// The real CPU in emulation mode forces 8-bit widths, so its widths are
 	// always right. code_map's fold-in (`if (e) status |= INDEX|MEMORY`) uses
-	// the ESTIMATED e, though, and that can diverge from the real one through
-	// the same unmodelled carry -- after which the estimate believes it is in
-	// native mode and sizes operands accordingly, while the machine is really
-	// still in emulation.
+	// the ESTIMATED e, though, and nothing re-seeds or repairs that estimate
+	// mid-walk: run_e is seeded once per forward run and thereafter written
+	// only by XCE, from the ESTIMATE's carry. An anchor overrides the status
+	// but never the E. So the estimate can believe it is in native mode while
+	// the machine is really in emulation, and size operands accordingly.
 	//
-	//   real:  E=1, C=0; ASL A sets C; XCE (C=1,E=1) stays in emulation
-	//   model: C is not tracked through ASL, so XCE sees C=0,E=1 -> NATIVE
-	//   then:  REP #$20 clears M. Real: emulation still forces 8-bit.
-	//   so:    the LDA # is really 2 bytes and the estimate sizes it 3.
+	//   real:  A bit 7 set and C=0, so ASL A really sets C; XCE then sees
+	//          C=1,E=1 and STAYS in emulation, where widths are forced 8-bit
+	//   model: the carry is not tracked through ASL, so XCE sees C=0,E=1 and
+	//          predicts NATIVE
+	//   then:  REP #$20 clears the model's M; the machine still forces 8-bit
+	//   so:    the LDA # is really 2 bytes and the estimate sizes it 3
+	//
+	// regs.a is set below only to make that premise concrete: this harness
+	// never executes the CPU, so what the real ASL/XCE would do is reasoning
+	// about the machine, while the assertion pins what the ESTIMATE produces.
+	// (The ASL is load-bearing for reality, not for the model -- the model's
+	// seed carry is already clear, so it would predict native either way.)
 	{
 		reset_all();
 		regs.is65c816 = true;
 		regs.e        = 1; // the machine really IS in emulation mode
+		regs.a        = 0x80; // so a real ASL A would set the carry
 		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // as emulation forces
 
 		const uint8_t code[] = {
@@ -1287,8 +1297,10 @@ main(void)
 		poke(0x8000, old_code, sizeof(old_code));
 		code_map_record(0x8000, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
 
-		// Replacement keeps the $A9 opcode but runs with a 16-bit accumulator,
-		// so the real instruction is three bytes.
+		// Replacement keeps the $A9 opcode but is about to run with a 16-bit
+		// accumulator, so the real instruction there is three bytes. (It has
+		// not run yet -- executing at $8000 would re-record the anchor and
+		// refresh its status, which is exactly what fixes this.)
 		const uint8_t new_code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
 		poke(0x8000, new_code, sizeof(new_code));
 		regs.status = FLAG_INDEX_WIDTH;

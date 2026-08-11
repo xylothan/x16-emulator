@@ -297,8 +297,9 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 //     accurate anchor ahead at all;
 //   - a wrong E is weaker. Anchors store the status byte but not E, so an
 //     anchor fixes the width of its OWN line and then propagation folds the
-//     stale E back in (`if (e) status |= INDEX|MEMORY`), mis-sizing the next
-//     unanchored line again. Recovery from a bad E is anchor-local.
+//     stale E back in (`if (e) status |= INDEX|MEMORY`), which can mis-size the
+//     next unanchored line again wherever the stale E and the real one imply
+//     different widths. Recovery from a bad E is anchor-local.
 // That fold-in also means "emulation mode is always right" holds for the real
 // CPU but NOT for this estimate: a diverged E sizes operands as though native
 // while the machine is really in emulation mode.
@@ -316,8 +317,9 @@ cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	// not the opcode's. They differ for an instruction whose opcode is the last
 	// byte of a window: a REP at $BFFF takes its operand from $C000, which is
 	// banked ROM, and reading that through the RAM window yields some other
-	// bank's byte. Getting it wrong here mis-sizes every following instruction
-	// until the next anchor -- the exact drift this file exists to prevent.
+	// bank's byte. Getting it wrong here mis-sizes the following instructions
+	// until an accurate anchor is reached -- the exact drift this file exists
+	// to prevent.
 	uint16_t argp   = (uint16_t)((addr + 1) & 0xFFFF);
 	int16_t  xb_op  = cm_x16bank_for(addr, rambank, rombank);
 	int16_t  xb_arg = cm_x16bank_for(argp, rambank, rombank);

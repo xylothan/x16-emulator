@@ -26,20 +26,26 @@ are modelled, and `REP`/`SEP`/`XCE` naturally update it as part of what they do,
 but `ADC`, `SBC`, the compares, and the shifts and rotates all move the carry
 without the estimate noticing. So an `LSR A` that really clears the carry,
 followed by `XCE`, makes the model predict a switch into emulation mode that
-does not happen, forcing the widths to 8-bit for every following line. That
-needs no `PLP` or `RTI` at all; `tests/test_code_map.c` pins it under
-`KNOWN LIMITATION`.
+does not happen, forcing the widths to 8-bit for every following line that has
+no anchor of its own. That needs no `PLP` or `RTI` at all;
+`tests/test_code_map.c` pins it under `KNOWN LIMITATION`.
 
 *The emulation flag* is not recorded by anchors at all — they store the
 effective status byte but **not** `E`. The running `E` is seeded from the live
 `regs.e`, so landing on an anchor re-syncs that line's widths but not `E`, and
 propagating past the anchor folds the stale `E` back in
-(`if (e) status |= INDEX|MEMORY`) — mis-sizing the next unanchored line. This is
-why recovery from a bad `E` is anchor-local rather than persistent, and it is
-pinned by a test. Most X16 software sets `E` once during startup and leaves it
-alone, which is why this is latent rather than routine — but nothing enforces
-that, and the divergence above needs no `XCE` written by the guest at all, only
-a carry the estimate did not track.
+(`if (e) status |= INDEX|MEMORY`) — which can mis-size the next unanchored line,
+where the stale `E` and the real one imply different widths. This is why
+recovery from a bad `E` is anchor-local rather than persistent, and it is pinned
+by a test.
+
+Most X16 software sets `E` once during startup and leaves it alone, which is why
+this is latent rather than routine. What defeats that reassurance is not a
+deliberate mode switch by the guest: it is enough that the walk *crosses* an
+`XCE` — the one from startup, one on a path the program never takes, or a `$FB`
+byte that is really data — with a carry the estimate did not track. `run_e` is
+written in exactly one place, `case 0xFB`, so without an `XCE` in the walked
+stream the estimate keeps the seeded `E`.
 
 For `PLP` and `RTI` the file leaves the running estimate untouched. Operand
 widths for lines decoded after one of them can therefore be wrong, and with
@@ -82,17 +88,36 @@ It costs nothing unless *all* of these hold at once:
   code has never executed, but also if its anchor was evicted with its bank
   context (the cache is capped, see `CM_MAX_CONTEXTS`) or is no longer believed
   because the opcode byte under it changed;
-- one of the unmodelled cases sits between the last anchor and that line. That
-  is *not* only `PLP` and `RTI`: a data-dependent carry change feeding an `XCE`
-  does it too, and so does a stale `E` on its own.
+- the status the estimate carries into that line is not the status the code
+  there really runs with.
+
+That third condition is the general one, and it is *not* only the unmodelled
+instructions. It happens whenever:
+
+- one of the unmodelled cases lies between the last anchor and the line — a
+  `PLP`, an `RTI`, a stale carry feeding an `XCE`, or a stale `E`;
+- **the walk crossed a branch or a call.** Propagation is address-linear: it
+  applies whatever opcode sits at the next *address*. Given
+  `BRA +2 / REP #$20 / LDA #`, execution jumps over the `REP` and the `LDA` is
+  two bytes, while the walk applies the `REP` and sizes it three. The same goes
+  for a `JSR` whose callee changes `M`/`X` and returns. `REP` and `SEP` are
+  applied exactly *as instructions*; that does not make the resulting estimate
+  right for a path the program never took;
+- **the walk started somewhere the seed does not describe.**
+  `code_map_disasm_forward` seeds from `regs.status`/`regs.e`, which is the
+  state at the *current PC*, not at `start`. That is the DAP `disassemble`
+  path, which takes an arbitrary address, so disassembling never-executed code
+  that runs at a different width is wrong from the first line — with no anchor
+  and no unmodelled instruction anywhere in sight.
 
 Note what is **not** on that list: native mode. The real CPU in emulation mode
 does force 8-bit widths and is always right — but the fold-in here
-(`if (e) status |= INDEX|MEMORY`) uses the *estimated* `E`, not the machine's.
-Once the estimate diverges it will size operands as though native while the
-machine is really in emulation. A test pins exactly that (`ASL A` sets the real
-carry, the estimate misses it, the following `XCE` is predicted backwards, and a
-later `LDA #` is sized 3 where reality is 2).
+(`if (e) status |= INDEX|MEMORY`) uses the *estimated* `E`, not the machine's,
+and nothing re-seeds or repairs that estimate mid-walk. `run_e` is seeded once
+per forward run and thereafter written only by `XCE`, from the estimate's own
+carry; an anchor overrides the status but never the `E`. Once the estimate
+diverges it will size operands as though native while the machine is really in
+emulation. A test pins exactly that.
 
 The mechanism that would recover the value is largely the same mechanism that
 makes the gap irrelevant: code that has executed has anchors. The correspondence
@@ -177,11 +202,12 @@ Why it is accepted rather than fixed:
 
 - It needs the replacement code to repeat the same opcode byte at the same
   address, which the one-byte check then cannot see through.
-- The damage is bounded and self-correcting: the stale status keeps propagating
-  until the next *valid* anchor that this line — or another stale one — has not
-  swallowed, and that anchor re-establishes both the boundary and the width. (An
-  anchor whose opcode no longer matches does **not** re-sync anything; it is
-  rejected by `cm_anchor_ok()` and simply stops being evidence.)
+- The damage is self-correcting *if* an accurate anchor is reached that this
+  line — or another stale one — has not swallowed. That is not guaranteed: right
+  after an overlay load the new code typically has no valid anchors at all, and
+  the stale status then propagates to the end of the window. (An anchor whose
+  opcode no longer matches re-syncs nothing; it is rejected by `cm_anchor_ok()`
+  and simply stops being evidence.)
 - The alternative — always clamping — costs the far more common case, the
   `.byte $2C` skip idiom, where two overlapping starts are both genuinely real
   and clamping renders a whole known instruction as a fragment.

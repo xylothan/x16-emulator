@@ -58,9 +58,9 @@
 // that happens to repeat the same opcode byte at the same address keeps the old
 // anchor, and with it the old recorded status. Such an anchor is still
 // believed, so it can cover a genuine instruction start in the new code; and on
-// a 65C816 its stale status can also make the line decode wider than the new
-// code really is. Bounded -- the next valid anchor it has not swallowed
-// re-syncs both -- and pinned by tests. See
+// a 65C816 its stale status can also make the line decode wider -- or narrower
+// -- than the new code really is. Self-correcting once an accurate anchor it
+// has not swallowed is reached, if there is one ahead, and pinned by tests. See
 // docs/code-map-width-propagation.md.
 //
 // This header is plain C and is shared by the C core (recording hooks, DAP) and
