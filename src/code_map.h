@@ -20,7 +20,11 @@
 //
 // WHERE THE WIDTHS ARE STILL A GUESS, so callers know what they are getting:
 // only five instructions change the 65C816 register widths -- REP, SEP, XCE,
-// PLP and RTI. The first three are modelled exactly. The last two restore a
+// PLP and RTI. REP and SEP are modelled exactly -- the bits are in the operand.
+// XCE is modelled exactly given a correct emulation flag, which is a real
+// caveat: anchors record the status byte but not E, so E is seeded from the
+// live CPU and is never re-established by an anchor the way the status byte is.
+// The last two restore a
 // status byte pulled off the stack, so what they will do cannot be known until
 // they actually run; no amount of static analysis recovers it.
 //

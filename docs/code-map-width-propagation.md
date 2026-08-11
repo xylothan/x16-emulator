@@ -112,9 +112,16 @@ address, and `disasm()` uses that one bank for every operand read.
 So for a `STA $1234` whose opcode is at `$BFFF` in RAM bank 5 and whose operand
 lives at `$C000`/`$C001` in ROM bank 2, the operand is read as *ROM bank 5*.
 With the test fixture that means `bytes[]` correctly reads `8D 34 12` while
-`text` reads `sta $eaea` and `eff_addr` is `$EAEA`. On real hardware the same
-mis-read happens — `ROM[rambank * 16384 + …]`, or open bus when the RAM bank
-number is ≥ 32.
+`text` reads `sta $eaea` and `eff_addr` is `$EAEA`. This is a *debugger-side*
+mis-read only: the CPU's own fetch goes through the real banking hardware and
+is correct, so the program runs fine — it is the disassembly shown to the user
+that is wrong. The same wrong bytes come back from the host-side read on a real
+machine's memory image (`ROM[rambank * 16384 + …]`, or open bus when the RAM
+bank number is ≥ 32).
+
+Note the width propagation had the *same* bug and **is** fixed: `cm_propagate()`
+now reads a REP/SEP operand through the window backing the operand's own
+address. That one is code_map's own read, so fixing it touched nothing shared.
 
 The test in `tests/test_code_map.c` asserts the displayed **bytes** only, and
 says so in a comment; it does not assert the text, because the text is wrong.
