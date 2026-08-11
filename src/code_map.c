@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>   // snprintf, for rendering a cut-short line as data bytes
 
 // --- Core symbols, declared directly to avoid pulling in memory.h/glue.h ---
 // The global CPU register file (defined in fake6502.c) and the non-intrusive
@@ -276,12 +277,23 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // value: the guess stays wrong only until the next recorded anchor, which
 // re-establishes both the boundary and the width.
 static uint8_t
-cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8_t *e_inout)
+cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
+             uint8_t status, uint8_t *e_inout)
 {
 	if (!regs.is65c816)
 		return status;
 
-	uint8_t opcode = (uint8_t)CM_READ(addr, bank, x16bank);
+	// The operand is read through the window backing the OPERAND's address,
+	// not the opcode's. They differ for an instruction whose opcode is the last
+	// byte of a window: a REP at $BFFF takes its operand from $C000, which is
+	// banked ROM, and reading that through the RAM window yields some other
+	// bank's byte. Getting it wrong here mis-sizes every following instruction
+	// until the next anchor -- the exact drift this file exists to prevent.
+	uint16_t argp   = (uint16_t)((addr + 1) & 0xFFFF);
+	int16_t  xb_op  = cm_x16bank_for(addr, rambank, rombank);
+	int16_t  xb_arg = cm_x16bank_for(argp, rambank, rombank);
+
+	uint8_t opcode = (uint8_t)CM_READ(addr, bank, xb_op);
 	uint8_t e      = *e_inout;
 
 	switch (opcode) {
@@ -292,10 +304,10 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 			status |= FLAG_CARRY;
 			break;
 		case 0xC2: // REP #imm — clears the given status bits
-			status &= (uint8_t)~CM_READ((addr + 1) & 0xFFFF, bank, x16bank);
+			status &= (uint8_t)~CM_READ(argp, bank, xb_arg);
 			break;
 		case 0xE2: // SEP #imm — sets the given status bits
-			status |= (uint8_t)CM_READ((addr + 1) & 0xFFFF, bank, x16bank);
+			status |= (uint8_t)CM_READ(argp, bank, xb_arg);
 			break;
 		case 0xFB: { // XCE — exchange carry and emulation flags
 			uint8_t carry = (uint8_t)(status & FLAG_CARRY);
@@ -373,16 +385,34 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 		}
 	}
 
-	// A line the decode did not get to finish is not a faithful record of an
-	// instruction: `text` describes more bytes than `size` covers, and `eff`
-	// was computed from bytes the line does not own -- for a clamped line those
-	// bytes are the NEXT instruction's opcode. Say so, instead of letting a
-	// consumer colour the row as verified ground truth and offer an effective
-	// address assembled from someone else's bytes. `recorded` describes the
-	// line, not merely its start address.
+	// A line the decode did not get to finish is not an instruction, and must
+	// not be dressed as one: `text` would describe more bytes than `size`
+	// covers, and `eff` was computed from bytes the line does not own -- for a
+	// clamped line those bytes are the NEXT instruction's opcode. Render the
+	// bytes it does own as data instead, so size, bytes and text agree and a
+	// consumer (the panel, or DAP's instruction/instructionBytes pair) cannot
+	// be handed a self-contradictory row.
+	//
+	// This is the honest rendering of a genuine ambiguity rather than a
+	// failure: the `.byte $2C` skip idiom really does put two overlapping
+	// instruction starts in memory, both real and both executed, and no linear
+	// non-overlapping tiling can show both whole. The policy is that the
+	// interior recorded start wins -- it is the harder evidence -- and the
+	// bytes leading up to it are shown as the data they are on that path.
 	if (sz < decoded) {
 		recorded = false;
 		eff      = -1;
+
+		int used = 0;
+		for (int b = 0; b < sz && b < 4; b++) {
+			uint16_t p = (uint16_t)((addr + b) & 0xFFFF);
+			int      w = snprintf(ln->text + used, sizeof(ln->text) - (size_t)used,
+			                      "%s$%02x", b == 0 ? ".byte " : ",",
+			                      (unsigned)CM_READ(p, bank, cm_x16bank_for(p, rambank, rombank)));
+			if (w < 0 || (size_t)(used + w) >= sizeof(ln->text))
+				break;
+			used += w;
+		}
 	}
 
 	ln->addr     = addr;
@@ -414,7 +444,7 @@ cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 
 	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, max_size, ln);
 
-	*run_status = cm_propagate(addr, bank, cm_x16bank_for(addr, rambank, rombank), st, run_e);
+	*run_status = cm_propagate(addr, bank, rambank, rombank, st, run_e);
 	return sz;
 }
 
@@ -582,13 +612,25 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 			}
 		} while (k < CM_MAX_INSN_LEN);
 
-		// Only commit a group that reached the boundary exactly and fits whole.
-		// Stopping here just starts the window later; splitting one would put
-		// back the gap this loop exists to remove.
-		if (!closed || k > write)
+		// Commit only a group that reached its boundary exactly; one that did
+		// not is not a tiling of anything.
+		//
+		// A group too large for the space left is trimmed to its SUFFIX -- the
+		// lines nearest the center -- rather than dropped whole. Every line in
+		// the group is contiguous and the last one ends on the boundary, so any
+		// suffix still tiles; it just starts the window later. (A prefix would
+		// not: it would end short of the boundary and reintroduce the gap this
+		// loop exists to remove.) Dropping the group instead would throw away
+		// context the caller has room for.
+		if (!closed)
 			break;
+		int from = 0;
+		if (k > write) {
+			from = k - write;
+			k    = write;
+		}
 		write -= k;
-		memcpy(&out[write], tile, (size_t)k * sizeof(*tile));
+		memcpy(&out[write], &tile[from], (size_t)k * sizeof(*tile));
 	}
 
 	int n = b_cap - write;

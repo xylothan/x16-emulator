@@ -106,7 +106,10 @@ typedef struct {
 // `lines_before + lines_after`; it never exceeds `max_out`. Callers wanting a
 // fixed row count should use the returned count, not the requested one.
 //
-// Returns the number of lines written (<= max_out).
+// Returns the number of lines written (<= max_out). Only `out[0 .. returned-1]`
+// are meaningful: resolving the window may use the rest of the buffer up to
+// `max_out` as scratch, so a caller must not expect entries beyond the returned
+// count to be preserved. Nothing is ever written past `max_out`.
 int code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t rombank,
                            int lines_before, int lines_after,
                            code_map_line_t *out, int max_out, int *out_center_index);
