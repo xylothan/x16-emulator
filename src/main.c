@@ -97,15 +97,14 @@ uint32_t stat[65536];
 #endif
 
 bool debugger_enabled = false;
-// True when a local interactive debugger was asked for (-debug/-bp/-wp), as
-// distinct from the machinery merely being switched on. A DAP client uses this
-// to decide whether anyone is left to resume the machine if it disconnects.
-bool debug_window_enabled = false;
-
 // -imgui: the graphical debugger window. Independent of debugger_enabled, so
 // the two UIs can be used together or separately. Always defined, even in a
 // build without the UI, so the emulator loop needs no #ifdef.
 bool imgui_debugger_enabled = false;
+// True when a local interactive debugger was asked for (-debug/-bp/-wp), as
+// distinct from the machinery merely being switched on. A DAP client uses this
+// to decide whether anyone is left to resume the machine if it disconnects.
+bool debug_window_enabled = false;
 char *paste_text = NULL;
 char *clipboard_buffer = NULL;
 char paste_text_data[65536];
@@ -2199,6 +2198,12 @@ emulator_loop(void *param)
 			testbench_init();
 		}
 
+		// The graphical debugger needs this too: DEBUGGetCurrentStatus() is what
+		// detects breakpoint arrival and completes a step, and it delegates the
+		// pause loop to whichever UI is up. Tested against the window rather
+		// than the flag alone, so that no path can park the machine in a pause
+		// loop that has no UI to resume it.
+		//
 		// The guest can clear debugger_enabled by writing $9FB0. With a DAP
 		// client attached that must not take the debugger down with it: nothing
 		// would poll the socket again, breakpoints would stop being tested, and
@@ -2206,14 +2211,9 @@ emulator_loop(void *param)
 		// rather than polling separately also keeps the socket work behind the
 		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
 		// syscall per emulated instruction.
-		//
-		// The graphical debugger needs this too: DEBUGGetCurrentStatus() is what
-		// detects breakpoint arrival and completes a step, and it delegates the
-		// pause loop to whichever UI is up. Tested against the window rather
-		// than the flag alone, so that no path can park the machine in a pause
-		// loop that has no UI to resume it.
-		if (debugger_enabled || debug_server_is_enabled()
-		    || (imgui_debugger_enabled && video_debug_ui_available())) {
+		if (debugger_enabled
+		    || (imgui_debugger_enabled && video_debug_ui_available())
+		    || debug_server_is_enabled()) {
 			int dbgCmd = DEBUGGetCurrentStatus();
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;

@@ -95,27 +95,6 @@ endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(PkgConfig QUIET)
 
-# Debug Adapter Protocol server
-#
-# Speaks DAP over a TCP socket so an editor can drive the emulator's debugger.
-# Needs cJSON. AUTO builds it when cJSON is present and quietly leaves it out
-# when it is not, so a checkout without the dependency still builds an emulator
-# -- just one that rejects -dap. ON makes a missing cJSON an error instead.
-
-set(ENABLE_DAP "AUTO" CACHE STRING "Enable the Debug Adapter Protocol server (ON/OFF/AUTO)")
-set_property(CACHE ENABLE_DAP PROPERTY STRINGS ON OFF AUTO)
-
-set(USE_DAP FALSE)
-if(ENABLE_DAP STREQUAL "OFF")
-    message(STATUS "[x16] DAP server explicitly disabled.")
-elseif(TARGET cjson OR TARGET cjson::cjson OR cJSON_FOUND)
-    set(USE_DAP TRUE)
-elseif(ENABLE_DAP STREQUAL "ON")
-    message(FATAL_ERROR "[x16] ENABLE_DAP=ON but cJSON was not found.")
-else()
-    message(STATUS "[x16] cJSON not found; building without the DAP server.")
-endif()
-
 # Dear ImGui debugger
 #
 # An in-process debugger UI in its own window: memory, disassembly, CPU, VERA,
@@ -162,6 +141,27 @@ elseif(ENABLE_IMGUI STREQUAL "ON")
     message(FATAL_ERROR "[x16] ENABLE_IMGUI=ON but src/extern/imgui is missing.")
 else()
     message(STATUS "[x16] Vendored ImGui not found; building without the debugger UI.")
+endif()
+
+# Debug Adapter Protocol server
+#
+# Speaks DAP over a TCP socket so an editor can drive the emulator's debugger.
+# Needs cJSON. AUTO builds it when cJSON is present and quietly leaves it out
+# when it is not, so a checkout without the dependency still builds an emulator
+# -- just one that rejects -dap. ON makes a missing cJSON an error instead.
+
+set(ENABLE_DAP "AUTO" CACHE STRING "Enable the Debug Adapter Protocol server (ON/OFF/AUTO)")
+set_property(CACHE ENABLE_DAP PROPERTY STRINGS ON OFF AUTO)
+
+set(USE_DAP FALSE)
+if(ENABLE_DAP STREQUAL "OFF")
+    message(STATUS "[x16] DAP server explicitly disabled.")
+elseif(TARGET cjson OR TARGET cjson::cjson OR cJSON_FOUND)
+    set(USE_DAP TRUE)
+elseif(ENABLE_DAP STREQUAL "ON")
+    message(FATAL_ERROR "[x16] ENABLE_DAP=ON but cJSON was not found.")
+else()
+    message(STATUS "[x16] cJSON not found; building without the DAP server.")
 endif()
 
 # Fluidsynth

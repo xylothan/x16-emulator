@@ -73,6 +73,11 @@ bool DEBUGGetBreakOnInterrupt(void);
 // literal and is never freed. A UI uses this to keep the view still after a
 // step but re-centre it after an arrival somewhere new.
 void        DEBUGSetStopReason(const char *reason);
+// Record the reason and tell a DAP client execution stopped. Edge-triggered:
+// call this exactly once per RUN->STOP transition, from the site that knows it
+// is one. Sites that run on every poll while already halted, or that set a
+// default a later caller overrides, must use DEBUGSetStopReason() instead.
+void        DEBUGAnnounceStop(const char *reason);
 const char *DEBUGGetStopReason(void);
 
 #define DBG_WIDTH 		(60)									// Char cells across
@@ -94,7 +99,6 @@ const char *DEBUGGetStopReason(void);
 // whichever front end is attached -- the SDL debugger, the ImGui debugger, or
 // the DAP server when a client is stepping.
 extern int currentMode;
-
 #ifdef __cplusplus
 }
 #endif

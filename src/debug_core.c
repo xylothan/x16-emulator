@@ -567,18 +567,6 @@ debug_wp_count(void)
 	return numWatchpoints;
 }
 
-// Is there a watchpoint with exactly this identity? The counterpart to
-// debug_wp_covers(), which asks the different question "would a write to this
-// address fire something" and treats DEBUG_BANK_ANY as a wildcard. A UI that
-// offers a toggle needs this one: deciding with covers() and then removing with
-// an exact key means the control can report a watchpoint it is unable to
-// remove, and the button does nothing.
-bool
-debug_wp_exists(uint16_t addr, int x16Bank)
-{
-	return wp_find(addr, x16Bank) >= 0;
-}
-
 // Read-only access to one watchpoint, for UIs that list them. Returns NULL for
 // an out-of-range index rather than trusting the caller's bound, since the
 // table shrinks as watchpoints are removed and a UI's cached count can outlive
@@ -591,6 +579,40 @@ debug_wp_at(int index)
 	if (index < 0 || index >= numWatchpoints)
 		return NULL;
 	return &watchPoints[index];
+}
+
+// Is there a watchpoint with exactly this identity? The counterpart to
+// debug_wp_covers(), which asks the different question "would a write to this
+// address fire something" and treats DEBUG_BANK_ANY as a wildcard. A UI that
+// offers a toggle needs this one: deciding with covers() and then removing with
+// an exact key means the control can report a watchpoint it is unable to
+// remove, and the button does nothing.
+bool
+debug_wp_exists(uint16_t addr, int x16Bank)
+{
+	return wp_find(addr, x16Bank) >= 0;
+}
+
+int
+debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
+{
+	if (wp_find(addr, x16Bank) >= 0)
+		return -1;
+	if (numWatchpoints >= MAX_WATCHPOINTS)
+		return -1;
+
+	if (len == 0)
+		len = 1;
+
+	struct watchpoint *w = &watchPoints[numWatchpoints];
+	w->addr      = addr;
+	w->len       = len;
+	w->x16Bank   = normalise_bank(x16Bank, addr, 0);
+	w->active    = true;
+	w->has_value = false;
+	w->value     = 0;
+	w->op        = BPCMP_EQ;
+	return numWatchpoints++;
 }
 
 static void
