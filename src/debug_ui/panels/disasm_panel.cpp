@@ -255,6 +255,13 @@ disasm_panel_render(bool *p_open)
 			// that is not an instruction. Opening a tooltip for it would show
 			// an empty box, since the body returns immediately and those lines
 			// carry no effective address either.
+			//
+			// This cannot hide a tooltip that had content: the body draws
+			// nothing at all unless the lookup succeeds, and the operand-value
+			// section below is gated on eff_addr independently. Swept the whole
+			// opcode space (both CPUs, both width settings) for mnemonics the
+			// table lacks: only "dbg" ($DB), which is implied and so has no
+			// effective address -- it too used to open an empty box.
 			char mnem[16];
 			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem) &&
 			                       insn_info_lookup(mnem) != nullptr;
