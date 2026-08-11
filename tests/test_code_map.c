@@ -25,16 +25,58 @@
 struct regs regs;
 bool        is_gen2;
 
-static uint8_t g_mem[0x10000];
+// The memory model has to be real enough to tell banks apart, or the bank
+// arguments code_map computes are unobservable and cm_x16bank_for() is checked
+// by nothing: a stub returning g_mem[address] gives the same answer for every
+// bank, so any window selection -- or none -- passes. This mirrors the decode
+// in real_read6502() closely enough to make a wrong window show up as the
+// wrong bytes:
+//   - gen2 with a non-zero CPU bank: the whole 64K is that bank's flat RAM,
+//     and the window registers select nothing;
+//   - $C000-$FFFF: banked ROM, x16Bank if given, else the live ROM register;
+//   - $A000-$BFFF: banked RAM, x16Bank if given, else the live RAM register;
+//   - below that: flat, unbanked, and x16Bank is not consulted at all.
+#define TEST_RAM_BANKS  256
+#define TEST_ROM_BANKS  32
+#define TEST_GEN2_BANKS 4
+
+static uint8_t g_mem[0x10000];                            // flat low memory
+static uint8_t g_bram[TEST_RAM_BANKS][0x2000];            // $A000-$BFFF
+static uint8_t g_brom[TEST_ROM_BANKS][0x4000];            // $C000-$FFFF
+static uint8_t g_gen2[TEST_GEN2_BANKS][0x10000];          // gen2 flat CPU banks
 static uint8_t g_ram_bank = 0;
 static uint8_t g_rom_bank = 0;
+
+// Set whenever a read below $A000 arrives with an explicit window bank. Low
+// memory is not banked, so code_map is supposed to pass "current bank" there;
+// anything else is it inventing a window that does not exist.
+static int g_low_mem_windowed = 0;
 
 uint8_t
 real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 {
-	(void)bank;
 	(void)debugOn;
-	(void)x16Bank;
+
+	if (is_gen2 && bank != 0) {
+		if (bank < TEST_GEN2_BANKS) {
+			return g_gen2[bank][address];
+		}
+		return (uint8_t)((address >> 8) & 0xFF); // open bus, as in memory.c
+	}
+	if (address >= 0xC000) {
+		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_rom_bank;
+		if (rb >= TEST_ROM_BANKS) {
+			return (uint8_t)((address >> 8) & 0xFF); // open bus, as in memory.c
+		}
+		return g_brom[rb][address - 0xC000];
+	}
+	if (address >= 0xA000) {
+		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_ram_bank;
+		return g_bram[rb % TEST_RAM_BANKS][address - 0xA000];
+	}
+	if (x16Bank >= 0) {
+		g_low_mem_windowed++;
+	}
 	return g_mem[address];
 }
 
@@ -65,20 +107,115 @@ check(bool cond, const char *what)
 	}
 }
 
+// `recorded` is derivable: a row is a verified whole instruction exactly when
+// it is an instruction row AND its start address is a recorded anchor. The
+// field predates the other two and is kept for callers, so the relationship is
+// checked rather than left as a comment -- if it ever stops holding, one of the
+// three is being set wrong.
+static void
+check_line_flags(const code_map_line_t *lines, int n, const char *what)
+{
+	for (int i = 0; i < n; i++) {
+		bool expect = (lines[i].kind == CM_LINE_INSTRUCTION) && lines[i].start_recorded;
+		if (lines[i].recorded != expect) {
+			printf("      line %d at $%04X: recorded=%d kind=%u start_recorded=%d\n",
+			       i, (unsigned)lines[i].addr, (int)lines[i].recorded,
+			       (unsigned)lines[i].kind, (int)lines[i].start_recorded);
+			check(false, what);
+			return;
+		}
+		if (lines[i].kind == CM_LINE_DATA && lines[i].eff_addr != -1) {
+			printf("      line %d at $%04X: data row with eff_addr $%04X\n",
+			       i, (unsigned)lines[i].addr, (unsigned)lines[i].eff_addr);
+			check(false, what);
+			return;
+		}
+	}
+	check(n >= 1, what);
+}
+
+// The property that makes a disassembly window renderable at all: the emitted
+// lines must TILE the range they cover. Every line starts exactly where the
+// previous one ended -- an overlap claims the same byte for two instructions, a
+// gap describes no instruction at all for the bytes in between, and nothing
+// downstream can draw either. Asserted directly, rather than against golden
+// text, because this is the actual invariant; golden strings pass for the wrong
+// reasons and fail for cosmetic ones.
+static void
+check_tiles(const code_map_line_t *lines, int n, const char *what)
+{
+	for (int i = 0; i < n; i++) {
+		if (lines[i].size < 1) {
+			printf("      line %d at $%04X has size %u\n",
+			       i, (unsigned)lines[i].addr, (unsigned)lines[i].size);
+			check(false, what);
+			return;
+		}
+		if (i == 0) {
+			continue;
+		}
+		uint16_t end = (uint16_t)((lines[i - 1].addr + lines[i - 1].size) & 0xFFFF);
+		if (lines[i].addr != end) {
+			printf("      %s: line %d $%04X+%u ends at $%04X, line %d starts at $%04X\n",
+			       (uint16_t)(lines[i].addr - end) < 0x8000 ? "gap" : "overlap",
+			       i - 1, (unsigned)lines[i - 1].addr, (unsigned)lines[i - 1].size,
+			       (unsigned)end, i, (unsigned)lines[i].addr);
+			check(false, what);
+			return;
+		}
+	}
+	check(n >= 1, what);
+}
+
 static void
 reset_all(void)
 {
 	code_map_reset();
 	memset(g_mem, 0xEA, sizeof(g_mem)); // NOP everywhere by default
+	memset(g_bram, 0xEA, sizeof(g_bram));
+	memset(g_brom, 0xEA, sizeof(g_brom));
+	memset(g_gen2, 0xEA, sizeof(g_gen2));
+	g_ram_bank         = 0;
+	g_rom_bank         = 0;
+	g_low_mem_windowed = 0;
 	memset(&regs, 0, sizeof(regs));
 	regs.status = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // 8-bit A/X/Y
 }
 
+// Write into a specific banked window, so a test can put different code at the
+// same address in different banks. Addresses are absolute; which array they
+// land in follows the same split real_read6502() uses.
+static void
+poke_banked(uint16_t addr, uint8_t window_bank, const uint8_t *bytes, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		uint16_t a = (uint16_t)((addr + i) & 0xFFFF);
+		if (a >= 0xC000) {
+			g_brom[window_bank % TEST_ROM_BANKS][a - 0xC000] = bytes[i];
+		} else if (a >= 0xA000) {
+			g_bram[window_bank % TEST_RAM_BANKS][a - 0xA000] = bytes[i];
+		} else {
+			g_mem[a] = bytes[i];
+		}
+	}
+}
+
+// Write through whichever window the live bank registers currently select, so
+// a plain poke and a plain read agree without the test naming a bank.
 static void
 poke(uint16_t addr, const uint8_t *bytes, size_t n)
 {
 	for (size_t i = 0; i < n; i++) {
-		g_mem[(addr + i) & 0xFFFF] = bytes[i];
+		uint16_t a = (uint16_t)((addr + i) & 0xFFFF);
+		poke_banked(a, a >= 0xC000 ? g_rom_bank : g_ram_bank, &bytes[i], 1);
+	}
+}
+
+static void
+poke_gen2(uint8_t cpu_bank, uint16_t addr, const uint8_t *bytes, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		g_gen2[cpu_bank % TEST_GEN2_BANKS][(addr + i) & 0xFFFF] = bytes[i];
 	}
 }
 
@@ -302,8 +439,12 @@ main(void)
 		check(next == 0x8006, "reports the address just past the last instruction");
 		check(n == 3 && lines[0].bytes[0] == 0xA9 && lines[0].bytes[1] == 0x12,
 		      "captures the raw instruction bytes");
-		check(n == 3 && strstr(lines[1].text, "8d") == NULL && lines[1].text[0] != '\0',
-		      "renders instruction text");
+		// The text must be a disassembly, not a hex dump: pin the mnemonic that
+		// belongs to the opcode. (Asserting only that "8d" is absent cannot
+		// fail -- the mnemonics are alphabetic and the operand here is $1234.)
+		check(n == 3 && strstr(lines[1].text, "sta") != NULL &&
+		          strstr(lines[1].text, "$1234") != NULL,
+		      "renders the mnemonic and operand for the opcode it decoded");
 
 		// Coverage is reported so a UI can distinguish "known good" from "guess".
 		check(n == 3 && !lines[0].recorded, "marks unexecuted lines as unrecorded");
@@ -332,8 +473,13 @@ main(void)
 		check(n >= 1 && lines[0].addr == 0x8001, "starts the window before the center");
 
 		// A window that cannot fit must still be safe and still locate center.
+		center_index = -99;
 		n = code_map_disasm_window(0x8004, 0, 0, 0, 3, 3, lines, 2, &center_index);
-		check(n <= 2, "honours the output capacity");
+		check(n == 2, "honours the output capacity");
+		check(center_index == 1 && lines[center_index].addr == 0x8004,
+		      "still locates the center in a window that cannot fit");
+		check(n == 2 && lines[0].addr == 0x8003,
+		      "spends a too-small window on the lines nearest the center");
 	}
 
 	// ── Recovering from a disagreement about instruction width ──────────────
@@ -368,25 +514,300 @@ main(void)
 		int             center_index = -99;
 		int             n = code_map_disasm_window(0x8004, 0, 0, 0, 2, 2, lines, 16, &center_index);
 
-		check(n > 0, "still produces a window when the walks disagree");
-		check(center_index >= 0, "does not lose the center line to width drift");
+		check(n > 0 && center_index >= 0, "does not lose the center line to width drift");
 		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8004,
 		      "re-aligns onto the center address after drifting");
 		check(n == 4, "returns exactly the requested line count despite the drift");
 		check(center_index == 2, "puts exactly the requested number of lines before center");
 
+		// The width the backward walk settled on is the whole point: read with
+		// the 8-bit status the LDA is 2 bytes and the walk lands on $8003, then
+		// $8005, jumping the center. Only the 16-bit reading reaches $8004.
+		check(n == 4 && lines[1].addr == 0x8001 && lines[1].size == 3,
+		      "sizes the drifting instruction from the status that reaches center");
+
 		// The real damage from drift is contradictory output: a line claiming
 		// bytes that the next line also claims. Nothing downstream can render
 		// that sensibly, so the window must never emit it.
-		bool overlap = false;
-		for (int i = 1; i < n; i++) {
-			if (lines[i].addr < lines[i - 1].addr + lines[i - 1].size) {
-				overlap = true;
-			}
-		}
-		check(!overlap, "never emits overlapping instructions");
+		check_tiles(lines, n, "never emits overlapping instructions");
 
 		regs.is65c816 = false;
+	}
+
+	// ── The one-byte fallback must not overlap the line after it ────────────
+	// When no backoff decodes cleanly onto the anchor, the backward walk gives
+	// up and backs off a single byte so the caller still makes progress. That
+	// is a guess about where the previous instruction STARTS -- it is not a
+	// decode -- so the byte sitting there can still decode wider than the one
+	// byte the walk allowed for, and the rendered line then runs straight into
+	// the line the caller actually asked for.
+	//
+	//   $7FFF: A9 ..   LDA #imm -- 2 bytes, so its operand IS $8000
+	//   $8000: the requested center
+	//
+	// Everything else is NOP, so no backoff of 2..4 decodes onto $8000 either;
+	// the walk has nothing to align to and falls back.
+	{
+		reset_all();
+		g_mem[0x7FFF] = 0xA9; // LDA #imm: 2 bytes, operand at $8000
+
+		code_map_line_t lines[8];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8000, 0, 0, 0, 1, 2, lines, 8, &center_index);
+
+		check(n >= 2 && lines[0].addr == 0x7FFF,
+		      "backs off a single byte when nothing decodes onto the anchor");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8000,
+		      "keeps the center where the caller asked despite the fallback");
+		check_tiles(lines, n, "the one-byte fallback tiles the range instead of overlapping");
+	}
+
+	// ── Truncating onto an interior anchor must not leave a hole ────────────
+	// Overlapping-but-legal instruction starts are ordinary on this CPU. The
+	// `.byte $2C` skip idiom hides a real entry point inside a BIT abs operand,
+	// so the BIT and the byte after it are BOTH genuine instruction starts, and
+	// live execution can record either.
+	//
+	//   $8002: 2C 8D 12   BIT $128D -- 3 bytes, lands exactly on $8005
+	//   $8003: 8D ..      STA abs   -- the hidden entry point, recorded
+	//
+	// The inner start is not itself a candidate (STA abs from $8003 runs to
+	// $8006, past the anchor), so the backward walk picks the BIT. The fill then
+	// truncates the BIT onto the recorded start at $8003 -- correctly, an anchor
+	// outranks a decode -- and the two operand bytes end up described by no line
+	// at all unless the truncation is followed up.
+	{
+		reset_all();
+		const uint8_t skip_idiom[] = { 0x2C, 0x8D, 0x12 };
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[8];
+		int             center_index = -99;
+		int             n = code_map_disasm_window(0x8005, 0, 0, 0, 1, 2, lines, 8, &center_index);
+
+		check(n >= 2 && lines[0].addr == 0x8002,
+		      "walks back onto the wider of two overlapping starts");
+		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8005,
+		      "still centers on the requested address after truncating");
+		check_tiles(lines, n, "truncating onto an interior anchor leaves no gap");
+		check_line_flags(lines, n, "keeps recorded/kind/start_recorded consistent");
+
+		// Tiling alone would also be satisfied by simply not truncating, so
+		// pin the intent: the recorded start at $8003 is ground truth and must
+		// begin a line of its own, and the line cut short to reach it must not
+		// still claim to be a whole verified instruction.
+		bool starts_at_8003 = false;
+		for (int i = 0; i < n; i++) {
+			if (lines[i].addr == 0x8003) {
+				starts_at_8003 = true;
+			}
+		}
+		check(starts_at_8003, "begins a line at the recorded start inside the BIT");
+		check(n >= 1 && lines[0].size == 1 && !lines[0].recorded && lines[0].eff_addr == -1,
+		      "a line cut short is not reported as a whole verified instruction");
+		// size, bytes and text must agree: a row cut short is rendered as the
+		// data bytes it actually owns, not as an instruction whose mnemonic
+		// describes bytes the next row claims.
+		check(n >= 1 && lines[0].bytes[0] == 0x2C &&
+		          strcmp(lines[0].text, ".byte $2c") == 0,
+		      "renders a cut-short line as the bytes it owns");
+		// The row kind says what the row IS, so a consumer need not parse the
+		// text to find out; start_recorded still says the address was executed,
+		// which `recorded` cannot express once the row became data.
+		check(n >= 1 && lines[0].kind == CM_LINE_DATA,
+		      "marks a cut-short line as data rather than an instruction");
+		check(center_index >= 0 && center_index < n &&
+		          lines[center_index].kind == CM_LINE_INSTRUCTION,
+		      "marks a whole line as an instruction");
+
+		// Capacity is the case that used to lose the center outright: phase B
+		// now needs two lines where the walk resolved one, and with room for
+		// only two lines a naive fill spends both and drops $8005 entirely.
+		center_index = -99;
+		int tight = code_map_disasm_window(0x8005, 0, 0, 0, 1, 2, lines, 2, &center_index);
+		check(tight >= 1 && center_index >= 0 && center_index < tight &&
+		          lines[center_index].addr == 0x8005,
+		      "keeps the center line when phase B cannot fit as well");
+		check_tiles(lines, tight, "tiles what fits when capacity runs out");
+
+		// ...and it must spend the one remaining slot on the row NEAREST the
+		// center. A group that needs two lines and has room for one can keep
+		// its last line ($8003) and simply start the window later; dropping the
+		// whole group instead throws away context the caller has room for.
+		check(tight == 2 && center_index == 1 && lines[0].addr == 0x8003,
+		      "keeps the part of a too-large group closest to the center");
+		// That row is the recorded start at $8003 cut short by the boundary, so
+		// it reports as data while still saying its address was executed --
+		// "never ran" and "ran, but cannot be shown whole here" are different
+		// things, and `recorded` alone cannot say which.
+		check(tight == 2 && lines[0].kind == CM_LINE_DATA && lines[0].start_recorded &&
+		          !lines[0].recorded,
+		      "a row cut by a boundary still reports its start as executed");
+	}
+
+	// ── Two overlapping starts that are BOTH ground truth ───────────────────
+	// The `.byte $2C` skip idiom really can have both starts executed: entering
+	// at the BIT swallows the next two bytes, entering at the hidden address
+	// runs the instruction they spell. When only the inner one is recorded, the
+	// outer decode is a guess and gives way to it (above). When BOTH are
+	// recorded they are evidence of the same rank, and the caller asked for one
+	// of them specifically -- clipping it there would throw away a whole known
+	// instruction to show a different execution path than the one requested.
+	//
+	//   $8002: 2C 8D 12   BIT $128D   recorded -- the skip
+	//   $8003:    8D 12 EA  STA $EA12  recorded -- the hidden entry point
+	{
+		reset_all();
+		const uint8_t skip_idiom[] = { 0x2C, 0x8D, 0x12 };
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8002, 0, 0, 0, regs.status);
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+
+		int n = code_map_disasm_forward(0x8002, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].addr == 0x8002 && lines[0].size == 3 &&
+		          lines[0].recorded,
+		      "emits a recorded instruction whole over a recorded start inside it");
+		check(n == 2 && strstr(lines[0].text, "bit") != NULL,
+		      "keeps the mnemonic of a recorded instruction spanning another start");
+		check(n == 2 && lines[1].addr == 0x8005,
+		      "continues past a swallowed start on the path the caller asked for");
+		check_tiles(lines, n, "tiles the path entered at the outer start");
+
+		// Entering at the hidden address gives the other real path, whole.
+		n = code_map_disasm_forward(0x8003, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].addr == 0x8003 && lines[0].size == 3 &&
+		          lines[0].recorded && strstr(lines[0].text, "sta") != NULL,
+		      "emits the hidden entry point whole when entered there");
+		check_tiles(lines, n, "tiles the path entered at the hidden start");
+
+		// A guessed width still gives way, so the protection above cannot be
+		// used to step over ground truth.
+		code_map_reset();
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+		n = code_map_disasm_forward(0x8002, 0, 0, 0, 2, lines, 8, &next);
+		check(n == 2 && lines[0].size == 1 && !lines[0].recorded,
+		      "an unrecorded decode still gives way to a recorded start inside it");
+
+		// A row forced to data by a window boundary still reports that its
+		// address was executed -- "never ran" and "ran, but cannot be shown
+		// whole on this path" are different things, and `recorded` alone
+		// cannot say which.
+		reset_all();
+		poke(0x8002, skip_idiom, sizeof(skip_idiom));
+		code_map_record(0x8002, 0, 0, 0, regs.status);
+		code_map_record(0x8003, 0, 0, 0, regs.status);
+
+		int             center_index = -99;
+		code_map_line_t win[8];
+		int             wn = code_map_disasm_window(0x8005, 0, 0, 0, 1, 1, win, 8, &center_index);
+		check(wn >= 2 && win[0].addr == 0x8002 && win[0].size == 3 &&
+		          win[0].kind == CM_LINE_INSTRUCTION && win[0].start_recorded,
+		      "the window shows the outer instruction whole when both are recorded");
+		check_tiles(win, wn, "tiles when both overlapping starts are recorded");
+
+		// Centering on each overlapping start gives that start's own path.
+		center_index = -99;
+		wn = code_map_disasm_window(0x8002, 0, 0, 0, 0, 2, win, 8, &center_index);
+		check(wn >= 1 && center_index == 0 && win[0].addr == 0x8002 &&
+		          win[0].size == 3 && win[0].kind == CM_LINE_INSTRUCTION,
+		      "centering on the outer start shows the outer instruction whole");
+		center_index = -99;
+		wn = code_map_disasm_window(0x8003, 0, 0, 0, 0, 2, win, 8, &center_index);
+		check(wn >= 1 && center_index == 0 && win[0].addr == 0x8003 &&
+		          win[0].size == 3 && win[0].kind == CM_LINE_INSTRUCTION,
+		      "centering on the inner start shows the inner instruction whole");
+	}
+
+	// ── KNOWN LIMITATION: a stale anchor that kept its opcode byte ──────────
+	// Anchors are validated by comparing one byte -- the opcode that was
+	// executing -- against memory. Replacement code that happens to repeat that
+	// byte at the same address keeps the old anchor, and with it the old
+	// recorded STATUS. On a 65C816 that status can imply a different operand
+	// width, so the stale line decodes wider than the new code really is, and
+	// the exemption above then lets it swallow a genuinely fresh anchor inside
+	// it.
+	//
+	//   old: $8000  A9 11 22   LDA #$2211  recorded with 16-bit A (3 bytes)
+	//   new: $8000  A9 EA      LDA #$EA    8-bit A, and $8002 freshly executed
+	//
+	// The opcode byte is still $A9, so the stale anchor survives and wins.
+	//
+	// This pins the CURRENT behaviour so the limitation is visible rather than
+	// folklore. Note carefully what it is NOT: the recorded state here is
+	// indistinguishable from a routine legitimately executed at two different
+	// widths, where emitting the 3-byte LDA is exactly right. Nothing derivable
+	// from the anchors AS RECORDED -- one opcode byte -- can separate the two,
+	// which is why a "prefer the newer anchor" rule would not fix this; it
+	// would only trade this case for that one. A wider staleness check would
+	// catch this particular fixture, whose operand bytes do differ, but not the
+	// case where the replacement bytes are identical; only invalidating anchors
+	// on the write that replaced the code closes it in general. See
+	// docs/code-map-width-propagation.md. If you fix it, this check should
+	// fail -- but only for a fix INSIDE code_map (a wider staleness check, a
+	// stored length, an epoch). A write-invalidation fix would not be reached
+	// from here at all, because poke() writes the test's memory directly and
+	// code_map has no write-notification entry point; route poke() through
+	// whatever hook you add, or this tripwire will stay green while the note
+	// above it goes stale. Update these checks, do not delete them.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		// The old program runs here with a 16-bit accumulator, so its LDA is
+		// three bytes and the anchor records both that opcode and that status.
+		const uint8_t old_code[] = { 0xA9, 0x11, 0x22, 0x33 };
+		poke(0x8000, old_code, sizeof(old_code));
+		code_map_record(0x8000, 0, 0, 0, FLAG_INDEX_WIDTH);
+
+		// An overlay replaces the code. The replacement happens to begin with
+		// $A9 as well, so the one-byte staleness check cannot see the change
+		// and the old anchor -- with its 16-bit status -- survives.
+		const uint8_t new_code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
+		poke(0x8000, new_code, sizeof(new_code));
+		code_map_record(0x8002, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
+		regs.status = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 3,
+		      "KNOWN LIMITATION: a stale same-opcode anchor still swallows a fresh one");
+		check(n == 2 && lines[1].addr == 0x8003,
+		      "KNOWN LIMITATION: the line after it starts past the fresh anchor");
+
+		regs.is65c816 = false;
+	}
+
+	// The same swallowing happens on a 65C02, where no width is involved at
+	// all: it needs only a stale anchor whose opcode byte survived. Here the
+	// old code's BIT is still $2C, so the anchor is believed, is exempt from
+	// the interior clamp, and covers the fresh start the new code has at
+	// $8001. Only the WRONG-WIDTH flavour above is 65C816-specific.
+	{
+		reset_all(); // regs.is65c816 stays false
+
+		const uint8_t old_bit[] = { 0x2C, 0x8D, 0x12 }; // bit $128d
+		poke(0x8000, old_bit, sizeof(old_bit));
+		code_map_record(0x8000, 0, 0, 0, regs.status);
+
+		// Overlay: same $2C opcode byte, but the new program really starts an
+		// instruction at $8001.
+		const uint8_t new_bit[] = { 0x2C, 0xA9, 0xEA };
+		poke(0x8000, new_bit, sizeof(new_bit));
+		code_map_record(0x8001, 0, 0, 0, regs.status);
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 3 && lines[1].addr == 0x8003,
+		      "KNOWN LIMITATION: stale-anchor swallowing is not 65C816-specific");
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────
@@ -501,7 +922,406 @@ main(void)
 
 		regs.is65c816 = false;
 	}
-	// ── Degenerate input ────────────────────────────────────────────────────
+
+	// ── The same bound applies to RTI ───────────────────────────────────────
+	// RTI restores a status byte the interrupt pushed, so like PLP it changes
+	// the M/X widths by an amount no static analysis recovers -- and unlike
+	// PLP there is not even a matching push in the instruction stream to walk
+	// back to. cm_propagate() therefore leaves the estimate alone for it.
+	//
+	// This pins the two things that make that safe, and it is deliberately
+	// written so that "fixing" RTI by inventing a plausible width would fail
+	// it: the line decoded from the stale estimate must be reported as a guess,
+	// and the next anchor must be reached rather than stepped over.
+	//
+	//   $8000: 40         RTI       recorded with 8-bit A
+	//   $8001: A9 EA A9   LDA #...  2 bytes on the stale estimate, 3 in truth
+	//   $8004: EA         NOP       recorded with 16-bit A -- the anchor
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		const uint8_t code[] = { 0x40, 0xA9, 0xEA, 0xA9, 0xEA };
+		poke(0x8000, code, sizeof(code));
+		const uint8_t st_8bit  = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		const uint8_t st_16bit = FLAG_INDEX_WIDTH;
+		regs.status = st_8bit;
+		code_map_record(0x8000, 0, 0, 0, st_8bit);
+		code_map_record(0x8004, 0, 0, 0, st_16bit);
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+
+		check(n >= 2 && lines[0].recorded && lines[0].size == 1,
+		      "decodes RTI itself from its own anchor");
+
+		// The contract: cm_propagate leaves the estimate alone for RTI, so the
+		// next line is decoded on the pre-RTI width. Pinned explicitly, because
+		// substituting a plausible width is the tempting "fix" and it would be
+		// a guess dressed up as knowledge.
+		check(n >= 2 && lines[1].addr == 0x8001 && lines[1].size == 2 &&
+		          lines[1].status == st_8bit,
+		      "leaves the width estimate alone across RTI instead of guessing");
+
+		// The two properties that make leaving it alone acceptable: the guess
+		// is labelled as one, and it cannot run on -- the next anchor is
+		// reached rather than stepped over, and it restores the real width.
+		check(n >= 2 && !lines[1].recorded,
+		      "reports a line decoded across RTI as a guess, not as known");
+		bool resynced = false;
+		for (int i = 0; i < n; i++) {
+			if (lines[i].addr == 0x8004 && lines[i].recorded && lines[i].status == st_16bit) {
+				resynced = true;
+			}
+		}
+		check(resynced, "reaches the anchor after RTI and recovers the real width");
+		check_tiles(lines, n, "tiles the range either side of an RTI");
+
+		regs.is65c816 = false;
+	}
+	// ── Reads go through the window that backs each address ─────────────────
+	// Every read code_map makes has to name the bank that actually backs the
+	// address: the ROM bank above $C000, the RAM bank in $A000-$BFFF, and the
+	// live registers below that. Get it wrong and the disassembler decodes some
+	// other bank's bytes, which is indistinguishable from garbage.
+	//
+	// The live bank registers are deliberately pointed somewhere else here, with
+	// different code in them, so selecting the wrong window shows up as the
+	// wrong instruction rather than passing by coincidence.
+	{
+		reset_all();
+		g_ram_bank = 0x11; // live registers disagree with the requested banks
+		g_rom_bank = 0x17;
+
+		// What the caller asks for.
+		const uint8_t ram5[]  = { 0xA9, 0x12 };       // lda #$12
+		const uint8_t rom2[]  = { 0x8D, 0x34, 0x12 }; // sta $1234
+		// Decoys of a different length sitting in the live banks.
+		const uint8_t decoy[] = { 0xEA, 0xEA, 0xEA }; // nop nop nop
+		poke_banked(0xA000, 5, ram5, sizeof(ram5));
+		poke_banked(0xC000, 2, rom2, sizeof(rom2));
+		poke_banked(0xA000, 0x11, decoy, sizeof(decoy));
+		poke_banked(0xC000, 0x17, decoy, sizeof(decoy));
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+
+		int n = code_map_disasm_forward(0xA000, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 2 && lines[0].bytes[0] == 0xA9 &&
+		          lines[0].bytes[1] == 0x12,
+		      "reads a $A000 address through the requested RAM bank");
+
+		n = code_map_disasm_forward(0xC000, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 3 && lines[0].bytes[0] == 0x8D &&
+		          lines[0].bytes[2] == 0x12,
+		      "reads a $C000 address through the requested ROM bank");
+
+		// Low memory is not banked at all, so code_map must ask for "current
+		// bank" there rather than invent a window for it.
+		g_low_mem_windowed = 0;
+		n = code_map_disasm_forward(0x0801, 0, 5, 2, 4, lines, 4, &next);
+		check(n == 4 && g_low_mem_windowed == 0,
+		      "does not put a window bank on an unbanked low-memory read");
+
+		// An instruction may straddle the $BFFF/$C000 boundary, and then each
+		// half lives behind a different window. The bytes shown have to follow
+		// the address, not the opcode.
+		reset_all();
+		g_ram_bank = 0x11;
+		g_rom_bank = 0x17;
+		const uint8_t head[] = { 0x8D };       // sta $xxxx, opcode in RAM bank 5
+		const uint8_t tail[] = { 0x34, 0x12 }; // its operand, in ROM bank 2
+		poke_banked(0xBFFF, 5, head, sizeof(head));
+		poke_banked(0xC000, 2, tail, sizeof(tail));
+		const uint8_t straddle_decoy[] = { 0x00, 0x00 };
+		poke_banked(0xC000, 0x17, straddle_decoy, sizeof(straddle_decoy));
+
+		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 3 && lines[0].bytes[0] == 0x8D &&
+		          lines[0].bytes[1] == 0x34 && lines[0].bytes[2] == 0x12,
+		      "shows each byte of a window-straddling instruction from its own bank");
+		// NOT COVERED, and not fixed here: this pins the displayed BYTES only.
+		// The mnemonic text and effective address are still wrong for a
+		// straddling instruction -- cm_decode() hands disasm() a single window
+		// (the one backing the START address), and disasm() reads every operand
+		// byte through it, so the operand above $C000 comes from ROM bank 5
+		// rather than 2 and the text reads "sta $eaea". Fixing it means giving
+		// disasm() a per-byte reader, which is shared with the classic debugger
+		// and the DAP server. See docs/code-map-width-propagation.md.
+
+		// The width propagation, by contrast, is code_map's own and must read
+		// its operand through the right window. A REP whose opcode is the last
+		// byte of the RAM window takes its operand from the ROM window, and
+		// getting that wrong mis-sizes the following instructions until an
+		// accurate anchor is reached -- exactly the drift this file exists to
+		// prevent.
+		//
+		//   $BFFF: C2 20   REP #$20   opcode in RAM bank 5, operand in ROM 2
+		//   $C001: A9 ..   LDA #imm   3 bytes once REP has cleared M
+		//
+		// ROM bank 5 holds $00 at $C000, so reading the operand through the
+		// opcode's own window clears nothing and sizes the LDA at 2.
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // 8-bit A to start
+		g_ram_bank    = 0x11;
+		g_rom_bank    = 0x17;
+
+		const uint8_t rep_op[]    = { 0xC2 };       // REP, in the RAM window
+		const uint8_t rep_arg[]   = { 0x20 };       // its operand: clear M
+		const uint8_t rep_decoy[] = { 0x00 };       // same address, wrong bank
+		const uint8_t lda_imm[]   = { 0xA9, 0xEA, 0xEA };
+		poke_banked(0xBFFF, 5, rep_op, sizeof(rep_op));
+		poke_banked(0xC000, 2, rep_arg, sizeof(rep_arg));
+		poke_banked(0xC000, 5, rep_decoy, sizeof(rep_decoy));
+		poke_banked(0xC001, 2, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 2, lines, 4, &next);
+		// A REP is two bytes whatever its operand says, so this only pins that
+		// the straddling instruction is sized at all -- the check below is the
+		// one that exercises the operand's window.
+		check(n == 2 && lines[0].addr == 0xBFFF && lines[0].size == 2,
+		      "sizes a REP that straddles the window boundary");
+		check(n == 2 && lines[1].addr == 0xC001 && lines[1].size == 3,
+		      "reads a REP operand through the window backing the operand");
+
+		// The same split exists at $9FFF/$A000: an opcode below $A000 follows
+		// the live bank while its operand sits in the caller's RAM window.
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		g_ram_bank    = 0x11;
+		const uint8_t sep_op[]  = { 0xC2 };
+		const uint8_t sep_arg[] = { 0x20 };
+		const uint8_t sep_bad[] = { 0x00 };
+		poke_banked(0x9FFF, 0, sep_op, sizeof(sep_op));   // below $A000: flat
+		poke_banked(0xA000, 4, sep_arg, sizeof(sep_arg)); // requested RAM bank
+		poke_banked(0xA000, 0x11, sep_bad, sizeof(sep_bad)); // live bank decoy
+		poke_banked(0xA001, 4, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0x9FFF, 0, 4, 0, 2, lines, 4, &next);
+		check(n == 2 && lines[1].addr == 0xA001 && lines[1].size == 3,
+		      "reads a REP operand across the $9FFF/$A000 boundary correctly");
+
+		// And at the very top of memory the operand wraps to $0000. That is low
+		// memory, which is unbanked, so this pins the wrapped ADDRESS rather
+		// than a window choice: reading at `addr` instead of `addr + 1` leaves
+		// M set and sizes the LDA at 2. (There is deliberately no decoy here --
+		// no window selection can be observed below $A000.)
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH;
+		poke_banked(0xFFFF, 3, sep_op, sizeof(sep_op)); // REP in ROM bank 3
+		poke(0x0000, sep_arg, sizeof(sep_arg));         // operand wraps to $0000
+		poke(0x0001, lda_imm, sizeof(lda_imm));
+
+		n = code_map_disasm_forward(0xFFFF, 0, 0, 3, 2, lines, 4, &next);
+		check(n == 2 && lines[1].addr == 0x0001 && lines[1].size == 3,
+		      "wraps the REP operand address past $FFFF instead of reading past the end");
+
+		regs.is65c816 = false;
+	}
+
+	// ── Anchor staleness is judged in the right bank ────────────────────────
+	// An anchor is only believed while the opcode it recorded is still in
+	// memory. That comparison is a read, so it too has to name the right
+	// window: check it against the wrong bank and a live anchor looks stale
+	// (or, worse, a stale one looks live) purely because another bank happens
+	// to hold a different byte at the same address.
+	{
+		reset_all();
+		const uint8_t lda[] = { 0xA9, 0x12 };
+		const uint8_t nop[] = { 0xEA, 0xEA };
+		poke_banked(0xA000, 5, lda, sizeof(lda));
+		poke_banked(0xA000, 6, nop, sizeof(nop));
+
+		g_ram_bank = 6; // live register points at the other bank throughout
+		code_map_record(0xA000, 0, 5, 0, regs.status);
+		check(code_map_is_recorded_start(0xA000, 0, 5, 0),
+		      "validates an anchor against the bank it was recorded in");
+
+		// Overwrite bank 5 only. The anchor must die even though the live bank
+		// register still points at untouched memory.
+		poke_banked(0xA000, 5, nop, sizeof(nop));
+		check(!code_map_is_recorded_start(0xA000, 0, 5, 0),
+		      "drops the anchor when its own bank's code changes");
+	}
+
+	// ── Gen2 program banks are flat memory ──────────────────────────────────
+	// On a Gen2 machine a non-zero CPU bank maps its whole 64K as flat RAM, so
+	// the window registers select nothing there -- including above $C000, where
+	// they otherwise would.
+	{
+		reset_all();
+		is_gen2 = true;
+		g_rom_bank = 0x17;
+		const uint8_t code[] = { 0xA9, 0x12 };
+		const uint8_t decoy[] = { 0x8D, 0x34, 0x12 };
+		poke_gen2(1, 0xC000, code, sizeof(code));
+		poke_banked(0xC000, 0x17, decoy, sizeof(decoy));
+		poke_banked(0xC000, 3, decoy, sizeof(decoy));
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int n = code_map_disasm_forward(0xC000, 1, 0, 3, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 2 && lines[0].bytes[0] == 0xA9 &&
+		          lines[0].bytes[1] == 0x12,
+		      "reads a Gen2 program bank as flat RAM, ignoring the ROM window");
+
+		is_gen2 = false;
+	}
+
+	// ── KNOWN LIMITATION: the carry feeding XCE is not tracked through data ──
+	// XCE swaps the carry and emulation flags, so predicting it needs the
+	// incoming CARRY as well as the incoming E. cm_propagate carries the carry
+	// through CLC, SEC and whatever REP/SEP/XCE themselves do to it, but every
+	// data-dependent change (ADC, SBC, CMP/CPX/CPY, the shifts and rotates) and
+	// the stack restores (PLP, RTI) leave the estimate untouched. A stale carry
+	// therefore mispredicts the emulation flag, and with it the widths, WITHOUT
+	// any PLP or RTI being involved.
+	//
+	//   $8000: 4A       LSR A   really clears C; the estimate keeps it set
+	//   $8001: FB       XCE     estimate: C set -> enter emulation, force 8-bit
+	//                           reality:  C clear -> stay native, A stays 16-bit
+	//   $8002: A9 xx xx LDA #   3 bytes in reality, 2 on the estimate
+	//
+	// Pinned so the gap is visible, and paired with the recovery that bounds
+	// it. If XCE's inputs are ever tracked properly this first check should
+	// fail: update it, do not delete it.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+		// 16-bit A, and carry set going in.
+		regs.status = FLAG_INDEX_WIDTH | FLAG_CARRY;
+
+		const uint8_t code[] = { 0x4A, 0xFB, 0xA9, 0xEA, 0xEA, 0xA9, 0xEA, 0xEA };
+		poke(0x8000, code, sizeof(code));
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 3, lines, 8, &next);
+
+		check(n == 3 && lines[2].addr == 0x8002 && lines[2].size == 2,
+		      "KNOWN LIMITATION: a stale carry into XCE mispredicts the widths");
+		check(n == 3 && !lines[2].recorded,
+		      "the mispredicted line is still reported as a guess");
+
+		// What an anchor buys here is its OWN line, and no more. It supplies
+		// the status for that line, so the line is sized correctly -- but no
+		// anchor re-establishes E, so propagating past it folds the widths back
+		// to 8-bit and the next unanchored line is wrong again. (E is not
+		// beyond repair in general: a later XCE decoded with an accurate carry
+		// writes a correct E, as the real instruction does. There is no XCE
+		// after this point in the fixture, so nothing repairs it here.)
+		const uint8_t st_16 = FLAG_INDEX_WIDTH;
+		code_map_record(0x8002, 0, 0, 0, st_16);
+		n = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+		check(n == 4 && lines[2].addr == 0x8002 && lines[2].size == 3 &&
+		          lines[2].recorded,
+		      "an anchor recovers the width of its own line after a bad XCE");
+		check(n == 4 && lines[3].addr == 0x8005 && lines[3].size == 2 &&
+		          !lines[3].recorded,
+		      "KNOWN LIMITATION: past that anchor a stale E mis-sizes again");
+
+		regs.is65c816 = false;
+	}
+
+	// ── KNOWN LIMITATION: "emulation mode is always right" is not true of the
+	//    ESTIMATE ──────────────────────────────────────────────────────────────
+	// The real CPU in emulation mode forces 8-bit widths, so its widths are
+	// always right. code_map's fold-in (`if (e) status |= INDEX|MEMORY`) uses
+	// the ESTIMATED e, though, and no ordinary anchor repairs that estimate:
+	// run_e is seeded once per forward run and thereafter written only by XCE,
+	// from the ESTIMATE's carry. (A later XCE decoded with an accurate carry
+	// would put it back in step -- that is what the real instruction does --
+	// but an anchor overrides the status and never the E, so nothing here
+	// guarantees it.) So the estimate can believe it is in native mode while
+	// the machine is really in emulation, and size operands accordingly.
+	//
+	//   real:  A bit 7 set and C=0, so ASL A really sets C; XCE then sees
+	//          C=1,E=1 and STAYS in emulation, where widths are forced 8-bit
+	//   model: the carry is not tracked through ASL, so XCE sees C=0,E=1 and
+	//          predicts NATIVE
+	//   then:  REP #$20 clears the model's M; the machine still forces 8-bit
+	//   so:    the LDA # is really 2 bytes and the estimate sizes it 3
+	//
+	// regs.a is set below only to make that premise concrete: this harness
+	// never executes the CPU, so what the real ASL/XCE would do is reasoning
+	// about the machine, while the assertion pins what the ESTIMATE produces.
+	// (The ASL is load-bearing for reality, not for the model -- the model's
+	// seed carry is already clear, so it would predict native either way.)
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 1; // the machine really IS in emulation mode
+		regs.a        = 0x80; // so a real ASL A would set the carry
+		regs.status   = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // as emulation forces
+
+		const uint8_t code[] = {
+			0x0A,             // $8000 ASL A -- really sets C; not modelled
+			0xFB,             // $8001 XCE   -- really stays in emulation
+			0xC2, 0x20,       // $8002 REP #$20
+			0xA9, 0xEA, 0xEA, // $8004 LDA # -- really 2 bytes in emulation
+		};
+		poke(0x8000, code, sizeof(code));
+
+		code_map_line_t lines[8];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
+
+		check(n == 4 && lines[3].addr == 0x8004 && lines[3].size == 3,
+		      "KNOWN LIMITATION: a stale carry mis-sizes even in emulation mode");
+		check(n == 4 && !lines[3].recorded,
+		      "that mis-sized line is still reported as a guess");
+
+		regs.is65c816 = false;
+		regs.e        = 0;
+	}
+
+	// ── KNOWN LIMITATION: a stale anchor can also decode too SHORT ───────────
+	// The stale-anchor cases above all decode too WIDE and swallow a fresh
+	// start. The opposite is just as reachable and is quieter: an anchor
+	// recorded when the accumulator was 8 bits sizes its LDA # at two bytes, so
+	// if the replacement code is about to run with a 16-bit accumulator the row
+	// stops one byte early and the NEXT row starts inside the real
+	// instruction's operand. Nothing is swallowed, so nothing looks wrong --
+	// the rows still tile.
+	{
+		reset_all();
+		regs.is65c816 = true;
+		regs.e        = 0;
+
+		// Old code, 8-bit A: LDA #$11 is two bytes.
+		const uint8_t old_code[] = { 0xA9, 0x11 };
+		poke(0x8000, old_code, sizeof(old_code));
+		code_map_record(0x8000, 0, 0, 0, FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH);
+
+		// Replacement keeps the $A9 opcode but is about to run with a 16-bit
+		// accumulator, so the real instruction there is three bytes. (It has
+		// not run yet -- executing at $8000 would re-record the anchor and
+		// refresh its status, which is exactly what fixes this.)
+		const uint8_t new_code[] = { 0xA9, 0xEA, 0xEA, 0xEA };
+		poke(0x8000, new_code, sizeof(new_code));
+		regs.status = FLAG_INDEX_WIDTH;
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int             n    = code_map_disasm_forward(0x8000, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].size == 2,
+		      "KNOWN LIMITATION: a stale anchor can size an instruction too short");
+		check(n == 2 && lines[1].addr == 0x8002,
+		      "KNOWN LIMITATION: the next row then starts inside a real operand");
+		check_tiles(lines, n, "the too-short reading still tiles, so it looks correct");
+
+		regs.is65c816 = false;
+	}
 	{
 		reset_all();
 		code_map_line_t lines[4];
@@ -521,20 +1341,51 @@ main(void)
 		      "treats a negative count as nothing to do");
 
 		// Negative "lines before" must be clamped, not used as an array size.
-		check(code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index) >= 1,
-		      "clamps a negative lines_before");
+		// Asserting only that a line comes back proves nothing -- phase C
+		// always emits the center -- so pin where the center actually lands.
+		center_index = -99;
+		int n = code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index);
+		check(n == 1 && center_index == 0 && lines[0].addr == 0x8000,
+		      "treats a negative lines_before as none at all");
+
+		// An absurd one must be capped too: the backward walk collects into a
+		// fixed 256-entry buffer, so an uncapped count writes off the end of
+		// it. 255 preceding lines is the ceiling, and the cap is only worth
+		// asserting if the count it produces is actually pinned -- a bare
+		// "did not overrun" passes for any cap at all.
+		static code_map_line_t wide[300];
+		center_index = -99;
+		n = code_map_disasm_window(0x8000, 0, 0, 0, 100000, 1, wide, 300, &center_index);
+		check(n == 256 && center_index == 255,
+		      "caps an absurd lines_before at the backward-walk ceiling");
+		check_tiles(wide, n, "tiles a window capped by the backward-walk ceiling");
 	}
 
 	// ── Wrapping at the top of the address space ────────────────────────────
-	// Decoding off the end of memory must wrap rather than read past the end of
-	// the address space.
+	// Decoding off the end of memory must wrap to $0000 and read the bytes that
+	// are really there. Asserting only that the address stayed below $0100
+	// proves nothing: code_map_line_t::addr is a uint16_t, so no arithmetic in
+	// the file can produce anything else.
 	{
 		reset_all();
+		// $FFFE: A9 12     LDA #$12   -- 2 bytes, ends exactly on the wrap
+		// $0000: 8D 34 12  STA $1234  -- must be decoded from the bottom of RAM
+		const uint8_t tail[] = { 0xA9, 0x12 };
+		const uint8_t head[] = { 0x8D, 0x34, 0x12 };
+		poke(0xFFFE, tail, sizeof(tail));
+		poke(0x0000, head, sizeof(head));
+
 		code_map_line_t lines[4];
 		uint16_t        next = 0;
-		int             n = code_map_disasm_forward(0xFFFE, 0, 0, 0, 3, lines, 4, &next);
-		check(n == 3, "keeps disassembling across the $FFFF boundary");
-		check(n == 3 && lines[2].addr < 0x0100, "wraps to the bottom of memory");
+		int             n = code_map_disasm_forward(0xFFFE, 0, 0, 0, 2, lines, 4, &next);
+
+		check(n == 2 && lines[0].addr == 0xFFFE && lines[0].size == 2,
+		      "decodes the instruction at the very top of memory");
+		check(n == 2 && lines[1].addr == 0x0000 && lines[1].size == 3 &&
+		          lines[1].bytes[0] == 0x8D && lines[1].bytes[2] == 0x12,
+		      "wraps to $0000 and decodes the bytes actually there");
+		check(next == 0x0003, "reports the wrapped next address");
+		check_tiles(lines, n, "tiles across the $FFFF wrap");
 	}
 
 	if (failures) {

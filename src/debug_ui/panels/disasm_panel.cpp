@@ -230,10 +230,16 @@ disasm_panel_render(bool *p_open)
 
 		// Row on the same line as the gutter; the Selectable also toggles the
 		// breakpoint so clicking anywhere on the address line works.
+		// Colour by whether the address carries live-execution evidence, not by
+		// whether the row is a whole instruction. A row cut short by a boundary
+		// carries start_recorded = true with recorded = false, and tinting it
+		// as "inferred" would deny evidence that exists. The tint tracks a
+		// currently believed anchor, which is the best signal available -- not
+		// proof the code on screen is what ran.
 		ImGui::SameLine(0.0f, 0.0f);
-		ImVec4 col = is_pc       ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
-		           : ln.recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // executed
-		                         : ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // inferred
+		ImVec4 col = is_pc             ? ImVec4(1.00f, 0.92f, 0.40f, 1.0f)   // current PC
+		           : ln.start_recorded ? ImVec4(0.86f, 0.86f, 0.86f, 1.0f)   // anchored
+		                               : ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // inferred
 		ImGui::PushStyleColor(ImGuiCol_Text, col);
 		if (ImGui::Selectable(text, is_pc)) {
 			toggle_breakpoint(ln.addr, bank, x16bank_for(ln.addr, bank, rambank, rombank));
@@ -248,8 +254,25 @@ disasm_panel_render(bool *p_open)
 			// Same instruction help the Source panel gives, so hovering here
 			// explains the instruction and — on the PC's row — predicts what it
 			// will do. Followed by the operand's live value.
+			//
+			// Gated on the row being an instruction at all, and on the lookup
+			// succeeding -- not merely on a token being extracted. code_map
+			// renders a row whose decode had to be cut short as its raw data
+			// bytes (".byte $2c"), which yields a token that is not an
+			// instruction. Opening a tooltip for it would show an empty box,
+			// since the body returns immediately and those rows carry no
+			// effective address either.
+			//
+			// This cannot hide a tooltip that had content: the body draws
+			// nothing at all unless the lookup succeeds, and the operand-value
+			// section below is gated on eff_addr independently. Swept the whole
+			// opcode space (both CPUs, both width settings) for mnemonics the
+			// table lacks: only "dbg" ($DB), which is implied and so has no
+			// effective address -- it too used to open an empty box.
 			char mnem[16];
-			const bool have_mnem = dbgui_mnemonic_of(ln.text, mnem, sizeof mnem);
+			const bool have_mnem = ln.kind == CM_LINE_INSTRUCTION &&
+			                       dbgui_mnemonic_of(ln.text, mnem, sizeof mnem) &&
+			                       insn_info_lookup(mnem) != nullptr;
 
 			if (have_mnem || ln.eff_addr >= 0) {
 				ImGui::BeginTooltip();

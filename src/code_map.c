@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>   // snprintf, for rendering a cut-short line as data bytes
 
 // --- Core symbols, declared directly to avoid pulling in memory.h/glue.h ---
 // The global CPU register file (defined in fake6502.c) and the non-intrusive
@@ -161,8 +162,8 @@ cm_bit(const cm_context_t *c, uint16_t addr)
 	return c && (c->cover[addr >> 3] & (uint8_t)(1u << (addr & 7))) != 0;
 }
 
-// True if `addr` is a recorded instruction start AND the code it described is
-// still there.
+// True if `addr` is a recorded instruction start AND the opcode byte recorded
+// there still matches memory.
 //
 // Anchors are only ever added; nothing removes them when memory changes, and on
 // this machine memory under code changes all the time -- an overlay LOAD, a
@@ -172,10 +173,14 @@ cm_bit(const cm_context_t *c, uint16_t addr)
 // so it can confidently place an instruction boundary in the middle of a real
 // instruction.
 //
-// Comparing the recorded opcode byte against memory catches all of those for
-// the price of one byte per address, and it costs nothing on the hot recording
-// path -- staleness is detected when an anchor is *used*, not when memory is
-// written, so no write hook is needed.
+// Comparing the recorded opcode byte against memory catches most of those for
+// the price of one byte per address, and it keeps the DETECTION off the hot
+// path -- staleness is noticed when an anchor is *used*, not when memory is
+// written, so no write hook is needed. (Recording still pays one read and one
+// store per executed instruction to capture the byte.) It is a heuristic, not a
+// proof: replacement code that repeats the same opcode byte at the same address
+// slips through. See the note in code_map.h and the KNOWN LIMITATION checks in
+// tests/test_code_map.c.
 static bool
 cm_anchor_ok(const cm_context_t *c, uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank)
 {
@@ -269,19 +274,61 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // takes precedence over this estimate.
 //
 // Just five instructions change the register widths -- REP, SEP, XCE, PLP and
-// RTI -- and the first three are handled exactly here (CLC/SEC are tracked only
-// because XCE swaps carry with the emulation flag). PLP and RTI restore a
-// status byte from the stack, which is unknowable until they run, so this
-// deliberately leaves the estimate alone for them rather than inventing a
-// value: the guess stays wrong only until the next recorded anchor, which
-// re-establishes both the boundary and the width.
+// RTI. REP and SEP apply their own status bits exactly, since the bits are in
+// the operand; the WIDTHS they imply are still only as good as the E estimate
+// below, because emulation mode overrides them.
+//
+// XCE is exact only when BOTH of its inputs are right, and neither is
+// guaranteed. It swaps the carry and emulation flags, so it needs the incoming
+// carry -- which is carried through the instructions handled in this switch
+// (CLC, SEC, and whatever REP/SEP/XCE themselves do to it), but NOT through any
+// data-dependent change: ADC, SBC, the compares, the shifts and rotates all
+// move the carry without this estimate noticing. It also needs the incoming E,
+// which anchors do not record at all.
+//
+// PLP and RTI restore a status byte from the stack, so this deliberately leaves
+// the estimate alone for them rather than inventing a value.
+//
+// HOW WELL EACH GAP IS BOUNDED differs, and none is bounded unconditionally:
+//   - a wrong STATUS estimate can be corrected when an accurate, believed
+//     anchor is reached. Not "the next recorded anchor": a same-opcode stale
+//     anchor is still believed and hands back its old status, there may be no
+//     accurate anchor ahead at all, and even an accurate one only fixes its OWN
+//     line -- an anchor on a PLP or RTI gives the status going INTO it, and the
+//     byte it restores is still unmodelled, so the next line can be wrong again;
+//   - a wrong E is weaker again, because anchors do not store E. An anchor
+//     fixes the width of its own line, and propagation folds the stale E back
+//     in (`if (e) status |= INDEX|MEMORY`), which can mis-size the next
+//     unanchored line wherever the stale E and the real one imply different
+//     widths. It is not unrecoverable: an XCE decoded with an accurate carry
+//     writes a correct E (that is exactly what the real instruction does), as
+//     does an explicit CLC/SEC before one -- but nothing guarantees such a
+//     sequence appears.
+// That fold-in also means "emulation mode is always right" holds for the real
+// CPU but NOT for this estimate: a diverged E sizes operands as though native
+// while the machine is really in emulation mode.
+// Either way every line drawn from the estimate reports recorded = false, so a
+// consumer is never told a guess is ground truth. All of this is pinned by
+// tests.
 static uint8_t
-cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8_t *e_inout)
+cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
+             uint8_t status, uint8_t *e_inout)
 {
 	if (!regs.is65c816)
 		return status;
 
-	uint8_t opcode = (uint8_t)CM_READ(addr, bank, x16bank);
+	// The operand is read through the window backing the OPERAND's address,
+	// not the opcode's. They differ for an instruction whose opcode is the last
+	// byte of a window: a REP at $BFFF takes its operand from $C000, which is
+	// banked ROM, and reading that through the RAM window yields some other
+	// bank's byte. Getting it wrong here mis-sizes the following instructions
+	// until an accurate anchor is reached -- the exact drift this file exists
+	// to prevent.
+	uint16_t argp   = (uint16_t)((addr + 1) & 0xFFFF);
+	int16_t  xb_op  = cm_x16bank_for(addr, rambank, rombank);
+	int16_t  xb_arg = cm_x16bank_for(argp, rambank, rombank);
+
+	uint8_t opcode = (uint8_t)CM_READ(addr, bank, xb_op);
 	uint8_t e      = *e_inout;
 
 	switch (opcode) {
@@ -292,10 +339,10 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 			status |= FLAG_CARRY;
 			break;
 		case 0xC2: // REP #imm — clears the given status bits
-			status &= (uint8_t)~CM_READ((addr + 1) & 0xFFFF, bank, x16bank);
+			status &= (uint8_t)~CM_READ(argp, bank, xb_arg);
 			break;
 		case 0xE2: // SEP #imm — sets the given status bits
-			status |= (uint8_t)CM_READ((addr + 1) & 0xFFFF, bank, x16bank);
+			status |= (uint8_t)CM_READ(argp, bank, xb_arg);
 			break;
 		case 0xFB: { // XCE — exchange carry and emulation flags
 			uint8_t carry = (uint8_t)(status & FLAG_CARRY);
@@ -330,25 +377,103 @@ cm_propagate(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status, uint8
 	return status;
 }
 
-// Fill one line at `addr`, decoded with an explicit status. Returns the size the
-// decode produced, clamped so that it never swallows an address live execution
-// proved is an instruction start: a recorded anchor is harder evidence than our
-// width estimate, so truncate onto it rather than stepping over the very ground
-// truth this file exists to collect.
+// Fill one line at `addr`, decoded with an explicit status.
+//
+// The size the decode produces is clamped twice, and both clamps exist because
+// a decode is the weakest evidence in this file:
+//
+//   * `max_size`, when positive, is a boundary the caller has already committed
+//     to -- the address the next line starts at. The backward walk resolves
+//     that boundary from evidence the fill does not have (and its last-resort
+//     fallback does not decode at all, it just backs off a byte), so a decode
+//     that disagrees has to give way rather than emit a line overlapping the
+//     next one.
+//   * a recorded anchor inside the instruction is live-execution evidence that
+//     a real instruction starts there, which outranks a width ESTIMATE;
+//     truncate onto it rather than stepping over the very ground truth this
+//     file exists to collect. This applies only when the line being decoded is
+//     itself a guess. When the line is recorded too, its width came from the
+//     status captured as it executed and is evidence of the same rank, so
+//     the two anchors are simply two real, overlapping instruction starts --
+//     the `.byte $2C` skip idiom -- and the one the caller asked for wins.
+//     Clipping it there would discard a whole known instruction to display a
+//     different execution path than the one requested.
+//
+// Either clamp can leave the line shorter than the decode wanted. Such a line
+// no longer describes a whole instruction, so it is not reported as one: it
+// comes back with `recorded == false`, no effective address, and `text`
+// rewritten as the raw data bytes it actually owns, so `size`, `bytes` and
+// `text` always agree. Covering the leftover bytes is the caller's job; see the
+// tiling loop in code_map_disasm_window().
 static int
 cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
-        uint8_t st, bool recorded, code_map_line_t *ln)
+        uint8_t st, bool recorded, int max_size, code_map_line_t *ln)
 {
 	int16_t xb = cm_x16bank_for(addr, rambank, rombank);
 
 	int32_t eff;
-	int     sz = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+	int     sz      = cm_decode(addr, bank, xb, st, ln->text, (unsigned)sizeof(ln->text), &eff);
+	int     decoded = sz;
 
-	for (int i = 1; i < sz; i++) {
-		uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
-		if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
-			sz = i;
-			break;
+	if (max_size > 0 && sz > max_size)
+		sz = max_size;
+
+	// Only a guessed width gives way to an interior anchor. A recorded line's
+	// width came from the status captured as it executed, so it is evidence of
+	// the same rank -- two overlapping real instruction starts, not a bad guess
+	// straddling a good one.
+	//
+	// The exemption is re-derived here rather than taken from the `recorded`
+	// argument, because it is only sound while `st` really is the status the
+	// anchor recorded: a caller that passed `recorded` with some other status
+	// would be decoding at a guessed width and would then be allowed to step
+	// over the very ground truth this clamp protects. The one caller does
+	// satisfy that today; checking it locally means a second one cannot quietly
+	// break it. (Defensive: no current path violates it, so this is not
+	// exercised by a test.)
+	cm_context_t *self  = cm_ctx_for_addr(addr, bank, rambank, rombank);
+	bool          truth = cm_anchor_ok(self, addr, bank, rambank, rombank) &&
+	                      self->status[addr] == st;
+
+	if (!truth) {
+		for (int i = 1; i < sz; i++) {
+			uint16_t p = (uint16_t)((addr + i) & 0xFFFF);
+			if (cm_anchor_ok(cm_ctx_for_addr(p, bank, rambank, rombank), p, bank, rambank, rombank)) {
+				sz = i;
+				break;
+			}
+		}
+	}
+
+	// A line the decode did not get to finish is not an instruction, and must
+	// not be dressed as one: `text` would describe more bytes than `size`
+	// covers, and `eff` was computed from bytes the line does not own -- for a
+	// clamped line those bytes are the NEXT instruction's opcode. Render the
+	// bytes it does own as data instead, so size, bytes and text agree and a
+	// consumer (the panel, or DAP's instruction/instructionBytes pair) cannot
+	// be handed a self-contradictory row.
+	//
+	// This is the honest rendering of a genuine ambiguity rather than a
+	// failure: the `.byte $2C` skip idiom really does put two overlapping
+	// instruction starts in memory, both real and both executed, and no linear
+	// non-overlapping tiling can show both whole. The policy is that the start
+	// the caller selected wins -- forward from the outer one shows the outer
+	// instruction, forward from the inner one shows the inner -- and only a
+	// guessed decode, or one crossing a boundary the window already committed
+	// to, is reduced to the bytes it owns on that path.
+	if (sz < decoded) {
+		recorded = false;
+		eff      = -1;
+
+		int used = 0;
+		for (int b = 0; b < sz && b < 4; b++) {
+			uint16_t p = (uint16_t)((addr + b) & 0xFFFF);
+			int      w = snprintf(ln->text + used, sizeof(ln->text) - (size_t)used,
+			                      "%s$%02x", b == 0 ? ".byte " : ",",
+			                      (unsigned)CM_READ(p, bank, cm_x16bank_for(p, rambank, rombank)));
+			if (w < 0 || (size_t)(used + w) >= sizeof(ln->text))
+				break;
+			used += w;
 		}
 	}
 
@@ -357,6 +482,11 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 	ln->status   = st;
 	ln->eff_addr = eff;
 	ln->recorded = recorded;
+	ln->kind     = (uint8_t)(sz < decoded ? CM_LINE_DATA : CM_LINE_INSTRUCTION);
+	// Whether the ADDRESS was executed is separate from whether this row could
+	// be shown as a whole instruction: a boundary can force a recorded start to
+	// be emitted as data, and a consumer still wants to know it is real code.
+	ln->start_recorded = cm_anchor_ok(self, addr, bank, rambank, rombank);
 	memset(ln->bytes, 0, sizeof(ln->bytes));
 	// Each byte is read through the window that backs its own address, so an
 	// instruction straddling $BFFF/$C000 shows the ROM bank's bytes for the part
@@ -369,18 +499,20 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 }
 
 // Emit one line at `addr` and advance the running status estimate. Recorded
-// status wins; otherwise *run_status is used. Returns the instruction size.
+// status wins; otherwise *run_status is used. `max_size` is passed through to
+// cm_fill. Returns the number of bytes the emitted row covers (always >= 1),
+// which is the instruction's size unless a clamp cut the row short.
 static int
 cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
-        uint8_t *run_status, uint8_t *run_e, code_map_line_t *ln)
+        uint8_t *run_status, uint8_t *run_e, int max_size, code_map_line_t *ln)
 {
 	cm_context_t *c  = cm_ctx_for_addr(addr, bank, rambank, rombank);
 	bool     recorded = cm_anchor_ok(c, addr, bank, rambank, rombank);
 	uint8_t  st       = recorded ? c->status[addr] : *run_status;
 
-	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, ln);
+	int sz = cm_fill(addr, bank, rambank, rombank, st, recorded, max_size, ln);
 
-	*run_status = cm_propagate(addr, bank, cm_x16bank_for(addr, rambank, rombank), st, run_e);
+	*run_status = cm_propagate(addr, bank, rambank, rombank, st, run_e);
 	return sz;
 }
 
@@ -388,9 +520,12 @@ cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 //  Anchored alignment
 // ---------------------------------------------------------------------------
 
-// The decision the backward walk made about one instruction, so a caller can
-// render exactly that instruction instead of re-deriving it from a different
-// status estimate and disagreeing about where it ends.
+// The decision the backward walk made about one instruction: where it starts,
+// how long it is, and the status it was sized with. Phase B seeds itself from
+// this rather than re-deriving the boundary from a propagated estimate, which
+// is what used to make the walk step over `center`. It does NOT render the line
+// verbatim -- cm_emit re-resolves the evidence at each address, and on the
+// fallback path can reach a different answer; see the note in phase B.
 typedef struct {
 	uint16_t addr;
 	uint8_t  status;
@@ -501,19 +636,89 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 		a                   = an.addr;
 	}
 
-	int n = 0;
+	// Phase B — render the preceding instructions, tiling the range the backward
+	// walk resolved: each line must start exactly where the previous one ended,
+	// or the caller cannot draw the result.
+	//
+	// The walk fixes where each instruction ENDS (the next line's start), but
+	// the fill can still land short of it or, left unchecked, past it:
+	//   * the walk's last-resort fallback backs off one byte without decoding,
+	//     so the byte there can decode wider than the one byte allowed for;
+	//   * the fill truncates onto a recorded start found inside the
+	//     instruction, which is right but leaves the remaining bytes uncovered.
+	// Capping each fill at the distance to the boundary kills the overlap, and
+	// looping until the boundary is reached exactly kills the gap.
+	//
+	// run_status is seeded from the walk's decision, but cm_emit re-resolves
+	// the evidence at each address rather than taking before[i] verbatim, so
+	// the first line is not guaranteed to match what the walk decided. It can
+	// differ on the fallback path: the walk rejects a candidate whose decode
+	// does not land on the anchor and stores the anchor's status, while cm_emit
+	// looks up that address and may find a recorded anchor of its own. Where
+	// they differ, cm_emit's answer is the better one -- it is live-execution
+	// evidence recorded at that exact address -- and it cannot drift, because
+	// the fallback has one byte of room and phase C reseeds independently.
+	//
+	// Because one resolved instruction can now need more than one line, this
+	// resolves them NEAREST-THE-CENTER FIRST and places them backwards from the
+	// end of the reserved region. Filling forwards would spend the buffer on
+	// the furthest context and push `center` -- the address the caller asked to
+	// be centered on -- off the end of a full buffer, which is the one row every
+	// consumer most needs. One slot is always held back for it.
+	code_map_line_t tile[CM_MAX_INSN_LEN];
+	const int       b_cap = max_out > 1 ? max_out - 1 : 0;
+	int             write = b_cap;
 
-	// Phase B — render the preceding instructions lowest-first, exactly as the
-	// backward walk resolved them. Each one's size reaches the next start by
-	// construction, so the lines cannot overlap.
-	for (int i = collected - 1; i >= 0 && n < max_out; i--) {
-		cm_fill(before[i].addr, bank, rambank, rombank, before[i].status,
-		        before[i].recorded, &out[n]);
-		n++;
+	for (int i = 0; i < collected && write > 0; i++) {
+		uint16_t limit      = (i > 0) ? before[i - 1].addr : center;
+		uint16_t a          = before[i].addr;
+		uint8_t  run_status = before[i].status;
+		uint8_t  run_e      = regs.e;
+		int      k          = 0;
+		bool     closed     = false;
+
+		// Terminates: every emit covers at least one byte and never more than
+		// the bytes left, so `a` closes on `limit` monotonically. `room` starts
+		// at before[i].size, which the walk bounds by CM_MAX_INSN_LEN.
+		do {
+			int room = (int)(uint16_t)((limit - a) & 0xFFFF);
+			int sz   = cm_emit(a, bank, rambank, rombank, &run_status, &run_e, room, &tile[k]);
+			k++;
+			a = (uint16_t)((a + sz) & 0xFFFF);
+			if (sz >= room) {
+				closed = true;
+				break;
+			}
+		} while (k < CM_MAX_INSN_LEN);
+
+		// Commit only a group that reached its boundary exactly; one that did
+		// not is not a tiling of anything.
+		//
+		// A group too large for the space left is trimmed to its SUFFIX -- the
+		// lines nearest the center -- rather than dropped whole. Every line in
+		// the group is contiguous and the last one ends on the boundary, so any
+		// suffix still tiles; it just starts the window later. (A prefix would
+		// not: it would end short of the boundary and reintroduce the gap this
+		// loop exists to remove.) Dropping the group instead would throw away
+		// context the caller has room for.
+		if (!closed)
+			break;
+		int from = 0;
+		if (k > write) {
+			from = k - write;
+			k    = write;
+		}
+		write -= k;
+		memcpy(&out[write], &tile[from], (size_t)k * sizeof(*tile));
 	}
 
+	int n = b_cap - write;
+	if (write > 0 && n > 0)
+		memmove(&out[0], &out[write], (size_t)n * sizeof(*out));
+
 	// Phase C — forward from `center` itself, so the center line is always
-	// present and always starts where the caller asked.
+	// present and always starts where the caller asked. The slot reserved above
+	// guarantees n < max_out here whenever the caller gave any capacity at all.
 	if (n < max_out && out_center_index)
 		*out_center_index = n;
 
@@ -521,7 +726,7 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	uint8_t  run_status = code_map_recorded_status(center, bank, rambank, rombank, regs.status);
 	uint8_t  run_e      = regs.e;
 	for (int i = 0; i < lines_after && n < max_out; i++) {
-		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, &out[n]);
+		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, 0, &out[n]);
 		n++;
 		addr = (uint16_t)((addr + sz) & 0xFFFF);
 	}
@@ -548,7 +753,7 @@ code_map_disasm_forward(uint16_t start, uint8_t bank, uint8_t rambank, uint8_t r
 	int      n          = 0;
 
 	while (n < count) {
-		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, &out[n]);
+		int sz = cm_emit(addr, bank, rambank, rombank, &run_status, &run_e, 0, &out[n]);
 		n++;
 		addr = (uint16_t)((addr + sz) & 0xFFFF);
 	}
