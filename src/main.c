@@ -591,9 +591,12 @@ usage()
 	printf("\tstack. Independent of -debug, and can be combined with it.\n");
 #endif
 	printf("-bp <address>\n");
-	printf("\tSet a breakpoint before the machine starts. Unlike -debug's optional\n");
-	printf("\taddress this can be repeated, so several breakpoints can be armed\n");
-	printf("\tup front.\n");
+	printf("\tArm a breakpoint before the first instruction runs. This is the\n");
+	printf("\tonly way to stop inside something that is over before you could\n");
+	printf("\tattach: start-up code, KERNAL or ROM routines, a program that runs\n");
+	printf("\tfrom its load address. Unlike -debug's optional address it can be\n");
+	printf("\trepeated. Usually paired with -imgui, so the machine is already\n");
+	printf("\tstopped where you wanted it when the window appears.\n");
 	printf("\tA breakpoint needs a debugger to resume from, so this opens -debug\n");
 	printf("\tunless -imgui or -debugport is already providing one.\n");
 	printf("\tAn address on its own applies whatever bank is mapped. To pin one\n");
