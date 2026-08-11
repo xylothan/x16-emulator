@@ -25,16 +25,55 @@
 struct regs regs;
 bool        is_gen2;
 
-static uint8_t g_mem[0x10000];
+// The memory model has to be real enough to tell banks apart, or the bank
+// arguments code_map computes are unobservable and cm_x16bank_for() is checked
+// by nothing: a stub returning g_mem[address] gives the same answer for every
+// bank, so any window selection -- or none -- passes. This mirrors the decode
+// in real_read6502() closely enough to make a wrong window show up as the
+// wrong bytes:
+//   - gen2 with a non-zero CPU bank: the whole 64K is that bank's flat RAM,
+//     and the window registers select nothing;
+//   - $C000-$FFFF: banked ROM, x16Bank if given, else the live ROM register;
+//   - $A000-$BFFF: banked RAM, x16Bank if given, else the live RAM register;
+//   - below that: flat, unbanked, and x16Bank is not consulted at all.
+#define TEST_RAM_BANKS  256
+#define TEST_ROM_BANKS  32
+#define TEST_GEN2_BANKS 4
+
+static uint8_t g_mem[0x10000];                            // flat low memory
+static uint8_t g_bram[TEST_RAM_BANKS][0x2000];            // $A000-$BFFF
+static uint8_t g_brom[TEST_ROM_BANKS][0x4000];            // $C000-$FFFF
+static uint8_t g_gen2[TEST_GEN2_BANKS][0x10000];          // gen2 flat CPU banks
 static uint8_t g_ram_bank = 0;
 static uint8_t g_rom_bank = 0;
+
+// Set whenever a read below $A000 arrives with an explicit window bank. Low
+// memory is not banked, so code_map is supposed to pass "current bank" there;
+// anything else is it inventing a window that does not exist.
+static int g_low_mem_windowed = 0;
 
 uint8_t
 real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 {
-	(void)bank;
 	(void)debugOn;
-	(void)x16Bank;
+
+	if (is_gen2 && bank != 0) {
+		if (bank < TEST_GEN2_BANKS) {
+			return g_gen2[bank][address];
+		}
+		return (uint8_t)((address >> 8) & 0xFF); // open bus, as in memory.c
+	}
+	if (address >= 0xC000) {
+		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_rom_bank;
+		return g_brom[rb & (TEST_ROM_BANKS - 1)][address - 0xC000];
+	}
+	if (address >= 0xA000) {
+		int rb = x16Bank >= 0 ? (uint8_t)x16Bank : g_ram_bank;
+		return g_bram[rb & (TEST_RAM_BANKS - 1)][address - 0xA000];
+	}
+	if (x16Bank >= 0) {
+		g_low_mem_windowed++;
+	}
 	return g_mem[address];
 }
 
@@ -105,15 +144,50 @@ reset_all(void)
 {
 	code_map_reset();
 	memset(g_mem, 0xEA, sizeof(g_mem)); // NOP everywhere by default
+	memset(g_bram, 0xEA, sizeof(g_bram));
+	memset(g_brom, 0xEA, sizeof(g_brom));
+	memset(g_gen2, 0xEA, sizeof(g_gen2));
+	g_ram_bank         = 0;
+	g_rom_bank         = 0;
+	g_low_mem_windowed = 0;
 	memset(&regs, 0, sizeof(regs));
 	regs.status = FLAG_MEMORY_WIDTH | FLAG_INDEX_WIDTH; // 8-bit A/X/Y
 }
 
+// Write into a specific banked window, so a test can put different code at the
+// same address in different banks. Addresses are absolute; which array they
+// land in follows the same split real_read6502() uses.
+static void
+poke_banked(uint16_t addr, uint8_t window_bank, const uint8_t *bytes, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		uint16_t a = (uint16_t)((addr + i) & 0xFFFF);
+		if (a >= 0xC000) {
+			g_brom[window_bank & (TEST_ROM_BANKS - 1)][a - 0xC000] = bytes[i];
+		} else if (a >= 0xA000) {
+			g_bram[window_bank & (TEST_RAM_BANKS - 1)][a - 0xA000] = bytes[i];
+		} else {
+			g_mem[a] = bytes[i];
+		}
+	}
+}
+
+// Write through whichever window the live bank registers currently select, so
+// a plain poke and a plain read agree without the test naming a bank.
 static void
 poke(uint16_t addr, const uint8_t *bytes, size_t n)
 {
 	for (size_t i = 0; i < n; i++) {
-		g_mem[(addr + i) & 0xFFFF] = bytes[i];
+		uint16_t a = (uint16_t)((addr + i) & 0xFFFF);
+		poke_banked(a, a >= 0xC000 ? g_rom_bank : g_ram_bank, &bytes[i], 1);
+	}
+}
+
+static void
+poke_gen2(uint8_t cpu_bank, uint16_t addr, const uint8_t *bytes, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		g_gen2[cpu_bank % TEST_GEN2_BANKS][(addr + i) & 0xFFFF] = bytes[i];
 	}
 }
 
@@ -598,6 +672,118 @@ main(void)
 
 		regs.is65c816 = false;
 	}
+	// ── Reads go through the window that backs each address ─────────────────
+	// Every read code_map makes has to name the bank that actually backs the
+	// address: the ROM bank above $C000, the RAM bank in $A000-$BFFF, and the
+	// live registers below that. Get it wrong and the disassembler decodes some
+	// other bank's bytes, which is indistinguishable from garbage.
+	//
+	// The live bank registers are deliberately pointed somewhere else here, with
+	// different code in them, so selecting the wrong window shows up as the
+	// wrong instruction rather than passing by coincidence.
+	{
+		reset_all();
+		g_ram_bank = 0x11; // live registers disagree with the requested banks
+		g_rom_bank = 0x17;
+
+		// What the caller asks for.
+		const uint8_t ram5[]  = { 0xA9, 0x12 };       // lda #$12
+		const uint8_t rom2[]  = { 0x8D, 0x34, 0x12 }; // sta $1234
+		// Decoys of a different length sitting in the live banks.
+		const uint8_t decoy[] = { 0xEA, 0xEA, 0xEA }; // nop nop nop
+		poke_banked(0xA000, 5, ram5, sizeof(ram5));
+		poke_banked(0xC000, 2, rom2, sizeof(rom2));
+		poke_banked(0xA000, 0x11, decoy, sizeof(decoy));
+		poke_banked(0xC000, 0x17, decoy, sizeof(decoy));
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+
+		int n = code_map_disasm_forward(0xA000, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 2 && lines[0].bytes[0] == 0xA9 &&
+		          lines[0].bytes[1] == 0x12,
+		      "reads a $A000 address through the requested RAM bank");
+
+		n = code_map_disasm_forward(0xC000, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 3 && lines[0].bytes[0] == 0x8D &&
+		          lines[0].bytes[2] == 0x12,
+		      "reads a $C000 address through the requested ROM bank");
+
+		// Low memory is not banked at all, so code_map must ask for "current
+		// bank" there rather than invent a window for it.
+		g_low_mem_windowed = 0;
+		n = code_map_disasm_forward(0x0801, 0, 5, 2, 4, lines, 4, &next);
+		check(n == 4 && g_low_mem_windowed == 0,
+		      "does not put a window bank on an unbanked low-memory read");
+
+		// An instruction may straddle the $BFFF/$C000 boundary, and then each
+		// half lives behind a different window. The bytes shown have to follow
+		// the address, not the opcode.
+		reset_all();
+		g_ram_bank = 0x11;
+		g_rom_bank = 0x17;
+		const uint8_t head[] = { 0x8D };       // sta $xxxx, opcode in RAM bank 5
+		const uint8_t tail[] = { 0x34, 0x12 }; // its operand, in ROM bank 2
+		poke_banked(0xBFFF, 5, head, sizeof(head));
+		poke_banked(0xC000, 2, tail, sizeof(tail));
+		const uint8_t straddle_decoy[] = { 0x00, 0x00 };
+		poke_banked(0xC000, 0x17, straddle_decoy, sizeof(straddle_decoy));
+
+		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 3 && lines[0].bytes[0] == 0x8D &&
+		          lines[0].bytes[1] == 0x34 && lines[0].bytes[2] == 0x12,
+		      "reads each byte of a window-straddling instruction from its own bank");
+	}
+
+	// ── Anchor staleness is judged in the right bank ────────────────────────
+	// An anchor is only believed while the opcode it recorded is still in
+	// memory. That comparison is a read, so it too has to name the right
+	// window: check it against the wrong bank and a live anchor looks stale
+	// (or, worse, a stale one looks live) purely because another bank happens
+	// to hold a different byte at the same address.
+	{
+		reset_all();
+		const uint8_t lda[] = { 0xA9, 0x12 };
+		const uint8_t nop[] = { 0xEA, 0xEA };
+		poke_banked(0xA000, 5, lda, sizeof(lda));
+		poke_banked(0xA000, 6, nop, sizeof(nop));
+
+		g_ram_bank = 6; // live register points at the other bank throughout
+		code_map_record(0xA000, 0, 5, 0, regs.status);
+		check(code_map_is_recorded_start(0xA000, 0, 5, 0),
+		      "validates an anchor against the bank it was recorded in");
+
+		// Overwrite bank 5 only. The anchor must die even though the live bank
+		// register still points at untouched memory.
+		poke_banked(0xA000, 5, nop, sizeof(nop));
+		check(!code_map_is_recorded_start(0xA000, 0, 5, 0),
+		      "drops the anchor when its own bank's code changes");
+	}
+
+	// ── Gen2 program banks are flat memory ──────────────────────────────────
+	// On a Gen2 machine a non-zero CPU bank maps its whole 64K as flat RAM, so
+	// the window registers select nothing there -- including above $C000, where
+	// they otherwise would.
+	{
+		reset_all();
+		is_gen2 = true;
+		g_rom_bank = 0x17;
+		const uint8_t code[] = { 0xA9, 0x12 };
+		const uint8_t decoy[] = { 0x8D, 0x34, 0x12 };
+		poke_gen2(1, 0xC000, code, sizeof(code));
+		poke_banked(0xC000, 0x17, decoy, sizeof(decoy));
+		poke_banked(0xC000, 3, decoy, sizeof(decoy));
+
+		code_map_line_t lines[4];
+		uint16_t        next = 0;
+		int n = code_map_disasm_forward(0xC000, 1, 0, 3, 1, lines, 4, &next);
+		check(n == 1 && lines[0].size == 2 && lines[0].bytes[0] == 0xA9 &&
+		          lines[0].bytes[1] == 0x12,
+		      "reads a Gen2 program bank as flat RAM, ignoring the ROM window");
+
+		is_gen2 = false;
+	}
+
 	// ── Degenerate input ────────────────────────────────────────────────────
 	{
 		reset_all();
