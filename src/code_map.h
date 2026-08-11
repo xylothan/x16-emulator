@@ -31,13 +31,22 @@
 // restore a status byte pulled off the stack; this linear, instruction-stream
 // analysis does not recover it.
 //
-// The gaps are not equally well bounded, and none of them is bounded
-// unconditionally. A wrong STATUS estimate is corrected when an accurate,
-// believed anchor is reached -- but only then: a same-opcode stale anchor is
-// "recorded" and supplies its old status, and there may be no accurate anchor
-// ahead at all. A wrong E is weaker still: anchors do not store E, so an anchor
-// fixes its own line and propagation then folds the stale E back in, mis-sizing
-// the next unanchored line. Recovery from a bad E is anchor-local.
+// None of these gaps is bounded unconditionally.
+//
+// A wrong STATUS estimate can be corrected when an accurate, believed anchor is
+// reached -- but that anchor fixes its OWN line, and accuracy does not
+// automatically carry forward: an anchor on a PLP or an RTI supplies the status
+// going INTO it, and the byte it restores is still not modelled, so the very
+// next line can be wrong again. A same-opcode stale anchor is "recorded" and
+// hands back its old status, and there may be no accurate anchor ahead at all.
+//
+// A wrong E is weaker again, because anchors do not store E: an anchor fixes
+// the width of its own line, and propagation then folds the stale E back in,
+// which can mis-size the next unanchored line wherever the stale E and the real
+// one imply different widths. It is not unrecoverable -- an XCE decoded with an
+// accurate carry writes a correct E, as does an explicit CLC/SEC before one --
+// but nothing guarantees such a sequence appears, so no persistent recovery is
+// promised.
 //
 // Note the emulation-mode escape clause applies to the ESTIMATE, not the
 // machine: the real CPU in emulation mode always has 8-bit widths, but the
@@ -46,9 +55,12 @@
 //
 // This costs nothing in practice unless all of the following hold at once: the
 // machine is a 65C816 (on the 65C02 widths never vary), the line being drawn
-// has no currently believed anchor, and one of the unmodelled cases above sits
-// between the last anchor and it. Every line this could affect already reports
-// `recorded = false`.
+// has no currently believed anchor, and the status the estimate carries into
+// that line is not the status the code there really runs with. That last one is
+// broader than the unmodelled instructions above -- an address-linear walk over
+// a branch or call, or a walk started away from the PC, does it too. See
+// docs/code-map-width-propagation.md. Every line this could affect already
+// reports `recorded = false`.
 //
 // Anchors are not deleted when the code under them changes -- there is no write
 // hook -- so each stores the opcode byte that was executing and is ignored once

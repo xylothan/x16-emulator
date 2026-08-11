@@ -290,16 +290,20 @@ cm_decode(uint16_t addr, uint8_t bank, int16_t x16bank, uint8_t status,
 // the estimate alone for them rather than inventing a value.
 //
 // HOW WELL EACH GAP IS BOUNDED differs, and none is bounded unconditionally:
-//   - a wrong STATUS estimate is corrected when an accurate, believed anchor is
-//     reached, which supplies both the boundary and the width and carries
-//     forward. Not "the next recorded anchor": a same-opcode stale anchor is
-//     still believed and hands back its old status, and there may be no
-//     accurate anchor ahead at all;
-//   - a wrong E is weaker. Anchors store the status byte but not E, so an
-//     anchor fixes the width of its OWN line and then propagation folds the
-//     stale E back in (`if (e) status |= INDEX|MEMORY`), which can mis-size the
-//     next unanchored line again wherever the stale E and the real one imply
-//     different widths. Recovery from a bad E is anchor-local.
+//   - a wrong STATUS estimate can be corrected when an accurate, believed
+//     anchor is reached. Not "the next recorded anchor": a same-opcode stale
+//     anchor is still believed and hands back its old status, there may be no
+//     accurate anchor ahead at all, and even an accurate one only fixes its OWN
+//     line -- an anchor on a PLP or RTI gives the status going INTO it, and the
+//     byte it restores is still unmodelled, so the next line can be wrong again;
+//   - a wrong E is weaker again, because anchors do not store E. An anchor
+//     fixes the width of its own line, and propagation folds the stale E back
+//     in (`if (e) status |= INDEX|MEMORY`), which can mis-size the next
+//     unanchored line wherever the stale E and the real one imply different
+//     widths. It is not unrecoverable: an XCE decoded with an accurate carry
+//     writes a correct E (that is exactly what the real instruction does), as
+//     does an explicit CLC/SEC before one -- but nothing guarantees such a
+//     sequence appears.
 // That fold-in also means "emulation mode is always right" holds for the real
 // CPU but NOT for this estimate: a diverged E sizes operands as though native
 // while the machine is really in emulation mode.
@@ -384,12 +388,12 @@ cm_propagate(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 //     fallback does not decode at all, it just backs off a byte), so a decode
 //     that disagrees has to give way rather than emit a line overlapping the
 //     next one.
-//   * a recorded anchor inside the instruction is proof from live execution
-//     that a real instruction starts there, which outranks a width ESTIMATE;
+//   * a recorded anchor inside the instruction is live-execution evidence that
+//     a real instruction starts there, which outranks a width ESTIMATE;
 //     truncate onto it rather than stepping over the very ground truth this
 //     file exists to collect. This applies only when the line being decoded is
 //     itself a guess. When the line is recorded too, its width came from the
-//     status captured as it executed and is ground truth in its own right, so
+//     status captured as it executed and is evidence of the same rank, so
 //     the two anchors are simply two real, overlapping instruction starts --
 //     the `.byte $2C` skip idiom -- and the one the caller asked for wins.
 //     Clipping it there would discard a whole known instruction to display a
@@ -650,8 +654,9 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	// differ on the fallback path: the walk rejects a candidate whose decode
 	// does not land on the anchor and stores the anchor's status, while cm_emit
 	// looks up that address and may find a recorded anchor of its own. Where
-	// they differ, cm_emit's answer is the better one -- it is ground truth
-	// recorded at that exact address -- and it cannot drift, because the
+	// they differ, cm_emit's answer is the better one -- it is live-execution
+	// evidence recorded at that exact address -- and it cannot drift, because
+	// the
 	// fallback has one byte of room and phase C reseeds independently.
 	//
 	// Because one resolved instruction can now need more than one line, this

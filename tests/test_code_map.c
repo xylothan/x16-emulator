@@ -1054,8 +1054,9 @@ main(void)
 		// The width propagation, by contrast, is code_map's own and must read
 		// its operand through the right window. A REP whose opcode is the last
 		// byte of the RAM window takes its operand from the ROM window, and
-		// getting that wrong mis-sizes every following instruction until the
-		// next anchor -- exactly the drift this file exists to prevent.
+		// getting that wrong mis-sizes the following instructions until an
+		// accurate anchor is reached -- exactly the drift this file exists to
+		// prevent.
 		//
 		//   $BFFF: C2 20   REP #$20   opcode in RAM bank 5, operand in ROM 2
 		//   $C001: A9 ..   LDA #imm   3 bytes once REP has cleared M
@@ -1234,10 +1235,12 @@ main(void)
 	//    ESTIMATE ──────────────────────────────────────────────────────────────
 	// The real CPU in emulation mode forces 8-bit widths, so its widths are
 	// always right. code_map's fold-in (`if (e) status |= INDEX|MEMORY`) uses
-	// the ESTIMATED e, though, and nothing re-seeds or repairs that estimate
-	// mid-walk: run_e is seeded once per forward run and thereafter written
-	// only by XCE, from the ESTIMATE's carry. An anchor overrides the status
-	// but never the E. So the estimate can believe it is in native mode while
+	// the ESTIMATED e, though, and no ordinary anchor repairs that estimate:
+	// run_e is seeded once per forward run and thereafter written only by XCE,
+	// from the ESTIMATE's carry. (A later XCE decoded with an accurate carry
+	// would put it back in step -- that is what the real instruction does --
+	// but an anchor overrides the status and never the E, so nothing here
+	// guarantees it.) So the estimate can believe it is in native mode while
 	// the machine is really in emulation, and size operands accordingly.
 	//
 	//   real:  A bit 7 set and C=0, so ASL A really sets C; XCE then sees

@@ -35,9 +35,14 @@ effective status byte but **not** `E`. The running `E` is seeded from the live
 `regs.e`, so landing on an anchor re-syncs that line's widths but not `E`, and
 propagating past the anchor folds the stale `E` back in
 (`if (e) status |= INDEX|MEMORY`) — which can mis-size the next unanchored line,
-where the stale `E` and the real one imply different widths. This is why
-recovery from a bad `E` is anchor-local rather than persistent, and it is pinned
-by a test.
+wherever the stale `E` and the real one imply different widths.
+
+A bad `E` is not unrecoverable, though. `XCE` writes `E` from the estimate's
+carry, which is exactly what the real instruction does, so an `XCE` decoded with
+an *accurate* carry — one taken from an anchor, or set explicitly by a `CLC`/
+`SEC` the estimate did track — puts `E` back in step. What is not promised is
+that such a sequence appears: an ordinary anchor does not repair `E`, so nothing
+guarantees recovery.
 
 Most X16 software sets `E` once during startup and leaves it alone, which is why
 this is latent rather than routine. What defeats that reassurance is not a
@@ -129,15 +134,19 @@ Every line this can affect already reports `recorded == false`, so a UI can say
 so. **The strength of the recovery differs by which input was wrong**, and none
 of it is unconditional:
 
-- a wrong **status** estimate is corrected once an accurate, believed anchor is
-  reached, which supplies both the boundary and the width and then carries
-  forward. Not simply "the next recorded anchor": a same-opcode stale anchor is
-  still believed and hands back its *old* status, and there is no guarantee an
-  accurate anchor exists ahead at all;
-- a wrong **E** is weaker still. Anchors store the effective status byte but not
-  `E`, so an anchor fixes the width of its own line and propagation past it
-  folds the stale `E` straight back in, mis-sizing the next unanchored line
-  again. Recovery from a bad `E` is anchor-local, not persistent.
+- a wrong **status** estimate can be corrected once an accurate, believed anchor
+  is reached. Three caveats, all real: a same-opcode stale anchor is still
+  believed and hands back its *old* status; there is no guarantee an accurate
+  anchor exists ahead at all; and even an accurate one only fixes its **own**
+  line — an anchor on a `PLP` or `RTI` supplies the status going *into* it,
+  while the byte it restores is still unmodelled, so the next line can be wrong
+  immediately;
+- a wrong **E** is weaker again, since anchors do not store `E` at all. An
+  anchor fixes the width of its own line, and propagation past it folds the
+  stale `E` straight back in, which can mis-size the next unanchored line
+  wherever the two imply different widths. It is recoverable in principle — an
+  `XCE` decoded with an accurate carry writes a correct `E` — but no ordinary
+  anchor does it, so nothing guarantees it happens.
 
 In both cases the decode is not allowed to swallow a recorded start (unless it
 is itself recorded — see the overlap policy in `cm_fill`), so a wrong guess
@@ -192,7 +201,8 @@ The opcode is still `$A9`, so the stale anchor survives and wins.
 **It cuts both ways.** The example above decodes too *wide* and swallows a fresh
 anchor, which is the loud failure. The opposite is quieter and just as
 reachable: an anchor recorded when the accumulator was 8 bits sizes its `LDA #`
-at two bytes, so if the replacement code runs with a 16-bit accumulator the row
+at two bytes, so if the replacement code is about to run with a 16-bit
+accumulator the row
 stops a byte early and the *next* row starts inside the real instruction's
 operand. Nothing is swallowed and the rows still tile perfectly, so there is no
 visible seam — the disassembly is simply misaligned from there until an accurate
