@@ -4,6 +4,7 @@
 
 [![Build Status](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/xylothan/x16-emulator)](https://github.com/xylothan/x16-emulator/releases)
+[![Dev build](https://img.shields.io/github/release-date-pre/xylothan/x16-emulator?label=dev%20build&color=orange)](https://github.com/xylothan/x16-emulator/releases/tag/dev)
 [![License: BSD-Clause](https://img.shields.io/github/license/xylothan/x16-emulator)](./LICENSE)
 [![Contributors](https://img.shields.io/github/contributors/xylothan/x16-emulator.svg)](https://github.com/xylothan/x16-emulator/graphs/contributors)
 
