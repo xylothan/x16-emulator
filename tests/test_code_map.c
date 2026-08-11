@@ -559,6 +559,30 @@ main(void)
 		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8005,
 		      "still centers on the requested address after truncating");
 		check_tiles(lines, n, "truncating onto an interior anchor leaves no gap");
+
+		// Tiling alone would also be satisfied by simply not truncating, so
+		// pin the intent: the recorded start at $8003 is ground truth and must
+		// begin a line of its own, and the line cut short to reach it must not
+		// still claim to be a whole verified instruction.
+		bool starts_at_8003 = false;
+		for (int i = 0; i < n; i++) {
+			if (lines[i].addr == 0x8003) {
+				starts_at_8003 = true;
+			}
+		}
+		check(starts_at_8003, "begins a line at the recorded start inside the BIT");
+		check(n >= 1 && lines[0].size == 1 && !lines[0].recorded && lines[0].eff_addr == -1,
+		      "a line cut short is not reported as a whole verified instruction");
+
+		// Capacity is the case that used to lose the center outright: phase B
+		// now needs two lines where the walk resolved one, and with room for
+		// only two lines a naive fill spends both and drops $8005 entirely.
+		center_index = -99;
+		int tight = code_map_disasm_window(0x8005, 0, 0, 0, 1, 2, lines, 2, &center_index);
+		check(tight >= 1 && center_index >= 0 && center_index < tight &&
+		          lines[center_index].addr == 0x8005,
+		      "keeps the center line when phase B cannot fit as well");
+		check_tiles(lines, tight, "tiles what fits when capacity runs out");
 	}
 
 	// ── Recorded starts are respected while decoding forward ────────────────
@@ -792,7 +816,15 @@ main(void)
 		n = code_map_disasm_forward(0xBFFF, 0, 5, 2, 1, lines, 4, &next);
 		check(n == 1 && lines[0].size == 3 && lines[0].bytes[0] == 0x8D &&
 		          lines[0].bytes[1] == 0x34 && lines[0].bytes[2] == 0x12,
-		      "reads each byte of a window-straddling instruction from its own bank");
+		      "shows each byte of a window-straddling instruction from its own bank");
+		// NOT COVERED, and not fixed here: this pins the displayed BYTES only.
+		// The mnemonic text and effective address are still wrong for a
+		// straddling instruction -- cm_decode() hands disasm() a single window
+		// (the one backing the START address), and disasm() reads every operand
+		// byte through it, so the operand above $C000 comes from ROM bank 5
+		// rather than 2 and the text reads "sta $eaea". Fixing it means giving
+		// disasm() a per-byte reader, which is shared with the classic debugger
+		// and the DAP server. See docs/code-map-width-propagation.md.
 	}
 
 	// ── Anchor staleness is judged in the right bank ────────────────────────

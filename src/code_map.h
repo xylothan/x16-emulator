@@ -86,12 +86,26 @@ typedef struct {
 //   center            : address to center on (usually regs.pc).
 //   bank              : CPU program bank (regs.k; 0 on the 65C02 / X16 gen1).
 //   rambank, rombank  : bank context for banked reads and coverage lookup.
-//   lines_before      : number of instructions to resolve before `center`.
+//   lines_before      : number of instructions to resolve before `center`
+//                       (capped at 255; negative is treated as none).
 //   lines_after       : number of instructions after `center` (incl. center).
 //   out               : caller-provided array receiving the lines, low->high.
 //   max_out           : capacity of `out`.
 //   out_center_index  : receives the index within `out` of the `center` line
 //                       (-1 if it did not fit); may be NULL.
+//
+// The lines written TILE the range they cover: each one starts exactly where
+// the previous one ended, with no gaps and no overlaps, so a caller can render
+// them as consecutive rows without reconciling contradictory byte ranges.
+//
+// Holding that invariant occasionally costs an extra line. Where a decode has
+// to be cut short -- it would swallow an address live execution proved is an
+// instruction start, or it disagrees with a boundary the backward walk already
+// resolved -- the bytes up to the next start are covered by a further line
+// rather than left out. The count returned can therefore exceed
+// `lines_before + lines_after`; it never exceeds `max_out`. Callers wanting a
+// fixed row count should use the returned count, not the requested one.
+//
 // Returns the number of lines written (<= max_out).
 int code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t rombank,
                            int lines_before, int lines_after,
