@@ -26,7 +26,7 @@ Everything the official emulator does, ADD does too.
 > That said it has been used successfully to carry several real Commodore 64 to X16 porting
 > projects through to completion, which is exactly the work it was built for. Anyone debugging
 > assembly on the X16 today will very likely save time with it.  This software is purpose built
-> to further personal projects and my life easier.  If it makes your life easier, great!
+> to further personal projects and make my life easier.  If it makes your life easier, great!
 >
 > **It is published as-is, and is not formally supported at this time.**
 
@@ -53,7 +53,7 @@ Relationship to the official emulator
 -------------------------------------
 
 ADD exists to add debugging tooling, not to diverge from the X16 platform. It has no relation
-to the upstream editing.  Don't bug them about it.
+to upstream development. Don't bug the upstream developers about it.
 
 **Everything about the Commander X16 itself — the KERNAL, BASIC, VERA, the hardware, the file
 formats — is documented officially, and those docs apply here unchanged:**
@@ -182,7 +182,7 @@ You can build a ROM image yourself using the [build instructions][x16rom-build] 
 
 The emulator depends on SDL2. The debugger and DAP server add two more requirements:
 
-* a **C++17** compiler, because Dear ImGui and the debug UI are C++ (Dear ImGui itself is
+* a **C++17** compiler, because Dear ImGui and the debug UI are written in C++ (Dear ImGui itself is
   vendored in `src/extern/imgui/`, so there is nothing to install for it), and
 * **cJSON**, used by the DAP server — `libcjson-dev` on Debian/Ubuntu, `cjson` on Homebrew,
   or supplied by vcpkg on Windows.
@@ -196,7 +196,7 @@ Install SDL2 using `brew install sdl2`, and cJSON using `brew install cjson`.
 
 ### Linux Build
 
-The SDL2 development package is available as a distribution package with most major versions of Linux:
+The SDL2 development package is available from the package repositories of most major Linux distributions:
 - Red Hat: `yum install SDL2-devel cjson-devel`
 - Debian: `apt-get install libsdl2-dev libcjson-dev`
 
