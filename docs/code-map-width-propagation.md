@@ -14,9 +14,19 @@ the 65C816 register widths:
 |---|---|---|
 | `REP #imm` | yes, exactly | the bits to clear are in the operand |
 | `SEP #imm` | yes, exactly | the bits to set are in the operand |
-| `XCE`      | yes, exactly | swaps carry and emulation, both tracked |
+| `XCE`      | yes, but see below | swaps carry and the emulation flag |
 | `PLP`      | **no** | restores a status byte pulled off the stack |
 | `RTI`      | **no** | restores the status the interrupt pushed |
+
+`XCE` is modelled exactly *given* a correct emulation flag, and that is a real
+caveat: anchors record the effective status byte but **not** `E`. The running
+`E` estimate is seeded from the live `regs.e` and is never re-established by an
+anchor the way the status byte is. So landing on an anchor re-syncs the widths
+but not `E`, and a window drawn over code that last ran under a different
+emulation mode can propagate the wrong `E` through an `XCE`. In practice `E` is
+set once during boot and never touched again, and the emulation-mode fold-in
+(`if (e) status |= INDEX|MEMORY`) is applied after the recorded status is
+restored, so the widths still come out right on any anchored line.
 
 For `PLP` and `RTI` the file leaves the running estimate untouched. Operand
 widths for lines decoded after one of them can therefore be wrong, and with
@@ -85,3 +95,36 @@ The first `RTI` check is deliberately written to fail if someone substitutes a
 plausible width without also building the known/unknown machinery. It is a
 tripwire, not a claim that the current behaviour is ideal — if the widths are
 ever tracked properly, that check should be replaced, not deleted quietly.
+
+---
+
+# Related: a window-straddling instruction is decoded through one bank
+
+**Not fixed. Not covered by a passing test.** Found while adding banking
+coverage for `cm_x16bank_for()`.
+
+`cm_fill()` reads the raw bytes of an instruction one at a time, each through
+the window backing that byte's own address, so an instruction straddling the
+`$BFFF`/`$C000` boundary shows the right bytes. `cm_decode()` does not: it hands
+`disasm()` a *single* `x16Bank`, derived from the instruction's **start**
+address, and `disasm()` uses that one bank for every operand read.
+
+So for a `STA $1234` whose opcode is at `$BFFF` in RAM bank 5 and whose operand
+lives at `$C000`/`$C001` in ROM bank 2, the operand is read as *ROM bank 5*.
+With the test fixture that means `bytes[]` correctly reads `8D 34 12` while
+`text` reads `sta $eaea` and `eff_addr` is `$EAEA`. On real hardware the same
+mis-read happens — `ROM[rambank * 16384 + …]`, or open bus when the RAM bank
+number is ≥ 32.
+
+The test in `tests/test_code_map.c` asserts the displayed **bytes** only, and
+says so in a comment; it does not assert the text, because the text is wrong.
+
+Fixing it properly means giving `disasm()` a per-byte, window-aware reader (or
+having `cm_decode()` detect a straddle and re-render the operand from the bytes
+`cm_fill()` already read correctly). `disasm()` is shared with the classic SDL
+debugger and the DAP server, so that is a wider change than the code_map
+defects this work covers.
+
+Scope: one instruction per window boundary, and only when code is laid across
+`$BFFF`/`$C000`. Rare, but it renders as confidently wrong text rather than as
+an admitted unknown, which is the worst failure mode this file has.
