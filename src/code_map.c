@@ -500,7 +500,8 @@ cm_fill(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
 
 // Emit one line at `addr` and advance the running status estimate. Recorded
 // status wins; otherwise *run_status is used. `max_size` is passed through to
-// cm_fill. Returns the instruction size actually emitted (always >= 1).
+// cm_fill. Returns the number of bytes the emitted row covers (always >= 1),
+// which is the instruction's size unless a clamp cut the row short.
 static int
 cm_emit(uint16_t addr, uint8_t bank, uint8_t rambank, uint8_t rombank,
         uint8_t *run_status, uint8_t *run_e, int max_size, code_map_line_t *ln)
@@ -656,8 +657,7 @@ code_map_disasm_window(uint16_t center, uint8_t bank, uint8_t rambank, uint8_t r
 	// looks up that address and may find a recorded anchor of its own. Where
 	// they differ, cm_emit's answer is the better one -- it is live-execution
 	// evidence recorded at that exact address -- and it cannot drift, because
-	// the
-	// fallback has one byte of room and phase C reseeds independently.
+	// the fallback has one byte of room and phase C reseeds independently.
 	//
 	// Because one resolved instruction can now need more than one line, this
 	// resolves them NEAREST-THE-CENTER FIRST and places them backwards from the

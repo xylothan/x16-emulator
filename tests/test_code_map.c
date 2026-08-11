@@ -1212,12 +1212,13 @@ main(void)
 		check(n == 3 && !lines[2].recorded,
 		      "the mispredicted line is still reported as a guess");
 
-		// The bound is ANCHOR-LOCAL, and only that. An anchor supplies the
-		// status for its own line, so that line is sized correctly -- but
-		// nothing re-establishes E, so propagating past the anchor folds the
-		// widths back to 8-bit and the next unanchored line is wrong again.
-		// This is weaker than the PLP/RTI bound, where the anchor's status
-		// carries forward correctly.
+		// What an anchor buys here is its OWN line, and no more. It supplies
+		// the status for that line, so the line is sized correctly -- but no
+		// anchor re-establishes E, so propagating past it folds the widths back
+		// to 8-bit and the next unanchored line is wrong again. (E is not
+		// beyond repair in general: a later XCE decoded with an accurate carry
+		// writes a correct E, as the real instruction does. There is no XCE
+		// after this point in the fixture, so nothing repairs it here.)
 		const uint8_t st_16 = FLAG_INDEX_WIDTH;
 		code_map_record(0x8002, 0, 0, 0, st_16);
 		n = code_map_disasm_forward(0x8000, 0, 0, 0, 4, lines, 8, &next);
@@ -1287,9 +1288,10 @@ main(void)
 	// The stale-anchor cases above all decode too WIDE and swallow a fresh
 	// start. The opposite is just as reachable and is quieter: an anchor
 	// recorded when the accumulator was 8 bits sizes its LDA # at two bytes, so
-	// if the replacement code runs with a 16-bit accumulator the row stops one
-	// byte early and the NEXT row starts inside the real instruction's operand.
-	// Nothing is swallowed, so nothing looks wrong -- the rows still tile.
+	// if the replacement code is about to run with a 16-bit accumulator the row
+	// stops one byte early and the NEXT row starts inside the real
+	// instruction's operand. Nothing is swallowed, so nothing looks wrong --
+	// the rows still tile.
 	{
 		reset_all();
 		regs.is65c816 = true;

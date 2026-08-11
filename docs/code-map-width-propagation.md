@@ -118,11 +118,11 @@ instructions. It happens whenever:
 Note what is **not** on that list: native mode. The real CPU in emulation mode
 does force 8-bit widths and is always right — but the fold-in here
 (`if (e) status |= INDEX|MEMORY`) uses the *estimated* `E`, not the machine's,
-and nothing re-seeds or repairs that estimate mid-walk. `run_e` is seeded once
-per forward run and thereafter written only by `XCE`, from the estimate's own
-carry; an anchor overrides the status but never the `E`. Once the estimate
-diverges it will size operands as though native while the machine is really in
-emulation. A test pins exactly that.
+and no anchor repairs that estimate. `run_e` is seeded once per forward run and
+thereafter written only by `XCE`, from the estimate's own carry; an anchor
+overrides the status but never the `E`. Once the estimate diverges it will size
+operands as though native while the machine is really in emulation, until an
+`XCE` with an accurate carry happens to put it back. A test pins exactly that.
 
 The mechanism that would recover the value is largely the same mechanism that
 makes the gap irrelevant: code that has executed has anchors. The correspondence
@@ -202,11 +202,10 @@ The opcode is still `$A9`, so the stale anchor survives and wins.
 anchor, which is the loud failure. The opposite is quieter and just as
 reachable: an anchor recorded when the accumulator was 8 bits sizes its `LDA #`
 at two bytes, so if the replacement code is about to run with a 16-bit
-accumulator the row
-stops a byte early and the *next* row starts inside the real instruction's
-operand. Nothing is swallowed and the rows still tile perfectly, so there is no
-visible seam — the disassembly is simply misaligned from there until an accurate
-anchor is reached. Both directions are pinned by tests.
+accumulator the row stops a byte early and the *next* row starts inside the real
+instruction's operand. Nothing is swallowed and the rows still tile perfectly,
+so there is no visible seam — the disassembly is simply misaligned from there
+until an accurate anchor is reached. Both directions are pinned by tests.
 
 Why it is accepted rather than fixed:
 
