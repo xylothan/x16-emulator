@@ -1,13 +1,12 @@
-<p align="center">
-  <img src="./.gh/logo.png" />
-</p>
-
 # X16Emu ADD — the Advanced Disassembler and Debugger for the Commander X16
+
+<img src="./.gh/logo.png" align="right" width="200" alt="X16Emu ADD logo" />
 
 [![Build Status](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml/badge.svg)](https://github.com/xylothan/x16-emulator/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/xylothan/x16-emulator)](https://github.com/xylothan/x16-emulator/releases)
 [![License: BSD-Clause](https://img.shields.io/github/license/xylothan/x16-emulator)](./LICENSE)
 [![Contributors](https://img.shields.io/github/contributors/xylothan/x16-emulator.svg)](https://github.com/xylothan/x16-emulator/graphs/contributors)
+
 
 **X16Emu ADD** — the **A**dvanced **D**isassembler and **D**ebugger — is a fork of the
 [official Commander X16 emulator][upstream] built for people who write software for the X16
@@ -15,19 +14,20 @@ rather than just run it. It is the upstream emulator with a real debugger bolted
 graphical debug UI, source-level debugging from cc65 `.dbg` files, and a Debug Adapter Protocol
 server so the machine can be driven from VS Code, Visual Studio, or any other DAP-speaking editor.
 
-Everything the official emulator does, ADD does too. It tracks upstream and merges its releases.
+Everything the official emulator does, ADD does too.
 
 > ### ⚠️ This is experimental software
 >
-> The emulator core is upstream's and is solid, but **the debugger, the DAP server and the
-> Windows-specific changes are experimental**. Expect rough edges, and expect details to change
-> between releases.
+> The emulator core is upstream and is great, but **the debugger, the DAP server and the
+> Windows-specific changes are experimental** and probably not great. Expect rough edges, and
+> expect details to change between releases.  
 >
-> That said, it is not a toy — it has been used successfully to carry several real
-> Commodore 64 to X16 porting projects through to completion, which is exactly the work it was
-> built for. Anyone debugging assembly on the X16 today will very likely save time with it.
+> That said it has been used successfully to carry several real Commodore 64 to X16 porting
+> projects through to completion, which is exactly the work it was built for. Anyone debugging
+> assembly on the X16 today will very likely save time with it.  This software is purpose built
+> to further personal projects and my life easier.  If it makes your life easier, great!
 >
-> It is published as-is, and is not formally supported at this time.
+> **It is published as-is, and is not formally supported at this time.**
 
 Why X16Emu ADD
 ---------------
@@ -51,8 +51,9 @@ The debugger is documented in full under [Advanced Debugging](#advanced-debuggin
 Relationship to the official emulator
 -------------------------------------
 
-ADD exists to add debugging tooling, not to diverge from the X16 platform. It follows upstream
-closely and merges each official release.
+ADD exists to add debugging tooling, not to diverge from the X16 platform. It has no relation
+to the upstream editing.  Don't bug them about it.
+
 **Everything about the Commander X16 itself — the KERNAL, BASIC, VERA, the hardware, the file
 formats — is documented officially, and those docs apply here unchanged:**
 
