@@ -22,3 +22,12 @@ imgui.ini
 # Klaus Dormann's functional test images, fetched by tests/fetch_klaus.py.
 # GPL-licensed and 64K each, so downloaded rather than committed.
 /tests/klaus/
+
+# SingleStepTests/ProcessorTests, fetched by tests/fetch_pt.py. ~1 GB of JSON
+# per CPU variant, plus the binary it converts to. The per-opcode baseline is
+# committed; it is small and it is the thing worth reviewing.
+/tests/pt/
+pt-report.txt
+
+__pycache__/
+*.pyc

@@ -662,6 +662,12 @@ x16_add_test(klaus NEEDS_CPU_TABLES
     SOURCES tests/test_klaus.c tests/support/cpu_fixture.c tests/support/harness.c
             src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# SingleStepTests/ProcessorTests: every opcode, thousands of randomised states
+# each. Fixtures are fetched by tests/fetch_pt.py and not committed.
+x16_add_test(processor_tests NEEDS_CPU_TABLES
+    SOURCES tests/test_processor_tests.c tests/support/cpu_fixture.c
+            tests/support/harness.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are

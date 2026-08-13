@@ -107,6 +107,36 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["cpu_loadstore", "klaus"],
     },
+    # The three below exist to check ProcessorTests specifically: a baseline
+    # comparison is only worth anything if it moves when behaviour moves.
+    {
+        "name": "the negative flag is never set",
+        "file": "src/cpu/support.h",
+        "find": "else if ((n) & 0x0080) setsign();",
+        "into": "else if ((n) & 0x0000) setsign();",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests", "klaus"],
+    },
+    {
+        "name": "the zero flag is set from the wrong width",
+        "file": "src/cpu/support.h",
+        "find": "else if ((n) & 0x00FF) clearzero();",
+        "into": "else if ((n) & 0x000F) clearzero();",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests", "klaus"],
+    },
+    {
+        # Timing only: results stay correct, so klaus cannot see it.
+        "name": "a taken branch costs no extra cycle",
+        "file": "src/cpu/instructions.h",
+        "find": "clockticks6502++;",
+        "into": "clockticks6502 += 0;",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
 ]
 
 
@@ -140,8 +170,17 @@ def main():
         return 2
 
     survived = []
+    not_applicable = []
     for m in MUTATIONS:
         if args.only and args.only not in m["name"]:
+            continue
+
+        # Without its fixture the test skips, passes, and looks like the
+        # mutation survived.
+        need = m.get("requires")
+        if need and not (ROOT / need).exists():
+            print(f"n/a   {m['name']}\n      needs {need}, which is not present")
+            not_applicable.append(m["name"])
             continue
 
         path = ROOT / m["file"]
@@ -182,27 +221,22 @@ def main():
                 survived.append(m["name"])
         finally:
             shutil.copy2(backup, path)
-            # copy2 preserves the original mtime, which would leave the restored
-            # file older than the object built from the mutated version. Ninja
-            # and make both compare timestamps, so the mutation would stay
-            # compiled in and every later mutation would be measured against an
-            # already-broken emulator -- with every test red for the wrong
-            # reason and every mutation therefore reported as caught. Stamp it
-            # as changed so the next build actually recompiles it.
+            # copy2 preserves mtime, leaving the restored file older than the
+            # object built from the mutated version. Ninja and make skip the
+            # rebuild, so the mutation stays compiled in and every later one
+            # runs against a broken emulator and is reported caught.
             os.utime(path, None)
             backup.unlink(missing_ok=True)
 
-    # Leave the tree built from clean source, so a later run is not confused by
-    # objects compiled from a mutation.
-    build(args.build_dir)
-
-    # Leave the tree built from clean source, so a later run is not confused by
-    # objects compiled from a mutation.
+    # Leave the tree built from clean source.
     build(args.build_dir)
 
     total = len([m for m in MUTATIONS
                  if not args.only or args.only in m["name"]])
+    total -= len(not_applicable)
     print(f"\n{total - len(survived)}/{total} mutations caught")
+    if not_applicable:
+        print(f"{len(not_applicable)} not applicable here (missing fixtures)")
     if survived:
         print("survived:")
         for s in survived:

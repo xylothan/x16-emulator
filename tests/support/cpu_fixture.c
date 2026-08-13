@@ -18,11 +18,18 @@ static uint32_t cycles_before_run;
 // which only selects a 64K space the emulator itself maps; a test that cares
 // about banking belongs with memory.c, not here.
 
+void (*cpu_bus_read_hook)(uint16_t addr, uint8_t value);
+void (*cpu_bus_write_hook)(uint16_t addr, uint8_t value);
+
 uint8_t
 read6502(uint16_t address, uint8_t bank)
 {
 	(void)bank;
-	return cpu_mem[address];
+	uint8_t value = cpu_mem[address];
+	if (cpu_bus_read_hook) {
+		cpu_bus_read_hook(address, value);
+	}
+	return value;
 }
 
 void
@@ -30,6 +37,9 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 {
 	(void)bank;
 	cpu_mem[address] = value;
+	if (cpu_bus_write_hook) {
+		cpu_bus_write_hook(address, value);
+	}
 }
 
 // STP halts the CPU until reset. Counted rather than ignored so a test can tell

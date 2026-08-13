@@ -1,26 +1,19 @@
 // Klaus Dormann's 6502/65C02 functional tests, run against the CPU core.
 //
-// What this covers that nothing else does is sequential composition: about
-// thirty million instructions of interdependent code -- branches, subroutines,
-// self-checking sequences -- rather than instructions considered one at a time.
+// Covers sequential composition: ~30 million instructions of interdependent
+// code, rather than instructions considered one at a time. Not the per-opcode
+// oracle -- ProcessorTests is -- and it reports a single trap address for a
+// whole run.
 //
-// It is not the per-opcode oracle. SingleStepTests/ProcessorTests runs ten
-// thousand randomised starting states for each opcode; this reports a single
-// trap address for a whole run. The two answer different questions, and this
-// one answers "do these instructions still work when used together".
+// No timing coverage: it verifies results, not cycle counts. mutation_check.py
+// confirms that by dropping the page-cross penalty and watching this pass.
 //
-// It also does not check timing. The program verifies results, not cycle
-// counts, so it is blind to a wrong cycle count -- mutation_check.py confirms
-// that by dropping the page-cross penalty and watching this still pass.
+// The .bin is a full 64K image, execution starts at $0400, and the program
+// traps by branching to itself. Success is a trap at one specific address from
+// the listing; a trap anywhere else means a check failed there.
 //
-// The mechanics are simple: the .bin is a full 64K image, execution starts at
-// $0400, and the program traps by branching to itself. Success is a trap at one
-// specific address, taken from the listing that ships with the binary; a trap
-// anywhere else means a check failed there, and the listing says which.
-//
-// The binaries are fetched by tests/fetch_klaus.py rather than committed --
-// they are GPL and 64K each. Without them this reports skipped and passes,
-// because a missing optional fixture is not a failure.
+// Binaries are fetched by tests/fetch_klaus.py rather than committed: GPL and
+// 64K each. Without them this reports skipped.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
