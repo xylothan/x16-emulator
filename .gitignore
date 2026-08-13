@@ -18,3 +18,7 @@ src/x16edit_E_labels.h
 *.opensdf
 
 imgui.ini
+
+# Klaus Dormann's functional test images, fetched by tests/fetch_klaus.py.
+# GPL-licensed and 64K each, so downloaded rather than committed.
+/tests/klaus/

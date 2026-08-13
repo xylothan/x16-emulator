@@ -25,11 +25,21 @@
 
 extern int x16_failures;
 extern int x16_checks;
+extern int x16_divergences;
 
 void check(bool cond, const char *what);
 
 // Compare two values, reporting both when they differ.
 void check_eq(uint32_t got, uint32_t want, const char *what);
+
+// For a difference from the hardware that is known, understood and not being
+// fixed yet. Prints loudly and is counted, but does not fail the build, so
+// coverage can land before the fix does.
+//
+// If it unexpectedly passes, that IS a failure: the marker is now a lie, and
+// the whole point is that this list only ever shrinks. Delete the marker and
+// make it an ordinary check.
+void check_divergent(bool passed, const char *what, const char *why);
 
 // Print the tally and return the process exit status. Never returns the raw
 // failure count: exit status is masked to 8 bits, so exactly 256 failures

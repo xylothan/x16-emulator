@@ -143,6 +143,10 @@ jobs:
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        # Klaus Dormann's functional tests. Not committed: GPL, and 64K each.
+        # The test reports them skipped if this step is removed or fails.
+        run: python tests/fetch_klaus.py
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and
@@ -151,7 +155,29 @@ jobs:
         # was never compiled.
         run: cmake --build build --target unit_tests
       - name: Run Tests
-        run: ctest --test-dir build --output-on-failure
+        # X16_KLAUS_REQUIRED makes a missing test image a failure rather than a
+        # skip, so removing or breaking the fetch step above shows up as a red
+        # test instead of a green run that checked nothing.
+        #
+        # Run verbose into a log rather than straight to the console: ctest only
+        # shows a passing test's output on failure, which would hide a known
+        # divergence behind a green tick. The log is dumped on failure, and any
+        # divergence is raised as a warning annotation so it is visible on a
+        # run that otherwise passed.
+        env:
+          X16_KLAUS_REQUIRED: 1
+        run: |
+          if ! ctest --test-dir build -V > ctest.log 2>&1; then
+            cat ctest.log
+            exit 1
+          fi
+          grep -E 'Test #|tests passed|tests failed' ctest.log || true
+          if grep -q 'DIVERGE:' ctest.log; then
+            echo
+            grep -A1 'DIVERGE:' ctest.log
+            n=$(grep -c 'DIVERGE:' ctest.log)
+            echo "::warning title=Known hardware divergences::$n known difference(s) from real hardware. See the DIVERGE lines in this job's log."
+          fi
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
   # with no redistributable to install. The MinGW jobs in windows-legacy still
