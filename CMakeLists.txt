@@ -651,6 +651,10 @@ x16_add_test(cpu_decimal NEEDS_CPU_TABLES
     SOURCES tests/test_cpu_decimal.c tests/support/cpu_fixture.c tests/support/harness.c
             src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+x16_add_test(cpu_steprun NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_steprun.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
