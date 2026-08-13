@@ -643,6 +643,10 @@ x16_add_test(cpu_loadstore NEEDS_CPU_TABLES
     SOURCES tests/test_cpu_loadstore.c tests/support/cpu_fixture.c tests/support/harness.c
             src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+x16_add_test(cpu_adc_sbc NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_adc_sbc.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
