@@ -139,9 +139,13 @@ cartridge_write(uint16_t address, uint8_t bank, uint8_t value)
 void audio_render(void) {}
 void print_iso8859_15_char(char c) { (void)c; }
 void dbg_load_note_debugger(bool on) { (void)on; }
-void DEBUGBreakOnWatchpoint(void) {}
 uint8_t wav_recorder_get_state(void) { return 0; }
 void wav_recorder_set(wav_recorder_command_t command) { (void)command; }
+
+// Counted rather than ignored: whether a watchpoint reported a break is the one
+// thing a watchpoint is allowed to change.
+int fake_break_count = 0;
+void DEBUGBreakOnWatchpoint(void) { fake_break_count++; }
 
 // The CPU core signals a halt (STP) through this. memory.c already provides
 // vp6502(), the vector-pull callback.

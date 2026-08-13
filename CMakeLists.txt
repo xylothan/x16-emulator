@@ -664,6 +664,14 @@ x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# The watchpoint hook sits on the store path, so this links the same real
+# memory.c, debug_core.c and CPU core as the debugOn tests, and asserts that
+# watching an address changes nothing except that a break is reported.
+x16_add_test(watchpoint_purity NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_watchpoint_purity.c tests/support/fake_devices.c
+            tests/support/signature.c tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
