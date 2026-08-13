@@ -155,6 +155,11 @@ jobs:
         # was never compiled.
         run: cmake --build build --target unit_tests
       - name: Run Tests
+        # X16_KLAUS_REQUIRED makes a missing test image a failure rather than a
+        # skip, so removing or breaking the fetch step above shows up as a red
+        # test instead of a green run that checked nothing.
+        env:
+          X16_KLAUS_REQUIRED: 1
         run: ctest --test-dir build --output-on-failure
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe

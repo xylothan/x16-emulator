@@ -80,6 +80,17 @@ run_image(const char *path, bool c816)
 	return 0;
 }
 
+// Whether a missing image is a failure rather than a skip. CI sets this, so a
+// broken or deleted fetch step shows up as a red test instead of a green run
+// that quietly checked nothing. Locally it is unset, and the images stay
+// optional.
+static bool
+images_required(void)
+{
+	const char *v = getenv("X16_KLAUS_REQUIRED");
+	return v != NULL && v[0] != '\0' && v[0] != '0';
+}
+
 static void
 run_case(const char *name, uint16_t expected_success, const char *divergence)
 {
@@ -87,7 +98,14 @@ run_case(const char *name, uint16_t expected_success, const char *divergence)
 	char label[192];
 
 	if (!find_binary(name, path, sizeof path)) {
-		printf("skip: %s not present (run tests/fetch_klaus.py)\n", name);
+		if (images_required()) {
+			snprintf(label, sizeof label,
+			         "%s is present (X16_KLAUS_REQUIRED is set)", name);
+			check(false, label);
+			printf("     run tests/fetch_klaus.py, or unset X16_KLAUS_REQUIRED\n");
+		} else {
+			printf("skip: %s not present (run tests/fetch_klaus.py)\n", name);
+		}
 		return;
 	}
 
