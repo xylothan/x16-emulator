@@ -59,6 +59,42 @@
 #define memory_16bit() (regs.is65c816 && !(regs.status & FLAG_MEMORY_WIDTH))
 #define acc_for_mode() (memory_16bit() ? regs.c : ((uint16_t) regs.a))
 
+// Bits 4 and 5 of P mean different things on the two CPUs, so pin them before
+// each instruction according to which one is running.
+//
+// On the 65816 they are the index and memory width flags, forced to 1 in
+// emulation mode.
+//
+// On the 65C02 bit 5 is unused and reads as 1, while bit 4 is the break flag,
+// which has no register existence -- it only appears in a copy of P pushed to
+// the stack. No instruction alters it, so it must be preserved. Forcing it
+// here corrupts it: ProcessorTests has 22,900 of 25,400 cases expecting it
+// clear.
+static inline void
+cpu_pin_status_flags(void)
+{
+    if (regs.is65c816) {
+        if (regs.e) {
+            regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
+        }
+    } else {
+        regs.status |= FLAG_CONSTANT;
+    }
+}
+
+// PLP and RTI load P from the stack. On the 65C02 bits 4 and 5 are not
+// loadable -- there is no register bit behind either -- so they keep their
+// previous values. On the 65816 both are real width flags and load normally.
+static inline uint8_t
+cpu_merge_pulled_status(uint8_t pulled)
+{
+    const uint8_t keep = FLAG_INDEX_WIDTH | FLAG_CONSTANT;
+    if (regs.is65c816) {
+        return pulled;
+    }
+    return (uint8_t) ((pulled & (uint8_t) ~keep) | (regs.status & keep));
+}
+
 
 #define saveaccum(n) (memory_16bit() ? (regs.c = (n)) : (regs.a = (uint8_t)((n) & 0x00FF)))
 

@@ -503,12 +503,14 @@ static void pld() {
 }
 
 static void plp() {
-    regs.status = pull8();
-    if (regs.e) {
-        regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
-    } else if (regs.status & FLAG_INDEX_WIDTH) {
-        regs.xh = 0;
-        regs.yh = 0;
+    regs.status = cpu_merge_pulled_status(pull8());
+    if (regs.is65c816) {
+        if (regs.e) {
+            regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
+        } else if (regs.status & FLAG_INDEX_WIDTH) {
+            regs.xh = 0;
+            regs.yh = 0;
+        }
     }
 }
 
@@ -545,18 +547,20 @@ static void ror() {
 }
 
 static void rti() {
-    regs.status = pull8();
+    regs.status = cpu_merge_pulled_status(pull8());
     value = pull16();
     regs.pc = value;
 
-    if (regs.e) {
-        regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
-    } else {
-        if (regs.status & FLAG_INDEX_WIDTH) {
-            regs.xh = 0;
-            regs.yh = 0;
+    if (regs.is65c816) {
+        if (regs.e) {
+            regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
+        } else {
+            if (regs.status & FLAG_INDEX_WIDTH) {
+                regs.xh = 0;
+                regs.yh = 0;
+            }
+            regs.k = pull8();
         }
-        regs.k = pull8();
     }
 
     // Pair this with the interrupt entry that set the stack up. Reported after
