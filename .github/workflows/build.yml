@@ -178,6 +178,29 @@ jobs:
             n=$(grep -c 'DIVERGE:' ctest.log)
             echo "::warning title=Known hardware divergences::$n known difference(s) from real hardware. See the DIVERGE lines in this job's log."
           fi
+  # Break the emulator on purpose and check the tests notice. Every test is
+  # written to pass against correct behaviour, which says nothing about whether
+  # it would catch incorrect behaviour; this is the half that does. Kept out of
+  # unit-tests because it rebuilds once per mutation.
+  mutation-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+      - name: Configure
+        run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        run: python tests/fetch_klaus.py
+      - name: Check the tests catch faults
+        env:
+          X16_KLAUS_REQUIRED: 1
+        run: python tests/mutation_check.py --build-dir build
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
   # with no redistributable to install. The MinGW jobs in windows-legacy still
