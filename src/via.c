@@ -272,8 +272,13 @@ via1_read(uint8_t reg, bool debug)
 			
 		case 1: // PA
 		case 15:
-			i2c_step();
-			if (!debug) via_clear_pra_irqs(&via[0]);
+			// i2c_step() advances the bus state machine, so it has to sit behind
+			// the debug check: reading $9F01 in a memory view shouldn't disturb
+			// a transfer in progress. That bus talks to the SMC and the RTC.
+			if (!debug) {
+				i2c_step();
+				via_clear_pra_irqs(&via[0]);
+			}
 			if (via[0].registers[11] & 1) {
 				// CA1 is currently not connected to anything (?)
 				return 0;
