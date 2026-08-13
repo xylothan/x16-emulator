@@ -655,6 +655,13 @@ x16_add_test(cpu_steprun NEEDS_CPU_TABLES
     SOURCES tests/test_cpu_steprun.c tests/support/cpu_fixture.c tests/support/harness.c
             src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# Klaus Dormann's functional tests: a program that walks every opcode and
+# checks its own results. The binaries are fetched, not committed, and the test
+# reports skipped without them.
+x16_add_test(klaus NEEDS_CPU_TABLES
+    SOURCES tests/test_klaus.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are

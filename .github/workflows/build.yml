@@ -143,6 +143,10 @@ jobs:
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        # Klaus Dormann's functional tests. Not committed: GPL, and 64K each.
+        # The test reports them skipped if this step is removed or fails.
+        run: python tests/fetch_klaus.py
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and

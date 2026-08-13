@@ -4,6 +4,7 @@
 
 int x16_failures = 0;
 int x16_checks   = 0;
+int x16_divergences = 0;
 
 void
 check(bool cond, const char *what)
@@ -29,9 +30,29 @@ check_eq(uint32_t got, uint32_t want, const char *what)
 	}
 }
 
+void
+check_divergent(bool passed, const char *what, const char *why)
+{
+	x16_checks++;
+	if (passed) {
+		// Better than expected, and still wrong: the marker says this differs
+		// from the hardware, and it no longer does.
+		x16_failures++;
+		printf("FIXED: %s -- this passes now; drop the divergence marker\n", what);
+	} else {
+		x16_divergences++;
+		printf("DIVERGE: %s\n         %s\n", what, why);
+	}
+}
+
 int
 x16_test_summary(const char *suite)
 {
-	printf("\n%s: %d checks, %d failed\n", suite, x16_checks, x16_failures);
+	printf("\n%s: %d checks, %d failed", suite, x16_checks, x16_failures);
+	if (x16_divergences > 0) {
+		printf(", %d known divergence%s",
+		       x16_divergences, x16_divergences == 1 ? "" : "s");
+	}
+	printf("\n");
 	return x16_failures ? 1 : 0;
 }
