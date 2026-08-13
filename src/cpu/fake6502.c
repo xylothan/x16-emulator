@@ -248,16 +248,19 @@ void exec6502(uint32_t tickcount) {
         penaltye = 0;
         penaltyn = 0;
         penaltyx = 0;
+        penaltyd = 0;
 
         (*addrtable[opcode])();
         (*optable[opcode])();
         clockticks6502 += ticktable[opcode];
 
-        if (!regs.e && penaltyop && penaltyaddr) clockticks6502++;
+        // Keep this in sync with step6502().
+        if (penaltyop && penaltyaddr) clockticks6502++;
         if (memory_16bit()) clockticks6502 += penaltym;
         if (index_16bit()) clockticks6502 += penaltyx;
         if (penaltyn && !regs.e) clockticks6502++;
         if (penaltye && regs.e) clockticks6502++;
+        if (penaltyd) clockticks6502++;
 
         instructions++;
 
@@ -286,6 +289,9 @@ void step6502() {
     penaltye = 0;
     penaltyn = 0;
     penaltyx = 0;
+    // Otherwise this sticks: after one misaligned direct-page access every later
+    // instruction costs an extra cycle, and reset6502() doesn't clear it either.
+    penaltyd = 0;
 
     (*addrtable[opcode])();
     (*optable[opcode])();
