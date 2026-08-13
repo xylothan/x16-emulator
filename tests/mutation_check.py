@@ -182,7 +182,19 @@ def main():
                 survived.append(m["name"])
         finally:
             shutil.copy2(backup, path)
+            # copy2 preserves the original mtime, which would leave the restored
+            # file older than the object built from the mutated version. Ninja
+            # and make both compare timestamps, so the mutation would stay
+            # compiled in and every later mutation would be measured against an
+            # already-broken emulator -- with every test red for the wrong
+            # reason and every mutation therefore reported as caught. Stamp it
+            # as changed so the next build actually recompiles it.
+            os.utime(path, None)
             backup.unlink(missing_ok=True)
+
+    # Leave the tree built from clean source, so a later run is not confused by
+    # objects compiled from a mutation.
+    build(args.build_dir)
 
     # Leave the tree built from clean source, so a later run is not confused by
     # objects compiled from a mutation.
