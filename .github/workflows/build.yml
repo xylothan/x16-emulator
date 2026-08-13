@@ -144,9 +144,12 @@ jobs:
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Build Tests
-        # Named targets rather than a bare --build, so a broken emulator build
-        # is reported by the platform jobs and not duplicated here.
-        run: cmake --build build --target dbg_info_test code_map_test debug_core_test timing_speed_test irq_ctx_test dbg_load_test
+        # One aggregate target rather than a bare --build, so a broken emulator
+        # build is reported by the platform jobs and not duplicated here, and
+        # rather than a list of names, so adding a test stays a one-line change
+        # in CMakeLists.txt and cannot leave ctest running an executable that
+        # was never compiled.
+        run: cmake --build build --target unit_tests
       - name: Run Tests
         run: ctest --test-dir build --output-on-failure
   # The Windows builds we point people at. Everything is linked statically,

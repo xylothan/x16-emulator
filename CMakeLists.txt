@@ -11,6 +11,10 @@ project(x16emu LANGUAGES C CXX)
 # --- Options (Replacements for Env Vars) ---
 option(ENABLE_LTO "Enable Link Time Optimization" ON)
 
+# Turning this off builds only the unit tests, which link no emulator core and so
+# need neither SDL nor a ROM. Chiefly for CI and for working on the tests.
+option(BUILD_EMULATOR "Build the x16emu executable and makecart" ON)
+
 # --- Configuration & Standards ---
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -70,6 +74,12 @@ add_custom_target(
 )
 
 # --- Dependencies ---
+# The unit tests link no emulator core, so a tests-only build (-DBUILD_EMULATOR=OFF)
+# has no use for SDL or zlib and should not be blocked by their absence -- that is
+# what lets the tests run on a bare machine and keeps them honestly independent of
+# any one display backend. The exceptions are the tests whose sources reach SDL's
+# headers through glue.h (code_map and timing_speed); those are skipped when SDL
+# is absent rather than failing the build.
 if(EMSCRIPTEN)
     # Emscripten: SDL2 is a built-in port, not a package we search for.
     # We create a "Dummy" target that passes the compiler flags (-s USE_SDL=2)
@@ -87,8 +97,13 @@ if(EMSCRIPTEN)
 
     set(ZLIB_FOUND TRUE)
 else()
-    find_package(SDL2 REQUIRED)
-    find_package(ZLIB REQUIRED)
+    if(BUILD_EMULATOR)
+        find_package(SDL2 REQUIRED)
+        find_package(ZLIB REQUIRED)
+    else()
+        find_package(SDL2 QUIET)
+        find_package(ZLIB QUIET)
+    endif()
     find_package(cJSON CONFIG QUIET)
 endif()
 
@@ -352,6 +367,11 @@ if(USE_DAP)
 endif()
 
 # --- Main Executable Target ---
+# Guarded so a tests-only build skips the emulator and its SDL dependency. The
+# body is left un-indented deliberately: CMake ignores whitespace, and
+# re-indenting ~150 lines would bury the one-line change in noise.
+if(BUILD_EMULATOR)
+
 add_executable(x16emu ${X16_SOURCES})
 
 # Ensure the Python script runs before compiling x16emu
@@ -516,6 +536,8 @@ if(EMSCRIPTEN)
     target_link_options(makecart PRIVATE "SHELL:-s USE_ZLIB=1")
 endif()
 
+endif() # BUILD_EMULATOR
+
 # --- Optional: unit tests ---
 # Every test is off by default so none of them affect the normal `x16emu` build.
 # -DBUILD_TESTS=ON turns the lot on at once, which is what CI does; the per-test
@@ -526,108 +548,112 @@ endif()
 # Emscripten is excluded throughout: the output there is .js/.wasm, which ctest
 # cannot execute as a plain binary.
 option(BUILD_TESTS "Build every unit test" OFF)
-option(BUILD_DBG_INFO_TEST "Build the cc65 debug-info parser test" OFF)
-option(BUILD_CODE_MAP_TEST "Build the anchored disassembler test" OFF)
-option(BUILD_DEBUG_CORE_TEST "Build the debugger breakpoint core test" OFF)
-option(BUILD_TIMING_SPEED_TEST "Build the emulation-speed control test" OFF)
-option(BUILD_IRQ_CTX_TEST "Build the interrupt context tracking test" OFF)
-option(BUILD_DBG_LOAD_TEST "Build the runtime debug-info load test" OFF)
-
-if(BUILD_TESTS)
-    set(BUILD_DBG_INFO_TEST ON)
-    set(BUILD_CODE_MAP_TEST ON)
-    set(BUILD_DEBUG_CORE_TEST ON)
-    set(BUILD_TIMING_SPEED_TEST ON)
-    set(BUILD_IRQ_CTX_TEST ON)
-    set(BUILD_DBG_LOAD_TEST ON)
-endif()
 
 # add_test() only writes a CTestTestfile when testing is enabled, so this has to
-# come before the add_test() calls below.
-if((BUILD_DBG_INFO_TEST OR BUILD_CODE_MAP_TEST OR BUILD_DEBUG_CORE_TEST
-    OR BUILD_TIMING_SPEED_TEST OR BUILD_IRQ_CTX_TEST OR BUILD_DBG_LOAD_TEST)
-    AND NOT EMSCRIPTEN)
+# come before the x16_add_test() calls below.
+if(NOT EMSCRIPTEN)
     enable_testing()
 endif()
 
-# --- cc65 debug-info parser checks ---
-# dbg_info.c has no dependency on the emulator core, so this links it on its own.
-if(BUILD_DBG_INFO_TEST AND NOT EMSCRIPTEN)
-    add_executable(dbg_info_test
-        tests/test_dbg_info.c
-        src/dbg_info.c
-    )
-    target_include_directories(dbg_info_test PRIVATE src)
-    add_test(NAME dbg_info COMMAND dbg_info_test)
-endif()
+# Everything x16_add_test() registers hangs off this, so CI can build the whole
+# suite by name without naming each test -- and without a bare --build, which
+# would drag in the emulator and duplicate what the platform jobs already report.
+# Without it, "adding a test is one line" would be false: the workflow would be
+# a second place to remember, and forgetting it leaves ctest running executables
+# that were never compiled.
+add_custom_target(unit_tests)
 
-# --- Anchored disassembler checks ---
+# x16_add_test(<name> SOURCES <src>... [NEEDS_SDL] [NEEDS_CPU_TABLES])
+#
+# Declares the per-test BUILD_<NAME>_TEST option, builds tests/<name>_test from
+# SOURCES, and registers it with ctest. Adding a test is therefore one line in
+# one place, which matters when many tests land in parallel: a shared block per
+# test would make this file a standing merge conflict.
+#
+# NEEDS_SDL marks a test whose sources reach SDL's headers (via glue.h). Those
+# are skipped rather than failing the build when SDL is absent, so the tests that
+# genuinely stand alone still run on a machine without it.
+function(x16_add_test name)
+    cmake_parse_arguments(T "NEEDS_SDL;NEEDS_CPU_TABLES" "" "SOURCES" ${ARGN})
+
+    string(TOUPPER "${name}" name_uc)
+    option(BUILD_${name_uc}_TEST "Build the ${name} unit test" OFF)
+
+    if(EMSCRIPTEN)
+        return()
+    endif()
+    if(NOT BUILD_TESTS AND NOT BUILD_${name_uc}_TEST)
+        return()
+    endif()
+    if(T_NEEDS_SDL AND NOT SDL2_FOUND)
+        message(STATUS "SDL2 not found: skipping ${name} test")
+        return()
+    endif()
+
+    add_executable(${name}_test ${T_SOURCES})
+    target_include_directories(${name}_test PRIVATE src)
+    if(T_NEEDS_SDL)
+        target_include_directories(${name}_test PRIVATE ${SDL2_INCLUDE_DIRS})
+    endif()
+    if(T_NEEDS_CPU_TABLES)
+        add_dependencies(${name}_test gen_cpu_tables)
+    endif()
+    add_dependencies(unit_tests ${name}_test)
+    add_test(NAME ${name} COMMAND ${name}_test)
+endfunction()
+
+# dbg_info.c has no dependency on the emulator core, so this links it on its own.
+x16_add_test(dbg_info
+    SOURCES tests/test_dbg_info.c src/dbg_info.c)
+
 # code_map.c leans on only disasm(), dbg_info and two core symbols, so the test
 # supplies its own memory and register file rather than linking the emulator
-# core. disasm.c still includes SDL headers, hence the SDL include directories.
-# It also includes the generated cpu/mnemonics.h, so this depends on
-# gen_cpu_tables: a tests-only build never builds x16emu, which is what would
-# otherwise pull the generator in.
-if(BUILD_CODE_MAP_TEST AND NOT EMSCRIPTEN)
-    add_executable(code_map_test
-        tests/test_code_map.c
-        src/code_map.c
-        src/disasm.c
-        src/dbg_info.c
-    )
-    target_include_directories(code_map_test PRIVATE src ${SDL2_INCLUDE_DIRS})
-    add_dependencies(code_map_test gen_cpu_tables)
-    add_test(NAME code_map COMMAND code_map_test)
-endif()
+# core. disasm.c still includes SDL headers, and the generated cpu/mnemonics.h.
+x16_add_test(code_map NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_code_map.c src/code_map.c src/disasm.c src/dbg_info.c)
 
-# --- Breakpoint core checks ---
 # debug_core.c reaches for only the register file, the bank registers and a debug
 # memory read, so the test supplies its own and links no emulator core.
-if(BUILD_DEBUG_CORE_TEST AND NOT EMSCRIPTEN)
-    add_executable(debug_core_test
-        tests/test_debug_core.c
-        src/debug_core.c
-    )
-    target_include_directories(debug_core_test PRIVATE src)
-    add_test(NAME debug_core COMMAND debug_core_test)
-endif()
+x16_add_test(debug_core
+    SOURCES tests/test_debug_core.c src/debug_core.c)
 
-# --- Emulation-speed control checks ---
 # The speed arithmetic in timing.c depends only on the machine's configured
 # clock, so the test supplies the few emulator globals it touches.
-if(BUILD_TIMING_SPEED_TEST AND NOT EMSCRIPTEN)
-    add_executable(timing_speed_test
-        tests/test_timing_speed.c
-        src/timing.c
-    )
-    target_include_directories(timing_speed_test PRIVATE src ${SDL2_INCLUDE_DIRS})
-    add_test(NAME timing_speed COMMAND timing_speed_test)
-endif()
+x16_add_test(timing_speed NEEDS_SDL
+    SOURCES tests/test_timing_speed.c src/timing.c)
 
-# --- Interrupt context tracking checks ---
 # irq_ctx.c is pure bookkeeping with no dependencies, so the test links it alone.
-if(BUILD_IRQ_CTX_TEST AND NOT EMSCRIPTEN)
-    add_executable(irq_ctx_test
-        tests/test_irq_ctx.c
-        src/cpu/irq_ctx.c
-    )
-    target_include_directories(irq_ctx_test PRIVATE src)
-    add_test(NAME irq_ctx COMMAND irq_ctx_test)
-endif()
+x16_add_test(irq_ctx
+    SOURCES tests/test_irq_ctx.c src/cpu/irq_ctx.c)
 
-# --- Runtime debug-info load checks ---
 # dbg_load.c reports loads to dbg_info and source_view, so the test links those
 # two alongside it. dbg_info.c has no dependency on the emulator core either.
-if(BUILD_DBG_LOAD_TEST AND NOT EMSCRIPTEN)
-    add_executable(dbg_load_test
-        tests/test_dbg_load.c
-        src/dbg_load.c
-        src/dbg_info.c
-        src/source_view.c
-    )
-    target_include_directories(dbg_load_test PRIVATE src)
-    add_test(NAME dbg_load COMMAND dbg_load_test)
-endif()
+x16_add_test(dbg_load
+    SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c)
+
+# The CPU core reaches outside itself for only six symbols, all supplied by the
+# fixture, so this links the real instruction tables against a flat 64K memory
+# and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
+# entry and exit to it.
+x16_add_test(cpu_smoke NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_smoke.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
+x16_add_test(cpu_loadstore NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_loadstore.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
+x16_add_test(cpu_adc_sbc NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_adc_sbc.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
+x16_add_test(cpu_decimal NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_decimal.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
+x16_add_test(cpu_steprun NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_steprun.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
 # Build summary
 
