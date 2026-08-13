@@ -54,5 +54,16 @@ x16_test_summary(const char *suite)
 		       x16_divergences, x16_divergences == 1 ? "" : "s");
 	}
 	printf("\n");
+
+	// Said plainly, because a divergence does not fail the run and would
+	// otherwise be invisible to anyone reading a green result.
+	if (x16_divergences > 0) {
+		printf("WARNING: %s differs from real hardware in %d known place%s. "
+		       "See the DIVERGE line%s above.\n",
+		       suite, x16_divergences,
+		       x16_divergences == 1 ? "" : "s",
+		       x16_divergences == 1 ? "" : "s");
+	}
+
 	return x16_failures ? 1 : 0;
 }
