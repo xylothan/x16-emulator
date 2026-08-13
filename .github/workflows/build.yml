@@ -147,6 +147,11 @@ jobs:
         # Klaus Dormann's functional tests. Not committed: GPL, and 64K each.
         # The test reports them skipped if this step is removed or fails.
         run: python tests/fetch_klaus.py
+      - name: Fetch ProcessorTests
+        # 100 cases per opcode, as a prefix so every machine converts the same
+        # ones -- the baseline records exact counts. The full suite is 10,000
+        # per opcode and ~1 GB.
+        run: python tests/fetch_pt.py --cases 100
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and
@@ -178,6 +183,15 @@ jobs:
             n=$(grep -c 'DIVERGE:' ctest.log)
             echo "::warning title=Known hardware divergences::$n known difference(s) from real hardware. See the DIVERGE lines in this job's log."
           fi
+      - name: Upload the per-opcode report
+        # The baseline says how many cases pass; this says what the failures
+        # look like.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: processor-tests-report
+          path: pt-report.txt
+          if-no-files-found: ignore
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
   # it would catch incorrect behaviour; this is the half that does. Kept out of
@@ -197,6 +211,8 @@ jobs:
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Fetch CPU test images
         run: python tests/fetch_klaus.py
+      - name: Fetch ProcessorTests
+        run: python tests/fetch_pt.py --cases 100
       - name: Check the tests catch faults
         env:
           X16_KLAUS_REQUIRED: 1
