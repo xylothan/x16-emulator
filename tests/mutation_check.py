@@ -91,8 +91,11 @@ MUTATIONS = [
     {
         "name": "the overflow flag is never set",
         "file": "src/cpu/support.h",
+        # Masking with 0x00 rather than replacing the condition with 0: the
+        # macro parameters stay referenced, so this compiles under -Werror
+        # where an `if (0)` leaves them unused and GCC refuses.
         "find": "if (((n) ^ (m)) & ((n) ^ (o)) & 0x80) setoverflow();",
-        "into": "if (0) setoverflow();",
+        "into": "if (((n) ^ (m)) & ((n) ^ (o)) & 0x00) setoverflow();",
         "count": 1,
         "caught_by": ["cpu_adc_sbc", "klaus"],
     },
@@ -161,8 +164,12 @@ def main():
                             encoding="utf-8")
             built, out = build(args.build_dir)
             if not built:
-                # A mutation that will not compile proves nothing either way.
-                print(f"SKIP  {m['name']}\n      does not compile")
+                # A mutation that will not compile proves nothing either way,
+                # and is usually a mutation that needs rewriting rather than a
+                # problem with the tests. Show enough to fix it.
+                first = next((l for l in out.splitlines()
+                              if "error" in l.lower()), "")
+                print(f"SKIP  {m['name']}\n      does not compile: {first.strip()[:120]}")
                 survived.append(m["name"] + " (did not compile)")
                 continue
 
