@@ -88,6 +88,12 @@ uint16_t cpu_a(void);
 uint16_t cpu_x(void);
 uint16_t cpu_y(void);
 
+// Set these to watch every bus access the CPU makes, so a test can compare the
+// order and addresses against a reference trace. NULL by default, which costs
+// one branch per access and keeps the other tests unaffected.
+extern void (*cpu_bus_read_hook)(uint16_t addr, uint8_t value);
+extern void (*cpu_bus_write_hook)(uint16_t addr, uint8_t value);
+
 // Whether the CPU is currently treating the accumulator, or the index
 // registers, as 16 bits. Emulation mode forces both to 8 whatever the flags say.
 bool memory_16bit_width(void);
