@@ -655,6 +655,15 @@ x16_add_test(cpu_steprun NEEDS_CPU_TABLES
     SOURCES tests/test_cpu_steprun.c tests/support/cpu_fixture.c tests/support/harness.c
             src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# memory.c routes every I/O access, and carries the debugOn flag that says
+# whether a read is the debugger looking or the machine running. The devices
+# behind it are recording fakes; memory.c, debug_core.c and the CPU core are
+# real, so this exercises the actual routing, watchpoint and cycle accounting.
+x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_debugon_contract.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
