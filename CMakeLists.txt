@@ -631,6 +631,14 @@ x16_add_test(irq_ctx
 x16_add_test(dbg_load
     SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c)
 
+# The CPU core reaches outside itself for only six symbols, all supplied by the
+# fixture, so this links the real instruction tables against a flat 64K memory
+# and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
+# entry and exit to it.
+x16_add_test(cpu_smoke NEEDS_CPU_TABLES
+    SOURCES tests/test_cpu_smoke.c tests/support/cpu_fixture.c tests/support/harness.c
+            src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # Build summary
 
 if(ENABLE_FLUIDSYNTH STREQUAL "AUTO" AND NOT USE_FLUIDSYNTH)
