@@ -6,6 +6,11 @@
 // millions of instructions at a time. It is the closest thing available to an
 // independent opinion.
 //
+// What it does not check is timing. The program verifies results, not cycle
+// counts, so it is blind to a wrong cycle count -- mutation_check.py confirms
+// that by dropping the page-cross penalty and watching this still pass. The
+// hand-written scenarios carry that half.
+//
 // The mechanics are simple: the .bin is a full 64K image, execution starts at
 // $0400, and the program traps by branching to itself. Success is a trap at one
 // specific address, taken from the listing that ships with the binary; a trap
