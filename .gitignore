@@ -23,10 +23,13 @@ imgui.ini
 # GPL-licensed and 64K each, so downloaded rather than committed.
 /tests/klaus/
 
-# SingleStepTests/ProcessorTests, fetched by tests/fetch_pt.py. Gigabytes of
-# JSON per suite, plus the binaries it converts to. The per-opcode baselines
-# are committed; they are small and they are the thing worth reviewing.
-/tests/pt/
+# SingleStepTests/ProcessorTests. The downloaded JSON is gigabytes and stays
+# out; the converted fixtures are a couple of megabytes each and are committed,
+# so the tests run offline and CI does not re-download 3.6 GB to rebuild them.
+# Regenerate with tests/fetch_pt.py --force.
+/tests/pt/*
+!/tests/pt/*.bin
+!/tests/pt/README.md
 pt-report*.txt
 
 __pycache__/
