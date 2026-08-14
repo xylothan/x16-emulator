@@ -668,6 +668,16 @@ x16_add_test(processor_tests NEEDS_CPU_TABLES
     SOURCES tests/test_processor_tests.c tests/support/cpu_fixture.c
             tests/support/harness.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# The same binary over the 65816 suites. One executable rather than three: the
+# fixtures differ only in which cases they hold, and each case says which core
+# to run it on. Registered separately so a failure names the mode.
+if(TARGET processor_tests_test)
+    add_test(NAME processor_tests_816_emu
+             COMMAND processor_tests_test 816-emu)
+    add_test(NAME processor_tests_816_native
+             COMMAND processor_tests_test 816-native)
+endif()
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
