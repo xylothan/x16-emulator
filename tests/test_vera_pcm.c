@@ -196,11 +196,19 @@ test_ctrl_bit7_resets_the_fifo(void)
 // bit 7 of that accumulator flips, so a LARGER value plays FASTER, all the way
 // to 255.
 //
-// The emulator computes rate = (val > 128) ? (256 - val) : val, which inverts
-// the top half of the range: 200 becomes 56, playing at roughly a quarter of
-// the hardware speed and reading back as 56 rather than 200. Values up to and
-// including 128 are unaffected, which is why this has gone unnoticed -- and
-// note that 128 is the fold's fixed point, so the boundary itself is invisible.
+// This is vestigial, not a misreading of the hardware. The original code by
+// VERA's designer was `rate = val`, which matches the RTL above exactly. Then
+// upstream #116 added a loop feature triggered by writing AUDIO_RATE > 128, and
+// masked the rate to recover it: `rate = loop ? (val & 0x7f) : val`. Upstream
+// #159 later moved that trigger to AUDIO_CTRL bits 6 and 7 -- but instead of
+// restoring `rate = val`, changed the mask to `256 - val`. Nothing has read
+// loop state out of this register since, so the fold now serves no purpose and
+// only corrupts rates above 128.
+//
+// 200 becomes 56, playing at roughly a quarter of the hardware speed and
+// reading back as 56. Values up to and including 128 are unaffected, and 128 is
+// the fold's fixed point, so the boundary itself is invisible -- which is why
+// this has gone unnoticed.
 static void
 test_rate_register_stores_the_raw_value(void)
 {
@@ -236,6 +244,12 @@ test_rate_register_stores_the_raw_value(void)
 // keeping the queued data. audio_fifo.v assigns rdidx_r in exactly two places,
 // :33 (reset, together with wridx_r) and :44 (increment on read). No path
 // rewinds it alone, so the feature has no hardware counterpart.
+//
+// This is a deliberate emulator extension rather than a mistake -- upstream
+// #116, "Add an ability to replay and loop FIFO data" -- so it is recorded
+// rather than quietly removed. Note what it implies: guest software driving
+// this bit works under the emulator and does nothing on a real machine, so the
+// extension cannot be relied on by anything portable.
 static void
 test_ctrl_bit6_is_ignored(void)
 {
@@ -270,6 +284,11 @@ test_ctrl_bit6_is_ignored(void)
 // The emulator reads bits 7 and 6 set together as loop mode and, in that case,
 // deliberately does not reset the FIFO. On hardware bit 7 resets it regardless
 // of bit 6, because bit 6 is not decoded at all, so the data should be gone.
+//
+// Same provenance as divergence 2 (upstream #116, retriggered by #159): an
+// intentional extension, not a misreading. It is recorded here rather than
+// removed, because software may already depend on it -- but it is the reason
+// bit 7 alone cannot be assumed to clear the FIFO under this emulator.
 static void
 test_no_loop_mode(void)
 {
