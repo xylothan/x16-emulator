@@ -137,6 +137,65 @@ MUTATIONS = [
         "requires": "tests/pt/wdc65c02.bin",
         "caught_by": ["processor_tests"],
     },
+    # The 65C816 fixes below. Each is checked by the suite for the mode it
+    # applies to, so a revert shows up as a named opcode rather than a number.
+    {
+        "name": "indirect addressing ignores the data bank",
+        "file": "src/cpu/modes.h",
+        "find": "ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0)",
+        "into": "ea = ((uint16_t)read6502(direct_page_add(eahelp), 0)",
+        "count": 2,  # ind0 and indx
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        "name": "the new stack instructions wrap inside page one",
+        "file": "src/cpu/instructions.h",
+        "find": "regs.dp = pull16_long();",
+        "into": "regs.dp = pull16();",
+        "count": 1,
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        "name": "a 16-bit operand costs no extra cycle",
+        "file": "src/cpu/support.h",
+        "find": "(penaltym = addressing_is_acc ? 0 : (uint8_t)(n))",
+        "into": "(penaltym = addressing_is_acc ? 0 : (uint8_t)((n) & 0x00))",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        "name": "BIT reads the wrong half of a 16-bit operand",
+        "file": "src/cpu/instructions.h",
+        "find": "uint16_t top = memory_16bit() ? (uint16_t)(value >> 8) : value;",
+        "into": "uint16_t top = value;",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        # The two CPUs correct decimal subtraction differently; using one
+        # algorithm for both was the fault this replaced.
+        "name": "the 65C02 decimal SBC algorithm is used on the 65C816",
+        "file": "src/cpu/instructions.h",
+        "find": "            int16_t adjusted;\n            if (regs.is65c816) {",
+        "into": "            int16_t adjusted;\n            if (0) {",
+        "count": 1,
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        # Guards the table against the published spec rather than the hardware
+        # traces, so it is the one mutation opcode_spec is required to catch.
+        "name": "a documented cycle count is changed",
+        "file": "src/cpu/65c02.opcodes",
+        "find": "tsb abso 6 $0c",
+        "into": "tsb abso 5 $0c",
+        "count": 1,
+        "caught_by": ["opcode_spec"],
+    },
 ]
 
 
