@@ -28,6 +28,10 @@
 
 #define START_PC 0x0400
 
+// The images are full 64K memory dumps. Named rather than taken from the
+// fixture's memory size, which is now the 65816's whole 24-bit space.
+#define KLAUS_IMAGE_SIZE 0x10000
+
 // Generous: a full functional run is tens of millions of instructions, and the
 // point of the ceiling is only to stop a broken core spinning forever.
 #define MAX_INSTRUCTIONS 200000000u
@@ -58,10 +62,10 @@ run_image(const char *path, bool c816)
 	}
 
 	cpu_reset_to(c816 ? CPU_816_EMU : CPU_65C02, START_PC);
-	size_t got = fread(cpu_mem, 1, sizeof cpu_mem, f);
+	size_t got = fread(cpu_mem, 1, KLAUS_IMAGE_SIZE, f);
 	fclose(f);
-	if (got != sizeof cpu_mem) {
-		printf("     image is %zu bytes, expected 65536\n", got);
+	if (got != KLAUS_IMAGE_SIZE) {
+		printf("     image is %zu bytes, expected %d\n", got, KLAUS_IMAGE_SIZE);
 		return 0;
 	}
 

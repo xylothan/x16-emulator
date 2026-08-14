@@ -42,7 +42,16 @@ bool cpu_mode_is_16bit(cpu_mode_t mode);
 
 // The machine's memory, exposed directly so a test can seed operands and read
 // results back without going through the CPU.
-extern uint8_t cpu_mem[0x10000];
+//
+// 16 MB, indexed by the 65816's full 24-bit address: (bank << 16) | offset.
+// Bank 0 is the first 64K, so a 65C02 test indexes it exactly as before.
+#define CPU_MEM_SIZE 0x1000000
+extern uint8_t cpu_mem[CPU_MEM_SIZE];
+
+// Seed a byte anywhere in the 24-bit space, recording it so the next reset
+// clears it again. Writing cpu_mem[] directly is fine within bank 0, which is
+// always cleared; outside it, use this or the byte survives into the next test.
+void cpu_seed(uint32_t addr, uint8_t value);
 
 // Zero memory and counters, point the reset vector at `start`, and reset the
 // CPU into `mode`. Every scenario begins here, so one test cannot inherit
@@ -91,8 +100,10 @@ uint16_t cpu_y(void);
 // Set these to watch every bus access the CPU makes, so a test can compare the
 // order and addresses against a reference trace. NULL by default, which costs
 // one branch per access and keeps the other tests unaffected.
-extern void (*cpu_bus_read_hook)(uint16_t addr, uint8_t value);
-extern void (*cpu_bus_write_hook)(uint16_t addr, uint8_t value);
+//
+// The address is the full 24-bit one; on a 65C02 the bank is always zero.
+extern void (*cpu_bus_read_hook)(uint32_t addr, uint8_t value);
+extern void (*cpu_bus_write_hook)(uint32_t addr, uint8_t value);
 
 // Whether the CPU is currently treating the accumulator, or the index
 // registers, as 16 bits. Emulation mode forces both to 8 whatever the flags say.
