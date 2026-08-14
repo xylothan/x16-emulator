@@ -147,21 +147,6 @@ jobs:
         # Klaus Dormann's functional tests. Not committed: GPL, and 64K each.
         # The test reports them skipped if this step is removed or fails.
         run: python tests/fetch_klaus.py
-      - name: Cache ProcessorTests
-        # Only the converted fixtures: a megabyte or so each, against gigabytes
-        # of JSON they come from. The suites are versioned and immutable, so a
-        # hit needs no revalidation and skips the downloads -- which is where
-        # the flakes are.
-        uses: actions/cache@v4
-        with:
-          path: tests/pt/*.bin
-          key: pt-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
-      - name: Fetch ProcessorTests
-        # 100 cases per opcode, as a prefix so every machine converts the same
-        # ones -- the baselines record exact counts. No-op on a cache hit.
-        run: |
-          python tests/fetch_pt.py --cases 100
-          python tests/fetch_pt.py --cases 100 --variant 816-emu
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and
@@ -221,15 +206,6 @@ jobs:
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Fetch CPU test images
         run: python tests/fetch_klaus.py
-      - name: Cache ProcessorTests
-        uses: actions/cache@v4
-        with:
-          path: tests/pt/*.bin
-          key: pt-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
-      - name: Fetch ProcessorTests
-        run: |
-          python tests/fetch_pt.py --cases 100
-          python tests/fetch_pt.py --cases 100 --variant 816-emu
       - name: Check the tests catch faults
         env:
           X16_KLAUS_REQUIRED: 1
