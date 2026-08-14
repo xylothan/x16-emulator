@@ -191,15 +191,35 @@ mode_of(const pt_case *c)
 	return x8 ? MODE_M16X8 : MODE_M16X16;
 }
 
-// MVN and MVP move one byte per execution and rewind PC so the instruction runs
-// again, which is what makes a block move interruptible. The suite records a
-// fixed 100-cycle prefix of the whole move -- fourteen iterations of a transfer
-// that may run for thousands -- so a case is not one instruction and cannot be
-// compared against one. Counted separately rather than left to read as failure.
+// Opcodes the suite records in a way that cannot be compared against a single
+// step of this emulator. Counted separately rather than left to read as
+// failure, since none of them is a fault in the core.
+//
+//   $44 MVP, $54 MVN   Move one byte per execution and rewind PC so the
+//                      instruction runs again, which is what makes a block move
+//                      interruptible. The suite records a fixed 100-cycle
+//                      prefix of the whole move -- fourteen iterations of a
+//                      transfer that may run for thousands.
+//
+//   $CB WAI            Halts until an interrupt arrives. Both WDC datasheets
+//                      give three cycles; the suite records a fourth from the
+//                      wait state, which on hardware continues indefinitely.
+//
+//   $DB                STP on a stock 65C816. This emulator maps it to a
+//                      debugger trap instead, which is a deliberate difference
+//                      rather than a timing error.
 static bool
-is_block_move(const pt_case *c)
+is_not_comparable(const pt_case *c)
 {
-	return c->cpu == PT_CPU_65816 && (c->opcode == 0x44 || c->opcode == 0x54);
+	if (c->cpu != PT_CPU_65816) {
+		return false;
+	}
+	switch (c->opcode) {
+		case 0x44: case 0x54: case 0xCB: case 0xDB:
+			return true;
+		default:
+			return false;
+	}
 }
 
 static void
@@ -249,7 +269,7 @@ run_case(const pt_case *c, pt_result *r)
 	r->total++;
 	pt_opcode *op = &by_opcode[c->opcode];
 	op->total++;
-	op->not_comparable = is_block_move(c);
+	op->not_comparable = is_not_comparable(c);
 	const int mode = mode_of(c);
 	by_mode[mode].total++;
 
@@ -645,7 +665,7 @@ main(int argc, char **argv)
 		}
 	}
 	if (not_comparable > 0) {
-		printf("     %d opcodes not comparable (block moves; see is_block_move)\n",
+		printf("     %d opcodes not comparable (see is_not_comparable)\n",
 		       not_comparable);
 	}
 	if (diverging > 0) {
