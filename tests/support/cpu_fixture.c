@@ -72,7 +72,7 @@ cpu_seed(uint32_t addr, uint8_t value)
 }
 
 // ---- What fake6502.c expects the rest of the emulator to provide ------------
-// Flat 24-bit memory: no I/O, and no banking beyond the 65816's own, which is
+// Flat 24-bit memory: no I/O, and no banking beyond the 65C816's own, which is
 // just the top eight address lines. A test that cares about the emulator's
 // banking scheme belongs with memory.c, not here.
 
@@ -80,7 +80,7 @@ void (*cpu_bus_read_hook)(uint32_t addr, uint8_t value);
 void (*cpu_bus_write_hook)(uint32_t addr, uint8_t value);
 
 // A 65C02 has sixteen address lines and no bank pins, so its addresses wrap
-// inside 64K. The core computes effective addresses in 24 bits for the 65816's
+// inside 64K. The core computes effective addresses in 24 bits for the 65C816's
 // benefit and indexing can carry past $FFFF, which on a 65C02 must come back to
 // $0000 rather than reaching bank 1.
 static uint32_t

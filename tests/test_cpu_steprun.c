@@ -154,7 +154,7 @@ test_page_cross(void)
 	BOTH_WAYS(CPU_65C02, prog, 3, "an indexed read across a page");
 }
 
-// ---- 65816 native mode, including a misaligned direct page -----------------
+// ---- 65C816 native mode, including a misaligned direct page -----------------
 // The direct-page penalty is applied by one loop and not the other, so this is
 // where the two paths are most likely to disagree.
 

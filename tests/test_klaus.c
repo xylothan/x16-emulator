@@ -29,7 +29,7 @@
 #define START_PC 0x0400
 
 // The images are full 64K memory dumps. Named rather than taken from the
-// fixture's memory size, which is now the 65816's whole 24-bit space.
+// fixture's memory size, which is now the 65C816's whole 24-bit space.
 #define KLAUS_IMAGE_SIZE 0x10000
 
 // Generous: a full functional run is tens of millions of instructions, and the

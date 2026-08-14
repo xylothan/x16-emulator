@@ -47,7 +47,7 @@ core. Each changes emulated behaviour, so code that depended on the old
 behaviour will see a difference.
 
 (1)		P bit 4		Was forced set on every instruction for the 65C02, which
-					applies the 65816's emulation-mode rule to the wrong CPU.
+					applies the 65C816's emulation-mode rule to the wrong CPU.
 					Bit 4 has no register bit behind it on a 65C02 and is now
 					preserved. PLP and RTI no longer load it from the stack.
 
@@ -74,11 +74,11 @@ behaviour will see a difference.
 					conditional cycle. The variant opcode files may now override
 					6502.opcodes rather than only adding to it.
 
-(6)		65816		A 16-bit operand costs an extra cycle, which only LDA
+(6)		65C816		A 16-bit operand costs an extra cycle, which only LDA
 					charged. PHX, PHY, PLX and PLY charged the accumulator
 					width instead of the index width, and TSB charged nothing.
 
-(7)		65816		(dp), (dp,X), (dp),Y and (sr),Y ignored the data bank and
+(7)		65C816		(dp), (dp,X), (dp),Y and (sr),Y ignored the data bank and
 					used bank 0. Indexing now carries past $FFFF into the next
 					bank.
 

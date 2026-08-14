@@ -108,7 +108,7 @@ static void and() {
 static void asl() {
     pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65816 has its own flat timing, so this
+    // part always paid it and the 65C816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
     penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
@@ -146,7 +146,7 @@ static void beq() {
 static void bit() {
     pay_for_wide_memory(1);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65816 has its own flat timing, so this
+    // part always paid it and the 65C816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
     penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
@@ -429,7 +429,7 @@ static void ldy() {
 static void lsr() {
     pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65816 has its own flat timing, so this
+    // part always paid it and the 65C816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
     penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
@@ -554,7 +554,7 @@ static void rep() {
 static void rol() {
     pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65816 has its own flat timing, so this
+    // part always paid it and the 65C816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
     penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
@@ -570,7 +570,7 @@ static void rol() {
 static void ror() {
     pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65816 has its own flat timing, so this
+    // part always paid it and the 65C816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
     penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
@@ -670,7 +670,7 @@ static void sbc() {
             // freshly computed carry back into the overflow calculation.
             const uint16_t carry_in = regs.status & FLAG_CARRY;
 
-            // The 65C02 subtracts in binary and corrects afterwards; the 65816
+            // The 65C02 subtracts in binary and corrects afterwards; the 65C816
             // corrects each nibble as it goes, as the NMOS part did. The two
             // agree on valid BCD and differ when a digit is $A-$F.
             int16_t lo  = (int16_t)(regs.a & 0x0F) - (int16_t)(value & 0x0F) +
