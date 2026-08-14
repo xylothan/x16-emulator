@@ -25,6 +25,14 @@
 // build. If one starts passing, the emulator has been fixed and the marker must
 // be deleted rather than left lying.
 //
+// Pin a commit, but check the history before calling something a divergence.
+// Two of the three below look like emulator inventions against the pinned RTL
+// and are not: the feature was real, sat on the RTL trunk for five weeks in
+// 2023, and was reverted as an accidental merge before any release. A single
+// snapshot would have recorded that as "no hardware counterpart", which is
+// wrong and would have justified deleting working code. VERA firmware is
+// field-flashable, so what matters is what shipped, not what main holds today.
+//
 // vera_pcm.c includes only its own header and libc, so this links it directly
 // with no fixture and no SDL.
 
@@ -196,19 +204,26 @@ test_ctrl_bit7_resets_the_fifo(void)
 // bit 7 of that accumulator flips, so a LARGER value plays FASTER, all the way
 // to 255.
 //
-// This is vestigial, not a misreading of the hardware. The original code by
-// VERA's designer was `rate = val`, which matches the RTL above exactly. Then
-// upstream #116 added a loop feature triggered by writing AUDIO_RATE > 128, and
-// masked the rate to recover it: `rate = loop ? (val & 0x7f) : val`. Upstream
-// #159 later moved that trigger to AUDIO_CTRL bits 6 and 7 -- but instead of
-// restoring `rate = val`, changed the mask to `256 - val`. Nothing has read
-// loop state out of this register since, so the fold now serves no purpose and
-// only corrupts rates above 128.
+// This is a leftover from the loop feature, not a reading of the hardware. No
+// RTL revision has ever transformed this register:
 //
-// 200 becomes 56, playing at roughly a quarter of the hardware speed and
-// reading back as 56. Values up to and including 128 are unaffected, and 128 is
-// the fold's fixed point, so the boundary itself is invisible -- which is why
-// this has gone unnoticed.
+//   2020-03-08  1b402ea2 (original PCM)  sr_accum_r <= sr_accum_r + sample_rate;
+//   2023-08-12  70a03e00 (loop era)      5'h1C: audio_pcm_sample_rate_next = write_data;
+//   pinned      6e8bea68                 same, top.v:481
+//
+// The original emulator code by VERA's designer was `rate = val`, matching all
+// three. Upstream #116 then added a loop feature triggered by writing
+// AUDIO_RATE > 128, and masked to recover the rate: `loop = (val > 128);
+// rate = loop ? (val & 0x7f) : val`. When #159 moved that trigger onto
+// AUDIO_CTRL bits 6 and 7 -- correctly, to match the RTL of the day -- it left
+// a transform behind on the rate register and changed it to `256 - val`.
+//
+// loop is now assigned only in pcm_write_ctrl, so nothing reads loop state out
+// of this register. The fold survives with no purpose beyond corrupting rates
+// above 128: 200 becomes 56, playing at roughly a quarter of the hardware speed
+// and reading back as 56. Values up to and including 128 are unaffected, and
+// 128 is the fold's fixed point, so the boundary itself is invisible -- which
+// is why this has gone unnoticed.
 static void
 test_rate_register_stores_the_raw_value(void)
 {
@@ -234,22 +249,33 @@ test_rate_register_stores_the_raw_value(void)
 	                "emulator folds to 1, near-silence, where hardware runs near maximum");
 }
 
-// DIVERGENCE 2 -- AUDIO_CTRL bit 6 does nothing on hardware.
+// DIVERGENCE 2 -- AUDIO_CTRL bit 6 does nothing on any released hardware.
 //
 // top.v:474-478 decodes only bits 7, 5, 4 and 3:0 of a write to 0x1B; bit 6 is
 // never read. Searching top.v for write_data[6] finds one use, at top.v:341,
-// for sprites_enabled on an unrelated register.
+// for sprites_enabled on an unrelated register. audio_fifo.v assigns rdidx_r in
+// exactly two places, :33 (reset, together with wridx_r) and :44 (increment on
+// read), so nothing rewinds the read pointer alone.
 //
 // The emulator treats bit 6 as a "restart" that rewinds the read pointer while
-// keeping the queued data. audio_fifo.v assigns rdidx_r in exactly two places,
-// :33 (reset, together with wridx_r) and :44 (increment on read). No path
-// rewinds it alone, so the feature has no hardware counterpart.
+// keeping the queued data. That was NOT invented: the RTL briefly carried the
+// same feature, and the emulator implemented it faithfully.
 //
-// This is a deliberate emulator extension rather than a mistake -- upstream
-// #116, "Add an ability to replay and loop FIFO data" -- so it is recorded
-// rather than quietly removed. Note what it implies: guest software driving
-// this bit works under the emulator and does nothing on a real machine, so the
-// extension cannot be relied on by anything portable.
+//   2023-08-09  VERA v0.3.1 released -- no loop or restart
+//   2023-08-12  vera-module 70a03e00 adds fifo_restart and fifo_loop, decoding
+//                 audio_fifo_reset_next   = write_data[7:6] == 2'b10;
+//                 audio_fifo_restart_next = write_data[6];
+//                 audio_fifo_loop_next    = write_data[7:6] == 2'b11;
+//               and an rd_rst input on the FIFO that clears rdidx_r alone
+//   2023-08-13  emulator #159 matches that decode exactly, one day later
+//   2023-09-16  vera-module b1ada295 reverts it: "Was accidentally merged in"
+//   2023-11-20  v0.3.2, then v47.0.2 and v48.0.1 -- none contain fifo_loop or
+//               fifo_restart
+//
+// So the feature existed on the RTL trunk for five weeks, by mistake, and is in
+// no released bitstream. The emulator tracked the addition and not the revert.
+// Recorded rather than removed, since software written in the meantime may use
+// it -- but no real machine has ever had it.
 static void
 test_ctrl_bit6_is_ignored(void)
 {
@@ -275,20 +301,21 @@ test_ctrl_bit6_is_ignored(void)
 	                "emulator requeues everything written; there is no restart in the RTL");
 }
 
-// DIVERGENCE 3 -- there is no loop mode on hardware.
+// DIVERGENCE 3 -- there is no loop mode on any released hardware.
 //
 // The string "loop" does not occur anywhere in top.v, audio.v, pcm.v or
-// audio_fifo.v. There is no loop register, no loop input on the pcm module
-// (pcm.v:8-20), and no re-read path in the FIFO.
+// audio_fifo.v at the pinned commit. There is no loop register, no loop input
+// on the pcm module (pcm.v:8-20), and no re-read path in the FIFO.
 //
 // The emulator reads bits 7 and 6 set together as loop mode and, in that case,
-// deliberately does not reset the FIFO. On hardware bit 7 resets it regardless
-// of bit 6, because bit 6 is not decoded at all, so the data should be gone.
+// deliberately does not reset the FIFO. On the pinned RTL bit 7 resets it
+// regardless of bit 6, because bit 6 is not decoded at all.
 //
-// Same provenance as divergence 2 (upstream #116, retriggered by #159): an
-// intentional extension, not a misreading. It is recorded here rather than
-// removed, because software may already depend on it -- but it is the reason
-// bit 7 alone cannot be assumed to clear the FIFO under this emulator.
+// Same history as divergence 2: the reverted RTL had
+//     if (fifo_empty && fifo_loop) fifo_restart_next = 1;
+// which is precisely the emulator's `if (loop && fifo_cnt == 0) fifo_restart()`.
+// The emulator is a faithful implementation of a design that was accidentally
+// merged and then reverted before any release.
 static void
 test_no_loop_mode(void)
 {
