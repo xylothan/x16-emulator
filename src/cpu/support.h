@@ -210,6 +210,11 @@ enum InterruptType {
 };
 
 void interrupt6502(enum InterruptType vector) {
+    // BRK is an opcode, so its cycles come from the tick table. A hardware
+    // interrupt is not dispatched through the table and is charged here
+    // instead. Recorded before the BRK vector is rewritten to IRQ below.
+    const bool from_brk = (vector == INT_BRK);
+
     // Tell the debugger an interrupt is being taken, before anything is pushed:
     // regs.pc is still the interrupted address and regs.sp is what the matching
     // RTI will restore. See cpu/irq_ctx.h.
@@ -241,7 +246,9 @@ void interrupt6502(enum InterruptType vector) {
     uint16_t vector_address = (regs.e ? 0xFFF0 : 0xFFE0) + (uint8_t) vector;
     regs.pc = (uint16_t) read6502(vector_address, 0) | ((uint16_t) read6502(vector_address + 1, 0) << 8);
 
-    clockticks6502 += 7; // consumed by CPU to process interrupt
+    if (!from_brk) {
+        clockticks6502 += 7; // consumed by CPU to process interrupt
+    }
 }
 
 static uint32_t addr_with_db(uint16_t addr) {

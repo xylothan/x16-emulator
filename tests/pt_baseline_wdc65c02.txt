@@ -4,7 +4,7 @@
 # Regenerate with X16_PT_WRITE_BASELINE=1 and commit the diff.
 cases_per_opcode 100
 # op state state-b cycles bus
-00 100 100 0 0
+00 100 100 100 0
 01 100 100 100 0
 02 100 100 100 0
 03 100 100 100 100
