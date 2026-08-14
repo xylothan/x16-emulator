@@ -102,12 +102,17 @@ static void absl() { // absolute long
 }
 
 static void absx() { //absolute,X
-    uint16_t startpage;
+    uint32_t startpage;
     ea = addr_with_db((uint16_t)read6502(regs.pc, regs.k) | ((uint16_t)read6502(regs.pc+1, regs.k) << 8));
-    startpage = ea & 0xFF00;
+    startpage = ea & 0xFFFF00;
     ea = mask_long_addr(ea + regs.x);
 
-    if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
+    // Compared across the whole 24-bit address: indexing that carries into
+    // the next bank costs the same cycle as crossing a page inside one. With
+    // 16-bit index registers the cycle is charged whether or not it crosses,
+    // which is the datasheet's "add 1 cycle for indexing across page
+    // boundaries, or write, or X=0".
+    if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
 
@@ -125,12 +130,17 @@ static void abslx() { // absolute long, X
 }
 
 static void absy() { //absolute,Y
-    uint16_t startpage;
+    uint32_t startpage;
     ea = addr_with_db((uint16_t)read6502(regs.pc, regs.k) | ((uint16_t)read6502(regs.pc+1, regs.k) << 8));
-    startpage = ea & 0xFF00;
+    startpage = ea & 0xFFFF00;
     ea = mask_long_addr(ea + regs.y);
 
-    if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
+    // Compared across the whole 24-bit address: indexing that carries into
+    // the next bank costs the same cycle as crossing a page inside one. With
+    // 16-bit index registers the cycle is charged whether or not it crosses,
+    // which is the datasheet's "add 1 cycle for indexing across page
+    // boundaries, or write, or X=0".
+    if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
 
@@ -184,19 +194,20 @@ static void indx() { // (indirect,X)
 }
 
 static void indy() { // (indirect),Y
-    uint16_t eahelp, startpage;
+    uint16_t eahelp;
     eahelp = (uint16_t)read6502(regs.pc++, regs.k);
     uint16_t pointer = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
-    startpage = pointer & 0xFF00;
     // Indexing applies to the whole 24-bit address, so carrying past $FFFF
-    // moves into the next bank rather than wrapping inside this one.
+    // moves into the next bank rather than wrapping inside this one, and the
+    // crossing costs the same cycle as one inside a bank.
+    uint32_t startpage = addr_with_db(pointer) & 0xFFFF00;
     ea = mask_long_addr(addr_with_db(pointer) + regs.y);
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
     }
 
-    if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
+    if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
 }
@@ -224,7 +235,9 @@ static void zprel() { // zero-page, relative for branch ops (8-bit immediatel va
 }
 
 static void sr() { // absolute,S
-    ea = regs.sp + (uint16_t)read6502(regs.pc++, regs.k);
+    // Masked to 16 bits: the stack lives in bank zero, so an offset that runs
+    // past $FFFF wraps inside it rather than reaching bank one.
+    ea = (uint16_t)(regs.sp + (uint16_t)read6502(regs.pc++, regs.k));
 }
 
 static void sridy() { // (indirect,S),Y
