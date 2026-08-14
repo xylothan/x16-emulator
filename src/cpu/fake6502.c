@@ -175,7 +175,11 @@ void rockwell_warning(const char *instruction) {
 }
 
 static uint8_t wrappedBankByte(uint32_t addr) {
-    if (addrtable[opcode] == zp || addrtable[opcode] == zpx || addrtable[opcode] == zpy) {
+    // The direct page and the stack are relocatable anywhere inside bank zero,
+    // by D and by S, but neither can leave it. So the second byte of a 16-bit
+    // access wraps within bank zero rather than stepping into bank one.
+    if (addrtable[opcode] == zp || addrtable[opcode] == zpx ||
+        addrtable[opcode] == zpy || addrtable[opcode] == sr) {
         return 0;
     }
     else {

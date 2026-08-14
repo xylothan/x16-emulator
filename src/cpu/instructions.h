@@ -654,17 +654,18 @@ static void sbc() {
                 d2 -= 0x0600;
             }
 
-            int32_t uncorrected = d3;
             if (d3 < 0) {
                 d3 -= 0x6000;
             }
 
             result = (uint16_t)((d0 & 0x000F) | (d1 & 0x00F0) | (d2 & 0x0F00) |
                                 (d3 & 0xF000));
-            uint16_t c_result = (uint16_t)((d0 & 0x000F) | (d1 & 0x00F0) |
-                                           (d2 & 0x0F00) | (uncorrected & 0xF000));
 
-            if (c_result <= regs.c) {
+            // Carry reports the binary borrow, as in the 8-bit path, rather
+            // than a comparison against the corrected result.
+            int32_t binary = (int32_t)regs.c - (int32_t)value +
+                             (int32_t)carry_in - 1;
+            if (binary >= 0) {
                 setcarry();
             } else {
                 clearcarry();
