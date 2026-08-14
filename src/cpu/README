@@ -39,6 +39,52 @@ Testing
 =======
 Fixed stz bug .... writing a ... duh !
 
+Conformance fixes
+=================
+
+Found by tests/test_processor_tests.c, which runs SingleStepTests against the
+core. Each changes emulated behaviour, so code that depended on the old
+behaviour will see a difference.
+
+(1)		P bit 4		Was forced set on every instruction for the 65C02, which
+					applies the 65816's emulation-mode rule to the wrong CPU.
+					Bit 4 has no register bit behind it on a 65C02 and is now
+					preserved. PLP and RTI no longer load it from the stack.
+
+(2)		$5C $DC $FC	Were one-byte implied NOPs, so their operand bytes were
+					executed. Now three bytes, as on a real 65C02. $5C is 8
+					cycles per the WDC datasheet and the 6502.org opcode list;
+					SingleStepTests says 4, and that divergence is recorded in
+					the baseline rather than matched.
+
+(3)		SBC			Decimal mode used the NMOS per-nibble correction. The
+					65C02 subtracts in binary and corrects afterwards. The two
+					differ only when a digit is $A-$F. Overflow was also
+					computed from the carry the instruction had just written
+					rather than the one it started with.
+
+(4)		BRK			Cost 14 cycles: interrupt6502() charges seven for the
+					interrupt sequence, which BRK also pays through the opcode
+					table. IRQ and NMI still need it, as neither goes through
+					the table.
+
+(5)		Timing		JMP (abs) is 6 cycles, not the NMOS 5. ASL, ROL, LSR and
+					ROR abs,X are 6 plus one only when indexing crosses a page,
+					where the NMOS always paid it. BIT abs,X gains the same
+					conditional cycle. The variant opcode files may now override
+					6502.opcodes rather than only adding to it.
+
+(6)		65816		A 16-bit operand costs an extra cycle, which only LDA
+					charged. PHX, PHY, PLX and PLY charged the accumulator
+					width instead of the index width, and TSB charged nothing.
+
+(7)		65816		(dp), (dp,X), (dp),Y and (sr),Y ignored the data bank and
+					used bank 0. Indexing now carries past $FFFF into the next
+					bank.
+
+The read-modify-write double write noted above is still not emulated, and shows
+up as a bus-trace divergence in the same tests.
+
 
 
 

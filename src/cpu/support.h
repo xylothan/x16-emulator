@@ -102,7 +102,7 @@ cpu_merge_pulled_status(uint8_t pulled)
 // Accumulator addressing touches no memory, so ASL A costs the same at either
 // width and must not be charged.
 #define pay_for_wide_memory(n) \
-    (penaltym = (addrtable[opcode] == acc) ? 0 : (uint8_t)(n))
+    (penaltym = addressing_is_acc ? 0 : (uint8_t)(n))
 
 
 #define saveaccum(n) (memory_16bit() ? (regs.c = (n)) : (regs.a = (uint8_t)((n) & 0x00FF)))
