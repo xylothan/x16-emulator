@@ -257,6 +257,7 @@ void exec6502(uint32_t tickcount) {
 
         (*addrtable[opcode])();
         (*optable[opcode])();
+        cpu_pin_stack_page();
         clockticks6502 += ticktable[opcode];
 
         // Keep this in sync with step6502().
@@ -299,6 +300,7 @@ void step6502() {
 
     (*addrtable[opcode])();
     (*optable[opcode])();
+    cpu_pin_stack_page();
     clockticks6502 += ticktable[opcode];
 
     if (penaltyop && penaltyaddr) clockticks6502++;

@@ -375,8 +375,8 @@ static void jsr() {
 }
 
 static void jsl() {
-    push8(regs.k);
-    push16(regs.pc - 1);
+    push8_long(regs.k);
+    push16_long(regs.pc - 1);
     regs.pc = ea & 0xFFFF;
     regs.k = ea >> 16;
 }
@@ -471,15 +471,15 @@ static void ora() {
 }
 
 static void pea() {
-    push16(getvalue(1));
+    push16_long(getvalue(1));
 }
 
 static void pei() {
-    push16(ea);
+    push16_long(ea);
 }
 
 static void per() {
-    push16(regs.pc + reladdr);
+    push16_long(regs.pc + reladdr);
 }
 
 static void pha() {
@@ -492,15 +492,15 @@ static void pha() {
 }
 
 static void phb() {
-    push8(regs.db);
+    push8_long(regs.db);
 }
 
 static void phd() {
-    push16(regs.dp);
+    push16_long(regs.dp);
 }
 
 static void phk() {
-    push8(regs.k);
+    push8_long(regs.k);
 }
 
 static void php() {
@@ -521,13 +521,13 @@ static void pla() {
 }
 
 static void plb() {
-    regs.db = pull8();
+    regs.db = pull8_long();
     zerocalc(regs.db, 0);
     signcalc(regs.db, 0);
 }
 
 static void pld() {
-    regs.dp = pull16();
+    regs.dp = pull16_long();
     zerocalc(regs.dp, 1);
     signcalc(regs.dp, 1);
 }
@@ -612,9 +612,9 @@ static void rti() {
 }
 
 static void rtl() {
-    value = pull16();
+    value = pull16_long();
     regs.pc = value + 1;
-    regs.k = pull8();
+    regs.k = pull8_long();
 }
 
 static void rts() {

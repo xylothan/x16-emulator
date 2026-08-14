@@ -182,6 +182,46 @@ uint8_t pull8() {
     return value;
 }
 
+// The instructions the 65C816 added use the whole stack pointer even in
+// emulation mode, where the ones inherited from the 6502 wrap inside page one.
+// The high byte is forced back to $01 once the instruction finishes, so only
+// the addresses touched during it tell the two apart.
+void push16_long(uint16_t pushval) {
+    write6502(regs.sp, 0, (pushval >> 8) & 0xFF);
+    regs.sp--;
+    write6502(regs.sp, 0, pushval & 0xFF);
+    regs.sp--;
+}
+
+void push8_long(uint8_t pushval) {
+    write6502(regs.sp, 0, pushval);
+    regs.sp--;
+}
+
+uint16_t pull16_long() {
+    regs.sp++;
+    uint16_t temp16 = read6502(regs.sp, 0);
+    regs.sp++;
+    temp16 |= (uint16_t) read6502(regs.sp, 0) << 8;
+    return temp16;
+}
+
+uint8_t pull8_long() {
+    regs.sp++;
+    return read6502(regs.sp, 0);
+}
+
+// Emulation mode keeps the stack pointer in page one. Applied after each
+// instruction rather than inside the pushes, so a 16-bit access can cross the
+// boundary and come back.
+static inline void
+cpu_pin_stack_page(void)
+{
+    if (regs.e) {
+        regs.sp = 0x0100 | (regs.sp & 0x00FF);
+    }
+}
+
 void reset6502(bool c816) {
     cpu_irq_ctx_reset();   // any handler in flight is abandoned by a reset
     regs.pc = (uint16_t)read6502(0xFFFC, 0) | ((uint16_t)read6502(0xFFFD, 0) << 8);
