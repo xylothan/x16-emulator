@@ -26,10 +26,16 @@ MODE_BYTES = {
     "abso": 3, "absx": 3, "absy": 3, "ind": 3, "ainx": 3, "zprel": 3,
 }
 
-# Where this emulator knowingly differs from the published 65C02 spec.
+# Where this emulator knowingly differs from the published 65C02 spec. The
+# value is what the emulator is expected to be, so a drift away from the
+# recorded difference fails rather than being waved through.
 KNOWN = {
-    0xDB: "the X16 maps $DB to a debugger trap rather than STP",
+    0xDB: ((1, 1), "the X16 maps $DB to a debugger trap rather than STP"),
 }
+
+# The spec file is data, and data can be quietly emptied. A truncated file would
+# otherwise report zero failures out of zero opcodes and pass.
+MIN_ROWS = 120
 
 
 def read_table(path, decl):
@@ -62,6 +68,11 @@ def main() -> int:
         return 1
 
     failures = 0
+    if len(spec) < MIN_ROWS:
+        print("FAIL: spec_65c02.txt holds %d opcodes, expected at least %d"
+              % (len(spec), MIN_ROWS))
+        failures += 1
+
     for op in sorted(spec):
         want_size, want_cycles, _note = spec[op]
         mode = modes[op]
@@ -70,25 +81,28 @@ def main() -> int:
                   % (op, mode))
             failures += 1
             continue
-        got_size, got_cycles = MODE_BYTES[mode], ticks[op]
-        if (got_size, got_cycles) == (want_size, want_cycles):
+        got = (MODE_BYTES[mode], ticks[op])
+        if got == (want_size, want_cycles):
+            if op in KNOWN:
+                print("FAIL: $%02X now matches the spec; drop it from KNOWN (%s)"
+                      % (op, KNOWN[op][1]))
+                failures += 1
             continue
         if op in KNOWN:
-            print("ok   : $%02X differs as expected -- %s" % (op, KNOWN[op]))
+            expected, why = KNOWN[op]
+            if got == expected:
+                print("ok   : $%02X is %d bytes and %d cycles rather than %d and "
+                      "%d -- %s" % (op, got[0], got[1], want_size, want_cycles, why))
+            else:
+                print("FAIL: $%02X is %d bytes and %d cycles; the spec says %d and "
+                      "%d and the recorded difference is %d and %d"
+                      % (op, got[0], got[1], want_size, want_cycles,
+                         expected[0], expected[1]))
+                failures += 1
             continue
         print("FAIL: $%02X is %d bytes and %d cycles, spec says %d and %d"
-              % (op, got_size, got_cycles, want_size, want_cycles))
+              % (op, got[0], got[1], want_size, want_cycles))
         failures += 1
-
-    # A divergence that has been fixed should stop being excused.
-    for op, why in KNOWN.items():
-        if op not in spec:
-            continue
-        want_size, want_cycles, _ = spec[op]
-        if (MODE_BYTES.get(modes[op]), ticks[op]) == (want_size, want_cycles):
-            print("FAIL: $%02X now matches the spec; drop it from KNOWN (%s)"
-                  % (op, why))
-            failures += 1
 
     print("%s: %d opcodes checked against the published spec, %d failed"
           % ("opcode_spec", len(spec), failures))

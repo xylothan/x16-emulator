@@ -187,12 +187,14 @@ MUTATIONS = [
         "caught_by": ["processor_tests_816_emu"],
     },
     {
-        # Guards the table against the published spec rather than the hardware
-        # traces, so it is the one mutation opcode_spec is required to catch.
+        # WAI is one of the four opcodes ProcessorTests records in a form it
+        # cannot compare, so this is a table change no other test can see. It
+        # is the mutation that shows opcode_spec covers something new rather
+        # than repeating the traces.
         "name": "a documented cycle count is changed",
         "file": "src/cpu/65c02.opcodes",
-        "find": "tsb abso 6 $0c",
-        "into": "tsb abso 5 $0c",
+        "find": "wai imp 3 $cb",
+        "into": "wai imp 4 $cb",
         "count": 1,
         "caught_by": ["opcode_spec"],
     },
@@ -203,9 +205,23 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, **kw)
 
 
-def build(build_dir):
-    r = run([CMAKE, "--build", build_dir, "--target", "unit_tests"])
-    return r.returncode == 0, r.stdout + r.stderr
+def build(build_dir, passes=1):
+    """Build the tests, optionally more than once.
+
+    A mutation to an .opcodes file regenerates src/cpu/tables.h during the
+    build, and the objects that include it are only recompiled on the following
+    pass: the header dependency comes from the compiler's depfile, which ninja
+    evaluates before the generator has run. One pass would leave the binaries
+    linked from the unmutated tables, so such a mutation would look like it
+    survived when nothing had actually been tested.
+    """
+    out = ""
+    for _ in range(passes):
+        r = run([CMAKE, "--build", build_dir, "--target", "unit_tests"])
+        out += r.stdout + r.stderr
+        if r.returncode != 0:
+            return False, out
+    return True, out
 
 
 def tests_fail(build_dir, names):
@@ -255,12 +271,22 @@ def main():
             survived.append(m["name"] + " (pattern stale)")
             continue
 
+        # Building an .opcodes mutation rewrites these, and they are tracked, so
+        # they have to be put back with everything else.
+        GENERATED = ("src/cpu/tables.h", "src/cpu/mnemonics.h")
+
         backup = Path(tempfile.gettempdir()) / (path.name + ".mutation_backup")
         shutil.copy2(path, backup)
+        gen_backups = {}
+        for rel in GENERATED:
+            gen = ROOT / rel
+            if gen.exists():
+                gen_backups[gen] = Path(tempfile.gettempdir()) / (gen.name + ".mutation_backup")
+                shutil.copy2(gen, gen_backups[gen])
         try:
             path.write_text(original.replace(m["find"], m["into"]),
                             encoding="utf-8")
-            built, out = build(args.build_dir)
+            built, out = build(args.build_dir, passes=2)
             if not built:
                 # A mutation that will not compile proves nothing either way,
                 # and is usually a mutation that needs rewriting rather than a
@@ -286,13 +312,16 @@ def main():
             # runs against a broken emulator and is reported caught.
             os.utime(path, None)
             backup.unlink(missing_ok=True)
+            for gen, saved in gen_backups.items():
+                shutil.copy2(saved, gen)
+                os.utime(gen, None)
+                saved.unlink(missing_ok=True)
 
-    # Leave the tree built from clean source. Twice: a mutation to an .opcodes
-    # file regenerates tables.h during the build, and the objects that include
-    # it are only rebuilt on the following pass. One pass leaves a tree whose
-    # tests fail for reasons that have nothing to do with the source.
-    build(args.build_dir)
-    build(args.build_dir)
+    # Leave the tree built from clean source.
+    ok, _ = build(args.build_dir, passes=2)
+    if not ok:
+        print("the tree does not build after restoring the sources")
+        return 2
 
     total = len([m for m in MUTATIONS
                  if not args.only or args.only in m["name"]])
