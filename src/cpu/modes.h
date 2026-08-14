@@ -162,7 +162,9 @@ static void aindl() { // [addr]    uint16_t eahelp, eahelp2;
 static void ind0() { // (zp)
     uint16_t eahelp;
     eahelp = (uint16_t)read6502(regs.pc++, regs.k);
-    ea = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
+    // The pointer lives in the direct page, which is always bank zero. The
+    // address it holds is in the data bank.
+    ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8));
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -176,7 +178,7 @@ static void indl0() { // [dp]
 static void indx() { // (indirect,X)
     uint16_t eahelp;
     eahelp = (uint16_t)read6502(regs.pc++, regs.k) + regs.x;
-    ea = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
+    ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8));
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -186,9 +188,11 @@ static void indx() { // (indirect,X)
 static void indy() { // (indirect),Y
     uint16_t eahelp, startpage;
     eahelp = (uint16_t)read6502(regs.pc++, regs.k);
-    ea = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
-    startpage = ea & 0xFF00;
-    ea += regs.y;
+    uint16_t pointer = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
+    startpage = pointer & 0xFF00;
+    // Indexing applies to the whole 24-bit address, so carrying past $FFFF
+    // moves into the next bank rather than wrapping inside this one.
+    ea = mask_long_addr(addr_with_db(pointer) + regs.y);
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -228,9 +232,9 @@ static void sr() { // absolute,S
 static void sridy() { // (indirect,S),Y
     uint16_t eahelp, startpage;
     eahelp = regs.sp + (uint16_t)read6502(regs.pc++, regs.k);
-    ea = (uint16_t)read6502(eahelp, 0) | ((uint16_t)read6502(eahelp + 1, 0) << 8);
-    startpage = ea & 0xFF00;
-    ea += (uint16_t)regs.y;
+    uint16_t pointer = (uint16_t)read6502(eahelp, 0) | ((uint16_t)read6502(eahelp + 1, 0) << 8);
+    startpage = pointer & 0xFF00;
+    ea = mask_long_addr(addr_with_db(pointer) + (uint16_t)regs.y);
 
     if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
         penaltyaddr = 1;
