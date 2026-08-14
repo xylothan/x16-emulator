@@ -16,6 +16,7 @@ import argparse
 import json
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -30,6 +31,8 @@ VARIANTS = {
     "65816": {"repo": "65816", "sub": "v1"},
 }
 
+ATTEMPTS = 4
+
 
 def fetch_opcode(variant: str, op: int, dest: pathlib.Path) -> bool:
     spec = VARIANTS[variant]
@@ -37,14 +40,23 @@ def fetch_opcode(variant: str, op: int, dest: pathlib.Path) -> bool:
     if out.exists() and out.stat().st_size > 0:
         return True
     url = RAW.format(repo=spec["repo"], sub=spec["sub"], op=f"{op:02x}")
-    try:
-        with urllib.request.urlopen(url, timeout=60) as r:
-            out.write_bytes(r.read())
-        return True
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return False
-        raise
+    # 256 requests per run, so a transient failure is likely rather than
+    # exceptional. Retry anything that is not a definite 404.
+    for attempt in range(ATTEMPTS):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                data = r.read()
+            out.write_bytes(data)
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            last = e
+        except Exception as e:
+            last = e
+        if attempt < ATTEMPTS - 1:
+            time.sleep(2 ** attempt)
+    raise SystemExit(f"${op:02X}: giving up after {ATTEMPTS} attempts: {last}")
 
 
 def load_cases(path: pathlib.Path):
@@ -76,9 +88,23 @@ def main() -> int:
         default="",
         help="comma-separated hex opcodes; default is all 256",
     )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="re-fetch and re-convert even if the fixture already exists",
+    )
     args = ap.parse_args()
 
     here = pathlib.Path(__file__).resolve().parent
+    out = here / "pt" / f"{args.variant}.bin"
+
+    # The fixture is ~1 MB and the JSON it came from is ~1 GB, so CI caches
+    # only the fixture. Nothing to do when the cache hit.
+    if out.exists() and out.stat().st_size > 0 and not args.force:
+        print(f"{out} already present ({out.stat().st_size / 1e6:.1f} MB); "
+              f"pass --force to rebuild")
+        return 0
+
     dest = here / "pt" / args.variant
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -116,7 +142,6 @@ def main() -> int:
     pt_convert.write_fixture(out, cases)
     print(f"wrote {out} -- {len(cases)} cases, {out.stat().st_size / 1e6:.1f} MB")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
