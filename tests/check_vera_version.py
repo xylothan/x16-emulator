@@ -16,6 +16,36 @@ It does not need the RTL to be present -- it compares two declarations, not the
 Verilog itself.
 
     python tests/check_vera_version.py
+
+WHAT THIS DOES NOT CHECK, AND WHY IT MATTERS
+--------------------------------------------
+The version register is a claim, and the rest of the emulator does not honour
+it. This is a composite of several revisions rather than any one of them:
+
+    version register    R47.0.2         video.c
+    PSG saw/triangle    R48             XOR with ~pulsewidth, vera_psg.c:122-123,
+                                        backported by #290 on 2024-08-11 -- two
+                                        months BEFORE the RTL change (a8135f32,
+                                        2024-10-21) that shipped in R48
+    PCM AUDIO_CTRL      none            bit 6 restart and bits 7+6 loop match
+                                        70a03e00, which lived on trunk for five
+                                        weeks in 2023 and was reverted as an
+                                        accidental merge
+    PCM AUDIO_RATE      none            the 256-val fold appears in no revision
+
+The pattern is that this emulator tracks vera-module trunk and proposals rather
+than releases, so it can hold behaviour that no released bitstream ever had.
+
+That makes "base the tests on version X" impossible to satisfy by picking a tag:
+the emulator would diverge from any single one. Each subsystem records the
+revision it is actually checked against instead. For PCM the choice is moot --
+audio_fifo.v, pcm.v and audio.v are byte-identical across v47.0.2 and v48.0.1 --
+but for PSG it decides the expected waveform, and R48 is what the code
+implements.
+
+The tidy end state is to bump this emulator to 48.0.1: PSG already matches it,
+PCM is unchanged between the two, and the only obstacles are the two PCM
+behaviours above, which match no revision and are bugs independent of version.
 """
 
 import re
