@@ -627,29 +627,37 @@ static void sbc() {
             overflowcalc16(ovresult, regs.c, value ^ 0xFFFF);
         } else {
             value = getvalue(0);
-            tmp = ((uint16_t)regs.a & 0x0F) - (value & 0x0F) + (regs.status & FLAG_CARRY) - 1;
-            tmp2 = ((uint16_t)regs.a & 0xF0) - (value & 0xF0);
+            // Captured before setcarry() below, which would otherwise feed the
+            // freshly computed carry back into the overflow calculation.
+            const uint16_t carry_in = regs.status & FLAG_CARRY;
 
-            if (tmp & 0xFFF0) {
-                tmp2 -= 0x10;
-                tmp -= 0x06;
+            // The 65C02 subtracts in binary and corrects afterwards, where the
+            // NMOS part corrects each nibble as it goes. The two agree on valid
+            // BCD and disagree when a digit is $A-$F: correcting per nibble
+            // borrows twice, leaving the result $10 high.
+            int16_t lo  = (int16_t)(regs.a & 0x0F) - (int16_t)(value & 0x0F) +
+                          (int16_t)carry_in - 1;
+            int16_t bin = (int16_t)regs.a - (int16_t)value +
+                          (int16_t)carry_in - 1;
+
+            int16_t adjusted = bin;
+            if (adjusted < 0) {
+                adjusted -= 0x60;
             }
-
-            tmpc = tmp2;
-            if (tmp2 & 0xFF00) {
-                tmp2 -= 0x60;
+            if (lo < 0) {
+                adjusted -= 0x06;
             }
+            result = (uint16_t)(adjusted & 0xFF);
 
-            result = (tmp & 0x0F) | (tmp2 & 0xF0);
-            uint16_t c_result = (tmp & 0x0F) | (tmpc & 0xF0);
+            uint8_t ovresult = (uint8_t)(regs.a + (value ^ 0xFF) + carry_in);
+            overflowcalc8((uint16_t)ovresult, (uint16_t)regs.a, value ^ 0xFF);
 
-            if (c_result <= (uint16_t)regs.a) {
+            // Carry reports the binary borrow, not the corrected result.
+            if (bin >= 0) {
                 setcarry();
             } else {
                 clearcarry();
             }
-            uint8_t ovresult = regs.a + (value ^ 0xFF) + (regs.status & FLAG_CARRY);
-            overflowcalc8((uint16_t)ovresult, (uint16_t)regs.a, value ^ 0xFF);
         }
 
         clockticks6502 += (uint32_t)(!regs.is65c816);
