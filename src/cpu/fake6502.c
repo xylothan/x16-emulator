@@ -238,9 +238,7 @@ void exec6502(uint32_t tickcount) {
     while (clockticks6502 < clockgoal6502) {
         opcode = read6502(regs.pc++, regs.k);
 
-        if (regs.e) {
-            regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
-        }
+        cpu_pin_status_flags();
 
         penaltyop = 0;
         penaltyaddr = 0;
@@ -279,9 +277,7 @@ void step6502() {
 
     opcode = read6502(regs.pc++, regs.k);
 
-    if (regs.e) {
-        regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
-    }
+    cpu_pin_status_flags();
 
     penaltyop = 0;
     penaltyaddr = 0;
