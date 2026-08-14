@@ -95,6 +95,15 @@ cpu_merge_pulled_status(uint8_t pulled)
     return (uint8_t) ((pulled & (uint8_t) ~keep) | (regs.status & keep));
 }
 
+// A 16-bit operand is one more byte through the bus, and each byte costs a
+// cycle: the datasheet's "M = 0 or X = 0, 16 bit operation, add 1 cycle". A
+// read-modify-write pays twice, once in each direction.
+//
+// Accumulator addressing touches no memory, so ASL A costs the same at either
+// width and must not be charged.
+#define pay_for_wide_memory(n) \
+    (penaltym = (addrtable[opcode] == acc) ? 0 : (uint8_t)(n))
+
 
 #define saveaccum(n) (memory_16bit() ? (regs.c = (n)) : (regs.a = (uint8_t)((n) & 0x00FF)))
 

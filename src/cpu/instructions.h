@@ -14,6 +14,7 @@
 //          instruction handler functions
 //
 static void adc() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
     if (regs.status & FLAG_DECIMAL) {
         uint16_t tmp, tmp2;
@@ -93,6 +94,7 @@ static void adc() {
 }
 
 static void and() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
     value = getvalue(memory_16bit());
     result = acc_for_mode() & value;
@@ -104,6 +106,7 @@ static void and() {
 }
 
 static void asl() {
+    pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
     // part always paid it and the 65816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
@@ -141,6 +144,7 @@ static void beq() {
 }
 
 static void bit() {
+    pay_for_wide_memory(1);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
     // part always paid it and the 65816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
@@ -204,6 +208,7 @@ static void clv() {
 }
 
 static void cmp() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
     value = getvalue(memory_16bit());
 
@@ -232,6 +237,7 @@ static void cop() {
 }
 
 static void cpx() {
+    penaltyx = 1;
     value = getvalue(index_16bit());
 
     if (index_16bit()) {
@@ -251,6 +257,7 @@ static void cpx() {
 }
 
 static void cpy() {
+    penaltyx = 1;
     value = getvalue(index_16bit());
 
     if (index_16bit()) {
@@ -270,6 +277,7 @@ static void cpy() {
 }
 
 static void dec() {
+    pay_for_wide_memory(2);
     value = getvalue(memory_16bit());
     result = value - 1;
 
@@ -304,6 +312,7 @@ static void dey() {
 }
 
 static void eor() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
     value = getvalue(memory_16bit());
     result = acc_for_mode() ^ value;
@@ -315,6 +324,7 @@ static void eor() {
 }
 
 static void inc() {
+    pay_for_wide_memory(2);
     value = getvalue(memory_16bit());
     result = value + 1;
 
@@ -417,6 +427,7 @@ static void ldy() {
 }
 
 static void lsr() {
+    pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
     // part always paid it and the 65816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
@@ -446,6 +457,7 @@ static void nop() {
 }
 
 static void ora() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
     value = getvalue(memory_16bit());
     result = acc_for_mode() | value;
@@ -469,6 +481,7 @@ static void per() {
 }
 
 static void pha() {
+    pay_for_wide_memory(1);
     if (memory_16bit()) {
         push16(regs.c);
     } else {
@@ -493,6 +506,7 @@ static void php() {
 }
 
 static void pla() {
+    pay_for_wide_memory(1);
     if (memory_16bit()) {
         regs.c = pull16();
         zerocalc(regs.c, 1);
@@ -536,6 +550,7 @@ static void rep() {
 }
 
 static void rol() {
+    pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
     // part always paid it and the 65816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
@@ -551,6 +566,7 @@ static void rol() {
 }
 
 static void ror() {
+    pay_for_wide_memory(2);
     // On the 65C02 the page-crossing cycle is conditional here; the NMOS
     // part always paid it and the 65816 has its own flat timing, so this
     // penalty applies to the 65C02 only.
@@ -601,6 +617,7 @@ static void rts() {
 }
 
 static void sbc() {
+    pay_for_wide_memory(1);
     penaltyop = 1;
 
     if (regs.status & FLAG_DECIMAL) {
@@ -725,14 +742,17 @@ static void sep() {
 }
 
 static void sta() {
+    pay_for_wide_memory(1);
     putvalue(acc_for_mode(), memory_16bit());
 }
 
 static void stx() {
+    penaltyx = 1;
     putvalue(index_16bit() ? regs.x : regs.xl, index_16bit());
 }
 
 static void sty() {
+    penaltyx = 1;
     putvalue(index_16bit() ? regs.y : regs.yl, index_16bit());
 }
 
