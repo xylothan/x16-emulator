@@ -32,5 +32,11 @@ imgui.ini
 !/tests/pt/README.md
 pt-report*.txt
 
+# VERA Verilog, fetched by tests/fetch_vera_rtl.py. Someone else's repository
+# under its own licence, and reference material rather than part of the build.
+# The VERA tests quote the lines they rest on, so nothing depends on it being
+# present -- it is here so a reviewer can check a citation.
+/tests/vera-rtl/
+
 __pycache__/
 *.pyc
