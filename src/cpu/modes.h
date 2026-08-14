@@ -235,8 +235,9 @@ static void zprel() { // zero-page, relative for branch ops (8-bit immediatel va
 }
 
 static void sr() { // absolute,S
-    // Masked to 16 bits: the stack lives in bank zero, so an offset that runs
-    // past $FFFF wraps inside it rather than reaching bank one.
+    // Masked to 16 bits: S can put the stack anywhere inside bank zero, but not
+    // outside it, so an offset running past $FFFF wraps rather than reaching
+    // bank one.
     ea = (uint16_t)(regs.sp + (uint16_t)read6502(regs.pc++, regs.k));
 }
 
