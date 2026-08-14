@@ -162,6 +162,34 @@ typedef struct {
 
 static pt_opcode by_opcode[256];
 
+// Native mode picks the accumulator and index widths independently, so a fault
+// in one width looks like scattered opcode failures until the results are split
+// this way.
+enum { MODE_EMU, MODE_M8X8, MODE_M8X16, MODE_M16X8, MODE_M16X16, MODE_COUNT };
+
+static const char *mode_name[MODE_COUNT] = {
+	"emulation", "native M8 X8", "native M8 X16", "native M16 X8",
+	"native M16 X16",
+};
+
+static struct {
+	long total, state_ok, cycles_ok;
+} by_mode[MODE_COUNT];
+
+static int
+mode_of(const pt_case *c)
+{
+	if (c->cpu != PT_CPU_65816 || c->initial.e) {
+		return MODE_EMU;
+	}
+	bool m8 = (c->initial.p & FLAG_MEMORY_WIDTH) != 0;
+	bool x8 = (c->initial.p & FLAG_INDEX_WIDTH) != 0;
+	if (m8) {
+		return x8 ? MODE_M8X8 : MODE_M8X16;
+	}
+	return x8 ? MODE_M16X8 : MODE_M16X16;
+}
+
 static void
 run_case(const pt_case *c, pt_result *r)
 {
@@ -209,6 +237,8 @@ run_case(const pt_case *c, pt_result *r)
 	r->total++;
 	pt_opcode *op = &by_opcode[c->opcode];
 	op->total++;
+	const int mode = mode_of(c);
+	by_mode[mode].total++;
 
 	// Compare at the width the case ran in. Reading regs.a in a 16-bit case
 	// would drop the high byte and report a false pass.
@@ -247,6 +277,7 @@ run_case(const pt_case *c, pt_result *r)
 	if (state) {
 		r->state_ok++;
 		op->state_ok++;
+		by_mode[mode].state_ok++;
 	}
 	if (state_but_b) {
 		r->state_ok_ignoring_b++;
@@ -278,6 +309,7 @@ run_case(const pt_case *c, pt_result *r)
 	if (spent == c->cycle_n) {
 		r->cycles_ok++;
 		op->cycles_ok++;
+		by_mode[mode].cycles_ok++;
 	}
 
 	bool trace = (bus_n == c->cycle_n);
@@ -570,6 +602,13 @@ main(int argc, char **argv)
 	printf("     ...ignoring P bit 4 : %ld/%ld\n", r.state_ok_ignoring_b, r.total);
 	printf("     cycle count : %ld/%ld\n", r.cycles_ok, r.total);
 	printf("     bus trace   : %ld/%ld\n", r.bus_ok, r.total);
+	for (int i = 0; i < MODE_COUNT; i++) {
+		if (by_mode[i].total > 0) {
+			printf("     %-15s state %ld/%ld  cycles %ld/%ld\n", mode_name[i],
+			       by_mode[i].state_ok, by_mode[i].total,
+			       by_mode[i].cycles_ok, by_mode[i].total);
+		}
+	}
 	if (r.have_first_bad) {
 		printf("     first state mismatch: %s\n", r.first_bad);
 	}
