@@ -156,7 +156,10 @@ static void bit() {
     // Xark - BUGFIX: 65C02 BIT #$xx only affects Z  See: http://6502.org/tutorials/65c02opcodes.html#2
     if (opcode != 0x89)
     {
-        regs.status = (regs.status & 0x3F) | (uint8_t)(value & 0xC0);
+        // N and V come from the top two bits of the operand, which are bits 15
+        // and 14 when the accumulator is 16 bits wide.
+        uint16_t top = memory_16bit() ? (uint16_t)(value >> 8) : value;
+        regs.status = (regs.status & 0x3F) | (uint8_t)(top & 0xC0);
     }
 }
 
@@ -821,16 +824,16 @@ static void tsx() {
 
 static void txa() {
     if (memory_16bit()) {
+        // The transfer is the accumulator's width, so the flags are too, even
+        // where an 8-bit X supplies only the low byte.
         if (index_16bit()) {
             regs.c = regs.x;
-            zerocalc(regs.c, 1);
-            signcalc(regs.c, 1);
         } else {
             regs.a = regs.xl;
             regs.b = 0;
-            zerocalc(regs.a, 0);
-            signcalc(regs.a, 0);
         }
+        zerocalc(regs.c, 1);
+        signcalc(regs.c, 1);
     } else {
         regs.a = regs.xl;
         zerocalc(regs.a, 0);
@@ -862,14 +865,12 @@ static void tya() {
     if (memory_16bit()) {
         if (index_16bit()) {
             regs.c = regs.y;
-            zerocalc(regs.c, 1);
-            signcalc(regs.c, 1);
         } else {
             regs.a = regs.yl;
             regs.b = 0;
-            zerocalc(regs.a, 0);
-            signcalc(regs.a, 0);
         }
+        zerocalc(regs.c, 1);
+        signcalc(regs.c, 1);
     } else {
         regs.a = regs.yl;
         zerocalc(regs.a, 0);
