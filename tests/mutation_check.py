@@ -36,6 +36,37 @@ CTEST = os.environ.get("CTEST", "ctest")
 # matching would otherwise look exactly like a mutation the tests caught.
 MUTATIONS = [
     {
+        "name": "PCM FIFO accepts one byte too many",
+        "file": "src/vera_pcm.c",
+        # The ring stores one fewer than its array so that full and empty stay
+        # distinguishable. Off by one here makes a full FIFO read as empty.
+        "find": "if (fifo_cnt < sizeof(fifo) - 1) {",
+        "into": "if (fifo_cnt <= sizeof(fifo) - 1) {",
+        "count": 1,
+        "caught_by": ["vera_pcm"],
+    },
+    {
+        "name": "PCM almost-empty boundary is off by one",
+        "file": "src/vera_pcm.c",
+        # Drives the AFLOW interrupt: firing a byte late or early changes when
+        # a program is asked for more audio.
+        "find": "return fifo_cnt < 1024;",
+        "into": "return fifo_cnt <= 1024;",
+        "count": 1,
+        "caught_by": ["vera_pcm"],
+    },
+    {
+        "name": "PCM rate folds to the wrong value",
+        "file": "src/vera_pcm.c",
+        # Mutating the >128 threshold instead would be an equivalent mutant:
+        # 128 is the fold's fixed point (256 - 128 == 128), so `> 127` and
+        # `> 128` agree on every input. The subtrahend is the observable part.
+        "find": "rate = (val > 128) ? (256 - val) : val;",
+        "into": "rate = (val > 128) ? (255 - val) : val;",
+        "count": 1,
+        "caught_by": ["vera_pcm"],
+    },
+    {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
         # step6502()'s copy, four-space indented. exec6502()'s is eight-space
