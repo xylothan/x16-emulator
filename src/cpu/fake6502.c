@@ -124,6 +124,12 @@ uint8_t penaltyx = 0;
 uint8_t penaltyd = 0;
 uint8_t waiting = 0;
 
+// Set by acc() and cleared before each instruction, because the obvious test --
+// comparing addrtable[opcode] against acc -- is not reliable. acc() and imp()
+// are both empty, and MSVC folds identical functions onto one address, so the
+// comparison is true for every implied opcode there and false under GCC.
+static bool addressing_is_acc = false;
+
 //externally supplied functions
 extern uint8_t read6502(uint16_t address, uint8_t bank);
 extern void write6502(uint16_t address, uint8_t bank, uint8_t value);
@@ -178,7 +184,7 @@ static uint8_t wrappedBankByte(uint32_t addr) {
 }
 
 static uint16_t getvalue(bool use16Bit) {
-    if (addrtable[opcode] == acc) {
+    if (addressing_is_acc) {
         return use16Bit ? regs.c : (uint16_t)regs.a;
     } else if (use16Bit) {
         return ((uint16_t)read6502(ea, bank_byte(ea)) | ((uint16_t)read6502(ea+1, wrappedBankByte(ea)) << 8));
@@ -191,7 +197,7 @@ static uint16_t MAYBE_UNUSED getvalue16() {
 }
 
 static void putvalue(uint16_t saveval, bool use16Bit) {
-    if (addrtable[opcode] == acc) {
+    if (addressing_is_acc) {
         if (use16Bit) {
             regs.c = saveval;
         } else {
@@ -247,6 +253,7 @@ void exec6502(uint32_t tickcount) {
         penaltyn = 0;
         penaltyx = 0;
         penaltyd = 0;
+        addressing_is_acc = false;
 
         (*addrtable[opcode])();
         (*optable[opcode])();
@@ -288,6 +295,7 @@ void step6502() {
     // Otherwise this sticks: after one misaligned direct-page access every later
     // instruction costs an extra cycle, and reset6502() doesn't clear it either.
     penaltyd = 0;
+        addressing_is_acc = false;
 
     (*addrtable[opcode])();
     (*optable[opcode])();
