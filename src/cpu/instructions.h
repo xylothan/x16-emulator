@@ -626,46 +626,49 @@ static void sbc() {
     penaltyop = 1;
 
     if (regs.status & FLAG_DECIMAL) {
-        uint16_t tmp, tmp2;
-        uint32_t tmpc;
         if (memory_16bit()) {
-            uint16_t tmp3;
-            uint32_t tmp4;
             value = getvalue(1);
-            tmp = (regs.c & 0x000F) - (value & 0x000F) + (regs.status & FLAG_CARRY) - 1;
-            tmp2 = (regs.c & 0x00F0) - (value & 0x00F0);
-            tmp3 = (regs.c & 0x0F00) - (value & 0x0F00);
-            tmp4 = (regs.c & 0xF000) - (value & 0xF000);
+            const uint16_t carry_in = regs.status & FLAG_CARRY;
 
-            if (tmp & 0xFFF0) {
-                tmp2 -= 0x0010;
-                tmp -= 0x0006;
+            // Four digits, each corrected when the one below borrows. Signed
+            // throughout: the top digit corrects on a borrow out, matching the
+            // 8-bit path, where testing the digit against $A instead left the
+            // result $6000 low whenever a high digit was $A-$F.
+            int32_t d0 = (int32_t)(regs.c & 0x000F) - (int32_t)(value & 0x000F) +
+                         (int32_t)carry_in - 1;
+            int32_t d1 = (int32_t)(regs.c & 0x00F0) - (int32_t)(value & 0x00F0);
+            int32_t d2 = (int32_t)(regs.c & 0x0F00) - (int32_t)(value & 0x0F00);
+            int32_t d3 = (int32_t)(regs.c & 0xF000) - (int32_t)(value & 0xF000);
+
+            if (d0 & ~0x000F) {
+                d1 -= 0x0010;
+                d0 -= 0x0006;
+            }
+            if (d1 & ~0x00FF) {
+                d2 -= 0x0100;
+                d1 -= 0x0060;
+            }
+            if (d2 & ~0x0FFF) {
+                d3 -= 0x1000;
+                d2 -= 0x0600;
             }
 
-            if (tmp2 & 0xFF00) {
-                tmp3 -= 0x0100;
-                tmp2 -= 0x0060;
+            int32_t uncorrected = d3;
+            if (d3 < 0) {
+                d3 -= 0x6000;
             }
 
-            if (tmp3 & 0xF000) {
-                tmp4 -= 0x1000;
-                tmp3 -= 0x0600;
-            }
-
-            tmpc = tmp4;
-            if (tmp4 >= 0x0000A000) {
-                tmp4 -= 0x6000;
-            }
-
-            result = (tmp & 0x000F) | (tmp2 & 0x00F0) | (tmp3 & 0x0F00) | (tmp4 & 0xF000);
-            uint16_t c_result = (tmp & 0x000F) | (tmp2 & 0x00F0) | (tmp3 & 0x0F00) | (tmpc & 0xF000);
+            result = (uint16_t)((d0 & 0x000F) | (d1 & 0x00F0) | (d2 & 0x0F00) |
+                                (d3 & 0xF000));
+            uint16_t c_result = (uint16_t)((d0 & 0x000F) | (d1 & 0x00F0) |
+                                           (d2 & 0x0F00) | (uncorrected & 0xF000));
 
             if (c_result <= regs.c) {
                 setcarry();
             } else {
                 clearcarry();
             }
-            uint16_t ovresult = regs.c + (value ^ 0xFFFF) + (regs.status & FLAG_CARRY);
+            uint16_t ovresult = regs.c + (value ^ 0xFFFF) + carry_in;
             overflowcalc16(ovresult, regs.c, value ^ 0xFFFF);
         } else {
             value = getvalue(0);
