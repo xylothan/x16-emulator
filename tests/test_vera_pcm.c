@@ -5,10 +5,21 @@
 // emulator's own C are both downstream of it and can drift from it.
 //
 //   repo:   https://github.com/X16Community/vera-module
-//   commit: 6e8bea68a5a04687149e27b1b7b3726fb01405f4   (VERSION_MAJOR = 48, "R48")
+//   tag:    v47.0.2   (commit 45cc1f05)
 //   files:  fpga/source/audio/audio_fifo.v
 //           fpga/source/audio/pcm.v
 //           fpga/source/top.v                          (register decode)
+//
+// v47.0.2 because that is what this emulator reports itself to be, from
+// VERA_VERSION_MAJOR/MINOR/PATCH in video.c. Guest software reads those bytes
+// back and adapts to them, so the version the emulator claims is the version it
+// has to behave like, whatever revision any particular physical board carries.
+// tests/check_vera_version.py fails if the two are changed apart.
+//
+// The audio RTL happens to be byte-identical in v48.0.1, so nothing here turns
+// on the choice; the two differ only in the version registers and a bus
+// write-address register. Line numbers in top.v do differ between them, and
+// these are v47.0.2's.
 //
 // Use this repo and no other. X16Community/vera-module is a fork of
 // fvdhoef/vera-module, but the two diverged at the v0.7 release in 2019 and are
@@ -69,7 +80,7 @@ fill(unsigned count, uint8_t first)
 }
 
 // audio_fifo.v:31-34   if (rst) begin wridx_r <= 0; rdidx_r <= 0; rddata <= 0; end
-// top.v:541-545        audio_pcm_sample_rate_r <= 0; ... audio_pcm_volume_r <= 0;
+// top.v:540-544        audio_pcm_sample_rate_r <= 0; ... audio_pcm_volume_r <= 0;
 static void
 test_reset_clears_pointers_and_registers(void)
 {
@@ -108,7 +119,7 @@ test_fifo_depth_is_one_less_than_its_memory(void)
 	         "a write to a full FIFO is dropped");
 }
 
-// top.v:230   5'h1B: rddata = {audio_fifo_full, audio_fifo_empty,
+// top.v:227   5'h1B: rddata = {audio_fifo_full, audio_fifo_empty,
 //                              audio_mode_16bit_r, audio_mode_stereo_r,
 //                              audio_pcm_volume_r};
 //
@@ -152,7 +163,7 @@ test_almost_empty_is_strictly_below_1024(void)
 	check(!state().almost_empty, "and the debug view agrees");
 }
 
-// top.v:474-478   if (do_write && access_addr == 5'h1B) begin
+// top.v:473-477   if (do_write && access_addr == 5'h1B) begin
 //                     audio_fifo_reset_next  = write_data[7];
 //                     audio_mode_16bit_next  = write_data[5];
 //                     audio_mode_stereo_next = write_data[4];
@@ -173,8 +184,8 @@ test_ctrl_stores_mode_and_volume_only(void)
 	check_eq(state().ctrl, 0x15u, "stereo and volume 5 are stored");
 }
 
-// top.v:475   audio_fifo_reset_next = write_data[7];
-// top.v:321   audio_fifo_reset_next = 0;          // default, every cycle
+// top.v:474   audio_fifo_reset_next = write_data[7];
+// top.v:320   audio_fifo_reset_next = 0;          // default, every cycle
 // pcm.v:31    wire audio_fifo_reset = rst || fifo_reset;
 //
 // Bit 7 is a one-shot command rather than a stored setting: the default
@@ -193,9 +204,9 @@ test_ctrl_bit7_resets_the_fifo(void)
 // DIVERGENCE 1 -- AUDIO_RATE is stored raw on hardware; the emulator folds it.
 //
 // top.v:139       reg [7:0] audio_pcm_sample_rate_r, audio_pcm_sample_rate_next;
-// top.v:480-481   if (do_write && access_addr == 5'h1C) begin
+// top.v:479-480   if (do_write && access_addr == 5'h1C) begin
 //                     audio_pcm_sample_rate_next = write_data;
-// top.v:231       5'h1C: rddata = audio_pcm_sample_rate_r;
+// top.v:228       5'h1C: rddata = audio_pcm_sample_rate_r;
 // pcm.v:67        sr_accum_r <= sr_accum_r + sample_rate;
 // pcm.v:72        wire new_sample = next_sample_r && (sr_accum7_r != sr_accum_r[7]);
 //
@@ -209,7 +220,7 @@ test_ctrl_bit7_resets_the_fifo(void)
 //
 //   2020-03-08  1b402ea2 (original PCM)  sr_accum_r <= sr_accum_r + sample_rate;
 //   2023-08-12  70a03e00 (loop era)      5'h1C: audio_pcm_sample_rate_next = write_data;
-//   pinned      6e8bea68                 same, top.v:481
+//   v47.0.2     45cc1f05 (this oracle)   same, top.v:480
 //
 // The original emulator code by VERA's designer was `rate = val`, matching all
 // three. Upstream #116 then added a loop feature triggered by writing
@@ -238,7 +249,7 @@ test_rate_register_stores_the_raw_value(void)
 
 	pcm_write_rate(129);
 	check_divergent(pcm_read_rate() == 129, "rate 129 is stored as 129",
-	                "emulator folds to 127; top.v:481 stores write_data unchanged");
+	                "emulator folds to 127; top.v:480 stores write_data unchanged");
 
 	pcm_write_rate(200);
 	check_divergent(pcm_read_rate() == 200, "rate 200 is stored as 200",
@@ -251,8 +262,8 @@ test_rate_register_stores_the_raw_value(void)
 
 // DIVERGENCE 2 -- AUDIO_CTRL bit 6 does nothing on any released hardware.
 //
-// top.v:474-478 decodes only bits 7, 5, 4 and 3:0 of a write to 0x1B; bit 6 is
-// never read. Searching top.v for write_data[6] finds one use, at top.v:341,
+// top.v:473-477 decodes only bits 7, 5, 4 and 3:0 of a write to 0x1B; bit 6 is
+// never read. Searching top.v for write_data[6] finds one use, at top.v:340,
 // for sprites_enabled on an unrelated register. audio_fifo.v assigns rdidx_r in
 // exactly two places, :33 (reset, together with wridx_r) and :44 (increment on
 // read), so nothing rewinds the read pointer alone.

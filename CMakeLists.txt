@@ -688,6 +688,13 @@ endif()
 add_test(NAME opcode_spec
          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_opcode_spec.py")
 
+# The VERA tests cite Verilog by file and line, which only means anything
+# against one revision -- the one the emulator reports itself to be. This fails
+# if src/video.c and the RTL pin in tests/fetch_vera_rtl.py drift apart, so a
+# version bump has to be a deliberate step that re-checks the citations.
+add_test(NAME vera_version
+         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_version.py")
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are

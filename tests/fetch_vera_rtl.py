@@ -12,7 +12,7 @@ Nothing here is committed: it is someone else's repository under its own
 licence, and it is reference material rather than part of the build. No test
 depends on it being present.
 
-Pinned to a commit rather than tracking a branch. A citation of "top.v:481" is
+Pinned to the tag the emulator reports itself to be, not to a branch. A citation of "top.v:480" is
 meaningless against a moving target, and the whole point is that a reviewer can
 check the quoted line. When the pin moves, the quoted lines must be re-checked.
 
@@ -29,8 +29,10 @@ from pathlib import Path
 
 DEST = Path(__file__).resolve().parent / "vera-rtl"
 
-# VERSION_MAJOR = 8'd48 in top.v -- the "R48" hardware revision.
-COMMIT = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"
+# The tag matching VERA_VERSION_MAJOR/MINOR/PATCH in src/video.c. Held in step
+# by tests/check_vera_version.py: if the emulator's declared version changes,
+# this pin and every cited line number must be re-checked.
+COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"  # tag v47.0.2
 BASE = f"https://raw.githubusercontent.com/X16Community/vera-module/{COMMIT}"
 
 FILES = (
@@ -61,13 +63,26 @@ def get(url, path):
 def main():
     print(f"VERA RTL -> {DEST}")
     print(f"  commit {COMMIT}")
+
+    # Re-fetch when the pin has moved. Skipping on "file exists" alone would
+    # quietly serve the previous revision's RTL under the new commit's name,
+    # and the line numbers cited in the tests would silently stop matching --
+    # which is exactly the failure this whole oracle exists to prevent.
+    stamp = DEST / "COMMIT"
+    have = stamp.read_text().strip() if stamp.exists() else None
+    if have and have != COMMIT:
+        print(f"  pin moved from {have[:8]}: discarding the fetched copy")
+        for f in FILES:
+            (DEST / Path(f).name).unlink(missing_ok=True)
+        stamp.unlink(missing_ok=True)
+
     ok = True
     for f in FILES:
         # Flattened: the citations name the file, not its path in the repo.
         ok &= get(f"{BASE}/{f}", DEST / Path(f).name)
     if not ok:
         return 1
-    (DEST / "COMMIT").write_text(COMMIT + "\n")
+    stamp.write_text(COMMIT + "\n")
     return 0
 
 
