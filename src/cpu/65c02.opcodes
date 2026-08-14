@@ -92,6 +92,22 @@ nop abso 8 $5c
 nop abso 4 $dc
 nop abso 4 $fc
 
+; The 65C02 retimed these relative to the NMOS part, so they override the
+; entries in 6502.opcodes rather than adding to them.
+;
+; JMP (abs) costs a cycle more: the NMOS page-wrap bug is fixed here, and the
+; correction costs the extra read.
+jmp ind 6 $6c
+;
+; The read-modify-write absolute,X instructions cost one less, and take the
+; extra cycle only when indexing crosses a page. The NMOS part always paid it.
+; The instructions set penaltyop only when running as a 65C02, so the 65816
+; keeps its own flat timing.
+asl absx 6 $1e
+rol absx 6 $3e
+lsr absx 6 $5e
+ror absx 6 $7e
+
 nop imm8 2 $02
 nop imm8 2 $22
 nop imm8 2 $42

@@ -104,6 +104,10 @@ static void and() {
 }
 
 static void asl() {
+    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
+    // part always paid it and the 65816 has its own flat timing, so this
+    // penalty applies to the 65C02 only.
+    penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
     result = value << 1;
 
@@ -137,6 +141,10 @@ static void beq() {
 }
 
 static void bit() {
+    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
+    // part always paid it and the 65816 has its own flat timing, so this
+    // penalty applies to the 65C02 only.
+    penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
     result = acc_for_mode() & value;
 
@@ -409,6 +417,10 @@ static void ldy() {
 }
 
 static void lsr() {
+    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
+    // part always paid it and the 65816 has its own flat timing, so this
+    // penalty applies to the 65C02 only.
+    penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
     result = value >> 1;
 
@@ -524,6 +536,10 @@ static void rep() {
 }
 
 static void rol() {
+    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
+    // part always paid it and the 65816 has its own flat timing, so this
+    // penalty applies to the 65C02 only.
+    penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
     result = (value << 1) | (regs.status & FLAG_CARRY);
 
@@ -535,6 +551,10 @@ static void rol() {
 }
 
 static void ror() {
+    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
+    // part always paid it and the 65816 has its own flat timing, so this
+    // penalty applies to the 65C02 only.
+    penaltyop = (uint8_t)!regs.is65c816;
     value = getvalue(memory_16bit());
     result = (value >> 1) | ((regs.status & FLAG_CARRY) << (memory_16bit() ? 15 : 7));
 
