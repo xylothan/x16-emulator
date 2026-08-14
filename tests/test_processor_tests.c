@@ -158,6 +158,7 @@ typedef struct {
 	long total, state_ok, state_ok_ignoring_b, cycles_ok, bus_ok;
 	char sample[192];   // first state mismatch seen for this opcode
 	bool have_sample;
+	bool not_comparable;
 } pt_opcode;
 
 static pt_opcode by_opcode[256];
@@ -188,6 +189,17 @@ mode_of(const pt_case *c)
 		return x8 ? MODE_M8X8 : MODE_M8X16;
 	}
 	return x8 ? MODE_M16X8 : MODE_M16X16;
+}
+
+// MVN and MVP move one byte per execution and rewind PC so the instruction runs
+// again, which is what makes a block move interruptible. The suite records a
+// fixed 100-cycle prefix of the whole move -- fourteen iterations of a transfer
+// that may run for thousands -- so a case is not one instruction and cannot be
+// compared against one. Counted separately rather than left to read as failure.
+static bool
+is_block_move(const pt_case *c)
+{
+	return c->cpu == PT_CPU_65816 && (c->opcode == 0x44 || c->opcode == 0x54);
 }
 
 static void
@@ -237,6 +249,7 @@ run_case(const pt_case *c, pt_result *r)
 	r->total++;
 	pt_opcode *op = &by_opcode[c->opcode];
 	op->total++;
+	op->not_comparable = is_block_move(c);
 	const int mode = mode_of(c);
 	by_mode[mode].total++;
 
@@ -617,12 +630,23 @@ main(int argc, char **argv)
 	// A run matching its baseline is still wrong; say so, or green reads as
 	// correct.
 	int diverging = 0;
+	int not_comparable = 0;
 	for (int i = 0; i < 256; i++) {
 		pt_opcode *op = &by_opcode[i];
-		if (op->total > 0 && (op->state_ok_ignoring_b < op->total ||
-		                      op->cycles_ok < op->total)) {
+		if (op->total == 0) {
+			continue;
+		}
+		if (op->not_comparable) {
+			not_comparable++;
+			continue;
+		}
+		if (op->state_ok_ignoring_b < op->total || op->cycles_ok < op->total) {
 			diverging++;
 		}
+	}
+	if (not_comparable > 0) {
+		printf("     %d opcodes not comparable (block moves; see is_block_move)\n",
+		       not_comparable);
 	}
 	if (diverging > 0) {
 		printf("DIVERGE: %s: %d of %d opcodes do not match hardware on state "

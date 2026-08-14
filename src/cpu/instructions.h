@@ -526,6 +526,8 @@ static void plb() {
 
 static void pld() {
     regs.dp = pull16();
+    zerocalc(regs.dp, 1);
+    signcalc(regs.dp, 1);
 }
 
 static void plp() {

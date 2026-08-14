@@ -219,10 +219,10 @@ enum InterruptType {
 };
 
 void interrupt6502(enum InterruptType vector) {
-    // BRK is an opcode, so its cycles come from the tick table. A hardware
-    // interrupt is not dispatched through the table and is charged here
-    // instead. Recorded before the BRK vector is rewritten to IRQ below.
-    const bool from_brk = (vector == INT_BRK);
+    // BRK and COP are opcodes, so their cycles come from the tick table. A
+    // hardware interrupt is not dispatched through the table and is charged
+    // here instead. Recorded before the BRK vector is rewritten to IRQ below.
+    const bool from_opcode = (vector == INT_BRK || vector == INT_COP);
 
     // Tell the debugger an interrupt is being taken, before anything is pushed:
     // regs.pc is still the interrupted address and regs.sp is what the matching
@@ -238,9 +238,12 @@ void interrupt6502(enum InterruptType vector) {
     push16(regs.pc);
 
     if (regs.e) {
-        if (vector == INT_BRK) {
+        // BRK and COP are software interrupts and push P with the break flag
+        // set; IRQ and NMI push it clear. The flag only exists in the pushed
+        // copy, which is what distinguishes the two on return.
+        if (vector == INT_BRK || vector == INT_COP) {
             push8(regs.status | FLAG_BREAK);
-            vector = INT_IRQ;
+            vector = (vector == INT_BRK) ? INT_IRQ : vector;
         } else {
             push8(regs.status & ~FLAG_BREAK);
         }
@@ -255,7 +258,7 @@ void interrupt6502(enum InterruptType vector) {
     uint16_t vector_address = (regs.e ? 0xFFF0 : 0xFFE0) + (uint8_t) vector;
     regs.pc = (uint16_t) read6502(vector_address, 0) | ((uint16_t) read6502(vector_address + 1, 0) << 8);
 
-    if (!from_brk) {
+    if (!from_opcode) {
         clockticks6502 += 7; // consumed by CPU to process interrupt
     }
 }
