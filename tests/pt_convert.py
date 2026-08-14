@@ -4,7 +4,7 @@
 Avoids a JSON parser in C. Run once; the C runner walks the output with fread().
 
 One format covers both suites. The 65C02 has no bank registers and no emulation
-bit, so those fields carry the values a 65816 in emulation mode would hold, and
+bit, so those fields carry the values a 65C816 in emulation mode would hold, and
 the cpu field says which core to reset into.
 
 Layout, all little-endian:
@@ -12,14 +12,14 @@ Layout, all little-endian:
     magic 'X16P', u32 version = 2, u32 case count
     per case:
         u8  opcode
-        u8  cpu           0 = 65C02, 1 = 65816
+        u8  cpu           0 = 65C02, 1 = 65C816
         initial state, then u16 ram count and [u32 addr, u8 value] each
         final state,   then u16 ram count and [u32 addr, u8 value] each
         u16 cycle count, then [u32 addr, u8 value, u8 flags] each
 
     state: u16 pc, u16 s, u16 a, u16 x, u16 y, u8 p, u8 e, u8 dbr, u8 pbr, u16 d
 
-Cycle flags, from the 65816 suite's eight-character signal string:
+Cycle flags, from the 65C816 suite's eight-character signal string:
 
     0x01 VDA   0x02 VPA   0x04 VPB   0x08 write
     0x10 E     0x20 M     0x40 X     0x80 MLB

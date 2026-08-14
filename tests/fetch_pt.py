@@ -2,7 +2,7 @@
 """Fetch SingleStepTests suites and convert them for test_processor_tests.
 
 Not committed: roughly a gigabyte of JSON per 65C02 variant and three for the
-65816, one file per opcode. Takes a fixed prefix of each instead.
+65C816, one file per opcode. Takes a fixed prefix of each instead.
 
 Prefix, not a random sample: the baseline records exact per-opcode counts, so
 every machine must convert the same cases.
@@ -31,7 +31,7 @@ VARIANTS = {
         "repo": "65x02", "sub": "wdc65c02/v1", "suffix": "",
         "cpu": pt_convert.CPU_65C02,
     },
-    # The 65816 ships two files per opcode. Emulation mode is all E=1 with 8-bit
+    # The 65C816 ships two files per opcode. Emulation mode is all E=1 with 8-bit
     # registers; native mixes the four M/X width combinations within one file.
     "816-emu": {
         "repo": "65816", "sub": "v1", "suffix": ".e",

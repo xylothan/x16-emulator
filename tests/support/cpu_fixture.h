@@ -7,7 +7,7 @@
 // the real instruction tables against this flat memory and nothing else: no
 // SDL, no ROM, no banking, no devices.
 //
-// One fixture covers all three instruction sets. There is no separate 65816
+// One fixture covers all three instruction sets. There is no separate 65C816
 // core: fake6502.c holds both optable_c02[] and optable_c816[] and swaps a
 // single pointer inside reset6502(), so which CPU a scenario runs on is a
 // parameter here rather than a different harness.
@@ -30,9 +30,9 @@ extern struct regs regs;
 // wide a register is, which changes what an instruction does with it.
 typedef enum {
 	CPU_65C02,
-	CPU_816_EMU,       // 65816, emulation mode
-	CPU_816_NATIVE_8,  // 65816, native mode, 8-bit A/X/Y
-	CPU_816_NATIVE_16, // 65816, native mode, 16-bit A/X/Y
+	CPU_816_EMU,       // 65C816, emulation mode
+	CPU_816_NATIVE_8,  // 65C816, native mode, 8-bit A/X/Y
+	CPU_816_NATIVE_16, // 65C816, native mode, 16-bit A/X/Y
 } cpu_mode_t;
 
 const char *cpu_mode_name(cpu_mode_t mode);
@@ -43,7 +43,7 @@ bool cpu_mode_is_16bit(cpu_mode_t mode);
 // The machine's memory, exposed directly so a test can seed operands and read
 // results back without going through the CPU.
 //
-// 16 MB, indexed by the 65816's full 24-bit address: (bank << 16) | offset.
+// 16 MB, indexed by the 65C816's full 24-bit address: (bank << 16) | offset.
 // Bank 0 is the first 64K, so a 65C02 test indexes it exactly as before.
 #define CPU_MEM_SIZE 0x1000000
 extern uint8_t cpu_mem[CPU_MEM_SIZE];

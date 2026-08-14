@@ -62,7 +62,7 @@
 // Bits 4 and 5 of P mean different things on the two CPUs, so pin them before
 // each instruction according to which one is running.
 //
-// On the 65816 they are the index and memory width flags, forced to 1 in
+// On the 65C816 they are the index and memory width flags, forced to 1 in
 // emulation mode.
 //
 // On the 65C02 bit 5 is unused and reads as 1, while bit 4 is the break flag,
@@ -84,7 +84,7 @@ cpu_pin_status_flags(void)
 
 // PLP and RTI load P from the stack. On the 65C02 bits 4 and 5 are not
 // loadable -- there is no register bit behind either -- so they keep their
-// previous values. On the 65816 both are real width flags and load normally.
+// previous values. On the 65C816 both are real width flags and load normally.
 static inline uint8_t
 cpu_merge_pulled_status(uint8_t pulled)
 {

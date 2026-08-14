@@ -26,7 +26,7 @@
 
 #define MAX_RAM    64
 // MVP and MVN move a block, and the suite records the whole move as one
-// instruction: 100 cycles in the 65816 emulation-mode set.
+// instruction: 100 cycles in the 65C816 emulation-mode set.
 #define MAX_CYCLES 160
 
 // Cycle flags, as written by pt_convert.py.

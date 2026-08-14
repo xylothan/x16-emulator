@@ -102,7 +102,7 @@
 #define MAYBE_UNUSED __attribute__((unused))
 #endif
 
-// 6502 / 65816 registers
+// 6502 / 65C816 registers
 
 struct regs regs;
 

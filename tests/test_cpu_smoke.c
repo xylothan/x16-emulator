@@ -97,7 +97,7 @@ test_reset_clears_flags(void)
 	check(!(regs.status & FLAG_DECIMAL), "reset clears decimal mode");
 }
 
-// penaltyd is set by the 65816 direct-page addressing modes when the direct
+// penaltyd is set by the 65C816 direct-page addressing modes when the direct
 // page is not page-aligned. It used not to be cleared per instruction, so one
 // misaligned access added a cycle to every instruction thereafter -- which
 // would show up as a scenario that passes alone and fails after another.
@@ -140,7 +140,7 @@ test_cycles_are_per_run(void)
 static void
 test_modes_select_register_width(void)
 {
-	// Naming and the width predicate are what the 65816 scenarios branch on,
+	// Naming and the width predicate are what the 65C816 scenarios branch on,
 	// so an error here would quietly mis-label every one of them.
 	check(cpu_mode_is_16bit(CPU_816_NATIVE_16), "native 16-bit mode reports 16-bit");
 	check(!cpu_mode_is_16bit(CPU_65C02), "65C02 does not report 16-bit");
