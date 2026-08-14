@@ -42,6 +42,7 @@ static void ainx() { 		// absolute indexed branch
 // *******************************************************************************************
 
 static void stz() {
+    pay_for_wide_memory(1);
     putvalue(0, memory_16bit());
 }
 
@@ -64,7 +65,7 @@ static void bra() {
 // *******************************************************************************************
 
 static void phx() {
-    penaltym = 1;
+    penaltyx = 1;
 
     if (index_16bit()) {
         push16(regs.x);
@@ -74,7 +75,7 @@ static void phx() {
 }
 
 static void plx() {
-    penaltym = 1;
+    penaltyx = 1;
 
     if (index_16bit()) {
         regs.x = pull16();
@@ -89,7 +90,7 @@ static void plx() {
 }
 
 static void phy() {
-    penaltym = 1;
+    penaltyx = 1;
 
     if (index_16bit()) {
         push16(regs.y);
@@ -99,7 +100,7 @@ static void phy() {
 }
 
 static void ply() {
-    penaltym = 1;
+    penaltyx = 1;
 
     if (index_16bit()) {
         regs.y = pull16();
@@ -120,6 +121,7 @@ static void ply() {
 // *******************************************************************************************
 
 static void tsb() {
+    pay_for_wide_memory(2);
     value = getvalue(memory_16bit()); 							// Read memory
     result = acc_for_mode() & value;                // calculate A & memory
     zerocalc(result, memory_16bit()); 								// Set Z flag from this.
@@ -128,6 +130,7 @@ static void tsb() {
 }
 
 static void trb() {
+    pay_for_wide_memory(2);
     value = getvalue(memory_16bit()); 							// Read memory
     result = acc_for_mode() & value;  			// calculate A & memory
     zerocalc(result, memory_16bit()); 								// Set Z flag from this.
