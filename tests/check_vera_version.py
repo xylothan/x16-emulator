@@ -28,6 +28,15 @@ FETCH = ROOT / "tests" / "fetch_vera_rtl.py"
 
 # The vera-module tag whose RTL the VERA tests cite, and the emulator version it
 # corresponds to. Both halves are stated so a mismatch names which side moved.
+#
+# One wrinkle, recorded rather than smoothed over: the RTL inside tag v47.0.2
+# reports 47.0.0 from its own version registers (top.v:191, 199, 207), not
+# 47.0.2 -- the tag name and the registers disagree in the patch field. v48.0.1
+# introduced VERSION_MAJOR/MINOR/BUILD defines and is self-consistent. Nothing
+# in the audio path turns on this, since audio_fifo.v, pcm.v and audio.v are
+# byte-identical across the two tags, but it does mean that RTL reporting
+# exactly 47.0.2 does not exist. v47.0.2 is the closest thing to what the
+# emulator claims.
 EXPECTED_VERSION = (47, 0, 2)
 EXPECTED_TAG = "v47.0.2"
 EXPECTED_COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"
