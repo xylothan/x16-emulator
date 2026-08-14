@@ -137,6 +137,67 @@ MUTATIONS = [
         "requires": "tests/pt/wdc65c02.bin",
         "caught_by": ["processor_tests"],
     },
+    # The 65C816 fixes below. Each is checked by the suite for the mode it
+    # applies to, so a revert shows up as a named opcode rather than a number.
+    {
+        "name": "indirect addressing ignores the data bank",
+        "file": "src/cpu/modes.h",
+        "find": "ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0)",
+        "into": "ea = ((uint16_t)read6502(direct_page_add(eahelp), 0)",
+        "count": 2,  # ind0 and indx
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        "name": "the new stack instructions wrap inside page one",
+        "file": "src/cpu/instructions.h",
+        "find": "regs.dp = pull16_long();",
+        "into": "regs.dp = pull16();",
+        "count": 1,
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        "name": "a 16-bit operand costs no extra cycle",
+        "file": "src/cpu/support.h",
+        "find": "(penaltym = addressing_is_acc ? 0 : (uint8_t)(n))",
+        "into": "(penaltym = addressing_is_acc ? 0 : (uint8_t)((n) & 0x00))",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        "name": "BIT reads the wrong half of a 16-bit operand",
+        "file": "src/cpu/instructions.h",
+        "find": "uint16_t top = memory_16bit() ? (uint16_t)(value >> 8) : value;",
+        "into": "uint16_t top = value;",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        # The two CPUs correct decimal subtraction differently; using one
+        # algorithm for both was the fault this replaced.
+        "name": "the 65C02 decimal SBC algorithm is used on the 65C816",
+        "file": "src/cpu/instructions.h",
+        "find": "            int16_t adjusted;\n            if (regs.is65c816) {",
+        "into": "            int16_t adjusted;\n            if (0) {",
+        "count": 1,
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        # WAI is one of the four opcodes ProcessorTests records in a form it
+        # cannot compare, so this is a table change no other test can see. It
+        # is the mutation that shows opcode_spec covers something new rather
+        # than repeating the traces.
+        "name": "a documented cycle count is changed",
+        "file": "src/cpu/65c02.opcodes",
+        "find": "wai imp 3 $cb",
+        "into": "wai imp 4 $cb",
+        "count": 1,
+        "caught_by": ["opcode_spec"],
+    },
 ]
 
 
@@ -144,9 +205,23 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, **kw)
 
 
-def build(build_dir):
-    r = run([CMAKE, "--build", build_dir, "--target", "unit_tests"])
-    return r.returncode == 0, r.stdout + r.stderr
+def build(build_dir, passes=1):
+    """Build the tests, optionally more than once.
+
+    A mutation to an .opcodes file regenerates src/cpu/tables.h during the
+    build, and the objects that include it are only recompiled on the following
+    pass: the header dependency comes from the compiler's depfile, which ninja
+    evaluates before the generator has run. One pass would leave the binaries
+    linked from the unmutated tables, so such a mutation would look like it
+    survived when nothing had actually been tested.
+    """
+    out = ""
+    for _ in range(passes):
+        r = run([CMAKE, "--build", build_dir, "--target", "unit_tests"])
+        out += r.stdout + r.stderr
+        if r.returncode != 0:
+            return False, out
+    return True, out
 
 
 def tests_fail(build_dir, names):
@@ -196,12 +271,22 @@ def main():
             survived.append(m["name"] + " (pattern stale)")
             continue
 
+        # Building an .opcodes mutation rewrites these, and they are tracked, so
+        # they have to be put back with everything else.
+        GENERATED = ("src/cpu/tables.h", "src/cpu/mnemonics.h")
+
         backup = Path(tempfile.gettempdir()) / (path.name + ".mutation_backup")
         shutil.copy2(path, backup)
+        gen_backups = {}
+        for rel in GENERATED:
+            gen = ROOT / rel
+            if gen.exists():
+                gen_backups[gen] = Path(tempfile.gettempdir()) / (gen.name + ".mutation_backup")
+                shutil.copy2(gen, gen_backups[gen])
         try:
             path.write_text(original.replace(m["find"], m["into"]),
                             encoding="utf-8")
-            built, out = build(args.build_dir)
+            built, out = build(args.build_dir, passes=2)
             if not built:
                 # A mutation that will not compile proves nothing either way,
                 # and is usually a mutation that needs rewriting rather than a
@@ -227,9 +312,16 @@ def main():
             # runs against a broken emulator and is reported caught.
             os.utime(path, None)
             backup.unlink(missing_ok=True)
+            for gen, saved in gen_backups.items():
+                shutil.copy2(saved, gen)
+                os.utime(gen, None)
+                saved.unlink(missing_ok=True)
 
     # Leave the tree built from clean source.
-    build(args.build_dir)
+    ok, _ = build(args.build_dir, passes=2)
+    if not ok:
+        print("the tree does not build after restoring the sources")
+        return 2
 
     total = len([m for m in MUTATIONS
                  if not args.only or args.only in m["name"]])

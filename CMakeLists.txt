@@ -678,6 +678,12 @@ if(TARGET processor_tests_test)
              COMMAND processor_tests_test 816-native)
 endif()
 
+# The generated opcode tables against the published 65C02 spec. ProcessorTests
+# measures what the hardware does; this checks the tables still agree with the
+# documentation, which is a different question and has disagreed once.
+add_test(NAME opcode_spec
+         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_opcode_spec.py")
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
