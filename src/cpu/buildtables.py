@@ -66,7 +66,7 @@ OPCODES_65c816_FNAME = "65c816.opcodes"
 #######################################################################################################################
 ####################################  Load in a source file with opcode descriptors  ##################################
 #######################################################################################################################
-def loadSource(srcFile, opcodesList):
+def loadSource(srcFile, opcodesList, allowOverride=False):
     # Read file line by line and omit committed
     fileLinesObject = open(srcFile).readlines()
     strippedOpcodeLines = [opcodeLine.strip() for opcodeLine in fileLinesObject if
@@ -78,7 +78,12 @@ def loadSource(srcFile, opcodesList):
         assert matchLine is not None, "Format {}".format(opcodeLine)
 
         opcode = int(matchLine.group(OPCODE_KEY_STR), 16)
-        assert opcodesList[opcode] is None, "Duplicate {0:02x}".format(opcode)
+        # The variant files are layered over 6502.opcodes. Most entries are
+        # additions, but a few opcodes exist on both parts with different
+        # timing, so a variant file is allowed to replace one. Only the variant
+        # files may: a duplicate inside the base is still a mistake.
+        assert allowOverride or opcodesList[opcode] is None, \
+            "Duplicate {0:02x}".format(opcode)
 
         opcodesList[opcode] = {
             MODE_KEY_STR: matchLine.group(MODE_KEY_STR),
@@ -188,14 +193,14 @@ if __name__ == '__main__':
     # Load 6502 opcodes list
     loadSource(OPCODES_6502_FNAME, opcodesList_c02)
     # Load 65C02 opcodes list
-    loadSource(OPCODES_65c02_FNAME, opcodesList_c02)
+    loadSource(OPCODES_65c02_FNAME, opcodesList_c02, allowOverride=True)
 
     opcodesList_c816 = [None] * TOTAL_NUMBER_OPCODES
 
     # Load 6502 opcodes list
     loadSource(OPCODES_6502_FNAME, opcodesList_c816)
     # Load 65C816 opcodes list
-    loadSource(OPCODES_65c816_FNAME, opcodesList_c816)
+    loadSource(OPCODES_65c816_FNAME, opcodesList_c816, allowOverride=True)
 
     # Fill opcodes list with NOP instructions
     fillNop(opcodesList_c02)
