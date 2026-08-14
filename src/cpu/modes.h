@@ -19,6 +19,7 @@ static void imp8() { // brk / cop
 }
 
 static void acc() { //accumulator
+    addressing_is_acc = true;
 }
 
 static void imm8() { //immediate, 8bit
