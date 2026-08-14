@@ -148,17 +148,20 @@ jobs:
         # The test reports them skipped if this step is removed or fails.
         run: python tests/fetch_klaus.py
       - name: Cache ProcessorTests
-        # Only the converted fixture: ~1 MB, against ~1 GB of JSON it came
-        # from. The suite is versioned and immutable, so a hit needs no
-        # revalidation and skips 256 requests -- which is where the flakes are.
+        # Only the converted fixtures: a megabyte or so each, against gigabytes
+        # of JSON they come from. The suites are versioned and immutable, so a
+        # hit needs no revalidation and skips the downloads -- which is where
+        # the flakes are.
         uses: actions/cache@v4
         with:
-          path: tests/pt/wdc65c02.bin
-          key: pt-wdc65c02-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
+          path: tests/pt/*.bin
+          key: pt-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
       - name: Fetch ProcessorTests
         # 100 cases per opcode, as a prefix so every machine converts the same
-        # ones -- the baseline records exact counts. No-op on a cache hit.
-        run: python tests/fetch_pt.py --cases 100
+        # ones -- the baselines record exact counts. No-op on a cache hit.
+        run: |
+          python tests/fetch_pt.py --cases 100
+          python tests/fetch_pt.py --cases 100 --variant 816-emu
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and
@@ -197,7 +200,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: processor-tests-report
-          path: pt-report.txt
+          path: pt-report-*.txt
           if-no-files-found: ignore
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
@@ -221,10 +224,12 @@ jobs:
       - name: Cache ProcessorTests
         uses: actions/cache@v4
         with:
-          path: tests/pt/wdc65c02.bin
-          key: pt-wdc65c02-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
+          path: tests/pt/*.bin
+          key: pt-100-${{ hashFiles('tests/fetch_pt.py', 'tests/pt_convert.py') }}
       - name: Fetch ProcessorTests
-        run: python tests/fetch_pt.py --cases 100
+        run: |
+          python tests/fetch_pt.py --cases 100
+          python tests/fetch_pt.py --cases 100 --variant 816-emu
       - name: Check the tests catch faults
         env:
           X16_KLAUS_REQUIRED: 1
