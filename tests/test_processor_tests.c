@@ -53,10 +53,10 @@ static pt_cycle bus[BUS_MAX];
 static int      bus_n;
 
 static void
-note_read(uint16_t addr, uint8_t value)
+note_read(uint32_t addr, uint8_t value)
 {
 	if (bus_n < BUS_MAX) {
-		bus[bus_n].addr = addr;
+		bus[bus_n].addr = (uint16_t)addr;
 		bus[bus_n].value = value;
 		bus[bus_n].is_write = 0;
 		bus_n++;
@@ -64,10 +64,10 @@ note_read(uint16_t addr, uint8_t value)
 }
 
 static void
-note_write(uint16_t addr, uint8_t value)
+note_write(uint32_t addr, uint8_t value)
 {
 	if (bus_n < BUS_MAX) {
-		bus[bus_n].addr = addr;
+		bus[bus_n].addr = (uint16_t)addr;
 		bus[bus_n].value = value;
 		bus[bus_n].is_write = 1;
 		bus_n++;

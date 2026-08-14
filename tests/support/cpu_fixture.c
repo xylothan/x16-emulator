@@ -7,27 +7,98 @@
 // run following another run would stop at the wrong point.
 extern uint32_t clockgoal6502;
 
-uint8_t  cpu_mem[0x10000];
+uint8_t  cpu_mem[CPU_MEM_SIZE];
 uint32_t cpu_stop_count;
 uint32_t cpu_vector_pulls;
 
 static uint32_t cycles_before_run;
 
-// ---- What fake6502.c expects the rest of the emulator to provide ------------
-// Flat memory: no banking, no I/O. The bank byte is the 65816 program bank,
-// which only selects a 64K space the emulator itself maps; a test that cares
-// about banking belongs with memory.c, not here.
+// Clearing 16 MB per reset would dominate everything: the ProcessorTests runner
+// resets once per case and there are tens of thousands of them. Bank 0 is
+// cleared outright, because it is small and every 65C02 test lives there. Above
+// bank 0 only the pages actually touched are cleared, tracked here.
+//
+// A test that scribbles over more than DIRTY_MAX pages sets dirty_all instead
+// and pays for a full clear, which is the right trade for the few that load
+// whole images.
+#define DIRTY_PAGE_SHIFT 8
+#define DIRTY_MAX        256
 
-void (*cpu_bus_read_hook)(uint16_t addr, uint8_t value);
-void (*cpu_bus_write_hook)(uint16_t addr, uint8_t value);
+static uint32_t dirty_pages[DIRTY_MAX];
+static int      dirty_count;
+static bool     dirty_all;
+
+static void
+mark_dirty(uint32_t addr)
+{
+	if (dirty_all || addr < 0x10000) {
+		return;  // bank 0 is always cleared
+	}
+	uint32_t page = addr >> DIRTY_PAGE_SHIFT;
+	for (int i = 0; i < dirty_count; i++) {
+		if (dirty_pages[i] == page) {
+			return;
+		}
+	}
+	if (dirty_count == DIRTY_MAX) {
+		dirty_all = true;
+		return;
+	}
+	dirty_pages[dirty_count++] = page;
+}
+
+static void
+clear_memory(void)
+{
+	if (dirty_all) {
+		memset(cpu_mem, 0, CPU_MEM_SIZE);
+	} else {
+		for (int i = 0; i < dirty_count; i++) {
+			memset(&cpu_mem[dirty_pages[i] << DIRTY_PAGE_SHIFT], 0,
+			       1u << DIRTY_PAGE_SHIFT);
+		}
+		memset(cpu_mem, 0, 0x10000);
+	}
+	dirty_count = 0;
+	dirty_all   = false;
+}
+
+void
+cpu_seed(uint32_t addr, uint8_t value)
+{
+	addr &= CPU_MEM_SIZE - 1;
+	mark_dirty(addr);
+	cpu_mem[addr] = value;
+}
+
+// ---- What fake6502.c expects the rest of the emulator to provide ------------
+// Flat 24-bit memory: no I/O, and no banking beyond the 65816's own, which is
+// just the top eight address lines. A test that cares about the emulator's
+// banking scheme belongs with memory.c, not here.
+
+void (*cpu_bus_read_hook)(uint32_t addr, uint8_t value);
+void (*cpu_bus_write_hook)(uint32_t addr, uint8_t value);
+
+// A 65C02 has sixteen address lines and no bank pins, so its addresses wrap
+// inside 64K. The core computes effective addresses in 24 bits for the 65816's
+// benefit and indexing can carry past $FFFF, which on a 65C02 must come back to
+// $0000 rather than reaching bank 1.
+static uint32_t
+cpu_bus_address(uint16_t address, uint8_t bank)
+{
+	if (!regs.is65c816) {
+		return address;
+	}
+	return ((uint32_t)bank << 16) | address;
+}
 
 uint8_t
 read6502(uint16_t address, uint8_t bank)
 {
-	(void)bank;
-	uint8_t value = cpu_mem[address];
+	uint32_t full  = cpu_bus_address(address, bank);
+	uint8_t  value = cpu_mem[full];
 	if (cpu_bus_read_hook) {
-		cpu_bus_read_hook(address, value);
+		cpu_bus_read_hook(full, value);
 	}
 	return value;
 }
@@ -35,10 +106,11 @@ read6502(uint16_t address, uint8_t bank)
 void
 write6502(uint16_t address, uint8_t bank, uint8_t value)
 {
-	(void)bank;
-	cpu_mem[address] = value;
+	uint32_t full = cpu_bus_address(address, bank);
+	mark_dirty(full);
+	cpu_mem[full] = value;
 	if (cpu_bus_write_hook) {
-		cpu_bus_write_hook(address, value);
+		cpu_bus_write_hook(full, value);
 	}
 }
 
@@ -94,7 +166,7 @@ cpu_mode_is_16bit(cpu_mode_t mode)
 void
 cpu_reset_to(cpu_mode_t mode, uint16_t start)
 {
-	memset(cpu_mem, 0, sizeof cpu_mem);
+	clear_memory();
 	cpu_stop_count   = 0;
 	cpu_vector_pulls = 0;
 
