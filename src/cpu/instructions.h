@@ -145,10 +145,9 @@ static void beq() {
 
 static void bit() {
     pay_for_wide_memory(1);
-    // On the 65C02 the page-crossing cycle is conditional here; the NMOS
-    // part always paid it and the 65C816 has its own flat timing, so this
-    // penalty applies to the 65C02 only.
-    penaltyop = (uint8_t)!regs.is65c816;
+    // BIT abs,X pays the page-crossing cycle on both CPUs, unlike the
+    // read-modify-write forms below it, which are flat on the 65C816.
+    penaltyop = 1;
     value = getvalue(memory_16bit());
     result = acc_for_mode() & value;
 
@@ -588,6 +587,8 @@ static void ror() {
 }
 
 static void rti() {
+    // Native mode pulls the program bank as well, which costs a cycle.
+    penaltyn = 1;
     regs.status = cpu_merge_pulled_status(pull8());
     value = pull16();
     regs.pc = value;

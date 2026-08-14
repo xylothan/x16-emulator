@@ -115,14 +115,11 @@ static void absx() { //absolute,X
 }
 
 static void abslx() { // absolute long, X
-    uint16_t startpage;
     ea = (uint32_t)read6502(regs.pc, regs.k) | ((uint32_t)read6502(regs.pc+1, regs.k) << 8) | ((uint32_t)read6502(regs.pc+2, regs.k) << 16);
-    startpage = ea & 0xFF00;
     ea = mask_long_addr(ea + regs.x);
 
-    if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
-        penaltyaddr = 1;
-    }
+    // No page-crossing penalty: a long address already names the bank, so
+    // indexing across a page costs nothing. Measured flat at five cycles.
 
     regs.pc += 3;
 }
@@ -231,15 +228,12 @@ static void sr() { // absolute,S
 }
 
 static void sridy() { // (indirect,S),Y
-    uint16_t eahelp, startpage;
+    uint16_t eahelp;
     eahelp = regs.sp + (uint16_t)read6502(regs.pc++, regs.k);
     uint16_t pointer = (uint16_t)read6502(eahelp, 0) | ((uint16_t)read6502(eahelp + 1, 0) << 8);
-    startpage = pointer & 0xFF00;
     ea = mask_long_addr(addr_with_db(pointer) + (uint16_t)regs.y);
 
-    if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
-        penaltyaddr = 1;
-    }
+    // No page-crossing penalty: measured flat at seven cycles.
 }
 
 static void bmv() { // block move
