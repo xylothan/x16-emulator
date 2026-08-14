@@ -287,7 +287,11 @@ def main():
             os.utime(path, None)
             backup.unlink(missing_ok=True)
 
-    # Leave the tree built from clean source.
+    # Leave the tree built from clean source. Twice: a mutation to an .opcodes
+    # file regenerates tables.h during the build, and the objects that include
+    # it are only rebuilt on the following pass. One pass leaves a tree whose
+    # tests fail for reasons that have nothing to do with the source.
+    build(args.build_dir)
     build(args.build_dir)
 
     total = len([m for m in MUTATIONS
