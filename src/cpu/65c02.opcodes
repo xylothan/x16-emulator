@@ -84,9 +84,13 @@ wai imp 3 $cb
 
 dbg imp 1 $DB
 
-nop imp 8 $5c
-nop imp 4 $dc
-nop imp 4 $fc
+; $5C is 8 cycles, per both the WDC W65C02S datasheet opcode matrix and the
+; 6502.org 65C02 opcode list. SingleStepTests says 4, so processor_tests
+; reports $5C as diverging on cycles. That divergence is deliberate and
+; recorded in the baseline: do not "fix" it to 4 to make the test green.
+nop abso 8 $5c
+nop abso 4 $dc
+nop abso 4 $fc
 
 nop imm8 2 $02
 nop imm8 2 $22

@@ -194,16 +194,12 @@ main(void)
 	// Documented opcodes and addressing modes. This is the one that gates.
 	run_case("6502_functional_test.bin", FUNCTIONAL_SUCCESS, NULL);
 
-	// The extended test also exercises undefined opcodes, and checks their
-	// byte counts by putting INY instructions in the bytes a correctly sized
-	// opcode would skip. The table generator fills every unused slot with a
-	// one-byte implied NOP, so those bytes get executed instead: at $0ECE the
-	// test finds Y is $44 where it should be $42, exactly two stray INYs,
-	// because $5C is a one-byte NOP here and three bytes on a real 65C02.
-	run_case("65C02_extended_opcodes_test.bin", EXTENDED_SUCCESS,
-	         "undefined opcodes are all one-byte NOPs here; a real 65C02 gives "
-	         "them specific sizes, so the bytes after one get executed rather "
-	         "than skipped. Documented opcodes all pass.");
+	// The extended test also exercises undefined opcodes, checking their byte
+	// counts by putting INY instructions in the bytes a correctly sized opcode
+	// would skip. It failed while $5C, $DC and $FC were one-byte implied NOPs
+	// rather than three-byte ones, because the operand bytes were executed
+	// instead of skipped.
+	run_case("65C02_extended_opcodes_test.bin", EXTENDED_SUCCESS, NULL);
 
 	return x16_test_summary("klaus");
 }
