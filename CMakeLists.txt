@@ -631,6 +631,10 @@ x16_add_test(irq_ctx
 x16_add_test(dbg_load
     SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c)
 
+# vera_pcm.c includes only its own header and libc, so the test links it alone.
+x16_add_test(vera_pcm
+    SOURCES tests/test_vera_pcm.c tests/support/harness.c src/vera_pcm.c)
+
 # The CPU core reaches outside itself for only six symbols, all supplied by the
 # fixture, so this links the real instruction tables against a flat 64K memory
 # and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
@@ -683,6 +687,13 @@ endif()
 # documentation, which is a different question and has disagreed once.
 add_test(NAME opcode_spec
          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_opcode_spec.py")
+
+# The VERA tests cite Verilog by file and line, which only means anything
+# against one revision -- the one the emulator reports itself to be. This fails
+# if src/video.c and the RTL pin in tests/fetch_vera_rtl.py drift apart, so a
+# version bump has to be a deliberate step that re-checks the citations.
+add_test(NAME vera_version
+         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_version.py")
 
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices

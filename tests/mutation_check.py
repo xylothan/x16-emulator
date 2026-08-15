@@ -36,6 +36,33 @@ CTEST = os.environ.get("CTEST", "ctest")
 # matching would otherwise look exactly like a mutation the tests caught.
 MUTATIONS = [
     {
+        "name": "PCM FIFO accepts one byte too many",
+        "file": "src/vera_pcm.c",
+        # audio_fifo.v:27  assign full = (wridx_next == rdidx_r);
+        # The ring stores one fewer than its 4096 cells so that full and empty
+        # stay distinguishable. Off by one here makes a full FIFO read as empty.
+        "find": "if (fifo_cnt < sizeof(fifo) - 1) {",
+        "into": "if (fifo_cnt <= sizeof(fifo) - 1) {",
+        "count": 1,
+        "caught_by": ["vera_pcm"],
+    },
+    {
+        "name": "PCM almost-empty boundary is off by one",
+        "file": "src/vera_pcm.c",
+        # audio_fifo.v:28  assign almost_empty = fifo_count < 12'd1024;
+        # Drives the AFLOW interrupt: firing a byte late or early changes when
+        # a program is asked for more audio.
+        "find": "return fifo_cnt < 1024;",
+        "into": "return fifo_cnt <= 1024;",
+        "count": 1,
+        "caught_by": ["vera_pcm"],
+    },
+    # No mutation for the AUDIO_RATE fold. The test asserts the RTL value
+    # (top.v:481 stores write_data raw) and marks the emulator's fold as a
+    # divergence, so it deliberately does not pin `256 - val`. A mutation of
+    # that expression would survive, and correctly so. Add one once the fold is
+    # removed and the register stores what was written.
+    {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
         # step6502()'s copy, four-space indented. exec6502()'s is eight-space
