@@ -722,6 +722,21 @@ add_test(NAME opcode_spec
 add_test(NAME vera_version
          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_version.py")
 
+# Register banking: the same addresses carry different registers per DCSEL.
+x16_add_test(vera_regbank NEEDS_SDL
+    SOURCES tests/test_vera_regbank.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_regbank_test)
+    target_include_directories(vera_regbank_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_regbank_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_regbank_test PRIVATE m)
+    endif()
+endif()
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
