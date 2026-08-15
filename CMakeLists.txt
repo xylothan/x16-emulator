@@ -655,6 +655,11 @@ if(TARGET vera_video_test)
     if(TARGET SDL2::SDL2)
         target_link_libraries(vera_video_test PRIVATE SDL2::SDL2)
     endif()
+    # video.c calls round(). The emulator picks libm up transitively from its
+    # other dependencies; this target links fewer of them, so it asks directly.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_video_test PRIVATE m)
+    endif()
 endif()
 
 # The CPU core reaches outside itself for only six symbols, all supplied by the
