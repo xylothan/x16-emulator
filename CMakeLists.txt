@@ -635,6 +635,10 @@ x16_add_test(dbg_load
 x16_add_test(vera_pcm
     SOURCES tests/test_vera_pcm.c tests/support/harness.c src/vera_pcm.c)
 
+# vera_psg.c likewise has no dependency beyond its own header and libc.
+x16_add_test(vera_psg
+    SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
+
 # The CPU core reaches outside itself for only six symbols, all supplied by the
 # fixture, so this links the real instruction tables against a flat 64K memory
 # and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
