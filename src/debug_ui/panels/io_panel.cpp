@@ -16,7 +16,8 @@
 //
 // ON TOOLTIPS: this panel describes hardware most people do not have memorised,
 // and a bare hex byte with no way to find out what it means is not debugging
-// information. Anything that is not self-evident carries a "(?)" or a hover.
+// information. Every label and every value is hoverable, and the pair share one
+// explanation, so a reader can point at whichever half confused them.
 #include "imgui.h"
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
@@ -24,6 +25,7 @@
 #include "debug_ui_widgets.h"
 #include "io_reg_info.h"
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,24 +52,61 @@ tip(const char *text)
     }
 }
 
-// A "(?)" the user can hover. Used wherever a value would otherwise be a bare
-// number with no way to find out what it means.
+// Attaches an explanation to the item just drawn. Named `help` for the places
+// that read as "explain this"; identical to tip().
+//
+// It deliberately does NOT draw a "(?)" marker. Thirty of those in one panel is
+// clutter, and it puts the explanation on a decoration rather than on the thing
+// being explained -- the label and the value are what a reader reaches for.
+// Discoverability is handled once, by the hint at the top of the panel.
 void
 help(const char *text)
 {
-    ImGui::SameLine(0, 4);
-    ImGui::TextDisabled("(?)");
     tip(text);
 }
 
-// A label/value row in a two-column table.
+// A heading that is itself hoverable, so the explanation is on the thing being
+// explained rather than on a marker beside it.
 void
-row_label(const char *label)
+heading(const char *text, const char *tip_text)
+{
+    ImGui::TextUnformatted(text);
+    tip(tip_text);
+}
+
+// The tooltip for the row currently being drawn, so the value cell can carry
+// the same explanation as its label without the caller repeating it.
+const char *g_row_tip = nullptr;
+
+// Start a label/value row. The label is hoverable; call row_end() after drawing
+// the value to make that hoverable too.
+void
+row_begin(const char *label, const char *tip_text)
 {
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     ImGui::TextColored(COL_DIM, "%s", label);
+    tip(tip_text);
     ImGui::TableSetColumnIndex(1);
+    g_row_tip = tip_text;
+}
+
+void
+row_end()
+{
+    tip(g_row_tip);
+}
+
+// The common case: a formatted value with the same tooltip on both cells.
+void
+row_kv(const char *label, const char *tip_text, const char *fmt, ...)
+{
+    row_begin(label, tip_text);
+    va_list ap;
+    va_start(ap, fmt);
+    ImGui::TextV(fmt, ap);
+    va_end(ap);
+    row_end();
 }
 
 // A lit/unlit indicator, for things that are physically a lamp or a bus line.
@@ -491,68 +530,68 @@ draw_sdcard_tab()
                                 dbgui_text_width("Multiblock read "));
         ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
 
-        row_label("Image");
-        ImGui::TextUnformatted(sd.image_path);
-        row_label("Size");
-        ImGui::Text("%lld bytes", (long long)sd.image_size);
+        row_kv("Image", "The image file backing the emulated card.", "%s", sd.image_path);
+        row_kv("Size", "Size of the image file on disk.", "%lld bytes",
+               (long long)sd.image_size);
 
-        row_label("Chip select");
-        ImGui::TextUnformatted(sd.selected ? "asserted" : "idle");
-        help("SPI slave select. The card only listens while this is asserted, so an idle "
-             "line means the machine is not talking to it at all.");
+        row_kv("Chip select",
+               "SPI slave select. The card only listens while this is asserted, so an idle "
+               "line means the machine is not talking to it at all.",
+               "%s", sd.selected ? "asserted" : "idle");
 
-        row_label("Last command");
         {
             const char *name = sd_command_name(sd.last_cmd, sd.last_cmd_is_acmd);
+            const char *ctip = "The most recent command decoded from the SPI stream. It "
+                               "persists after the command completes, so this is the last "
+                               "thing asked of the card, not necessarily something in "
+                               "progress.";
             if (name != nullptr) {
-                ImGui::TextUnformatted(name);
+                row_kv("Last command", ctip, "%s", name);
             } else {
-                ImGui::Text("%sCMD%u", sd.last_cmd_is_acmd ? "A" : "", sd.last_cmd);
+                row_kv("Last command", ctip, "%sCMD%u", sd.last_cmd_is_acmd ? "A" : "",
+                       sd.last_cmd);
             }
-            help("The most recent command decoded from the SPI stream. It persists after "
-                 "the command completes, so this is the last thing asked of the card, not "
-                 "necessarily something in progress.");
         }
 
-        row_label("Block (LBA)");
+        row_begin("Block (LBA)",
+                  "Logical block address of the last block command. Blocks are 512 bytes, so "
+                  "the byte offset into the image is this times 512.");
         ImGui::Text("%u", sd.last_lba);
         dbgui_hover_value_tooltip("byte offset", sd.last_lba * 512u, 4);
-        help("Logical block address of the last block command. Blocks are 512 bytes, so "
-             "the byte offset into the image is this times 512.");
+        row_end();
 
-        row_label("R1 status");
-        ImGui::Text("idle=%d  initialised=%d", sd.is_idle ? 1 : 0, sd.is_initialized ? 1 : 0);
-        help("The two R1 response bits this emulator models. \"idle\" means the card is in "
-             "its power-up idle state and will refuse data commands; the ROM clears it "
-             "during start-up with ACMD41.");
+        row_kv("R1 status",
+               "The two R1 response bits this emulator models. \"idle\" means the card is in "
+               "its power-up idle state and will refuse data commands; the ROM clears it "
+               "during start-up with ACMD41.",
+               "idle=%d  initialised=%d", sd.is_idle ? 1 : 0, sd.is_initialized ? 1 : 0);
 
-        row_label("Multiblock read");
-        ImGui::TextUnformatted(sd.ongoing_multiblock_read ? "in progress" : "no");
-        help("CMD18 streams blocks until CMD12 stops it. While this is in progress the "
-             "card keeps sending without being asked again.");
+        row_kv("Multiblock read",
+               "CMD18 streams blocks until CMD12 stops it. While this is in progress the card "
+               "keeps sending without being asked again.",
+               "%s", sd.ongoing_multiblock_read ? "in progress" : "no");
 
-        row_label("Response");
-        ImGui::Text("%d / %d bytes sent", sd.response_counter, sd.response_length);
-        help("How far through its reply the card is. A stalled transfer usually shows as a "
-             "partial count here.");
+        row_kv("Response",
+               "How far through its reply the card is. A stalled transfer usually shows as a "
+               "partial count here.",
+               "%d / %d bytes sent", sd.response_counter, sd.response_length);
 
-        row_label("Commands");
-        ImGui::Text("%u", sd.commands);
-        row_label("Blocks read");
-        ImGui::Text("%llu  (%llu bytes)", (unsigned long long)sd.blocks_read,
-                    (unsigned long long)sd.bytes_read);
-        row_label("Blocks written");
-        ImGui::Text("%llu  (%llu bytes)", (unsigned long long)sd.blocks_written,
-                    (unsigned long long)sd.bytes_written);
+        row_kv("Commands", "Commands decoded since the card was attached.", "%u", sd.commands);
+        row_kv("Blocks read", "512-byte blocks read since the card was attached.",
+               "%llu  (%llu bytes)", (unsigned long long)sd.blocks_read,
+               (unsigned long long)sd.bytes_read);
+        row_kv("Blocks written", "512-byte blocks written since the card was attached.",
+               "%llu  (%llu bytes)", (unsigned long long)sd.blocks_written,
+               (unsigned long long)sd.bytes_written);
 
         ImGui::EndTable();
     }
 
     ImGui::Separator();
 
-    ImGui::TextUnformatted("Last block resolves to:");
-    help("What the last block access was, in filesystem terms. Needs the image to have "
-         "been indexed -- see the Files tab.");
+    heading("Last block resolves to:",
+            "What the last block access was, in filesystem terms. Needs the image to have "
+            "been indexed -- the button is on Files > SD image.");
     ImGui::SameLine();
     if (!sdcard_fat_ready()) {
         ImGui::TextColored(COL_DIM, "(image not indexed)");
@@ -581,12 +620,17 @@ draw_sdcard_tab()
     ImGui::Separator();
     vera_spi_debug_state_t spi;
     vera_spi_debug_get_state(&spi);
-    ImGui::TextUnformatted("SPI");
-    help("The VERA SPI port at $9F3E/$9F3F -- the only wire to the card. \"out\" is the "
-         "byte being clocked to the card, \"in\" the byte that came back.");
+    heading("SPI",
+            "The VERA SPI port at $9F3E/$9F3F -- the only wire to the card. \"out\" is the "
+            "byte being clocked to the card, \"in\" the byte that came back.");
     ImGui::SameLine();
     ImGui::Text("select=%d  busy=%d  auto-tx=%d  out=$%02X  in=$%02X", spi.ss ? 1 : 0,
                 spi.busy ? 1 : 0, spi.autotx ? 1 : 0, spi.sending_byte, spi.received_byte);
+    tip("The VERA SPI port at $9F3E/$9F3F -- the only wire to the card.");
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_DIM, "This tab is the card as a device -- commands, blocks and "
+                                "status. For the files inside the image, see Files > SD image.");
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +653,169 @@ ieee_op_label(uint8_t kind)
     }
 }
 
+const char *
+ieee_op_tip(uint8_t kind)
+{
+    switch (kind) {
+        case IEEE_OP_OPEN:
+            return "A file was opened successfully on this channel.";
+        case IEEE_OP_OPEN_FAILED:
+            return "An open was attempted and refused. The Status column says why.";
+        case IEEE_OP_CLOSE:
+            return "A channel was closed. The byte counts are the totals moved while it "
+                   "was open.";
+        case IEEE_OP_DIR:
+            return "A directory listing was opened. \"$\" is the pseudo-file the drive "
+                   "serves a directory from -- this is what LOAD\"$\",8 does.";
+        case IEEE_OP_COMMAND:
+            return "A DOS command was sent to the command channel (15). The Meaning column "
+                   "says what it asks for.";
+        case IEEE_OP_STATUS:
+            return "A DOS status that no single operation accounted for -- something set an "
+                   "error outside an open or a command.";
+        default:
+            return "";
+    }
+}
+
+// What the row means in words, so the reader is not left decoding CBM DOS
+// punctuation. The filename prefixes are as much a part of the request as the
+// command letters are.
+void
+ieee_meaning(const ieee_history_entry_t &h, char *out, size_t outsz)
+{
+    out[0] = '\0';
+    switch (h.kind) {
+        case IEEE_OP_COMMAND:
+            snprintf(out, outsz, "%s", io_dos_command_meaning(h.name));
+            break;
+        case IEEE_OP_OPEN:
+        case IEEE_OP_OPEN_FAILED: {
+            const char *mode = h.read && h.write ? "read and write"
+                               : h.write         ? "write"
+                                                 : "read";
+            // '@' is CBM DOS for "replace an existing file" -- the difference
+            // between saving and failing with FILE EXISTS.
+            snprintf(out, outsz, "%sopen for %s", (h.name[0] == '@') ? "overwrite, " : "",
+                     mode);
+            break;
+        }
+        case IEEE_OP_DIR:
+            snprintf(out, outsz, "read the directory");
+            break;
+        case IEEE_OP_STATUS:
+            snprintf(out, outsz, "not tied to one operation");
+            break;
+        default:
+            break;
+    }
+}
+
+void
+draw_host_history(const ieee_debug_state_t &ie)
+{
+    if (ie.history_count == 0) {
+        ImGui::TextColored(COL_DIM, "Nothing yet. Try LOAD\"$\",8,1 or a DOS command such as @$.");
+        return;
+    }
+
+    if (!ImGui::BeginTable("host_hist", 7,
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                               ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE,
+                           ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 11))) {
+        return;
+    }
+
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("What", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("What", "open FAILED"));
+    ImGui::TableSetupColumn("Ch", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Ch", "88"));
+    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Meaning", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Meaning", "overwrite, open for read and write"));
+    ImGui::TableSetupColumn("Read", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Read", "8888888"));
+    ImGui::TableSetupColumn("Written", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Written", "8888888"));
+    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Status", "62,FILE NOT FOUND,00,00"));
+    ImGui::TableHeadersRow();
+
+    // Newest first. There is no auto-scroll here, and the newest operation is
+    // almost always the one being asked about, so it should not require a
+    // scroll to reach.
+    for (int i = ie.history_count - 1; i >= 0; i--) {
+        const ieee_history_entry_t &h = ie.history[i];
+        const bool failed = (h.kind == IEEE_OP_OPEN_FAILED) || (h.kind == IEEE_OP_STATUS);
+
+        ImGui::PushID(i);
+        ImGui::TableNextRow();
+
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextColored(failed ? COL_BAD : COL_DECODED, "%s", ieee_op_label(h.kind));
+        tip(ieee_op_tip(h.kind));
+
+        ImGui::TableSetColumnIndex(1);
+        if (h.channel >= 0) {
+            ImGui::Text("%d", h.channel);
+            tip(h.channel == 15 ? "Channel 15 is the command and status channel -- commands "
+                                  "go in and DOS status comes back."
+                                : "The logical channel the machine used, as in OPEN 2,8,2.");
+        } else {
+            ImGui::TextDisabled("-");
+            tip("Not tied to one channel.");
+        }
+
+        ImGui::TableSetColumnIndex(2);
+        ImGui::TextUnformatted(h.name);
+        if (h.name[0] != '\0') {
+            tip(h.name[0] == '@'
+                    ? "The name as the machine gave it. A leading @ asks to replace an "
+                      "existing file; a leading : separates the path from the filename."
+                    : "The name as the machine gave it, before the emulator resolved it "
+                      "against the host directory.");
+        }
+
+        ImGui::TableSetColumnIndex(3);
+        {
+            char meaning[64];
+            ieee_meaning(h, meaning, sizeof(meaning));
+            if (meaning[0] != '\0') {
+                ImGui::TextColored(COL_DIM, "%s", meaning);
+                tip(ieee_op_tip(h.kind));
+            }
+        }
+
+        ImGui::TableSetColumnIndex(4);
+        if (h.kind == IEEE_OP_CLOSE) {
+            ImGui::Text("%u", h.bytes_read);
+            tip("Bytes the machine read from this file while it was open.");
+        }
+
+        ImGui::TableSetColumnIndex(5);
+        if (h.kind == IEEE_OP_CLOSE) {
+            ImGui::Text("%u", h.bytes_written);
+            tip("Bytes the machine wrote to this file while it was open.");
+        }
+
+        ImGui::TableSetColumnIndex(6);
+        if (h.status[0] != '\0') {
+            const bool ok = (h.status[0] == '0' && h.status[1] == '0');
+            ImGui::TextColored(ok ? COL_DIM : COL_BAD, "%s", h.status);
+            tip("The DOS status this operation ended with, as code,text,track,sector. "
+                "\"00,OK\" is success; 62 is FILE NOT FOUND, 63 FILE EXISTS, 26 WRITE "
+                "PROTECT ON.");
+        } else {
+            ImGui::TextDisabled("-");
+            tip("This operation does not report a status of its own. A close always "
+                "succeeds once the file is open, so DOS has nothing to say about it.");
+        }
+
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
 void
 draw_host_files()
 {
@@ -628,95 +835,47 @@ draw_host_files()
     }
 
     ImGui::Text("Unit %d", ie.ieee_unit);
-    help("The IEC device number the host filesystem answers as. LOAD\"X\",8 talks to unit "
-         "8. Change it with -hostfsdev.");
+    tip("The IEC device number the host filesystem answers as. LOAD\"X\",8 talks to unit 8. "
+        "Change it with -hostfsdev.");
     ImGui::SameLine();
     ImGui::TextColored(COL_DIM, "\xc2\xb7 %s",
                        ie.hostfscwd[0] != '\0' ? ie.hostfscwd : "(no root set)");
-    tip("The host directory the machine currently sees. Set the starting point with "
-        "-fsroot.");
+    tip("The host directory the machine currently sees as its own. Set the starting point "
+        "with -fsroot.");
 
     ImGui::Text("Bus: %s%s%s", ie.listening ? "LISTENING " : "", ie.talking ? "TALKING " : "",
                 (!ie.listening && !ie.talking) ? "idle" : "");
-    help("IEC protocol state. LISTENING means the machine is sending to the drive, TALKING "
-         "that it is receiving. Both are transient -- an idle bus between operations is "
-         "normal, not a fault.");
+    tip("IEC protocol state. LISTENING means the machine is sending to the drive, TALKING "
+        "that it is receiving. Both are transient -- an idle bus between operations is "
+        "normal, not a fault.");
 
     if (ie.error_str[0] != '\0') {
         ImGui::TextUnformatted("Status:");
+        tip("The drive's current status line -- what reading channel 15 would return now.");
         ImGui::SameLine();
         // The DOS status line always starts with a two-digit code; anything
         // other than 00 is a complaint worth colouring.
         const bool ok = (ie.error_str[0] == '0' && ie.error_str[1] == '0');
         ImGui::TextColored(ok ? COL_DECODED : COL_BAD, "%s", ie.error_str);
-        help("The DOS status channel -- what the drive would tell you if you read channel "
-             "15. \"00,OK\" means the last operation succeeded.");
+        tip("Format is code,text,track,sector. \"00,OK\" means the last operation "
+            "succeeded. This is the CURRENT status; the history below keeps the status "
+            "each individual operation ended with.");
     }
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Recent activity");
-    help("Completed file operations, kept whether or not I/O capture is on -- file "
-         "operations are rare enough to record for free.\n\n"
-         "This exists because a file operation erases itself when it finishes: the channel "
-         "list below only shows what is open RIGHT NOW, and a directory listing or a failed "
-         "open is over within a millisecond. Without this history, doing @$ or opening a "
-         "missing file appeared to do nothing at all.");
-
-    if (ie.history_count == 0) {
-        ImGui::TextColored(COL_DIM, "Nothing yet. Try LOAD\"$\",8,1 or a DOS command such as @$.");
-    } else if (ImGui::BeginTable("host_hist", 5,
-                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                                     DBGUI_TABLE_FLAGS_RESIZABLE,
-                                 ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 10))) {
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("What", ImGuiTableColumnFlags_WidthFixed,
-                                dbgui_col_width("What", "open FAILED"));
-        ImGui::TableSetupColumn("Ch", ImGuiTableColumnFlags_WidthFixed,
-                                dbgui_col_width("Ch", "88"));
-        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed,
-                                dbgui_col_width("Bytes", "r888888 w888888"));
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed,
-                                dbgui_col_width("Status", "62,FILE NOT FOUND,00,00"));
-        ImGui::TableHeadersRow();
-
-        for (int i = 0; i < ie.history_count; i++) {
-            const ieee_history_entry_t &h      = ie.history[i];
-            const bool                  failed = (h.kind == IEEE_OP_OPEN_FAILED) ||
-                                (h.kind == IEEE_OP_STATUS);
-
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextColored(failed ? COL_BAD : COL_DECODED, "%s", ieee_op_label(h.kind));
-            ImGui::TableSetColumnIndex(1);
-            if (h.channel >= 0) {
-                ImGui::Text("%d", h.channel);
-            } else {
-                ImGui::TextUnformatted("-");
-            }
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(h.name);
-            ImGui::TableSetColumnIndex(3);
-            if (h.kind == IEEE_OP_CLOSE) {
-                ImGui::TextColored(COL_DIM, "r%u w%u", h.bytes_read, h.bytes_written);
-            } else {
-                ImGui::TextUnformatted(" ");
-            }
-            ImGui::TableSetColumnIndex(4);
-            if (h.status[0] != '\0') {
-                const bool ok = (h.status[0] == '0' && h.status[1] == '0');
-                ImGui::TextColored(ok ? COL_DIM : COL_BAD, "%s", h.status);
-            } else {
-                ImGui::TextUnformatted(" ");
-            }
-        }
-        ImGui::EndTable();
-    }
+    heading("Recent activity",
+            "Completed file operations, newest first. Kept whether or not I/O capture is on "
+            "-- file operations are rare enough to record for free.\n\n"
+            "This exists because a file operation erases itself when it finishes: the "
+            "channel list below only shows what is open RIGHT NOW, and a directory listing "
+            "or a failed open is over within a millisecond. Without this history, doing @$ "
+            "or opening a missing file appeared to do nothing at all.");
+    draw_host_history(ie);
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Open channels");
-    help("What is open right now. Usually empty -- the machine opens a file, reads it and "
-         "closes it faster than anyone can look. The history above is the useful view.");
+    heading("Open channels",
+            "What is open right now. Usually empty -- the machine opens a file, reads it and "
+            "closes it faster than anyone can look. The history above is the useful view.");
 
     bool any = false;
     for (int i = 0; i < 16; i++) {
@@ -782,6 +941,8 @@ draw_sd_files()
         "The emulator only ever sees 512-byte blocks here -- the filesystem inside the "
         "image is parsed by the ROM running on the emulated machine, not by us. To put "
         "names to that traffic the emulator parses the image itself:");
+    ImGui::TextColored(COL_DIM, "This sub-tab is the files inside the image. The SD Card tab "
+                                "is the same card as a device -- commands, blocks and status.");
 
     if (ImGui::SmallButton(sdcard_fat_ready() ? "Rebuild index" : "Build index")) {
         sdcard_reindex();
@@ -962,7 +1123,6 @@ draw_joystick_tab()
          "button state. A game pulses this once per frame.");
 
     ImGui::Text("Controller data bits: $%02X", js.data);
-    dbgui_hover_value_tooltip("joystick data", js.data, 1);
     help("The joystick contribution to VIA1 port A -- bits 7-4, one per controller slot, "
          "carrying whichever bit is currently being shifted out. Bits 3-0 are always zero "
          "here; the I2C lines that share port A are merged in separately when the CPU "
@@ -1249,7 +1409,10 @@ draw_i2c_bus()
                                 dbgui_text_width("Transactions "));
         ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
 
-        row_label("State");
+        row_begin("State",
+                  "Where the bus is within the current byte. Transfers are bit-at-a-time, so "
+                  "catching it mid-byte is normal. \"idle\" means no transaction is in "
+                  "flight, which is where the bus spends most of its time.");
         if (i2c.state < 0) {
             ImGui::TextUnformatted("idle");
         } else if (i2c.state == 0) {
@@ -1257,11 +1420,12 @@ draw_i2c_bus()
         } else {
             ImGui::Text("shifting bit %d of 8", i2c.state);
         }
-        help("Where the bus is within the current byte. Transfers are bit-at-a-time, so "
-             "catching it mid-byte is normal. \"idle\" means no transaction is in flight, "
-             "which is where the bus spends most of its time.");
+        row_end();
 
-        row_label("Device");
+        row_begin("Device",
+                  "Which device the current transaction is addressed to. $42 is the SMC and "
+                  "$6F the RTC; anything else goes unacknowledged, which usually means "
+                  "software is probing for hardware that is not there.");
         if (i2c.device_name[0] != '\0') {
             ImGui::Text("$%02X (%s)", i2c.device, i2c.device_name);
         } else if (i2c.device != 0) {
@@ -1269,33 +1433,34 @@ draw_i2c_bus()
         } else {
             ImGui::TextDisabled("none");
         }
-        help("Which device the current transaction is addressed to. $42 is the SMC and $6F "
-             "the RTC; anything else goes unacknowledged, which usually means software is "
-             "probing for hardware that is not there.");
+        row_end();
 
-        row_label("Direction");
-        ImGui::TextUnformatted(i2c.read_mode ? "reading from device" : "writing to device");
+        row_kv("Direction",
+               "Which way the current transaction is moving data. A read is normally preceded "
+               "by a write that selects the register.",
+               "%s", i2c.read_mode ? "reading from device" : "writing to device");
 
-        row_label("Byte");
+        row_begin("Byte",
+                  "The byte being shifted in or out, and how far into the transaction it is. "
+                  "The first byte written is normally the register number.");
         ImGui::Text("$%02X", i2c.value);
         ImGui::SameLine();
         ImGui::TextColored(COL_DIM, "(byte %d of this transaction)", i2c.count);
-        help("The byte being shifted in or out, and how far into the transaction it is. The "
-             "first byte written is normally the register number.");
+        row_end();
 
-        row_label("Lines");
-        ImGui::Text("SCL in %d   SDA in %d   SDA out %d", i2c.clk_in, i2c.data_in, i2c.data_out);
-        help("The raw bus wires. SCL is the clock, always driven by the machine. SDA carries "
-             "data in both directions, so it has a separate in and out here.");
+        row_kv("Lines",
+               "The raw bus wires. SCL is the clock, always driven by the machine. SDA "
+               "carries data in both directions, so it has a separate in and out here.",
+               "SCL in %d   SDA in %d   SDA out %d", i2c.clk_in, i2c.data_in, i2c.data_out);
 
-        row_label("Transactions");
-        ImGui::Text("%u started, %u completed", i2c.transactions_started,
-                    i2c.transactions_completed);
-        help("Counted since start-up. A growing gap between the two means transactions are "
-             "being abandoned part-way, which normally indicates a bus problem.");
+        row_kv("Transactions",
+               "Counted since start-up. A growing gap between the two means transactions are "
+               "being abandoned part-way, which normally indicates a bus problem.",
+               "%u started, %u completed", i2c.transactions_started,
+               i2c.transactions_completed);
 
-        row_label("Bytes");
-        ImGui::Text("%u read, %u written", i2c.bytes_read, i2c.bytes_written);
+        row_kv("Bytes", "Data bytes moved over the bus since start-up, excluding addresses.",
+               "%u read, %u written", i2c.bytes_read, i2c.bytes_written);
         ImGui::EndTable();
     }
 }
@@ -1316,46 +1481,47 @@ draw_smc()
                                 dbgui_text_width("Default read reg "));
         ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
 
-        row_label("Default read reg");
+        row_begin("Default read reg",
+                  "Which register a bare read returns -- one where the machine reads from the "
+                  "SMC without first writing a register number. The KERNAL sets this once at "
+                  "start-up so its keyboard polling loop can be a single short read.\n\n"
+                  "$41 is the power-on default, and returns a keyboard byte.");
         ImGui::Text("$%02X", smc.default_read_op);
         ImGui::SameLine();
         ImGui::TextColored(COL_DECODED, "%s", io_smc_reg_name(smc.default_read_op));
         tip(io_smc_reg_purpose(smc.default_read_op));
-        help("Which register a bare read returns -- one where the machine reads from the SMC "
-             "without first writing a register number. The KERNAL sets this once at start-up "
-             "so its keyboard polling loop can be a single short read.\n\n"
-             "$41 is the power-on default, and returns a keyboard byte.");
 
-        row_label("Transfer offset");
-        ImGui::Text("%u", smc.i2c_data_pos);
-        help("How many bytes into the current I2C transfer the SMC is. It resets at the start "
-             "of each transaction: byte 0 is the register number, byte 1 the value. Anything "
-             "other than 0 means a transfer is in flight right now.");
+        row_kv("Transfer offset",
+               "How many bytes into the current I2C transfer the SMC is. It resets at the "
+               "start of each transaction: byte 0 is the register number, byte 1 the value. "
+               "Anything other than 0 means a transfer is in flight right now.",
+               "%u", smc.i2c_data_pos);
 
-        row_label("Activity LED");
+        row_begin("Activity LED",
+                  "The case's disk-activity lamp. Real hardware dims it by PWM, but this "
+                  "emulator models it as simply on or off, switching at a value of 128.");
         lamp(smc.activity_led >= 128, smc.activity_led >= 128 ? "on" : "off");
-        help("The case's disk-activity lamp. Real hardware dims it by PWM, but this emulator "
-             "models it as simply on or off, switching at a value of 128.");
+        row_end();
 
-        row_label("Keyboard buffer");
-        ImGui::Text("%u byte%s waiting", smc.kbd_fill, smc.kbd_fill == 1 ? "" : "s");
-        help("Key events the SMC is holding until the machine collects them. It is a 16-byte "
-             "ring; if this sits full, the machine has stopped polling.");
+        row_kv("Keyboard buffer",
+               "Key events the SMC is holding until the machine collects them. It is a "
+               "16-byte ring; if this sits full, the machine has stopped polling.",
+               "%u byte%s waiting", smc.kbd_fill, smc.kbd_fill == 1 ? "" : "s");
 
-        row_label("Mouse buffer");
-        ImGui::Text("%u byte%s waiting", smc.mse_fill, smc.mse_fill == 1 ? "" : "s");
-        help("Mouse movement waiting to be collected. Packets are three bytes, or four when "
-             "a wheel is reported.");
+        row_kv("Mouse buffer",
+               "Mouse movement waiting to be collected. Packets are three bytes, or four when "
+               "a wheel is reported.",
+               "%u byte%s waiting", smc.mse_fill, smc.mse_fill == 1 ? "" : "s");
 
-        row_label("Mouse packets");
-        ImGui::Text("%u", smc.mse_count);
+        row_kv("Mouse packets", "Complete mouse packets queued behind the byte count above.",
+               "%u", smc.mse_count);
         ImGui::EndTable();
     }
 
     if (smc.requested_reset) {
         ImGui::TextColored(COL_BAD, "Reset requested");
-        help("The SMC has been told to reboot the machine and is waiting for the emulator to "
-             "act on it.");
+        tip("The SMC has been told to reboot the machine and is waiting for the emulator to "
+            "act on it.");
     }
 }
 
@@ -1375,36 +1541,38 @@ draw_rtc()
                                 dbgui_text_width("Transfer offset "));
         ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
 
-        row_label("Date and time");
-        ImGui::Text("20%02d-%02d-%02d  %02d:%02d:%02d", rtc.year, rtc.month, rtc.day, rtc.hours,
-                    rtc.minutes, rtc.seconds);
-        help("The clock's own idea of the time. It is stored on the device as BCD and shown "
-             "here decoded. The year field only holds 00-99, meaning 2000-2099.");
+        row_kv("Date and time",
+               "The clock's own idea of the time. It is stored on the device as BCD and shown "
+               "here decoded. The year field only holds 00-99, meaning 2000-2099.",
+               "20%02d-%02d-%02d  %02d:%02d:%02d", rtc.year, rtc.month, rtc.day, rtc.hours,
+               rtc.minutes, rtc.seconds);
 
-        row_label("Oscillator");
+        row_begin("Oscillator",
+                  "Whether the clock is ticking. Stopped is the normal state for an RTC that "
+                  "has never been set -- the machine starts it when it first writes the time.");
         lamp(rtc.running, rtc.running ? "running" : "stopped");
-        help("Whether the clock is ticking. Stopped is the normal state for an RTC that has "
-             "never been set -- the machine starts it when it first writes the time.");
+        row_end();
 
-        row_label("Hour format");
-        ImGui::TextUnformatted(rtc.h24 ? "24-hour" : "12-hour");
-        help("A flag in the hours register. It only affects how the device reports the hour, "
-             "not how it counts.");
+        row_kv("Hour format",
+               "A flag in the hours register. It only affects how the device reports the "
+               "hour, not how it counts.",
+               "%s", rtc.h24 ? "24-hour" : "12-hour");
 
-        row_label("Day of week");
-        ImGui::Text("%d", rtc.day_of_week);
-        help("1-7, exactly as stored. The RTC does not derive this from the date -- whatever "
-             "set the time chose it, so it is free to disagree with the date beside it.");
+        row_kv("Day of week",
+               "1-7, exactly as stored. The RTC does not derive this from the date -- "
+               "whatever set the time chose it, so it is free to disagree with the date "
+               "beside it.",
+               "%d", rtc.day_of_week);
 
-        row_label("Transfer offset");
-        ImGui::Text("%u", rtc.i2c_data_pos);
-        help("How many bytes into the current I2C transfer the RTC is. Byte 0 selects the "
-             "register, so anything other than 0 means a transfer is in progress.");
+        row_kv("Transfer offset",
+               "How many bytes into the current I2C transfer the RTC is. Byte 0 selects the "
+               "register, so anything other than 0 means a transfer is in progress.",
+               "%u", rtc.i2c_data_pos);
 
-        row_label("NVRAM");
-        ImGui::Text("64 bytes, %s", rtc.nvram_dirty ? "modified" : "unmodified");
-        help("Non-volatile storage at RTC registers $20-$5F. The emulator writes it back to "
-             "the file given by -nvram. \"modified\" means there are changes not yet saved.");
+        row_kv("NVRAM",
+               "Non-volatile storage at RTC registers $20-$5F. The emulator writes it back to "
+               "the file given by -nvram. \"modified\" means there are changes not yet saved.",
+               "64 bytes, %s", rtc.nvram_dirty ? "modified" : "unmodified");
         ImGui::EndTable();
     }
 }
@@ -1500,6 +1668,8 @@ io_panel_render(bool *p_open)
     dbgui_window_zoom("io");
 
     apply_capture_settings();
+
+    ImGui::TextDisabled("Hover any label or value for what it means.");
 
     if (ImGui::BeginTabBar("io_tabs", ImGuiTabBarFlags_DrawSelectedOverline)) {
         if (ImGui::BeginTabItem("Activity")) {

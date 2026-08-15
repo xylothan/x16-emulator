@@ -44,6 +44,11 @@ const char *io_smc_reg_purpose(uint8_t reg);
 // Name of an RTC register offset. Never NULL.
 const char *io_rtc_reg_name(uint8_t reg);
 
+// What a DOS command sent to the command channel does, e.g. "S:NAME" ->
+// "delete a file". Returns "" when the command is not recognised, so callers
+// can print it unconditionally. Never NULL.
+const char *io_dos_command_meaning(const char *cmd);
+
 #ifdef __cplusplus
 }
 #endif

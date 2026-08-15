@@ -126,6 +126,8 @@ hist_push(void)
 	if (hist_used < IEEE_HISTORY_MAX) {
 		hist_used++;
 	}
+	// A new operation ends the previous one's claim on the status line.
+	hist_await_status = 0;
 	return e;
 }
 
@@ -138,25 +140,30 @@ hist_expect_status(const ieee_history_entry_t *e)
 	hist_await_status = e->seq;
 }
 
-// Stamp the current error string onto the entry that is waiting for one.
+// Stamp the current error string onto the entry that is waiting for one, and
+// report whether it did.
 //
-// Only the operation that armed hist_await_status is stamped, and only once.
-// Matching "the most recent entry with no status yet" instead would be wrong:
-// a close produces no status of its own, so the next unrelated error -- often
-// the failed open that follows it -- would be pinned to the close, showing a
+// Only the operation that armed hist_await_status is stamped. Matching "the
+// most recent entry with no status yet" instead would be wrong: a close
+// produces no status of its own, so the next unrelated error -- often the
+// failed open that follows it -- would be pinned to the close, showing a
 // successful operation in red and leaving the real failure blank.
-static void
+//
+// The claim is NOT released after stamping, so a later status overwrites an
+// earlier one. That is deliberate: a DOS command routinely clears the error
+// and then sets a real one, and it is the state it ended in that describes it.
+// hist_push() releases the claim when the next operation begins.
+static bool
 hist_stamp_status(void)
 {
 	if (hist_used == 0 || hist_await_status == 0) {
-		return;
+		return false;
 	}
 	int                   prev = (hist_head - 1 + IEEE_HISTORY_MAX) % IEEE_HISTORY_MAX;
 	ieee_history_entry_t *e    = &hist[prev];
 	if (e->seq != hist_await_status) {
-		return;
+		return false;
 	}
-	hist_await_status = 0;
 
 	int elen = error_len < (int)(sizeof(e->status) - 1) ? error_len : (int)(sizeof(e->status) - 1);
 	memcpy(e->status, error, (size_t)elen);
@@ -165,7 +172,9 @@ hist_stamp_status(void)
 	if (elen > 0 && e->status[elen - 1] == '\r') {
 		e->status[elen - 1] = '\0';
 	}
+	return true;
 }
+
 #ifdef __MINGW32__
 // realpath doesn't exist on Windows. This function implements its behavior.
 static char *
@@ -1227,19 +1236,19 @@ set_error_text(int e, const char *text, int t, int s)
 	error_len = u8strlen(error);
 	error_pos = 0;
 	hist_stamp_status();
-	if (e >= 0x10 && e != 0x73) {
+	if (e >= 0x10 && e != 0x73 && hist_await_status == 0) {
+		// Only when no operation claimed this status. An error that belongs to
+		// an open or a command is already shown on that row, and repeating it
+		// as a standalone entry would say "62 FILE NOT FOUND" twice while
+		// naming no file either time.
 		ieee_history_entry_t *he = hist_push();
 		he->kind    = IEEE_OP_STATUS;
-		int elen = error_len < (int)(sizeof(he->name) - 1) ? error_len : (int)(sizeof(he->name) - 1);
-		memcpy(he->name, error, (size_t)elen);
-		he->name[elen] = '\0';
-		if (elen > 0 && he->name[elen - 1] == '\r') {
-			he->name[elen - 1] = '\0';
+		int elen = error_len < (int)(sizeof(he->status) - 1) ? error_len : (int)(sizeof(he->status) - 1);
+		memcpy(he->status, error, (size_t)elen);
+		he->status[elen] = '\0';
+		if (elen > 0 && he->status[elen - 1] == '\r') {
+			he->status[elen - 1] = '\0';
 		}
-		// snprintf rather than memcpy: `status` is smaller than `name`, and a
-		// truncating copy would leave it unterminated the first time a DOS
-		// message grew past 48 characters -- which the panel then hands to %s.
-		snprintf(he->status, sizeof(he->status), "%s", he->name);
 	}
 	if (io_trace_wants(IO_DEV_IEEE)) {
 		io_trace_event(IO_DEV_IEEE, "status: %02x %s,%02d,%02d", e, text, t, s);

@@ -263,3 +263,36 @@ io_rtc_reg_name(uint8_t reg)
     }
     return "-";
 }
+
+// Mirrors the dispatch in command() in src/ieee.c. Two-letter forms have to be
+// tested before their one-letter prefixes, exactly as the switch there does.
+const char *
+io_dos_command_meaning(const char *cmd)
+{
+    if (cmd == NULL || cmd[0] == '\0') {
+        return "";
+    }
+    switch (cmd[0]) {
+        case 'C':
+            if (cmd[1] == 'D') return "change directory";
+            if (cmd[1] == 'P') return "change partition (not supported)";
+            return "copy a file (not implemented)";
+        case 'I': return "initialise -- clears the error state";
+        case 'M':
+            if (cmd[1] == 'D') return "create a directory";
+            return "memory command (not implemented)";
+        case 'P': return "seek: set the read/write position on a channel";
+        case 'R':
+            if (cmd[1] == 'D') return "remove a directory";
+            return "rename a file";
+        case 'S':
+            if (cmd[1] == '-') return "switch which unit number the host filesystem answers as";
+            return "scratch: delete a file";
+        case 'T': return "tell: report the current position on a channel";
+        case 'U':
+            if (cmd[1] == 'I') return "soft reset";
+            if (cmd[1] == '0') return "set the unit number";
+            return "user command";
+        default: return "";
+    }
+}
