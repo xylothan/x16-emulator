@@ -63,6 +63,17 @@ MUTATIONS = [
     # that expression would survive, and correctly so. Add one once the fold is
     # removed and the register stores what was written.
     {
+        "name": "VERA DCSEL is truncated to four bits",
+        "file": "src/video.c",
+        # top.v:86 declares dc_select_r as [5:0] and top.v:336 fills it from
+        # write_data[6:1]. Narrowing it silently aliases the high banks onto
+        # the low ones.
+        "find": "io_dcsel = (value >> 1) & 0x3f;",
+        "into": "io_dcsel = (value >> 1) & 0x0f;",
+        "count": 1,
+        "caught_by": ["vera_regbank"],
+    },
+    {
         "name": "VERA address increment uses a power-of-two step",
         "file": "src/video.c",
         # addr_data.v:193 gives 40 for code 0x0B. The non-power-of-two steps
