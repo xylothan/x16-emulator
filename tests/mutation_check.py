@@ -58,10 +58,51 @@ MUTATIONS = [
         "caught_by": ["vera_pcm"],
     },
     # No mutation for the AUDIO_RATE fold. The test asserts the RTL value
-    # (top.v:481 stores write_data raw) and marks the emulator's fold as a
+    # (top.v:480 stores write_data raw) and marks the emulator's fold as a
     # divergence, so it deliberately does not pin `256 - val`. A mutation of
     # that expression would survive, and correctly so. Add one once the fold is
     # removed and the register stores what was written.
+    {
+        "name": "PSG sawtooth loses its pulse-width shaping",
+        "file": "src/vera_psg.c",
+        # Reverts the waveform to the R47 form. psg.v:163 (R48) XORs the saw
+        # with the inverted pulse width; R47 read the phase directly. This is
+        # the mutation that proves pinning psg.v to R48 does any work.
+        "find": "case WF_SAWTOOTH: v = (ch->phase >> 11) ^ ((ch->pw ^ 0x3f) & 0x3f); break;",
+        "into": "case WF_SAWTOOTH: v = (ch->phase >> 11); break;",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG voices keep running while silenced",
+        "file": "src/vera_psg.c",
+        # psg.v:140 holds a voice at phase zero unless a side is enabled, so
+        # unmuting restarts the waveform rather than resuming it.
+        "find": "uint32_t new_phase = (ch->left || ch->right) ? ((ch->phase + ch->freq) & 0x1FFFF) : 0;",
+        "into": "uint32_t new_phase = ((ch->phase + ch->freq) & 0x1FFFF);",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG noise LFSR loses a tap",
+        "file": "src/vera_psg.c",
+        # psg.v:128 taps 1, 2, 4 and 15. A wrong tap set still sounds like
+        # noise, so only the exact sequence catches it.
+        "find": "(((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 4) ^ (noise_state >> 15)) & 1)",
+        "into": "(((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 15)) & 1)",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG waveform is decoded from the wrong bits",
+        "file": "src/vera_psg.c",
+        # psg.v:44 cur_waveform = cur_channel_attr_r[31:30], the top two bits
+        # of the fourth attribute byte.
+        "find": "channels[ch].waveform = val >> 6;",
+        "into": "channels[ch].waveform = (val >> 5) & 3;",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
     {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
