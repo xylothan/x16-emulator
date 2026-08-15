@@ -63,6 +63,27 @@ MUTATIONS = [
     # that expression would survive, and correctly so. Add one once the fold is
     # removed and the register stores what was written.
     {
+        "name": "VERA address increment uses a power-of-two step",
+        "file": "src/video.c",
+        # addr_data.v:193 gives 40 for code 0x0B. The non-power-of-two steps
+        # exist so a program can walk tile rows, and are exactly what an
+        # implementation "tidying" the series to 1 << n would lose.
+        "find": "\t40,  -40,",
+        "into": "\t48,  -48,",
+        "count": 1,
+        "caught_by": ["vera_video"],
+    },
+    {
+        "name": "VERA reads the increment from the wrong bits of ADDRx_H",
+        "file": "src/video.c",
+        # video.c:2796. Bits 7:3 are the decrement flag and increment code;
+        # shifting by one more drops the decrement bit entirely.
+        "find": "io_inc[io_addrsel]  = value >> 3;",
+        "into": "io_inc[io_addrsel]  = value >> 4;",
+        "count": 1,
+        "caught_by": ["vera_video"],
+    },
+    {
         "name": "PSG sawtooth loses its pulse-width shaping",
         "file": "src/vera_psg.c",
         # Reverts the waveform to the R47 form. psg.v:163 (R48) XORs the saw
