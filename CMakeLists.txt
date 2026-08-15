@@ -737,6 +737,23 @@ if(TARGET vera_regbank_test)
     endif()
 endif()
 
+# The value half of the debugOn contract: a debug read must report what a real
+# read would. The existing contract test drives recording fakes, so it can only
+# check side effects; this links the real video.c.
+x16_add_test(vera_debug_read NEEDS_SDL
+    SOURCES tests/test_vera_debug_read.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_debug_read_test)
+    target_include_directories(vera_debug_read_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_debug_read_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_debug_read_test PRIVATE m)
+    endif()
+endif()
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are

@@ -63,6 +63,18 @@ MUTATIONS = [
     # that expression would survive, and correctly so. Add one once the fold is
     # removed and the register stores what was written.
     {
+        "name": "VERA debug reads report a constant",
+        "file": "src/video.c",
+        # The sweep in test_vera_debug_read.c records exactly which registers
+        # read differently to the debugger than to the machine. Breaking the
+        # debug path further changes that set, which the recorded count fails
+        # on -- so the sweep cannot quietly stop measuring anything.
+        "find": "if (debugOn) return video_get_dc_value(i);",
+        "into": "if (debugOn) return 0;",
+        "count": 1,
+        "caught_by": ["vera_debug_read"],
+    },
+    {
         "name": "VERA DCSEL is truncated to four bits",
         "file": "src/video.c",
         # top.v:86 declares dc_select_r as [5:0] and top.v:336 fills it from
