@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include "sdcard.h"
+#include "vera_spi.h"
 
 #define SPI_CLOCK_RATE_MHZ 12.5f
 
@@ -96,4 +97,16 @@ vera_spi_write(uint8_t reg, uint8_t value)
 			autotx = !!(value & 4);
 			break;
 	}
+}
+
+// Side-effect-free snapshot of SPI state for the ImGui debugger.
+void
+vera_spi_debug_get_state(vera_spi_debug_state_t *out)
+{
+	out->ss            = ss;
+	out->busy          = busy;
+	out->autotx        = autotx;
+	out->sending_byte  = sending_byte;
+	out->received_byte = received_byte;
+	out->outcounter    = outcounter;
 }

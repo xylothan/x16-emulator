@@ -257,3 +257,22 @@ rtc_write() {
 	i2c_data_pos = 0;
 }
 
+// Side-effect-free snapshot of RTC state for the ImGui debugger.
+void
+rtc_debug_get_state(rtc_debug_state_t *out)
+{
+	out->running      = running;
+	out->h24          = h24;
+	out->seconds      = seconds;
+	out->minutes      = minutes;
+	out->hours        = hours;
+	out->day_of_week  = day_of_week;
+	out->day          = day;
+	out->month        = month;
+	out->year         = year;
+	out->i2c_data_pos = i2c_data_pos;
+	out->nvram_dirty  = nvram_dirty;
+	for (int i = 0; i < 0x40; i++) {
+		out->nvram[i] = nvram[i];
+	}
+}

@@ -5,7 +5,12 @@
 #ifndef SERIAL_H
 #define SERIAL_H
 
+#include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define SERIAL_ATNIN_MASK   (1<<3)
 #define SERIAL_CLOCKIN_MASK (1<<4)
@@ -29,5 +34,9 @@ void serial_step(int clocks);
 
 bool serial_port_read_clk();
 bool serial_port_read_data();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

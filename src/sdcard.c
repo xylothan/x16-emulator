@@ -15,6 +15,8 @@
 #include <string.h>
 #include "compat.h"
 #include "sdcard.h"
+#include "sdcard_fat.h"
+#include "io_trace.h"
 #include "files.h"
 
 //#define VERBOSE 1
@@ -63,6 +65,13 @@ static int response_counter = 0;
 
 static bool selected = false;
 
+// Session counters — reset in sdcard_attach()/sdcard_detach().
+static uint64_t stat_blocks_read    = 0;
+static uint64_t stat_blocks_written = 0;
+static uint64_t stat_bytes_read     = 0;
+static uint64_t stat_bytes_written  = 0;
+static uint32_t stat_commands       = 0;
+
 void
 sdcard_set_path(char const *path)
 {
@@ -80,6 +89,12 @@ sdcard_path_is_set()
 	return strlen(sdcard_path) > 0;
 }
 
+const char *
+sdcard_get_path(void)
+{
+	return sdcard_path;
+}
+
 void
 sdcard_attach()
 {
@@ -92,19 +107,53 @@ sdcard_attach()
 
 		printf("SD card attached.\n");
 		sdcard_attached = true;
-		is_initialized = false;
+		is_initialized  = false;
+
+		// Reset session counters.
+		stat_blocks_read    = 0;
+		stat_blocks_written = 0;
+		stat_bytes_read     = 0;
+		stat_bytes_written  = 0;
+		stat_commands       = 0;
+
+		// Build the FAT index (best-effort; failure is non-fatal).
+		if (sdcard_fat_autoindex) {
+			sdcard_fat_build(sdcard_file);
+		}
 	}
+}
+
+// Rebuild the filesystem index over the attached image. The debugger offers
+// this because the index goes stale as soon as the machine writes to a FAT or
+// a directory, and it lives here rather than in the UI because the card owns
+// the file handle the index has to borrow.
+bool
+sdcard_reindex()
+{
+	if (!sdcard_attached || sdcard_file == NULL) {
+		return false;
+	}
+	sdcard_fat_free();
+	return sdcard_fat_build(sdcard_file);
 }
 
 void
 sdcard_detach()
 {
 	if (sdcard_attached) {
+		sdcard_fat_free();
 		x16close(sdcard_file);
 		sdcard_file = NULL;
 
 		printf("SD card detached.\n");
 		sdcard_attached = false;
+
+		// Reset session counters.
+		stat_blocks_read    = 0;
+		stat_blocks_written = 0;
+		stat_bytes_read     = 0;
+		stat_bytes_written  = 0;
+		stat_commands       = 0;
 	}
 }
 
@@ -192,6 +241,90 @@ set_response_r7(void)
 	response_length = sizeof(r7);
 }
 
+// ── Trace helpers ─────────────────────────────────────────────────────────────
+// All trace work is gated on io_trace_wants(); the helpers are no-ops when the
+// ring is not capturing SD events so the hot path costs one branch.
+
+// Emit a "read lba=N <region or path>" event.  Called after data actually
+// moves; safe to call from loadBlock() and the write handler.
+static void
+trace_block(uint32_t lba_val, bool is_write)
+{
+	if (!io_trace_wants(IO_DEV_SDCARD)) {
+		return;
+	}
+	const char              *verb = is_write ? "write" : "read";
+	const sdcard_fat_file_t *f    = NULL;
+	uint64_t                 off  = 0;
+	sdcard_fat_region_t      reg  = sdcard_fat_lookup(lba_val, &f, &off);
+
+	if ((reg == SDCARD_FAT_REGION_FILE || reg == SDCARD_FAT_REGION_DIR) && f != NULL) {
+		io_trace_event(IO_DEV_SDCARD, "%s lba=%u %s+%u",
+		               verb, lba_val, f->path, (uint32_t)off);
+		return;
+	}
+	const char *tag = NULL;
+	switch (reg) {
+		case SDCARD_FAT_REGION_FAT:      tag = "<FAT>";           break;
+		case SDCARD_FAT_REGION_ROOTDIR:  tag = "<root dir>";      break;
+		case SDCARD_FAT_REGION_MBR:      tag = "<MBR>";           break;
+		case SDCARD_FAT_REGION_RESERVED: tag = "<boot/reserved>"; break;
+		case SDCARD_FAT_REGION_FREE:     tag = "<unallocated>";   break;
+		default:                         tag = NULL;              break;
+	}
+	if (tag != NULL) {
+		io_trace_event(IO_DEV_SDCARD, "%s lba=%u %s", verb, lba_val, tag);
+	} else {
+		io_trace_event(IO_DEV_SDCARD, "%s lba=%u", verb, lba_val);
+	}
+}
+
+// Emit a decoded command event.  Called after the switch so that lba is
+// already updated for CMD17/18/24.  The argument bytes are still in rxbuf[1..4].
+static void
+trace_command(void)
+{
+	if (!io_trace_wants(IO_DEV_SDCARD)) {
+		return;
+	}
+	uint8_t  cmd  = last_cmd;
+	uint32_t arg  = ((uint32_t)rxbuf[1] << 24) | ((uint32_t)rxbuf[2] << 16)
+	              | ((uint32_t)rxbuf[3] <<  8)  |  (uint32_t)rxbuf[4];
+	uint8_t  num  = cmd & 0x3Fu;
+
+	if (cmd & 0x80u) {
+		// ACMD
+		switch (cmd) {
+			case ACMD41:
+				io_trace_event(IO_DEV_SDCARD, "ACMD41 SD_SEND_OP_COND");
+				break;
+			default:
+				io_trace_event(IO_DEV_SDCARD, "ACMD%u arg=0x%08X", num, arg);
+				break;
+		}
+		return;
+	}
+	switch (cmd) {
+		case CMD0:  io_trace_event(IO_DEV_SDCARD, "CMD0 GO_IDLE_STATE");               break;
+		case CMD1:  io_trace_event(IO_DEV_SDCARD, "CMD1 SEND_OP_COND");                break;
+		case CMD8:  io_trace_event(IO_DEV_SDCARD, "CMD8 SEND_IF_COND");                break;
+		case CMD9:  io_trace_event(IO_DEV_SDCARD, "CMD9 SEND_CSD");                    break;
+		case CMD10: io_trace_event(IO_DEV_SDCARD, "CMD10 SEND_CID");                   break;
+		case CMD12: io_trace_event(IO_DEV_SDCARD, "CMD12 STOP_TRANSMISSION");          break;
+		case CMD13: io_trace_event(IO_DEV_SDCARD, "CMD13 SEND_STATUS");                break;
+		case CMD16: io_trace_event(IO_DEV_SDCARD, "CMD16 SET_BLOCKLEN len=%u", arg);   break;
+		case CMD17: io_trace_event(IO_DEV_SDCARD, "CMD17 READ_SINGLE_BLOCK lba=%u",    arg); break;
+		case CMD18: io_trace_event(IO_DEV_SDCARD, "CMD18 READ_MULTIPLE_BLOCK lba=%u",  arg); break;
+		case CMD24: io_trace_event(IO_DEV_SDCARD, "CMD24 WRITE_BLOCK lba=%u",          arg); break;
+		case CMD25: io_trace_event(IO_DEV_SDCARD, "CMD25 WRITE_MULTIPLE_BLOCK lba=%u", arg); break;
+		case CMD55: io_trace_event(IO_DEV_SDCARD, "CMD55 APP_CMD");                    break;
+		case CMD58: io_trace_event(IO_DEV_SDCARD, "CMD58 READ_OCR");                   break;
+		default:
+			io_trace_event(IO_DEV_SDCARD, "CMD%u arg=0x%08X", num, arg);
+			break;
+	}
+}
+
 // Return length of reply
 static int loadBlock(uint8_t *dest)
 {
@@ -203,6 +336,9 @@ static int loadBlock(uint8_t *dest)
 #endif
 	if ((Sint64)lba * 512 >= x16size(sdcard_file)) {
 		dest[0] = 0x08; // Error token: out of range
+		if (io_trace_wants(IO_DEV_SDCARD)) {
+			io_trace_event(IO_DEV_SDCARD, "ERROR read lba=%u out of range", lba);
+		}
 		response_length = 1;
 	} else {
 		x16seek(sdcard_file, (Sint64)lba * 512, XSEEK_SET);
@@ -210,6 +346,10 @@ static int loadBlock(uint8_t *dest)
 		if (bytes_read != 512) {
 			printf("Warning: short read!\n");
 		}
+		stat_blocks_read++;
+		stat_bytes_read += 512;
+		sdcard_fat_note_access(lba, false, 512);
+		trace_block(lba, false);
 		response_length = 1 + 512 + 2;
 	}
 	return response_length;
@@ -268,6 +408,7 @@ sdcard_handle(uint8_t inbyte)
 			}
 
 			last_cmd = rxbuf[0];
+			stat_commands++;
 
 #if defined(VERBOSE) && VERBOSE >= 2
 			printf("*** SD %sCMD%d -> Response:", (rxbuf[0] & 0x80) ? "A" : "", rxbuf[0] & 0x3F);
@@ -368,6 +509,7 @@ sdcard_handle(uint8_t inbyte)
 				}
 			}
 			response_counter = 0;
+			trace_command();
 
 #if defined(VERBOSE) && VERBOSE >= 2
 			for (int i = 0; i < (response_length < 16 ? response_length : 16); i++) {
@@ -385,15 +527,47 @@ sdcard_handle(uint8_t inbyte)
 #endif
 				if ((Sint64)lba * 512 >= x16size(sdcard_file)) {
 					// do nothing?
-				} else {
-					x16seek(sdcard_file, (Sint64)lba * 512, XSEEK_SET);
-					int bytes_written = x16write(sdcard_file, rxbuf + 1, 1, 512);
-					if (bytes_written != 512) {
-						printf("Warning: short write!\n");
+						if (io_trace_wants(IO_DEV_SDCARD)) {
+							io_trace_event(IO_DEV_SDCARD, "ERROR write lba=%u out of range", lba);
+						}
+					} else {
+						x16seek(sdcard_file, (Sint64)lba * 512, XSEEK_SET);
+						int bytes_written = x16write(sdcard_file, rxbuf + 1, 1, 512);
+						if (bytes_written != 512) {
+							printf("Warning: short write!\n");
+						}
+						stat_blocks_written++;
+						stat_bytes_written += 512;
+						sdcard_fat_note_access(lba, true, 512);
+						trace_block(lba, true);
 					}
-				}
 			}
 		}
 	}
 	return outbyte;
+}
+
+void
+sdcard_debug_get_state(sdcard_debug_state_t *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->attached              = sdcard_attached;
+	out->selected              = selected;
+	out->image_path            = sdcard_path;
+	out->image_size            = sdcard_file ? x16size(sdcard_file) : -1;
+	out->last_cmd              = last_cmd & 0x3F;
+	out->last_cmd_is_acmd      = (last_cmd & 0x80) != 0;
+	out->last_lba              = lba;
+	out->is_idle               = is_idle;
+	out->is_initialized        = is_initialized;
+	out->ongoing_multiblock_read = ongoing_multiblock_read;
+	out->response_length       = response_length;
+	out->response_counter      = response_counter;
+	out->blocks_read           = stat_blocks_read;
+	out->blocks_written        = stat_blocks_written;
+	out->bytes_read            = stat_bytes_read;
+	out->bytes_written         = stat_bytes_written;
+	out->commands              = stat_commands;
 }

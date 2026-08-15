@@ -28,6 +28,7 @@ struct SettingField {
     const char *key;
     bool       *b;
     float      *f;
+    int        *i;
 };
 
 // Built lazily because it points into the settings singleton.
@@ -36,15 +37,29 @@ fields(int *count)
 {
     DebugUiSettings &s = debug_ui_settings();
     static const SettingField table[] = {
-        { "AutoSwitchDisasm",    &s.auto_switch_disasm,     nullptr },
-        { "AutoSwitchSource",    &s.auto_switch_source,     nullptr },
-        { "FollowInterrupts",    &s.follow_interrupts,      nullptr },
-        { "BreakOnInterrupt",    &s.break_on_interrupt,     nullptr },
-        { "MemHighlightChanges", &s.mem_highlight_changes,  nullptr },
-        { "AudioHoldOnPause",    &s.audio_hold_on_pause,    nullptr },
-        { "MemHighlightSeconds", nullptr, &s.mem_highlight_seconds },
-        { "UiScale",             nullptr, &s.ui_scale },
-        { "AllowBreakingChanges", &s.allow_breaking_changes, nullptr },
+        { "AutoSwitchDisasm",    &s.auto_switch_disasm,     nullptr, nullptr },
+        { "AutoSwitchSource",    &s.auto_switch_source,     nullptr, nullptr },
+        { "FollowInterrupts",    &s.follow_interrupts,      nullptr, nullptr },
+        { "BreakOnInterrupt",    &s.break_on_interrupt,     nullptr, nullptr },
+        { "MemHighlightChanges", &s.mem_highlight_changes,  nullptr, nullptr },
+        { "AudioHoldOnPause",    &s.audio_hold_on_pause,    nullptr, nullptr },
+        { "MemHighlightSeconds", nullptr, &s.mem_highlight_seconds, nullptr },
+        { "UiScale",             nullptr, &s.ui_scale, nullptr },
+        { "AllowBreakingChanges", &s.allow_breaking_changes, nullptr, nullptr },
+        { "IoTraceCapture",      &s.io_trace_capture,       nullptr, nullptr },
+        { "IoTraceCapacity",     nullptr, nullptr, &s.io_trace_capacity },
+        { "IoCapVia",            &s.io_cap_via,             nullptr, nullptr },
+        { "IoCapVera",           &s.io_cap_vera,            nullptr, nullptr },
+        { "IoCapSpi",            &s.io_cap_spi,             nullptr, nullptr },
+        { "IoCapYm",             &s.io_cap_ym,              nullptr, nullptr },
+        { "IoCapEmu",            &s.io_cap_emu,             nullptr, nullptr },
+        { "IoCapMidi",           &s.io_cap_midi,            nullptr, nullptr },
+        { "IoCapOpenBus",        &s.io_cap_openbus,         nullptr, nullptr },
+        { "IoCapSd",             &s.io_cap_sd,              nullptr, nullptr },
+        { "IoCapFiles",          &s.io_cap_files,           nullptr, nullptr },
+        { "IoCapI2c",            &s.io_cap_i2c,             nullptr, nullptr },
+        { "IoCapJoy",            &s.io_cap_joy,             nullptr, nullptr },
+        { "IoFatAutoIndex",      &s.io_fat_autoindex,       nullptr, nullptr },
     };
     *count = (int)(sizeof(table) / sizeof(table[0]));
     return table;
@@ -75,6 +90,8 @@ settings_read_line(ImGuiContext *, ImGuiSettingsHandler *, void *, const char *l
             *t[i].b = (value != 0.0f);
         } else if (t[i].f) {
             *t[i].f = value;
+        } else if (t[i].i) {
+            *t[i].i = (int)value;
         }
         return;
     }
@@ -107,6 +124,8 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
             buf->appendf("%s=%d\n", t[i].key, *t[i].b ? 1 : 0);
         } else if (t[i].f) {
             buf->appendf("%s=%.3f\n", t[i].key, *t[i].f);
+        } else if (t[i].i) {
+            buf->appendf("%s=%d\n", t[i].key, *t[i].i);
         }
     }
     buf->append("\n");
@@ -241,6 +260,33 @@ debug_ui_draw_settings_window(bool *p_open)
                       "Pausing silences the machine, so the PSG/YM2151/PCM meters and\n"
                       "scopes would otherwise read as silence. With this on they keep\n"
                       "showing the state from the moment execution stopped.");
+    }
+
+    if (ImGui::CollapsingHeader("I/O trace", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("Feeds the Activity log in the I/O panel. This is the one");
+        ImGui::TextDisabled("debugger feature the running machine pays for, so it can be");
+        ImGui::TextDisabled("turned off outright.");
+        pref_checkbox("Capture I/O events", &s.io_trace_capture,
+                      "Record register accesses and decoded device events.\n"
+                      "With this off the I/O panel still shows live device state;\n"
+                      "it just has no history to show.");
+
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::SliderInt("Events retained", &s.io_trace_capacity, 256, 65536)) {
+            debug_ui_settings_mark_dirty();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Size of the ring buffer. Changing it discards what is\n"
+                              "currently held, because ordering against a new ring is\n"
+                              "not meaningful.");
+        }
+
+        ImGui::TextDisabled("Per-device capture is on the I/O panel's Activity tab.");
+        pref_checkbox("Index the filesystem in an SD card image", &s.io_fat_autoindex,
+                      "Parse the FAT inside an attached image when it is attached, so\n"
+                      "block traffic resolves to filenames. The emulator itself never\n"
+                      "does this - to it an SD card is 512-byte blocks and nothing more.\n\n"
+                      "Off means the SD tab still works, it just reports raw LBAs.");
     }
 
     if (ImGui::CollapsingHeader("Safety", ImGuiTreeNodeFlags_DefaultOpen)) {

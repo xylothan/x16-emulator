@@ -28,6 +28,7 @@
 #include <limits.h>
 #include "memory.h"
 #include "ieee.h"
+#include "io_trace.h"
 #include "dbg_load.h"
 #include "glue.h"
 #include "utf8_encode.h"
@@ -99,6 +100,8 @@ typedef struct {
 	bool read;
 	bool write;
 	SDL_RWops *f;
+	uint32_t bytes_read;    // cumulative bytes read since channel was opened
+	uint32_t bytes_written; // cumulative bytes written since channel was opened
 } channel_t;
 
 channel_t channels[16];
@@ -1163,6 +1166,9 @@ set_error_text(int e, const char *text, int t, int s)
 	snprintf((char *)error, sizeof(error), "%02x,%s,%02d,%02d\r", e, text, t, s);
 	error_len = u8strlen(error);
 	error_pos = 0;
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		io_trace_event(IO_DEV_IEEE, "status: %02x %s,%02d,%02d", e, text, t, s);
+	}
 	uint8_t cbdos_flags = get_kernal_cbdos_flags();
 	if (e < 0x10 || e == 0x73) {
 		cbdos_flags &= ~0x20; // clear error
@@ -1190,6 +1196,13 @@ command(uint8_t *cmd)
 {
 	if (!cmd[0]) {
 		return;
+	}
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		if (cmd[0] == 'P' || cmd[0] == 'T') {
+			io_trace_event(IO_DEV_IEEE, "cmd: %c [binary]", cmd[0]);
+		} else {
+			io_trace_event(IO_DEV_IEEE, "cmd: %.71s", (char *)cmd);
+		}
 	}
 	if (log_ieee) {
 		if (cmd[0] == 'P') {
@@ -1537,6 +1550,8 @@ cunlink(uint8_t *f)
 static int
 copen(int channel)
 {
+	channels[channel].bytes_read    = 0;
+	channels[channel].bytes_written = 0;
 	if (channel == 15) {
 		command(channels[channel].name);
 		return -1;
@@ -1594,6 +1609,9 @@ copen(int channel)
 			dirlist_len = create_cwd_listing(dirlist);
 		} else {
 			dirlist_len = create_directory_listing(dirlist, channels[channel].name);
+		}
+		if (io_trace_wants(IO_DEV_IEEE)) {
+			io_trace_event(IO_DEV_IEEE, "open ch%d dir \"%.79s\"", channel, (char *)channels[channel].name);
 		}
 	} else {
 		if (!u8strcmp(channels[channel].name, ":*") && prg_file && !prg_consumed) {
@@ -1655,8 +1673,16 @@ copen(int channel)
 			}
 			set_error(0x62, 0, 0);
 			ret = -2; // FNF
+			if (io_trace_wants(IO_DEV_IEEE)) {
+				io_trace_event(IO_DEV_IEEE, "open ch%d FAILED \"%.79s\"", channel, (char *)channels[channel].name);
+			}
 		} else {
 			clear_error();
+			if (io_trace_wants(IO_DEV_IEEE)) {
+				io_trace_event(IO_DEV_IEEE, "open ch%d \"%-.79s\" %s", channel,
+					(char *)channels[channel].name,
+					channels[channel].write ? (channels[channel].read ? "R/W" : "write") : "read");
+			}
 		}
 	}
 	return ret;
@@ -1667,6 +1693,13 @@ cclose(int channel)
 {
 	if (log_ieee) {
 		printf("  CLOSE %d\n", channel);
+	}
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		if (channels[channel].f || channels[channel].name[0] == '$') {
+			io_trace_event(IO_DEV_IEEE, "close ch%d \"%.79s\" r=%u w=%u",
+				channel, (char *)channels[channel].name,
+				channels[channel].bytes_read, channels[channel].bytes_written);
+		}
 	}
 	channels[channel].name[0] = 0;
 	if (channels[channel].f) {
@@ -1772,6 +1805,8 @@ ieee_init()
 		for (ch = 0; ch < 16; ch++) {
 			channels[ch].f = NULL;
 			channels[ch].name[0] = 0;
+			channels[ch].bytes_read    = 0;
+			channels[ch].bytes_written = 0;
 		}
 
 		ieee_initialized_once = true;
@@ -1907,6 +1942,7 @@ ACPTR(uint8_t *a)
 					ret = 0x42;
 					*a = 0;
 				} else {
+					channels[channel].bytes_read++;
 					// We need to send EOI on the last byte of the file.
 					// We have to check every time since CMDR-DOS
 					// supports random access R/W mode
@@ -1958,8 +1994,11 @@ CIOUT(uint8_t a)
 					}
 				}
 			} else if (channels[channel].write && channels[channel].f) {
-				if (!SDL_WriteU8(channels[channel].f, a))
+				if (!SDL_WriteU8(channels[channel].f, a)) {
 					ret = 0x40;
+				} else {
+					channels[channel].bytes_written++;
+				}
 			} else {
 				ret = 2; // FNF
 			}
@@ -2273,5 +2312,48 @@ XMCIOUT(uint8_t stream_mode) // stream_mode is only for passing into MCIOUT fall
 		return ret;
 	} else {
 		return -2; // not us, do not handle
+	}
+}
+
+// Side-effect-free snapshot of IEEE/hostfs state for the ImGui debugger.
+void
+ieee_debug_get_state(ieee_debug_state_t *out)
+{
+	out->using_hostfs = using_hostfs;
+	out->ieee_unit    = ieee_unit;
+
+	if (hostfscwd != NULL) {
+		strncpy(out->hostfscwd, (const char *)hostfscwd, sizeof(out->hostfscwd) - 1);
+		out->hostfscwd[sizeof(out->hostfscwd) - 1] = '\0';
+	} else {
+		out->hostfscwd[0] = '\0';
+	}
+
+	out->channel   = channel;
+	out->listening = listening;
+	out->talking   = talking;
+	out->opening   = opening;
+
+	int clen = cmdlen < (int)(sizeof(out->cmd) - 1) ? cmdlen : (int)(sizeof(out->cmd) - 1);
+	memcpy(out->cmd, cmd, (size_t)clen);
+	out->cmd[clen] = '\0';
+	out->cmdlen = clen;
+
+	if (error_len > 0) {
+		int elen = error_len < (int)(sizeof(out->error_str) - 1) ? error_len : (int)(sizeof(out->error_str) - 1);
+		memcpy(out->error_str, error, (size_t)elen);
+		out->error_str[elen] = '\0';
+	} else {
+		out->error_str[0] = '\0';
+	}
+
+	for (int i = 0; i < 16; i++) {
+		out->channels[i].is_open       = (channels[i].f != NULL);
+		out->channels[i].read          = channels[i].read;
+		out->channels[i].write         = channels[i].write;
+		out->channels[i].bytes_read    = channels[i].bytes_read;
+		out->channels[i].bytes_written = channels[i].bytes_written;
+		strncpy(out->channels[i].name, (const char *)channels[i].name, sizeof(out->channels[i].name) - 1);
+		out->channels[i].name[sizeof(out->channels[i].name) - 1] = '\0';
 	}
 }

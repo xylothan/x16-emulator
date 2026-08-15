@@ -2,6 +2,15 @@
 // Copyright (c) 2022 Michael Steil
 // All rights reserved. License: 2-clause BSD
 
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void ieee_init();
 int SECOND(uint8_t a);
 int TKSA(uint8_t a);
@@ -15,3 +24,40 @@ int MACPTR(uint16_t addr, uint16_t *count, uint8_t stream_mode);
 int MCIOUT(uint16_t addr, uint16_t *count, uint8_t stream_mode);
 int XMACPTR(uint8_t stream_mode);
 int XMCIOUT(uint8_t stream_mode);
+
+// ─── Debugger accessor ───────────────────────────────────────────────────────
+// Side-effect-free snapshot of IEEE/hostfs state. Safe to call every frame
+// from the debugger while the emulation is running.
+//
+// All strings are NUL-terminated copies; no pointers into emulator state.
+// Per-channel bytes_read/bytes_written are cumulative since the channel was
+// last opened.
+
+typedef struct {
+	bool     is_open;          // channel has an active file handle
+	bool     read;             // channel is open for reading
+	bool     write;            // channel is open for writing
+	char     name[80];         // filename as seen by the DOS layer (NUL-terminated)
+	uint32_t bytes_read;       // bytes successfully read from this channel
+	uint32_t bytes_written;    // bytes successfully written to this channel
+} ieee_channel_debug_t;
+
+typedef struct {
+	bool     using_hostfs;              // hostfs is active (vs CMDR-DOS block device)
+	int      ieee_unit;                 // emulated device number (usually 8)
+	char     hostfscwd[512];            // current host working directory (NUL-terminated)
+	int      channel;                   // currently addressed channel (secondary address)
+	bool     listening;                 // device is in LISTEN state
+	bool     talking;                   // device is in TALK state
+	bool     opening;                   // currently accumulating a filename (OPEN in progress)
+	char     cmd[256];                  // last DOS command received on channel 15
+	int      cmdlen;                    // valid bytes in cmd[]
+	char     error_str[256];            // current error string (channel 15 status)
+	ieee_channel_debug_t channels[16]; // per-channel state
+} ieee_debug_state_t;
+
+void ieee_debug_get_state(ieee_debug_state_t *out);
+
+#ifdef __cplusplus
+}
+#endif

@@ -609,6 +609,9 @@ static const DebugPanelPlacement s_placement[] = {
     {"PSG",          DOCK_BOTTOM},
     {"YM2151",       DOCK_BOTTOM},
     {"PCM",          DOCK_BOTTOM},
+    // Added last in this slot so Memory stays the tab the bottom group opens
+    // on -- the loop below takes the first entry per slot as that slot's front.
+    {"I/O",          DOCK_BOTTOM},
 };
 
 // A representative, long-established window for each slot. Used to find the

@@ -36,6 +36,42 @@ struct DebugUiSettings {
     // --- Audio --------------------------------------------------------------
     bool audio_hold_on_pause = true; // freeze audio panels instead of blanking
 
+    // --- I/O trace ----------------------------------------------------------
+    // The I/O panel records a ring of register accesses and decoded device
+    // events. Capture is a preference rather than always-on because it is the
+    // one debugger feature that costs the running machine anything: a test and
+    // a branch on every I/O access, and a memcpy on every captured one.
+    bool io_trace_capture = true;
+    int  io_trace_capacity = 4096; // events retained; clamped by io_trace.c
+
+    // Per-device capture. VERA is off by default and deliberately so: its data
+    // ports are touched thousands of times per frame, and leaving them on means
+    // the ring holds one frame of VERA and nothing else. The SD data path is
+    // split out from VERA (see io_trace.h) precisely so it survives that.
+    bool io_cap_via = true;
+    bool io_cap_vera = false;
+    bool io_cap_spi = true;
+    bool io_cap_ym = false;
+    bool io_cap_emu = true;
+    bool io_cap_midi = true;
+    bool io_cap_openbus = false;
+
+    // Decoded device events, split per device rather than lumped together
+    // because their rates differ by orders of magnitude. The SD card and file
+    // access emit a handful of events per operation and are what the panel
+    // exists for. I2C and the joysticks are polled continuously -- roughly
+    // 60 events a second each, which is enough to push an hour of SD history
+    // out of the ring while the machine sits at a READY prompt. So the useful
+    // ones are on and the chatty ones are opt-in.
+    bool io_cap_sd = true;
+    bool io_cap_files = true;
+    bool io_cap_i2c = false;
+    bool io_cap_joy = false;
+
+    // Index the filesystem inside an attached SD image, so block traffic can be
+    // named. Off means the SD tab still works, it just reports LBAs.
+    bool io_fat_autoindex = true;
+
     // --- Safety -------------------------------------------------------------
     // Most register edits are recoverable pokes. A few are not: they change
     // machine state the running program has already committed to, and it will

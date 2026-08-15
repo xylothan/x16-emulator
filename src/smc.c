@@ -174,3 +174,19 @@ smc_write() {
 	i2c_data_pos = 0;
 }
 
+// Side-effect-free snapshot of SMC state for the ImGui debugger.
+void
+smc_debug_get_state(smc_debug_state_t *out)
+{
+	out->default_read_op  = default_read_op;
+	out->activity_led     = activity_led;
+	out->i2c_data_pos     = i2c_data_pos;
+	out->mse_count        = mse_count;
+	out->requested_reset  = smc_requested_reset;
+	for (int i = 0; i < I2C_DATA_LEN; i++) {
+		out->i2c_data[i] = i2c_data[i];
+	}
+	out->kbd_fill = i2c_kbd_buffer_count();
+	out->mse_fill = i2c_mse_buffer_count();
+}
+
