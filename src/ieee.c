@@ -2069,6 +2069,11 @@ ACPTR(uint8_t *a)
 			if (channels[channel].name[0] == '$') {
 				if (dirlist_pos < dirlist_len) {
 					*a = dirlist[dirlist_pos++];
+					// A directory listing is bytes delivered on this channel
+					// just as a file's contents are, even though they come from
+					// a generated buffer rather than from disk. Not counting
+					// them left every dir row reading zero.
+					channels[channel].bytes_read++;
 				} else {
 					*a = 0;
 				}
@@ -2243,6 +2248,10 @@ MACPTR(uint16_t addr, uint16_t *c, uint8_t stream_mode)
 					byte = 0;
 				} else {
 					curpos++;
+					// Counted here, before the cclose() below: that close is
+					// what pushes the history entry carrying these totals, so
+					// counting after it would report every load as zero.
+					channels[channel].bytes_read++;
 					bool last = (curpos == endpos);
 
 					// Reported before the close below, and as one call, because
@@ -2372,6 +2381,8 @@ XMACPTR(uint8_t stream_mode) // stream_mode is only for passing into MACPTR fall
 					byte = 0;
 				} else {
 					curpos++;
+					// As in MACPTR: before the cclose() that reports the totals.
+					channels[channel].bytes_read++;
 					if (curpos == endpos) {
 						ret = 0x40;
 						channels[channel].read = false;
