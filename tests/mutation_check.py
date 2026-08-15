@@ -398,6 +398,23 @@ def main():
         try:
             path.write_text(original.replace(m["find"], m["into"]),
                             encoding="utf-8")
+
+            # Delete the generated headers rather than trusting the build to
+            # notice they are stale. The generator fires on a timestamp
+            # comparison against the .opcodes file, and restoring the previous
+            # mutation stamps these to "now" -- so when a whole mutate, build
+            # and restore cycle lands inside one filesystem mtime tick, the
+            # mutated .opcodes is not newer than tables.h, generation is
+            # skipped, and the tests read the PREVIOUS opcode tables. The
+            # mutation then looks survived when nothing was ever built from it.
+            #
+            # That is machine-speed dependent, so it shows up as an occasional
+            # red build on CI and never locally. Deleting them cannot be
+            # defeated by any timestamp.
+            if path.suffix == ".opcodes":
+                for gen in gen_backups:
+                    gen.unlink(missing_ok=True)
+
             built, out = build(args.build_dir, passes=2)
             if not built:
                 # A mutation that will not compile proves nothing either way,
