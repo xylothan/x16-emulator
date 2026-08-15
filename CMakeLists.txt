@@ -639,6 +639,29 @@ x16_add_test(vera_pcm
 x16_add_test(vera_psg
     SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
 
+# The real video.c, which is VERA plus the SDL host in one file. The fixture
+# supplies the host half so the emulation half can be driven directly; the audio
+# modules are linked for real because video.c routes $9F3B-$9F3D into them and
+# they have no dependencies of their own.
+x16_add_test(vera_video NEEDS_SDL
+    SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+# video.c includes gif.h, which is vendored rather than sitting alongside it.
+# It also calls SDL directly from its host half, so unlike the other NEEDS_SDL
+# tests -- which only need the headers -- this one links the library too.
+if(TARGET vera_video_test)
+    target_include_directories(vera_video_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_video_test PRIVATE SDL2::SDL2)
+    endif()
+    # video.c calls round(). The emulator picks libm up transitively from its
+    # other dependencies; this target links fewer of them, so it asks directly.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_video_test PRIVATE m)
+    endif()
+endif()
+
 # The CPU core reaches outside itself for only six symbols, all supplied by the
 # fixture, so this links the real instruction tables against a flat 64K memory
 # and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
