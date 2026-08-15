@@ -38,33 +38,29 @@ struct DebugUiSettings {
 
     // --- I/O trace ----------------------------------------------------------
     // The I/O panel records a ring of register accesses and decoded device
-    // events. Capture is a preference rather than always-on because it is the
-    // one debugger feature that costs the running machine anything: a test and
-    // a branch on every I/O access, and a memcpy on every captured one.
-    bool io_trace_capture = true;
+    // events. Capture is off by default and every device with it: this is the
+    // one debugger feature that costs the running machine anything -- a test
+    // and a branch on every I/O access, and a copy on every captured one --
+    // and the I/O page is the busiest address range in the system. The panel's
+    // live state tabs all work without it; only the Activity log needs it.
+    bool io_trace_capture = false;
     int  io_trace_capacity = 4096; // events retained; clamped by io_trace.c
 
-    // Per-device capture. VERA is off by default and deliberately so: its data
-    // ports are touched thousands of times per frame, and leaving them on means
-    // the ring holds one frame of VERA and nothing else. The SD data path is
-    // split out from VERA (see io_trace.h) precisely so it survives that.
-    bool io_cap_via = true;
+    // Per-device capture, all off by default so that switching capture on
+    // records nothing until the user says what they are actually looking for.
+    // Rates differ by orders of magnitude -- see the tooltips in the panel.
+    bool io_cap_via = false;
     bool io_cap_vera = false;
-    bool io_cap_spi = true;
+    bool io_cap_spi = false;
     bool io_cap_ym = false;
-    bool io_cap_emu = true;
-    bool io_cap_midi = true;
+    bool io_cap_emu = false;
+    bool io_cap_midi = false;
     bool io_cap_openbus = false;
 
     // Decoded device events, split per device rather than lumped together
-    // because their rates differ by orders of magnitude. The SD card and file
-    // access emit a handful of events per operation and are what the panel
-    // exists for. I2C and the joysticks are polled continuously -- roughly
-    // 60 events a second each, which is enough to push an hour of SD history
-    // out of the ring while the machine sits at a READY prompt. So the useful
-    // ones are on and the chatty ones are opt-in.
-    bool io_cap_sd = true;
-    bool io_cap_files = true;
+    // because their rates differ by orders of magnitude.
+    bool io_cap_sd = false;
+    bool io_cap_files = false;
     bool io_cap_i2c = false;
     bool io_cap_joy = false;
 

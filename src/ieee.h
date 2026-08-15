@@ -7,6 +7,29 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define IEEE_HISTORY_MAX 64
+
+typedef enum {
+	IEEE_OP_OPEN        = 0,
+	IEEE_OP_OPEN_FAILED = 1,
+	IEEE_OP_CLOSE       = 2,
+	IEEE_OP_DIR         = 3,
+	IEEE_OP_COMMAND     = 4,
+	IEEE_OP_STATUS      = 5,
+} ieee_op_kind_t;
+
+typedef struct {
+	uint32_t seq;           /* monotonic; 0 means "empty slot" */
+	uint8_t  kind;          /* ieee_op_kind_t */
+	int8_t   channel;       /* -1 when not channel-specific */
+	bool     read;
+	bool     write;
+	char     name[80];      /* filename, command text, or status text */
+	char     status[48];    /* resulting DOS status, "" if none yet */
+	uint32_t bytes_read;
+	uint32_t bytes_written;
+} ieee_history_entry_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,6 +77,8 @@ typedef struct {
 	int      cmdlen;                    // valid bytes in cmd[]
 	char     error_str[256];            // current error string (channel 15 status)
 	ieee_channel_debug_t channels[16]; // per-channel state
+	int                  history_count;                    // valid entries, oldest first
+	ieee_history_entry_t history[IEEE_HISTORY_MAX];
 } ieee_debug_state_t;
 
 void ieee_debug_get_state(ieee_debug_state_t *out);

@@ -370,7 +370,7 @@ Every panel is dockable, closable and reopenable from the **View** menu.
 | **PSG** | VERA PSG voices with live register values, plus scope traces. |
 | **YM2151** | FM channel state and scope traces. |
 | **PCM** | VERA PCM state and scope traces. |
-| **I/O** | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**. See [Watching I/O and file access](#watching-io-and-file-access). |
+| **I/O** | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. See [Watching I/O and file access](#watching-io-and-file-access). |
 
 While the machine is paused, the audio panels keep drawing their scope traces by projecting from
 the current register state, so you can see what a voice *would* be doing at the moment you stopped.
@@ -476,13 +476,19 @@ line, or the bin in the Breakpoints panel.
 The **I/O** panel covers the ports: everything in `$9F00`–`$9FFF`, plus the devices that hang off
 them. Its **Activity** tab is a rolling log rather than a state dump, because I/O is a
 conversation — a command goes out, a status comes back — and a snapshot taken between commands
-tells you nothing.
+tells you nothing. Each row names the register it touched (`DATA0`, `T1C_L`, `SPI_CTRL`) and
+explains it on hover, so you are not looking up addresses in a manual while you debug.
 
-Capture is per-device, and **VERA is off by default**. Its data ports are touched thousands of
-times per frame, so leaving them on fills the log with VERA and pushes everything else out within
-a frame or two. The SD card's data path at `$9F3E`/`$9F3F` is captured separately as **SPI** so
-it survives VERA being off. Capture can be turned off entirely; it is the one debugger feature
-that costs the running machine anything.
+**Capture is off by default, and so is every device.** It is the one debugger feature the running
+machine pays for — a test and a branch on every I/O access — and the I/O page is the busiest
+address range in the system. Turn it on, then tick only what you are actually looking for. Each
+device's checkbox says what it captures, what it tells you that its own tab does not, and roughly
+how fast it produces events: VERA's data ports alone are thousands of accesses per frame, and I2C
+and the joysticks are polled around sixty times a second whether or not anything happens. The SD
+card's data path at `$9F3E`/`$9F3F` is captured separately as **SPI** so it survives VERA being
+off.
+
+Every other tab works with capture off — they read live device state, not the log.
 
 ##### Two ways to reach a file, and only one of them has names
 
@@ -491,16 +497,25 @@ This is the thing worth knowing before you go looking for a filename and cannot 
 | | When | What you see |
 | --- | --- | --- |
 | **Host filesystem** | the default, no SD image attached | Real filenames. The emulator intercepts the KERNAL's IEEE calls, so it knows the name, the channel, the direction and the byte counts. |
-| **SD card image** | `-sdcard` | **Blocks only.** The ROM's own FAT driver runs inside the emulated machine and talks to the card over SPI. The emulator sees `CMD17`, an LBA and 512 bytes — never a name. |
+| **SD card image** | `-sdcard <image>` | **Blocks only.** The ROM's own FAT driver runs inside the emulated machine and talks to the card over SPI. The emulator sees `CMD17`, an LBA and 512 bytes — never a name. |
 
-The **Files** tab shows both, in separate sub-tabs, so it is always clear which one is actually
-in play.
+They are mutually exclusive by default: `-sdcard` turns host-filesystem access off unless you also
+pass `-hostfsdev`. `-fsroot` sets the host directory the machine sees — it does **not** attach a
+card, so with `-fsroot` alone the SD tabs are legitimately empty and say so.
+
+The **Files** tab shows both, in separate sub-tabs, so it is always clear which one is in play.
+
+Its host-filesystem half keeps an always-on **history** of opens, closes, directory listings, DOS
+commands and the status each produced. That history is the point: a file operation erases itself
+when it completes, so a list of *currently open* channels is empty almost all the time, and a
+directory listing or a failed open would otherwise flash past unseen. The history is kept whether
+or not capture is on, because file operations are rare enough to record for free.
 
 For the SD image, ADD closes the gap by parsing the filesystem *itself*: **Build index** reads the
 image's partition table, BPB, FATs and directory tree — including long filenames — and maps every
 cluster back to a path. Block traffic then resolves to `/GAMES/FOO.PRG + 2048`, and the file list
-shows how many bytes of each file the machine has actually read or written this session, so the
-files it touched stand out from the ones that merely exist.
+shows how many bytes of each file the machine has actually read or written this session, listing
+the files it touched first so they stand out from the ones that merely exist.
 
 The index is a snapshot, not a live view. If the machine writes to a FAT or a directory the index
 is marked **STALE** and you rebuild it by hand. That is deliberate: quietly serving a filename

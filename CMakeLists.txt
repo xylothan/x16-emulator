@@ -344,6 +344,7 @@ if(USE_IMGUI)
         src/debug_ui/debug_ui.cpp
         src/debug_ui/debug_ui_panels.cpp
         src/debug_ui/debug_ui_settings.cpp
+        src/debug_ui/io_reg_info.cpp
         src/debug_ui/panels/memory_panel.cpp
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
