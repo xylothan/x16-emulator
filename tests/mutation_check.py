@@ -414,6 +414,29 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["opcode_spec"],
     },
+    {
+        "name": "VERA reset keeps the pending sprite collisions",
+        "file": "src/video.c",
+        # sprite_renderer.v:416  cur_collision_mask_r <= 0;
+        # The half of the sprite reset that is right. Dropping it carries
+        # collisions from before a reset into the frame after it.
+        "find": "\tsprite_line_collisions = 0;\n\n\tvga_scan_pos_x = 0;",
+        "into": "\tvga_scan_pos_x = 0;",
+        "count": 1,
+        "caught_by": ["vera_reset"],
+    },
+    {
+        "name": "VERA sprite z-depth is ignored",
+        "file": "src/video.c",
+        # sprite_renderer.v:81  wire [1:0] sprite_attr_z = sprite_attr[19:18];
+        # A z-depth of zero is not drawn, which is how a guest retires a
+        # sprite. test_vera_reset.c measures a reset by whether sprites stop,
+        # so this breaks the channel the rest of that file reads.
+        "find": "props->sprite_zdepth = (sprite_data[sprite][6] >> 2) & 3;",
+        "into": "props->sprite_zdepth = 1;",
+        "count": 1,
+        "caught_by": ["vera_reset"],
+    },
 ]
 
 
