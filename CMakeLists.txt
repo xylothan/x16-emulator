@@ -823,6 +823,12 @@ if(TARGET vera_layer_rows_test)
     endif()
 endif()
 
+# The 65C22's interrupt flags and enables. via.c pulls in memory.h, which
+# includes SDL.h, so it needs the headers -- but nothing here links SDL.
+x16_add_test(via_irq NEEDS_SDL
+    SOURCES tests/test_via_irq.c tests/support/via_fixture.c tests/support/harness.c
+            src/via.c)
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
