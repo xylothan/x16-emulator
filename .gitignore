@@ -38,5 +38,11 @@ pt-report*.txt
 # present -- it is here so a reviewer can check a citation.
 /tests/vera-rtl/
 
+# Datasheets and tutorials, fetched by tests/refs/fetch_refs.py. Copyright
+# Western Design Center and Bruce Clark respectively, so downloaded rather
+# than committed. The tests cite page numbers; this is what makes a citation
+# checkable.
+/tests/refs/downloads/
+
 __pycache__/
 *.pyc
