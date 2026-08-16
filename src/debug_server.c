@@ -1643,7 +1643,7 @@ static int handle_dap_write_memory(int seq, cJSON *args) {
     // windowed banks + I/O side effects; banks 1-255 = flat RAM in gen2/GS).
     for (int i = 0; i < out; i++) {
         uint32_t cur = (addr + (uint32_t)i) & 0xFFFFFF;
-        write6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), raw[i]);
+        debug_write6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), raw[i]);
     }
 
     free(raw);
@@ -1946,15 +1946,15 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
         else if (!strcmp(name, "ROM Bank")) memory_set_rom_bank((uint8_t)v);
         else ok = false;
     } else if (ref == VARREF_STACK) {
-        write6502((uint16_t)dap_parse_num(name), 0, (uint8_t)v); // name is "$XXXX"
+        debug_write6502((uint16_t)dap_parse_num(name), 0, (uint8_t)v); // name is "$XXXX"
     } else if (ref == VARREF_VREGS) {
         // name is "Rn" (n = 0..15) → 16-bit little-endian at direct-page + $02 + 2*n.
         if ((name[0] == 'R' || name[0] == 'r') && name[1]) {
             int n = atoi(name + 1);
             if (n >= 0 && n <= 15) {
                 uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * n));
-                write6502(a, 0, (uint8_t)(v & 0xFF));
-                write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
+                debug_write6502(a, 0, (uint8_t)(v & 0xFF));
+                debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
             } else ok = false;
         } else ok = false;
     } else {

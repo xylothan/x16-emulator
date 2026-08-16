@@ -291,8 +291,10 @@ MUTATIONS = [
     {
         "name": "a debug read of slow I/O costs cycles",
         "file": "src/memory.c",
-        "find": "if (!debugOn && address >= 0x9fa0) {",
-        "into": "if (address >= 0x9fa0) {",
+        # The write path now guards the same way, so this needs the read's own
+        # continuation to stay unique to it.
+        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
+        "into": "if (address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
         "count": 1,
         "caught_by": ["debugon_contract"],
     },
@@ -660,6 +662,39 @@ MUTATIONS = [
         "into": "\t\t\treturn 0;\n\t\t}\n\t} else { // banked ROM",
         "count": 1,
         "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "a debug write charges the slow-I/O cycles",
+        "file": "src/memory.c",
+        # A debugger's edit updates the machine and does nothing else, so it
+        # spends no cycles -- the same reason a debug read spends none. Losing
+        # the guard makes using the debugger change program timing.
+        "find": "\t\t\t// slow IO2 range\n\t\t\tif (!debugOn) {\n\t\t\t\tclockticks6502 += 3;\n\t\t\t}\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
+        "into": "\t\t\t// slow IO2 range\n\t\t\tclockticks6502 += 3;\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
+    },
+    {
+        "name": "a program write to slow I/O is free",
+        "file": "src/memory.c",
+        # The other side of the same guard: a store the program executed still
+        # costs what it costs, and the debug case is only interesting against
+        # it.
+        "find": "\t\tif (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
+        "into": "\t\tif (false && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
+    },
+    {
+        "name": "a debug write reports a watchpoint",
+        "file": "src/memory.c",
+        # A watchpoint answers "when does the program touch this?". Breaking on
+        # the debugger's own edit answers a question nobody asked, and stops
+        # the machine while someone is typing into it.
+        "find": "if (!debugOn && debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "into": "if (debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
     },
 ]
 

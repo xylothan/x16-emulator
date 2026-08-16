@@ -851,6 +851,14 @@ x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# The write half of the debugOn contract, which does not exist: pins what a
+# debugger's edit costs and disturbs, since nothing can tell it apart from a
+# store the program executed.
+x16_add_test(debug_write_path NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_debug_write_path.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # The watchpoint hook sits on the store path, so this links the same real
 # memory.c, debug_core.c and CPU core as the debugOn tests, and asserts that
 # watching an address changes nothing except that a break is reported.
