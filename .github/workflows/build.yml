@@ -147,6 +147,12 @@ jobs:
         # Klaus Dormann's functional tests. Not committed: GPL, and 64K each.
         # The test reports them skipped if this step is removed or fails.
         run: python tests/fetch_klaus.py
+      - name: Fetch VERA RTL
+        # Someone else's repository under its own licence, so it is fetched
+        # rather than committed. check_vera_palette.py compares the default
+        # palette against the memory file baked into VERA's bitstream and
+        # skips without it, so CI would otherwise never run that check.
+        run: python tests/fetch_vera_rtl.py
       - name: Build Tests
         # One aggregate target rather than a bare --build, so a broken emulator
         # build is reported by the platform jobs and not duplicated here, and
@@ -155,9 +161,9 @@ jobs:
         # was never compiled.
         run: cmake --build build --target unit_tests
       - name: Run Tests
-        # X16_KLAUS_REQUIRED makes a missing test image a failure rather than a
-        # skip, so removing or breaking the fetch step above shows up as a red
-        # test instead of a green run that checked nothing.
+        # X16_KLAUS_REQUIRED and X16_VERA_RTL_REQUIRED make a missing fixture a
+        # failure rather than a skip, so removing or breaking a fetch step above
+        # shows up as a red test instead of a green run that checked nothing.
         #
         # Run verbose into a log rather than straight to the console: ctest only
         # shows a passing test's output on failure, which would hide a known
@@ -166,6 +172,7 @@ jobs:
         # run that otherwise passed.
         env:
           X16_KLAUS_REQUIRED: 1
+          X16_VERA_RTL_REQUIRED: 1
         run: |
           if ! ctest --test-dir build -V > ctest.log 2>&1; then
             cat ctest.log
@@ -206,9 +213,16 @@ jobs:
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Fetch CPU test images
         run: python tests/fetch_klaus.py
+      - name: Fetch VERA RTL
+        # The default-palette mutation is only meaningful with the reference
+        # present: without it check_vera_palette.py skips, the mutation
+        # survives, and this job fails for a reason that has nothing to do
+        # with the mutation.
+        run: python tests/fetch_vera_rtl.py
       - name: Check the tests catch faults
         env:
           X16_KLAUS_REQUIRED: 1
+          X16_VERA_RTL_REQUIRED: 1
         run: python tests/mutation_check.py --build-dir build
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe

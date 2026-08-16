@@ -517,6 +517,18 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_layer_rows"],
     },
+    {
+        "name": "VERA default palette entry is wrong",
+        "file": "src/video.c",
+        # palette_ram.mem is the table baked into the FPGA bitstream, so the
+        # default palette is hardware and not a ROM convention. One edited
+        # entry in a 256-entry table is how this actually goes wrong, and the
+        # only thing that notices is a comparison against the file.
+        "find": "0x08f,0xbbb,",
+        "into": "0x08f,0xbbc,",
+        "count": 1,
+        "caught_by": ["vera_palette"],
+    },
 ]
 
 
