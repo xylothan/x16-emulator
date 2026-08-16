@@ -485,6 +485,38 @@ MUTATIONS = [
     # recorded as a divergence rather than asserted, so mutating video.c
     # towards the RTL would make the marker pass unexpectedly -- a failure by
     # design, not a caught mutation.
+    {
+        "name": "VERA layer row does not wrap at the layer height",
+        "file": "src/video.c",
+        # layer_renderer.v:86-89 masks the tile row to the map height. Without
+        # the mask a tall scroll walks off the end of the tilemap instead of
+        # coming back round to the top.
+        "find": "return (y + props->vscroll) & (props->layerh_max);",
+        "into": "return y + props->vscroll;",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
+    {
+        "name": "VERA map height starts at 16 tiles",
+        "file": "src/video.c",
+        # layer_renderer.v:86 masks to 5 bits at map_height 0, so the shortest
+        # map is 32 tiles. An octave low halves the wrap point.
+        "find": "props->maph_log2 = 5 + ((reg_layer[layer][0] >> 6) & 3);",
+        "into": "props->maph_log2 = 4 + ((reg_layer[layer][0] >> 6) & 3);",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
+    {
+        "name": "VERA tile height is read from the tile width bit",
+        "file": "src/video.c",
+        # top.v:386-387 takes height from write_data[1] and width from
+        # write_data[0]. Swapping them changes which bits of the scrolled line
+        # index select the row, per layer_renderer.v:82.
+        "find": "props->tileh_log2 = 3 + ((reg_layer[layer][2] >> 1) & 1);",
+        "into": "props->tileh_log2 = 3 + (reg_layer[layer][2] & 1);",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
 ]
 
 

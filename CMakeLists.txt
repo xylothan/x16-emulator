@@ -801,6 +801,22 @@ if(TARGET vera_layer_test)
     endif()
 endif()
 
+# Which row of a layer each display line shows: the vertical half of the tile
+# address path.
+x16_add_test(vera_layer_rows NEEDS_SDL
+    SOURCES tests/test_vera_layer_rows.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_layer_rows_test)
+    target_include_directories(vera_layer_rows_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_layer_rows_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_layer_rows_test PRIVATE m)
+    endif()
+endif()
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
