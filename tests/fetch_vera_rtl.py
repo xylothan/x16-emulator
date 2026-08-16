@@ -51,6 +51,7 @@ FILES = (
     ("fpga/source/top.v", COMMIT),                  # register decode, incl. 0x1B-0x1D
     ("fpga/source/graphics/layer_renderer.v", COMMIT),   # map and tile address arithmetic
     ("fpga/source/graphics/sprite_renderer.v", COMMIT),  # sprite collision mask and sprcol_irq
+    ("fpga/source/palette_ram.mem", COMMIT),        # the default palette, baked into the bitstream
     ("fpga/source/audio/audio_fifo.v", COMMIT),     # the PCM FIFO itself
     ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
     ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC

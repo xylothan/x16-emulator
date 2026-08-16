@@ -722,6 +722,12 @@ add_test(NAME opcode_spec
 add_test(NAME vera_version
          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_version.py")
 
+# VERA's palette RAM is initialised from a memory file baked into the FPGA
+# bitstream, so the default palette is hardware rather than a ROM convention.
+# Skips when the RTL has not been fetched.
+add_test(NAME vera_palette
+         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_palette.py")
+
 # Register banking: the same addresses carry different registers per DCSEL.
 x16_add_test(vera_regbank NEEDS_SDL
     SOURCES tests/test_vera_regbank.c tests/support/video_fixture.c tests/support/harness.c
