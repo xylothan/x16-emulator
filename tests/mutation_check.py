@@ -213,6 +213,45 @@ MUTATIONS = [
         "caught_by": ["vera_irq"],
     },
     {
+        "name": "VERA collision nibble accumulates across frames",
+        "file": "src/video.c",
+        # sprite_renderer.v:402  frame_collision_mask_next = cur_collision_mask_r;
+        # Assigned unconditionally at frame_done, so the nibble describes the
+        # frame just ended. ORing instead makes a collision permanent.
+        "find": "isr = (isr & 0xf) | sprite_line_collisions;",
+        "into": "isr = isr | sprite_line_collisions;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA sprite collision mask is read from the wrong nibble",
+        "file": "src/video.c",
+        # sprite_renderer.v:82  wire [3:0] sprite_attr_collision_mask = sprite_attr[23:20];
+        # The top half of attribute byte 6; the bottom half is z-depth and the
+        # flip bits.
+        "find": "props->sprite_collision_mask = sprite_data[sprite][6] & 0xf0;",
+        "into": "props->sprite_collision_mask = (sprite_data[sprite][6] & 0x0f) << 4;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA sprites collide where their masks differ",
+        "file": "src/video.c",
+        # sprite_renderer.v:328 uses the mask directly:
+        #   ... ? (linebuf_rddata[15:12] & sprite_collision_mask_r) : 4'b0;
+        # It was inverted until 4f46cb32 (2023-01-26). This mutation restores
+        # that form, which is the one bug the RTL's own history records here.
+        "find": "sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;",
+        "into": "sprite_line_collisions |= sprite_line_mask[line_x] & ~props->sprite_collision_mask;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    # No mutation for the ISR write clearing bits 7:4. The test records that as
+    # a divergence rather than asserting it, so mutating video.c:2910 towards
+    # the RTL would make the marker pass unexpectedly -- which is a failure by
+    # design, not a caught mutation. Add one once the write stops reaching the
+    # nibble.
+    {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
         # step6502()'s copy, four-space indented. exec6502()'s is eight-space
