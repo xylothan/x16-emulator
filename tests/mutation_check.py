@@ -437,6 +437,54 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_reset"],
     },
+    {
+        "name": "VERA layer map base is shifted one bit short",
+        "file": "src/video.c",
+        # layer_renderer.v:107  wire [14:0] map_addr = {map_baseaddr, 7'b0} + map_idx[15:1];
+        # The register names a byte address of register x 512. A shift of 8
+        # puts the tilemap at half the offset the guest asked for.
+        "find": "props->map_base       = reg_layer[layer][1] << 9;",
+        "into": "props->map_base       = reg_layer[layer][1] << 8;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA tile base takes in the two size bits",
+        "file": "src/video.c",
+        # top.v:383-384 forces tile_baseaddr[1:0] to zero on write; bits 1 and 0
+        # of the register are the tile height and width. Letting them into the
+        # address moves the tile data whenever the tile size changes.
+        "find": "props->tile_base      = (reg_layer[layer][2] & 0xFC) << 9;",
+        "into": "props->tile_base      = (reg_layer[layer][2] & 0xFF) << 9;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA map width starts at 16 tiles",
+        "file": "src/video.c",
+        # layer_renderer.v:100 masks the column index to 5 bits at map_width 0,
+        # so the narrowest map is 32 tiles. Starting an octave low halves every
+        # map and moves the end of the tilemap with it.
+        "find": "props->mapw_log2 = 5 + ((reg_layer[layer][0] >> 4) & 3);",
+        "into": "props->mapw_log2 = 4 + ((reg_layer[layer][0] >> 4) & 3);",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA layer 1 registers are written to layer 0",
+        "file": "src/video.c",
+        # top.v:219-225 gives layer 1 its own registers at 5'h14-5'h1A. One
+        # bank behind both sets of addresses would leave the two layers sharing
+        # a configuration.
+        "find": "reg_layer[1][reg - 0x14] = value;",
+        "into": "reg_layer[0][reg - 0x14] = value;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    # No mutation for the scroll high bytes reading back whole. That is
+    # recorded as a divergence rather than asserted, so mutating video.c
+    # towards the RTL would make the marker pass unexpectedly -- a failure by
+    # design, not a caught mutation.
 ]
 
 
