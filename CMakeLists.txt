@@ -844,6 +844,13 @@ x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
 
+# RAM and ROM banking: the registers at $0000 and $0001 and the windows they
+# steer. Same real memory.c and fake devices as the debugOn tests.
+x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_memory_banking.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+
 # The watchpoint hook sits on the store path, so this links the same real
 # memory.c, debug_core.c and CPU core as the debugOn tests, and asserts that
 # watching an address changes nothing except that a break is reported.

@@ -24,6 +24,7 @@ which is the failure mode the whole "quote your oracle" rule exists to stop.
 
 import re
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -43,6 +44,22 @@ PDFS = {
 PAGES = {
     "6502org-65c816-opcodes.txt": "http://6502.org/tutorials/65c816opcodes.html",
     "6502org-65c02-opcodes.txt": "http://6502.org/tutorials/65c02opcodes.html",
+}
+
+# The X16's own documentation. Unlike VERA there is no hardware definition to
+# consult: the banking is discrete logic on the board, with no schematic or
+# programmable-logic source published anywhere, so this is the strongest source
+# there is for the memory map -- and it is documentation, a step removed.
+#
+# Pinned to a commit rather than a branch, for the same reason the VERA RTL is:
+# a citation of a line in a moving file is not checkable. The Memory Map
+# chapter carries its own warning that "the layout of the banks may still
+# change", so this pin will need moving one day.
+DOCS_COMMIT = "79a8303bc33cda4ec3e85f3239f9b3d4c8c76260"
+
+DOCS = {
+    "x16-memory-map.md": "X16 Reference - 08 - Memory Map.md",
+    "x16-hardware.md": "X16 Reference - 14 - Hardware.md",
 }
 
 
@@ -108,6 +125,13 @@ def main():
             raw.unlink()
             print(f"  made {name}")
         else:
+            ok = False
+
+    print("X16 documentation:")
+    base = f"https://raw.githubusercontent.com/X16Community/x16-docs/{DOCS_COMMIT}"
+    for name, path in DOCS.items():
+        quoted = urllib.parse.quote(path)
+        if not fetch(f"{base}/{quoted}", DEST / name):
             ok = False
 
     print(f"\nreferences in {DEST}")

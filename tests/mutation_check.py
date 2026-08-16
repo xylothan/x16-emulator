@@ -618,6 +618,49 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["via_timers"],
     },
+    {
+        "name": "banked RAM window is 4K instead of 8K",
+        "file": "src/memory.c",
+        # x16-docs Memory Map: "$A000-$BFFF Banked RAM (8 KB window into one of
+        # 256 banks for a total of 2 MB)". A short stride overlaps every bank
+        # with the top half of the one below it.
+        "find": "return BRAM[(ramBank << 13) + address - 0xa000];",
+        "into": "return BRAM[(ramBank << 12) + address - 0xa000];",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "banked RAM writes ignore the bank",
+        "file": "src/memory.c",
+        # The window is the point: every bank would otherwise be the same 8K,
+        # and a write through one bank would be visible through all of them.
+        "find": "BRAM[(memory_get_ram_bank() << 13) + address - 0xa000] = value;",
+        "into": "BRAM[address - 0xa000] = value;",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "the RAM bank register is masked to the installed banks",
+        "file": "src/memory.c",
+        # x16-docs Memory Map: "$0000 Current RAM bank (0-255)". Masking on the
+        # way in would make a bank beyond the installed RAM alias a real one
+        # instead of reaching nothing.
+        "find": "case 0:\n\t\t\tmemory_set_ram_bank(value);",
+        "into": "case 0:\n\t\t\tmemory_set_ram_bank(value & 0x3f);",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "an uninstalled RAM bank reads as zero",
+        "file": "src/memory.c",
+        # No oracle says what an uninstalled bank returns; the test records
+        # this emulator's answer as characterization. The mutation is here so
+        # that record cannot quietly stop describing anything.
+        "find": "\t\t\treturn (address >> 8) & 0xff; // open bus read\n\t\t}\n\t} else { // banked ROM",
+        "into": "\t\t\treturn 0;\n\t\t}\n\t} else { // banked ROM",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
 ]
 
 
