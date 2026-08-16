@@ -16,12 +16,37 @@
 #include <string.h>
 #include <stdio.h>
 
-// _strdup is the MSVC name; most POSIX systems have strdup.
-#ifdef _MSC_VER
-#define fat_strdup _strdup
-#else
-#define fat_strdup strdup
-#endif
+// strdup is POSIX, not ISO C: under a strict -std= it is not declared, and gcc
+// with -Werror then treats the implicit declaration as an error. Rather than
+// widen the feature-test macros for the whole translation unit, duplicate the
+// three lines it would have provided.
+static char *
+fat_strdup(const char *s)
+{
+	const size_t n = strlen(s) + 1;
+	char        *p = (char *)malloc(n);
+	if (p != NULL) {
+		memcpy(p, s, n);
+	}
+	return p;
+}
+
+// Join a parent directory and a leaf into `out`, reporting whether it fit.
+// `parent` is "/" for the root, otherwise has no trailing slash.
+static bool
+join_path(char *out, size_t outsz, const char *parent, const char *name)
+{
+	const size_t plen = (parent[1] == '\0') ? 0 : strlen(parent);
+	const size_t nlen = strlen(name);
+	if (plen + 1 + nlen + 1 > outsz) {
+		return false;
+	}
+	memcpy(out, parent, plen);
+	out[plen] = '/';
+	memcpy(out + plen + 1, name, nlen);
+	out[plen + 1 + nlen] = '\0';
+	return true;
+}
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 #define SDCARD_FAT_MAX_FILES   4096
@@ -371,10 +396,14 @@ static void process_dirent(const uint8_t *de, const char *parent_path,
 
 	// Build full path.
 	char full_path[PATH_MAX];
-	if (parent_path[1] == '\0') { // parent == "/"
-		snprintf(full_path, sizeof(full_path), "/%s", name);
-	} else {
-		snprintf(full_path, sizeof(full_path), "%s/%s", parent_path, name);
+	if (!join_path(full_path, sizeof(full_path), parent_path, name)) {
+		// A truncated path is a wrong path, and naming files correctly is the
+		// entire purpose of this index, so an entry that will not fit is
+		// dropped and flagged rather than stored under a name that is not its
+		// own. Building it by hand also keeps the compiler from having to
+		// prove an snprintf cannot overflow, which it cannot.
+		g_truncated = true;
+		return;
 	}
 
 	uint32_t first_cluster = ((uint32_t)le16(de + 20) << 16) | le16(de + 26);
