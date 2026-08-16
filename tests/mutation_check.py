@@ -573,6 +573,51 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["via_irq"],
     },
+    {
+        "name": "VIA T1 one-shot and free-run are swapped",
+        "file": "src/via.c",
+        # W65C22S p17-18: ACR bit 6 clear is one-shot, "a single Interrupt Flag
+        # each time the Timer is loaded"; set is free-run, where the flag is
+        # raised at every zero with no reload.
+        "find": "if (!(acr & 0x40)) via->timer_running[0] = false;",
+        "into": "if (acr & 0x40) via->timer_running[0] = false;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T1 loads its low byte from the write, not the latch",
+        "file": "src/via.c",
+        # W65C22S p17: "the microprocessor does not write directly into the T1
+        # low order counter. Instead, this half of the counter is loaded
+        # automatically from the low order register when the microprocessor
+        # writes into the high order register and counter."
+        "find": "via->timer_count[0] = ((unsigned)value << 8) | via->registers[6];",
+        "into": "via->timer_count[0] = ((unsigned)value << 8) | value;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T2 counts the clock in pulse mode",
+        "file": "src/via.c",
+        # W65C22S p19: T2 "operates in the One-Shot Mode only (as an interval
+        # timer), or as a pulse counter for counting negative pulses on PB6. A
+        # single control bit within ACR5 is used to select between these two
+        # modes."
+        "find": "tclk = (acr & 0x20) ? via->pb6_pulse_counts : clocks;",
+        "into": "tclk = clocks;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T2 re-arms itself after timing out",
+        "file": "src/via.c",
+        # W65C22S p19: T2 has no free-run mode, so its flag is raised once per
+        # load. Leaving it armed turns a one-shot into a repeating interrupt.
+        "find": "\t\t\tifr |= 0x20;\n\t\t\tvia->timer_running[1] = false;",
+        "into": "\t\t\tifr |= 0x20;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
 ]
 
 
