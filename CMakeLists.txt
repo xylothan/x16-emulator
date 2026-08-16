@@ -281,6 +281,7 @@ add_custom_target(gen_cpu_tables DEPENDS ${TABLE_OUTPUT_H})
 set(X16_SOURCES
     src/cpu/fake6502.c
     src/memory.c
+    src/io_trace.c
     src/disasm.c
     src/video.c
     src/i2c.c
@@ -294,6 +295,7 @@ set(X16_SOURCES
     src/vera_pcm.c
     src/vera_psg.c
     src/sdcard.c
+    src/sdcard_fat.c
     src/main.c
     src/debugger.c
     src/dbg_info.c
@@ -342,6 +344,7 @@ if(USE_IMGUI)
         src/debug_ui/debug_ui.cpp
         src/debug_ui/debug_ui_panels.cpp
         src/debug_ui/debug_ui_settings.cpp
+        src/debug_ui/io_reg_info.cpp
         src/debug_ui/panels/memory_panel.cpp
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
@@ -353,6 +356,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/psg_panel.cpp
         src/debug_ui/panels/fm_panel.cpp
         src/debug_ui/panels/pcm_panel.cpp
+        src/debug_ui/panels/io_panel.cpp
     )
 
     list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
@@ -635,6 +639,19 @@ x16_add_test(dbg_load
 x16_add_test(vera_pcm
     SOURCES tests/test_vera_pcm.c tests/support/harness.c src/vera_pcm.c)
 
+# io_trace.c is deliberately free of emulator dependencies -- memory.c calls it,
+# and memory.c is linked into tests that pair it with fake devices -- so the
+# test links it alone, with no CPU, no memory and no SDL.
+x16_add_test(io_trace
+    SOURCES tests/test_io_trace.c tests/support/harness.c src/io_trace.c)
+
+# The FAT index parses untrusted binary data, so the test builds synthetic FAT16
+# and FAT32 images and reads them back. It stubs the five file-access functions
+# onto stdio rather than linking src/files.c, which would drag in SDL and zlib
+# to test nothing extra: what is under test is the parser.
+x16_add_test(sdcard_fat
+    SOURCES tests/test_sdcard_fat.c tests/support/harness.c src/sdcard_fat.c)
+
 # vera_psg.c likewise has no dependency beyond its own header and libc.
 x16_add_test(vera_psg
     SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
@@ -842,14 +859,16 @@ x16_add_test(via_timers NEEDS_SDL
 x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_debugon_contract.c tests/support/fake_devices.c
             tests/support/harness.c
-            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
 
 # RAM and ROM banking: the registers at $0000 and $0001 and the windows they
 # steer. Same real memory.c and fake devices as the debugOn tests.
 x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_memory_banking.c tests/support/fake_devices.c
             tests/support/harness.c
-            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
 
 # The write half of the debugOn contract, which does not exist: pins what a
 # debugger's edit costs and disturbs, since nothing can tell it apart from a
@@ -857,7 +876,8 @@ x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
 x16_add_test(debug_write_path NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_debug_write_path.c tests/support/fake_devices.c
             tests/support/harness.c
-            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
 
 # The watchpoint hook sits on the store path, so this links the same real
 # memory.c, debug_core.c and CPU core as the debugOn tests, and asserts that
@@ -865,7 +885,8 @@ x16_add_test(debug_write_path NEEDS_SDL NEEDS_CPU_TABLES
 x16_add_test(watchpoint_purity NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_watchpoint_purity.c tests/support/fake_devices.c
             tests/support/signature.c tests/support/harness.c
-            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c)
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
 
 # Build summary
 

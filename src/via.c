@@ -365,3 +365,25 @@ via2_irq()
 {
 	return (via[1].registers[13] & via[1].registers[14]) != 0;
 }
+
+// Side-effect-free snapshot of one VIA's state for the ImGui debugger.
+// `which` is 0 for VIA1, 1 for VIA2.
+void
+via_debug_get_state(int which, via_debug_state_t *out)
+{
+	if (which < 0 || which > 1) {
+		return;
+	}
+	const via_t *v = &via[which];
+	for (int i = 0; i < 15; i++) {
+		out->regs[i] = v->registers[i];
+	}
+	out->timer_count[0]   = (uint16_t)v->timer_count[0];
+	out->timer_count[1]   = (uint16_t)v->timer_count[1];
+	out->timer_latch[0]   = ((uint16_t)v->registers[7] << 8) | v->registers[6];
+	out->timer_latch[1]   = v->registers[8]; // T2 only has latch low byte
+	out->timer_running[0] = v->timer_running[0];
+	out->timer_running[1] = v->timer_running[1];
+	out->timer1_m1        = v->timer1_m1;
+	out->pb7_output       = v->pb7_output;
+}

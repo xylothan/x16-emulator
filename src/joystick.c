@@ -2,6 +2,7 @@
 
 #include <SDL.h>
 #include <stdio.h>
+#include "io_trace.h"
 
 struct joystick_info {
 	int                 instance_id;
@@ -244,6 +245,21 @@ joystick_set_latch(bool value)
 			}
 		}
 		do_shift();
+		if (io_trace_wants(IO_DEV_JOYSTICK)) {
+			// Initialised because no slot is enabled unless -joy1..-joy4 was
+			// passed, which is the default. The loop then writes nothing and
+			// the %s below would otherwise walk uninitialised stack.
+			char buf[64] = "";
+			int  off = 0;
+			for (int i = 0; i < NUM_JOYSTICKS && off < (int)sizeof(buf) - 10; ++i) {
+				if (!Joystick_slots_enabled[i]) continue;
+				struct joystick_info *joy = (Joystick_slots[i] >= 0)
+					? find_joystick_controller(Joystick_slots[i]) : NULL;
+				uint16_t mask = (joy != NULL) ? joy->button_mask : 0xffff;
+				off += snprintf(buf + off, sizeof(buf) - off, " j%d=%04X", i, mask);
+			}
+			io_trace_event(IO_DEV_JOYSTICK, "latch%s", buf);
+		}
 	}
 }
 
@@ -254,4 +270,32 @@ joystick_set_clock(bool value)
 		Joystick_data = 0;
 		do_shift();
 	}
+}
+
+// Side-effect-free snapshot of joystick state for the ImGui debugger.
+void
+joystick_debug_get_state(joystick_debug_state_t *out)
+{
+	for (int i = 0; i < NUM_JOYSTICKS; ++i) {
+		joystick_slot_debug_t *s = &out->slots[i];
+		s->enabled = Joystick_slots_enabled[i];
+		if (Joystick_slots[i] >= 0) {
+			struct joystick_info *joy = find_joystick_controller(Joystick_slots[i]);
+			if (joy != NULL) {
+				s->controller_bound = true;
+				s->button_mask      = joy->button_mask;
+				s->shift_mask       = joy->shift_mask;
+			} else {
+				s->controller_bound = false;
+				s->button_mask      = 0xffff;
+				s->shift_mask       = 0;
+			}
+		} else {
+			s->controller_bound = false;
+			s->button_mask      = 0xffff;
+			s->shift_mask       = 0;
+		}
+	}
+	out->latch = Joystick_latch;
+	out->data  = Joystick_data;
 }

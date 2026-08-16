@@ -35,7 +35,7 @@ Why X16Emu ADD
 
 |  |  |
 | --- | --- |
-| **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints and VERA/PSG/FM/PCM inspectors. |
+| **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints, I/O and file access, and VERA/PSG/FM/PCM inspectors. |
 | **Source-level debugging** | Point it at a cc65 `.dbg` file and step through the original `.s`/`.c` source, with labels, equates and live values. `.dbg` files auto-load, including for overlays the program `LOAD`s at runtime. |
 | **Debug from an editor** | A built-in DAP server means breakpoints, stepping, watches, memory and disassembly in VS Code, Visual Studio, or any DAP-speaking client. |
 | **Conditional breakpoints** | Break on `A == $05`, `byte[$1234] != 0`, a specific RAM bank, or the Nth hit. |
@@ -265,7 +265,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 
 | Option | What it does |
 |---|---|
-| `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics and the three audio sources. Additive: independent of, and combinable with, `-debug`. |
+| `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, and I/O ports and file access. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
@@ -379,6 +379,7 @@ Every panel is dockable, closable and reopenable from the **View** menu. Each on
 | [**PSG**](#psg--veras-16-voice-sound-generator) | VERA PSG voices with live register values, plus scope traces. |
 | [**YM2151**](#ym2151--the-fm-chip) | FM channel state and scope traces. |
 | [**PCM**](#pcm--the-audio-fifo) | VERA PCM state and scope traces. |
+| [**I/O**](#watching-io-and-file-access) | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. |
 
 While the machine is paused, the audio panels keep drawing their scope traces by projecting from
 the current register state, so you can see what a voice *would* be doing at the moment you stopped.
@@ -408,8 +409,8 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 
 **Settings…** covers interrupt following, break-on-interrupt, whether a break auto-switches you to
 the Disassembly or Source panel, memory change highlighting and its duration, holding audio while
-paused, and the global interface scale. Settings and your window layout are saved to `imgui.ini`
-and restored next run.
+paused, I/O capture and its per-device gating, and the global interface scale. Settings and your
+window layout are saved to `imgui.ini` and restored next run.
 
 ![The Settings window, with Appearance, Navigation, Execution, Memory, Audio and Safety sections](./.gh/screenshots/settings.png)
 
@@ -711,6 +712,56 @@ whether it is: FIFO fill level as a bar and a byte count, how many frames that i
 read and write indices, and whether the `AFLOW` interrupt is currently asserted. Format, volume and
 playback rate are decoded from `AUDIO_CTRL` and `AUDIO_RATE`, and the panel reads the PCM block
 directly rather than through `$9F3B`, so inspecting it does not itself consume audio.
+
+#### Watching I/O and file access
+
+The **I/O** panel covers the ports: everything in `$9F00`–`$9FFF`, plus the devices that hang off
+them. Its **Activity** tab is a rolling log rather than a state dump, because I/O is a
+conversation — a command goes out, a status comes back — and a snapshot taken between commands
+tells you nothing. Each row names the register it touched (`DATA0`, `T1C_L`, `SPI_CTRL`) and
+explains it on hover, so you are not looking up addresses in a manual while you debug.
+
+**Capture is off by default, and so is every device.** It is the one debugger feature the running
+machine pays for — a test and a branch on every I/O access — and the I/O page is the busiest
+address range in the system. Turn it on, then tick only what you are actually looking for. Each
+device's checkbox says what it captures, what it tells you that its own tab does not, and roughly
+how fast it produces events: VERA's data ports alone are thousands of accesses per frame, and I2C
+and the joysticks are polled around sixty times a second whether or not anything happens. The SD
+card's data path at `$9F3E`/`$9F3F` is captured separately as **SPI** so it survives VERA being
+off.
+
+Every other tab works with capture off — they read live device state, not the log.
+
+##### Two ways to reach a file, and only one of them has names
+
+This is the thing worth knowing before you go looking for a filename and cannot find it.
+
+| | When | What you see |
+| --- | --- | --- |
+| **Host filesystem** | the default, no SD image attached | Real filenames. The emulator intercepts the KERNAL's IEEE calls, so it knows the name, the channel, the direction and the byte counts. |
+| **SD card image** | `-sdcard <image>` | **Blocks only.** The ROM's own FAT driver runs inside the emulated machine and talks to the card over SPI. The emulator sees `CMD17`, an LBA and 512 bytes — never a name. |
+
+They are mutually exclusive by default: `-sdcard` turns host-filesystem access off unless you also
+pass `-hostfsdev`. `-fsroot` sets the host directory the machine sees — it does **not** attach a
+card, so with `-fsroot` alone the SD tabs are legitimately empty and say so.
+
+The **Files** tab shows both, in separate sub-tabs, so it is always clear which one is in play.
+
+Its host-filesystem half keeps an always-on **history** of opens, closes, directory listings, DOS
+commands and the status each produced. That history is the point: a file operation erases itself
+when it completes, so a list of *currently open* channels is empty almost all the time, and a
+directory listing or a failed open would otherwise flash past unseen. The history is kept whether
+or not capture is on, because file operations are rare enough to record for free.
+
+For the SD image, ADD closes the gap by parsing the filesystem *itself*: **Build index** reads the
+image's partition table, BPB, FATs and directory tree — including long filenames — and maps every
+cluster back to a path. Block traffic then resolves to `/GAMES/FOO.PRG + 2048`, and the file list
+shows how many bytes of each file the machine has actually read or written this session, listing
+the files it touched first so they stand out from the ones that merely exist.
+
+The index is a snapshot, not a live view. If the machine writes to a FAT or a directory the index
+is marked **STALE** and you rebuild it by hand. That is deliberate: quietly serving a filename
+that has since become wrong would be worse than admitting the index has aged.
 
 ### Source-level debugging with cc65
 

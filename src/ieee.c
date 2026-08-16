@@ -28,6 +28,7 @@
 #include <limits.h>
 #include "memory.h"
 #include "ieee.h"
+#include "io_trace.h"
 #include "dbg_load.h"
 #include "glue.h"
 #include "utf8_encode.h"
@@ -99,9 +100,80 @@ typedef struct {
 	bool read;
 	bool write;
 	SDL_RWops *f;
+	uint32_t bytes_read;    // cumulative bytes read since channel was opened
+	uint32_t bytes_written; // cumulative bytes written since channel was opened
 } channel_t;
 
 channel_t channels[16];
+
+// ─── File-operation history ring buffer ──────────────────────────────────────
+
+static uint32_t          hist_seq  = 0;                    // next sequence number
+static int               hist_head = 0;                    // next write slot (ring)
+static int               hist_used = 0;                    // entries written so far (caps at IEEE_HISTORY_MAX)
+static uint32_t          hist_await_status = 0;            // seq of the entry expecting a DOS status
+static ieee_history_entry_t hist[IEEE_HISTORY_MAX];
+
+// Push a new entry and return a pointer to it so the caller can finish filling it.
+static ieee_history_entry_t *
+hist_push(void)
+{
+	ieee_history_entry_t *e = &hist[hist_head];
+	memset(e, 0, sizeof(*e));
+	e->seq     = ++hist_seq;
+	e->channel = -1;
+	hist_head  = (hist_head + 1) % IEEE_HISTORY_MAX;
+	if (hist_used < IEEE_HISTORY_MAX) {
+		hist_used++;
+	}
+	// A new operation ends the previous one's claim on the status line.
+	hist_await_status = 0;
+	return e;
+}
+
+// Say that this entry is the one the next DOS status belongs to. Called by the
+// operations that actually produce a status; a close does not, and must not
+// claim one.
+static void
+hist_expect_status(const ieee_history_entry_t *e)
+{
+	hist_await_status = e->seq;
+}
+
+// Stamp the current error string onto the entry that is waiting for one, and
+// report whether it did.
+//
+// Only the operation that armed hist_await_status is stamped. Matching "the
+// most recent entry with no status yet" instead would be wrong: a close
+// produces no status of its own, so the next unrelated error -- often the
+// failed open that follows it -- would be pinned to the close, showing a
+// successful operation in red and leaving the real failure blank.
+//
+// The claim is NOT released after stamping, so a later status overwrites an
+// earlier one. That is deliberate: a DOS command routinely clears the error
+// and then sets a real one, and it is the state it ended in that describes it.
+// hist_push() releases the claim when the next operation begins.
+static bool
+hist_stamp_status(void)
+{
+	if (hist_used == 0 || hist_await_status == 0) {
+		return false;
+	}
+	int                   prev = (hist_head - 1 + IEEE_HISTORY_MAX) % IEEE_HISTORY_MAX;
+	ieee_history_entry_t *e    = &hist[prev];
+	if (e->seq != hist_await_status) {
+		return false;
+	}
+
+	int elen = error_len < (int)(sizeof(e->status) - 1) ? error_len : (int)(sizeof(e->status) - 1);
+	memcpy(e->status, error, (size_t)elen);
+	e->status[elen] = '\0';
+	// Trim trailing \r if present
+	if (elen > 0 && e->status[elen - 1] == '\r') {
+		e->status[elen - 1] = '\0';
+	}
+	return true;
+}
 
 #ifdef __MINGW32__
 // realpath doesn't exist on Windows. This function implements its behavior.
@@ -1163,6 +1235,24 @@ set_error_text(int e, const char *text, int t, int s)
 	snprintf((char *)error, sizeof(error), "%02x,%s,%02d,%02d\r", e, text, t, s);
 	error_len = u8strlen(error);
 	error_pos = 0;
+	hist_stamp_status();
+	if (e >= 0x10 && e != 0x73 && hist_await_status == 0) {
+		// Only when no operation claimed this status. An error that belongs to
+		// an open or a command is already shown on that row, and repeating it
+		// as a standalone entry would say "62 FILE NOT FOUND" twice while
+		// naming no file either time.
+		ieee_history_entry_t *he = hist_push();
+		he->kind    = IEEE_OP_STATUS;
+		int elen = error_len < (int)(sizeof(he->status) - 1) ? error_len : (int)(sizeof(he->status) - 1);
+		memcpy(he->status, error, (size_t)elen);
+		he->status[elen] = '\0';
+		if (elen > 0 && he->status[elen - 1] == '\r') {
+			he->status[elen - 1] = '\0';
+		}
+	}
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		io_trace_event(IO_DEV_IEEE, "status: %02x %s,%02d,%02d", e, text, t, s);
+	}
 	uint8_t cbdos_flags = get_kernal_cbdos_flags();
 	if (e < 0x10 || e == 0x73) {
 		cbdos_flags &= ~0x20; // clear error
@@ -1191,12 +1281,31 @@ command(uint8_t *cmd)
 	if (!cmd[0]) {
 		return;
 	}
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		if (cmd[0] == 'P' || cmd[0] == 'T') {
+			io_trace_event(IO_DEV_IEEE, "cmd: %c [binary]", cmd[0]);
+		} else {
+			io_trace_event(IO_DEV_IEEE, "cmd: %.71s", (char *)cmd);
+		}
+	}
 	if (log_ieee) {
 		if (cmd[0] == 'P') {
 			printf("  COMMAND \"%c\" [binary parameters suppressed]\n", cmd[0]);
 		} else {
 			printf("  COMMAND \"%s\"\n", cmd);
 		}
+	}
+	{
+		ieee_history_entry_t *he = hist_push();
+		he->kind    = IEEE_OP_COMMAND;
+		he->channel = 15;
+		if (cmd[0] == 'P' || cmd[0] == 'T') {
+			snprintf(he->name, sizeof(he->name), "%c [binary]", cmd[0]);
+		} else {
+			strncpy(he->name, (const char *)cmd, sizeof(he->name) - 1);
+			he->name[sizeof(he->name) - 1] = '\0';
+		}
+		hist_expect_status(he);
 	}
 	switch(cmd[0]) {
 		case 'C': // C (copy), CD (change directory), CP (change partition)
@@ -1537,6 +1646,8 @@ cunlink(uint8_t *f)
 static int
 copen(int channel)
 {
+	channels[channel].bytes_read    = 0;
+	channels[channel].bytes_written = 0;
 	if (channel == 15) {
 		command(channels[channel].name);
 		return -1;
@@ -1594,6 +1705,19 @@ copen(int channel)
 			dirlist_len = create_cwd_listing(dirlist);
 		} else {
 			dirlist_len = create_directory_listing(dirlist, channels[channel].name);
+		}
+		if (io_trace_wants(IO_DEV_IEEE)) {
+			io_trace_event(IO_DEV_IEEE, "open ch%d dir \"%.79s\"", channel, (char *)channels[channel].name);
+		}
+		{
+			ieee_history_entry_t *he = hist_push();
+			he->kind    = IEEE_OP_DIR;
+			he->channel = (int8_t)channel;
+			he->read    = true;
+			he->write   = false;
+			strncpy(he->name, (const char *)channels[channel].name, sizeof(he->name) - 1);
+			he->name[sizeof(he->name) - 1] = '\0';
+			hist_expect_status(he);
 		}
 	} else {
 		if (!u8strcmp(channels[channel].name, ":*") && prg_file && !prg_consumed) {
@@ -1653,10 +1777,44 @@ copen(int channel)
 			if (log_ieee) {
 				printf("  FILE NOT FOUND\n");
 			}
+			// Pushed BEFORE set_error, because set_error_text() stamps its
+			// status onto the most recent entry. Setting the error first would
+			// stamp "FILE NOT FOUND" onto whatever happened previously and
+			// leave this row blank -- which is worse than no status at all,
+			// since it accuses an unrelated operation of failing.
+			{
+				ieee_history_entry_t *he = hist_push();
+				he->kind    = IEEE_OP_OPEN_FAILED;
+				he->channel = (int8_t)channel;
+				he->read    = channels[channel].read;
+				he->write   = channels[channel].write;
+				strncpy(he->name, (const char *)channels[channel].name, sizeof(he->name) - 1);
+				he->name[sizeof(he->name) - 1] = '\0';
+				hist_expect_status(he);
+			}
 			set_error(0x62, 0, 0);
 			ret = -2; // FNF
+			if (io_trace_wants(IO_DEV_IEEE)) {
+				io_trace_event(IO_DEV_IEEE, "open ch%d FAILED \"%.79s\"", channel, (char *)channels[channel].name);
+			}
 		} else {
+			// Likewise pushed before clear_error(), so the "00,OK" lands here.
+			{
+				ieee_history_entry_t *he = hist_push();
+				he->kind    = IEEE_OP_OPEN;
+				he->channel = (int8_t)channel;
+				he->read    = channels[channel].read;
+				he->write   = channels[channel].write;
+				strncpy(he->name, (const char *)channels[channel].name, sizeof(he->name) - 1);
+				he->name[sizeof(he->name) - 1] = '\0';
+				hist_expect_status(he);
+			}
 			clear_error();
+			if (io_trace_wants(IO_DEV_IEEE)) {
+				io_trace_event(IO_DEV_IEEE, "open ch%d \"%-.79s\" %s", channel,
+					(char *)channels[channel].name,
+					channels[channel].write ? (channels[channel].read ? "R/W" : "write") : "read");
+			}
 		}
 	}
 	return ret;
@@ -1667,6 +1825,24 @@ cclose(int channel)
 {
 	if (log_ieee) {
 		printf("  CLOSE %d\n", channel);
+	}
+	if (io_trace_wants(IO_DEV_IEEE)) {
+		if (channels[channel].f || channels[channel].name[0] == '$') {
+			io_trace_event(IO_DEV_IEEE, "close ch%d \"%.79s\" r=%u w=%u",
+				channel, (char *)channels[channel].name,
+				channels[channel].bytes_read, channels[channel].bytes_written);
+		}
+	}
+	if (channels[channel].f || channels[channel].name[0] == '$') {
+		ieee_history_entry_t *he = hist_push();
+		he->kind          = IEEE_OP_CLOSE;
+		he->channel       = (int8_t)channel;
+		he->read          = channels[channel].read;
+		he->write         = channels[channel].write;
+		he->bytes_read    = channels[channel].bytes_read;
+		he->bytes_written = channels[channel].bytes_written;
+		strncpy(he->name, (const char *)channels[channel].name, sizeof(he->name) - 1);
+		he->name[sizeof(he->name) - 1] = '\0';
 	}
 	channels[channel].name[0] = 0;
 	if (channels[channel].f) {
@@ -1772,6 +1948,8 @@ ieee_init()
 		for (ch = 0; ch < 16; ch++) {
 			channels[ch].f = NULL;
 			channels[ch].name[0] = 0;
+			channels[ch].bytes_read    = 0;
+			channels[ch].bytes_written = 0;
 		}
 
 		ieee_initialized_once = true;
@@ -1891,6 +2069,11 @@ ACPTR(uint8_t *a)
 			if (channels[channel].name[0] == '$') {
 				if (dirlist_pos < dirlist_len) {
 					*a = dirlist[dirlist_pos++];
+					// A directory listing is bytes delivered on this channel
+					// just as a file's contents are, even though they come from
+					// a generated buffer rather than from disk. Not counting
+					// them left every dir row reading zero.
+					channels[channel].bytes_read++;
 				} else {
 					*a = 0;
 				}
@@ -1907,6 +2090,7 @@ ACPTR(uint8_t *a)
 					ret = 0x42;
 					*a = 0;
 				} else {
+					channels[channel].bytes_read++;
 					// We need to send EOI on the last byte of the file.
 					// We have to check every time since CMDR-DOS
 					// supports random access R/W mode
@@ -1958,8 +2142,11 @@ CIOUT(uint8_t a)
 					}
 				}
 			} else if (channels[channel].write && channels[channel].f) {
-				if (!SDL_WriteU8(channels[channel].f, a))
+				if (!SDL_WriteU8(channels[channel].f, a)) {
 					ret = 0x40;
+				} else {
+					channels[channel].bytes_written++;
+				}
 			} else {
 				ret = 2; // FNF
 			}
@@ -2061,6 +2248,10 @@ MACPTR(uint16_t addr, uint16_t *c, uint8_t stream_mode)
 					byte = 0;
 				} else {
 					curpos++;
+					// Counted here, before the cclose() below: that close is
+					// what pushes the history entry carrying these totals, so
+					// counting after it would report every load as zero.
+					channels[channel].bytes_read++;
 					bool last = (curpos == endpos);
 
 					// Reported before the close below, and as one call, because
@@ -2190,6 +2381,8 @@ XMACPTR(uint8_t stream_mode) // stream_mode is only for passing into MACPTR fall
 					byte = 0;
 				} else {
 					curpos++;
+					// As in MACPTR: before the cclose() that reports the totals.
+					channels[channel].bytes_read++;
 					if (curpos == endpos) {
 						ret = 0x40;
 						channels[channel].read = false;
@@ -2273,5 +2466,66 @@ XMCIOUT(uint8_t stream_mode) // stream_mode is only for passing into MCIOUT fall
 		return ret;
 	} else {
 		return -2; // not us, do not handle
+	}
+}
+
+// Side-effect-free snapshot of IEEE/hostfs state for the ImGui debugger.
+void
+ieee_debug_get_state(ieee_debug_state_t *out)
+{
+	out->using_hostfs = using_hostfs;
+	out->ieee_unit    = ieee_unit;
+
+	if (hostfscwd != NULL) {
+		strncpy(out->hostfscwd, (const char *)hostfscwd, sizeof(out->hostfscwd) - 1);
+		out->hostfscwd[sizeof(out->hostfscwd) - 1] = '\0';
+	} else {
+		out->hostfscwd[0] = '\0';
+	}
+
+	out->channel   = channel;
+	out->listening = listening;
+	out->talking   = talking;
+	out->opening   = opening;
+
+	int clen = cmdlen < (int)(sizeof(out->cmd) - 1) ? cmdlen : (int)(sizeof(out->cmd) - 1);
+	memcpy(out->cmd, cmd, (size_t)clen);
+	out->cmd[clen] = '\0';
+	out->cmdlen = clen;
+
+	if (error_len > 0) {
+		int elen = error_len < (int)(sizeof(out->error_str) - 1) ? error_len : (int)(sizeof(out->error_str) - 1);
+		memcpy(out->error_str, error, (size_t)elen);
+		out->error_str[elen] = '\0';
+	} else {
+		out->error_str[0] = '\0';
+	}
+
+	for (int i = 0; i < 16; i++) {
+		out->channels[i].is_open       = (channels[i].f != NULL);
+		out->channels[i].read          = channels[i].read;
+		out->channels[i].write         = channels[i].write;
+		out->channels[i].bytes_read    = channels[i].bytes_read;
+		out->channels[i].bytes_written = channels[i].bytes_written;
+		strncpy(out->channels[i].name, (const char *)channels[i].name, sizeof(out->channels[i].name) - 1);
+		out->channels[i].name[sizeof(out->channels[i].name) - 1] = '\0';
+	}
+
+	// Copy history ring oldest-first into out->history[].
+	out->history_count = hist_used;
+	if (hist_used < IEEE_HISTORY_MAX) {
+		// Buffer not yet wrapped: entries 0..hist_used-1 are in order
+		memcpy(out->history, hist, (size_t)hist_used * sizeof(ieee_history_entry_t));
+	} else {
+		// Buffer wrapped: oldest entry is at hist_head
+		int tail_count = IEEE_HISTORY_MAX - hist_head;
+		memcpy(out->history,
+		       hist + hist_head,
+		       (size_t)tail_count * sizeof(ieee_history_entry_t));
+		if (hist_head > 0) {
+			memcpy(out->history + tail_count,
+			       hist,
+			       (size_t)hist_head * sizeof(ieee_history_entry_t));
+		}
 	}
 }
