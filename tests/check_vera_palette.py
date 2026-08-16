@@ -10,7 +10,9 @@ entry for entry.
     python tests/check_vera_palette.py
 
 Skips when the RTL has not been fetched. Nothing in the suite requires the
-reference to be present -- run tests/fetch_vera_rtl.py to get it.
+reference to be present -- run tests/fetch_vera_rtl.py to get it. CI does
+fetch it, and sets X16_VERA_RTL_REQUIRED so that a broken fetch is a failure
+rather than a silent skip, the same way X16_KLAUS_REQUIRED works.
 
 WHY THIS IS A SCRIPT AND NOT A C TEST
 -------------------------------------
@@ -29,6 +31,7 @@ expansion is the emulator's own presentation choice. Asserting it against the
 Verilog would be inventing an oracle.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -38,6 +41,11 @@ VIDEO_C = ROOT / "src" / "video.c"
 MEM = ROOT / "tests" / "vera-rtl" / "palette_ram.mem"
 
 ENTRIES = 256
+
+
+def required():
+    v = os.environ.get("X16_VERA_RTL_REQUIRED")
+    return v is not None and v not in ("", "0")
 
 
 def emulator_palette():
@@ -65,6 +73,11 @@ def rtl_palette():
 
 def main():
     if not MEM.exists():
+        if required():
+            print(f"FAIL: {MEM.name} not present and X16_VERA_RTL_REQUIRED is set")
+            print("      Run tests/fetch_vera_rtl.py. A skip here would leave the")
+            print("      default palette unchecked on a green run.")
+            return 1
         print(f"skip: {MEM.name} not present (run tests/fetch_vera_rtl.py)")
         return 0
 
