@@ -375,7 +375,6 @@ via_debug_get_state(int which, via_debug_state_t *out)
 		return;
 	}
 	const via_t *v = &via[which];
-	out->exists = (which == 0) || has_via2;
 	for (int i = 0; i < 15; i++) {
 		out->regs[i] = v->registers[i];
 	}

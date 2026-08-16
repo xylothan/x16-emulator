@@ -28,20 +28,39 @@ import urllib.request
 from pathlib import Path
 
 DEST = Path(__file__).resolve().parent / "vera-rtl"
+RAW = "https://raw.githubusercontent.com/X16Community/vera-module"
 
 # The tag matching VERA_VERSION_MAJOR/MINOR/PATCH in src/video.c. Held in step
 # by tests/check_vera_version.py: if the emulator's declared version changes,
 # this pin and every cited line number must be re-checked.
 COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"  # tag v47.0.2
-BASE = f"https://raw.githubusercontent.com/X16Community/vera-module/{COMMIT}"
+
+# psg.v is pinned to R48 instead, because that is the revision the emulator
+# implements. vera_psg.c:122-123 XOR the saw and triangle waveforms with the
+# inverted pulse width, which arrived in the RTL as a8135f32 (2024-10-21) and
+# shipped in v48.0.1; R47 has the unmodulated forms. The emulator backported it
+# in #290 on 2024-08-11, two months before the RTL change landed.
+#
+# psg.v is the only audio file that differs between the two tags -- audio_fifo.v,
+# pcm.v and audio.v are byte-identical -- so this is the whole of the split.
+# See the header of tests/check_vera_version.py for why the emulator is not any
+# single revision.
+COMMIT_PSG = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"  # tag v48.0.1
 
 FILES = (
-    "fpga/source/top.v",                    # register decode, incl. 0x1B-0x1D
-    "fpga/source/audio/audio_fifo.v",       # the PCM FIFO itself
-    "fpga/source/audio/pcm.v",              # rate accumulator, sample fetch, volume
-    "fpga/source/audio/audio.v",            # PCM and PSG into the DAC
-    "fpga/source/audio/psg.v",              # for the PSG tests
+    ("fpga/source/top.v", COMMIT),                  # register decode, incl. 0x1B-0x1D
+    ("fpga/source/graphics/layer_renderer.v", COMMIT),   # map and tile address arithmetic
+    ("fpga/source/graphics/sprite_renderer.v", COMMIT),  # sprite collision mask and sprcol_irq
+    ("fpga/source/palette_ram.mem", COMMIT),        # the default palette, baked into the bitstream
+    ("fpga/source/audio/audio_fifo.v", COMMIT),     # the PCM FIFO itself
+    ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
+    ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC
+    ("fpga/source/audio/psg.v", COMMIT_PSG),        # R48: see above
 )
+
+
+def manifest():
+    return "".join(f"{Path(p).name} {ref}\n" for p, ref in FILES)
 
 
 def get(url, path):
@@ -62,27 +81,29 @@ def get(url, path):
 
 def main():
     print(f"VERA RTL -> {DEST}")
-    print(f"  commit {COMMIT}")
+    for p, ref in FILES:
+        print(f"  {Path(p).name:16} {ref[:8]}")
 
-    # Re-fetch when the pin has moved. Skipping on "file exists" alone would
+    # Re-fetch when any pin has moved. Skipping on "file exists" alone would
     # quietly serve the previous revision's RTL under the new commit's name,
     # and the line numbers cited in the tests would silently stop matching --
     # which is exactly the failure this whole oracle exists to prevent.
     stamp = DEST / "COMMIT"
-    have = stamp.read_text().strip() if stamp.exists() else None
-    if have and have != COMMIT:
-        print(f"  pin moved from {have[:8]}: discarding the fetched copy")
-        for f in FILES:
-            (DEST / Path(f).name).unlink(missing_ok=True)
+    want = manifest()
+    have = stamp.read_text() if stamp.exists() else None
+    if have is not None and have != want:
+        print("  pins moved: discarding the fetched copy")
+        for p, _ in FILES:
+            (DEST / Path(p).name).unlink(missing_ok=True)
         stamp.unlink(missing_ok=True)
 
     ok = True
-    for f in FILES:
+    for p, ref in FILES:
         # Flattened: the citations name the file, not its path in the repo.
-        ok &= get(f"{BASE}/{f}", DEST / Path(f).name)
+        ok &= get(f"{RAW}/{ref}/{p}", DEST / Path(p).name)
     if not ok:
         return 1
-    stamp.write_text(COMMIT + "\n")
+    stamp.write_text(want)
     return 0
 
 

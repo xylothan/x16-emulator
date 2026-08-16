@@ -1239,10 +1239,10 @@ draw_via_ports(int which, const via_debug_state_t &v)
 void
 draw_one_via(int which, const char *name)
 {
-    via_debug_state_t v;
-    via_debug_get_state(which, &v);
-
-    if (!v.exists) {
+    // Whether the second VIA is fitted is machine configuration, which via.c
+    // deliberately does not know -- see via.h.
+    const bool fitted = (which == 0) || has_via2;
+    if (!fitted) {
         ImGui::TextColored(COL_DIM, "%s is not fitted.", name);
         ImGui::Spacing();
         ImGui::TextWrapped("The second VIA is optional on the X16 and drives the user port. "
@@ -1250,6 +1250,9 @@ draw_one_via(int which, const char *name)
                            "for exercising the timers and interrupts.");
         return;
     }
+
+    via_debug_state_t v;
+    via_debug_get_state(which, &v);
 
     const uint8_t acr = v.regs[0x0b];
     const uint8_t ifr = v.regs[0x0d];

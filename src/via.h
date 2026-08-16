@@ -37,7 +37,10 @@ bool via2_irq();
 // `which`: 0 = VIA1, 1 = VIA2.
 
 typedef struct {
-	bool     exists;            // VIA is present (always true for VIA1; for VIA2 check has_via2)
+	// Whether VIA2 is fitted is a machine-configuration fact (has_via2 in
+	// glue.h), not something this module knows -- and reaching for it here
+	// would give via.c an external symbol it does not otherwise need, which
+	// the standalone VIA tests link without. The caller decides.
 	uint8_t  regs[15];         // raw register bytes (indices 0-14, see map above)
 	uint16_t timer_count[2];   // live timer counter values (T1=0, T2=1)
 	uint16_t timer_latch[2];   // T1 latch = (regs[7]<<8)|regs[6]; T2 latch low = regs[8]

@@ -652,6 +652,33 @@ x16_add_test(io_trace
 x16_add_test(sdcard_fat
     SOURCES tests/test_sdcard_fat.c tests/support/harness.c src/sdcard_fat.c)
 
+# vera_psg.c likewise has no dependency beyond its own header and libc.
+x16_add_test(vera_psg
+    SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
+
+# The real video.c, which is VERA plus the SDL host in one file. The fixture
+# supplies the host half so the emulation half can be driven directly; the audio
+# modules are linked for real because video.c routes $9F3B-$9F3D into them and
+# they have no dependencies of their own.
+x16_add_test(vera_video NEEDS_SDL
+    SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+# video.c includes gif.h, which is vendored rather than sitting alongside it.
+# It also calls SDL directly from its host half, so unlike the other NEEDS_SDL
+# tests -- which only need the headers -- this one links the library too.
+if(TARGET vera_video_test)
+    target_include_directories(vera_video_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_video_test PRIVATE SDL2::SDL2)
+    endif()
+    # video.c calls round(). The emulator picks libm up transitively from its
+    # other dependencies; this target links fewer of them, so it asks directly.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_video_test PRIVATE m)
+    endif()
+endif()
+
 # The CPU core reaches outside itself for only six symbols, all supplied by the
 # fixture, so this links the real instruction tables against a flat 64K memory
 # and nothing else. irq_ctx.c comes along because fake6502.c reports interrupt
@@ -712,12 +739,142 @@ add_test(NAME opcode_spec
 add_test(NAME vera_version
          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_version.py")
 
+# VERA's palette RAM is initialised from a memory file baked into the FPGA
+# bitstream, so the default palette is hardware rather than a ROM convention.
+# Skips when the RTL has not been fetched.
+add_test(NAME vera_palette
+         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_vera_palette.py")
+
+# Register banking: the same addresses carry different registers per DCSEL.
+x16_add_test(vera_regbank NEEDS_SDL
+    SOURCES tests/test_vera_regbank.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_regbank_test)
+    target_include_directories(vera_regbank_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_regbank_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_regbank_test PRIVATE m)
+    endif()
+endif()
+
+# The value half of the debugOn contract: a debug read must report what a real
+# read would. The existing contract test drives recording fakes, so it can only
+# check side effects; this links the real video.c.
+x16_add_test(vera_debug_read NEEDS_SDL
+    SOURCES tests/test_vera_debug_read.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_debug_read_test)
+    target_include_directories(vera_debug_read_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_debug_read_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_debug_read_test PRIVATE m)
+    endif()
+endif()
+
+# The interrupt latch and mask: which ISR bits a write can clear, and which
+# IEN bits a write can store.
+x16_add_test(vera_irq NEEDS_SDL
+    SOURCES tests/test_vera_irq.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_irq_test)
+    target_include_directories(vera_irq_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_irq_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_irq_test PRIVATE m)
+    endif()
+endif()
+
+# What a reset leaves behind: derived state must not outlive the registers it
+# was derived from.
+x16_add_test(vera_reset NEEDS_SDL
+    SOURCES tests/test_vera_reset.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_reset_test)
+    target_include_directories(vera_reset_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_reset_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_reset_test PRIVATE m)
+    endif()
+endif()
+
+# The layer registers, and the map and tile base addresses derived from them.
+x16_add_test(vera_layer NEEDS_SDL
+    SOURCES tests/test_vera_layer.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_layer_test)
+    target_include_directories(vera_layer_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_layer_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_layer_test PRIVATE m)
+    endif()
+endif()
+
+# Which row of a layer each display line shows: the vertical half of the tile
+# address path.
+x16_add_test(vera_layer_rows NEEDS_SDL
+    SOURCES tests/test_vera_layer_rows.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET vera_layer_rows_test)
+    target_include_directories(vera_layer_rows_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_layer_rows_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_layer_rows_test PRIVATE m)
+    endif()
+endif()
+
+# The 65C22's interrupt flags and enables. via.c pulls in memory.h, which
+# includes SDL.h, so it needs the headers -- but nothing here links SDL.
+x16_add_test(via_irq NEEDS_SDL
+    SOURCES tests/test_via_irq.c tests/support/via_fixture.c tests/support/harness.c
+            src/via.c)
+
+# The 65C22's interval timers: one-shot against free-run, and where the next
+# count comes from.
+x16_add_test(via_timers NEEDS_SDL
+    SOURCES tests/test_via_timers.c tests/support/via_fixture.c tests/support/harness.c
+            src/via.c)
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are
 # real, so this exercises the actual routing, watchpoint and cycle accounting.
 x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_debugon_contract.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
+
+# RAM and ROM banking: the registers at $0000 and $0001 and the windows they
+# steer. Same real memory.c and fake devices as the debugOn tests.
+x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_memory_banking.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c)
+
+# The write half of the debugOn contract, which does not exist: pins what a
+# debugger's edit costs and disturbs, since nothing can tell it apart from a
+# store the program executed.
+x16_add_test(debug_write_path NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/test_debug_write_path.c tests/support/fake_devices.c
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
             src/io_trace.c)

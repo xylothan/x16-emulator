@@ -58,10 +58,199 @@ MUTATIONS = [
         "caught_by": ["vera_pcm"],
     },
     # No mutation for the AUDIO_RATE fold. The test asserts the RTL value
-    # (top.v:481 stores write_data raw) and marks the emulator's fold as a
+    # (top.v:480 stores write_data raw) and marks the emulator's fold as a
     # divergence, so it deliberately does not pin `256 - val`. A mutation of
     # that expression would survive, and correctly so. Add one once the fold is
     # removed and the register stores what was written.
+    {
+        "name": "VERA debug reads report a constant",
+        "file": "src/video.c",
+        # The sweep in test_vera_debug_read.c records exactly which registers
+        # read differently to the debugger than to the machine. Breaking the
+        # debug path further changes that set, which the recorded count fails
+        # on -- so the sweep cannot quietly stop measuring anything.
+        "find": "if (debugOn) return video_get_dc_value(i);",
+        "into": "if (debugOn) return 0;",
+        "count": 1,
+        "caught_by": ["vera_debug_read"],
+    },
+    {
+        "name": "VERA DCSEL is truncated to four bits",
+        "file": "src/video.c",
+        # top.v:86 declares dc_select_r as [5:0] and top.v:336 fills it from
+        # write_data[6:1]. Narrowing it silently aliases the high banks onto
+        # the low ones.
+        "find": "io_dcsel = (value >> 1) & 0x3f;",
+        "into": "io_dcsel = (value >> 1) & 0x0f;",
+        "count": 1,
+        "caught_by": ["vera_regbank"],
+    },
+    {
+        "name": "VERA address increment uses a power-of-two step",
+        "file": "src/video.c",
+        # addr_data.v:193 gives 40 for code 0x0B. The non-power-of-two steps
+        # exist so a program can walk tile rows, and are exactly what an
+        # implementation "tidying" the series to 1 << n would lose.
+        "find": "\t40,  -40,",
+        "into": "\t48,  -48,",
+        "count": 1,
+        "caught_by": ["vera_video"],
+    },
+    {
+        "name": "VERA reads the increment from the wrong bits of ADDRx_H",
+        "file": "src/video.c",
+        # video.c:2796. Bits 7:3 are the decrement flag and increment code;
+        # shifting by one more drops the decrement bit entirely.
+        "find": "io_inc[io_addrsel]  = value >> 3;",
+        "into": "io_inc[io_addrsel]  = value >> 4;",
+        "count": 1,
+        "caught_by": ["vera_video"],
+    },
+    {
+        "name": "PSG sawtooth loses its pulse-width shaping",
+        "file": "src/vera_psg.c",
+        # Reverts the waveform to the R47 form. psg.v:163 (R48) XORs the saw
+        # with the inverted pulse width; R47 read the phase directly. This is
+        # the mutation that proves pinning psg.v to R48 does any work.
+        "find": "case WF_SAWTOOTH: v = (ch->phase >> 11) ^ ((ch->pw ^ 0x3f) & 0x3f); break;",
+        "into": "case WF_SAWTOOTH: v = (ch->phase >> 11); break;",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG voices keep running while silenced",
+        "file": "src/vera_psg.c",
+        # psg.v:140 holds a voice at phase zero unless a side is enabled, so
+        # unmuting restarts the waveform rather than resuming it.
+        "find": "uint32_t new_phase = (ch->left || ch->right) ? ((ch->phase + ch->freq) & 0x1FFFF) : 0;",
+        "into": "uint32_t new_phase = ((ch->phase + ch->freq) & 0x1FFFF);",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG noise LFSR loses a tap",
+        "file": "src/vera_psg.c",
+        # psg.v:128 taps 1, 2, 4 and 15. A wrong tap set still sounds like
+        # noise, so only the exact sequence catches it.
+        "find": "(((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 4) ^ (noise_state >> 15)) & 1)",
+        "into": "(((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 15)) & 1)",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "PSG waveform is decoded from the wrong bits",
+        "file": "src/vera_psg.c",
+        # psg.v:44 cur_waveform = cur_channel_attr_r[31:30], the top two bits
+        # of the fourth attribute byte.
+        "find": "channels[ch].waveform = val >> 6;",
+        "into": "channels[ch].waveform = (val >> 5) & 3;",
+        "count": 1,
+        "caught_by": ["vera_psg"],
+    },
+    {
+        "name": "VERA ISR clears on a written zero",
+        "file": "src/video.c",
+        # top.v:440-442 clear a latch when the written bit is one:
+        #   irq_status_vsync_next = irq_status_vsync_r & !write_data[0];
+        # Inverting that acknowledges every pending source whenever a program
+        # clears one, which loses interrupts rather than reporting them wrong.
+        "find": "isr &= value ^ 0xff;",
+        "into": "isr &= value;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IEN stores a fifth enable bit",
+        "file": "src/video.c",
+        # top.v:175 reads bits 5:4 as 2'b0 and top.v:433-436 give them no write
+        # target, so a program cannot store anything there.
+        "find": "ien = value & 0xF;",
+        "into": "ien = value & 0x1F;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IRQLINE bit 8 comes from the wrong IEN bit",
+        "file": "src/video.c",
+        # top.v:432  irq_line_next[8] = write_data[7];
+        # The compare value is split across $9F26 and $9F28; taking the high
+        # bit from bit 6 puts it where the scanline readback is instead.
+        "find": "irq_line = (irq_line & 0xFF) | ((value >> 7) << 8);",
+        "into": "irq_line = (irq_line & 0xFF) | (((value >> 6) & 1) << 8);",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA ISR bit 3 latches instead of following the FIFO",
+        "file": "src/video.c",
+        # top.v:176 takes bit 3 from the audio_fifo_low wire, not a latch, so
+        # it reports the FIFO level at the instant of the read.
+        "find": "case 0x07: return isr | (pcm_is_fifo_almost_empty() ? 8 : 0);",
+        "into": "case 0x07: return isr;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA asserts IRQ regardless of the enables",
+        "file": "src/video.c",
+        # top.v:1200  assign extbus_irq_n = (irq_status & irq_enable) == 0;
+        # Dropping the mask interrupts on every VSYNC whether or not the
+        # program asked for one.
+        "find": "return (tmp_isr & ien) != 0;",
+        "into": "return tmp_isr != 0;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IEN bit 6 reports a stored bit, not the scanline",
+        "file": "src/video.c",
+        # top.v:175 sources bit 6 from scanline[8], live, with nothing writing
+        # it. A debugger reading IEN would otherwise show a raster position
+        # that never moves.
+        "find": "((scanline & 0x100) >> 2)",
+        "into": "0",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA collision nibble accumulates across frames",
+        "file": "src/video.c",
+        # sprite_renderer.v:402  frame_collision_mask_next = cur_collision_mask_r;
+        # Assigned unconditionally at frame_done, so the nibble describes the
+        # frame just ended. ORing instead makes a collision permanent.
+        "find": "isr = (isr & 0xf) | sprite_line_collisions;",
+        "into": "isr = isr | sprite_line_collisions;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA sprite collision mask is read from the wrong nibble",
+        "file": "src/video.c",
+        # sprite_renderer.v:82  wire [3:0] sprite_attr_collision_mask = sprite_attr[23:20];
+        # The top half of attribute byte 6; the bottom half is z-depth and the
+        # flip bits.
+        "find": "props->sprite_collision_mask = sprite_data[sprite][6] & 0xf0;",
+        "into": "props->sprite_collision_mask = (sprite_data[sprite][6] & 0x0f) << 4;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA sprites collide where their masks differ",
+        "file": "src/video.c",
+        # sprite_renderer.v:328 uses the mask directly:
+        #   ... ? (linebuf_rddata[15:12] & sprite_collision_mask_r) : 4'b0;
+        # It was inverted until 4f46cb32 (2023-01-26). This mutation restores
+        # that form, which is the one bug the RTL's own history records here.
+        "find": "sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;",
+        "into": "sprite_line_collisions |= sprite_line_mask[line_x] & ~props->sprite_collision_mask;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    # No mutation for the ISR write clearing bits 7:4. The test records that as
+    # a divergence rather than asserting it, so mutating video.c:2910 towards
+    # the RTL would make the marker pass unexpectedly -- which is a failure by
+    # design, not a caught mutation. Add one once the write stops reaching the
+    # nibble.
     {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
@@ -102,8 +291,10 @@ MUTATIONS = [
     {
         "name": "a debug read of slow I/O costs cycles",
         "file": "src/memory.c",
-        "find": "if (!debugOn && address >= 0x9fa0) {",
-        "into": "if (address >= 0x9fa0) {",
+        # The write path now guards the same way, so this needs the read's own
+        # continuation to stay unique to it.
+        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
+        "into": "if (address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
         "count": 1,
         "caught_by": ["debugon_contract"],
     },
@@ -225,6 +416,286 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["opcode_spec"],
     },
+    {
+        "name": "VERA reset keeps the pending sprite collisions",
+        "file": "src/video.c",
+        # sprite_renderer.v:416  cur_collision_mask_r <= 0;
+        # The half of the sprite reset that is right. Dropping it carries
+        # collisions from before a reset into the frame after it.
+        "find": "\tsprite_line_collisions = 0;\n\n\tvga_scan_pos_x = 0;",
+        "into": "\tvga_scan_pos_x = 0;",
+        "count": 1,
+        "caught_by": ["vera_reset"],
+    },
+    {
+        "name": "VERA sprite z-depth is ignored",
+        "file": "src/video.c",
+        # sprite_renderer.v:81  wire [1:0] sprite_attr_z = sprite_attr[19:18];
+        # A z-depth of zero is not drawn, which is how a guest retires a
+        # sprite. test_vera_reset.c measures a reset by whether sprites stop,
+        # so this breaks the channel the rest of that file reads.
+        "find": "props->sprite_zdepth = (sprite_data[sprite][6] >> 2) & 3;",
+        "into": "props->sprite_zdepth = 1;",
+        "count": 1,
+        "caught_by": ["vera_reset"],
+    },
+    {
+        "name": "VERA layer map base is shifted one bit short",
+        "file": "src/video.c",
+        # layer_renderer.v:107  wire [14:0] map_addr = {map_baseaddr, 7'b0} + map_idx[15:1];
+        # The register names a byte address of register x 512. A shift of 8
+        # puts the tilemap at half the offset the guest asked for.
+        "find": "props->map_base       = reg_layer[layer][1] << 9;",
+        "into": "props->map_base       = reg_layer[layer][1] << 8;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA tile base takes in the two size bits",
+        "file": "src/video.c",
+        # top.v:383-384 forces tile_baseaddr[1:0] to zero on write; bits 1 and 0
+        # of the register are the tile height and width. Letting them into the
+        # address moves the tile data whenever the tile size changes.
+        "find": "props->tile_base      = (reg_layer[layer][2] & 0xFC) << 9;",
+        "into": "props->tile_base      = (reg_layer[layer][2] & 0xFF) << 9;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA map width starts at 16 tiles",
+        "file": "src/video.c",
+        # layer_renderer.v:100 masks the column index to 5 bits at map_width 0,
+        # so the narrowest map is 32 tiles. Starting an octave low halves every
+        # map and moves the end of the tilemap with it.
+        "find": "props->mapw_log2 = 5 + ((reg_layer[layer][0] >> 4) & 3);",
+        "into": "props->mapw_log2 = 4 + ((reg_layer[layer][0] >> 4) & 3);",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    {
+        "name": "VERA layer 1 registers are written to layer 0",
+        "file": "src/video.c",
+        # top.v:219-225 gives layer 1 its own registers at 5'h14-5'h1A. One
+        # bank behind both sets of addresses would leave the two layers sharing
+        # a configuration.
+        "find": "reg_layer[1][reg - 0x14] = value;",
+        "into": "reg_layer[0][reg - 0x14] = value;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
+    # No mutation for the scroll high bytes reading back whole. That is
+    # recorded as a divergence rather than asserted, so mutating video.c
+    # towards the RTL would make the marker pass unexpectedly -- a failure by
+    # design, not a caught mutation.
+    {
+        "name": "VERA layer row does not wrap at the layer height",
+        "file": "src/video.c",
+        # layer_renderer.v:86-89 masks the tile row to the map height. Without
+        # the mask a tall scroll walks off the end of the tilemap instead of
+        # coming back round to the top.
+        "find": "return (y + props->vscroll) & (props->layerh_max);",
+        "into": "return y + props->vscroll;",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
+    {
+        "name": "VERA map height starts at 16 tiles",
+        "file": "src/video.c",
+        # layer_renderer.v:86 masks to 5 bits at map_height 0, so the shortest
+        # map is 32 tiles. An octave low halves the wrap point.
+        "find": "props->maph_log2 = 5 + ((reg_layer[layer][0] >> 6) & 3);",
+        "into": "props->maph_log2 = 4 + ((reg_layer[layer][0] >> 6) & 3);",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
+    {
+        "name": "VERA tile height is read from the tile width bit",
+        "file": "src/video.c",
+        # top.v:386-387 takes height from write_data[1] and width from
+        # write_data[0]. Swapping them changes which bits of the scrolled line
+        # index select the row, per layer_renderer.v:82.
+        "find": "props->tileh_log2 = 3 + ((reg_layer[layer][2] >> 1) & 1);",
+        "into": "props->tileh_log2 = 3 + (reg_layer[layer][2] & 1);",
+        "count": 1,
+        "caught_by": ["vera_layer_rows"],
+    },
+    {
+        "name": "VERA default palette entry is wrong",
+        "file": "src/video.c",
+        # palette_ram.mem is the table baked into the FPGA bitstream, so the
+        # default palette is hardware and not a ROM convention. One edited
+        # entry in a 256-entry table is how this actually goes wrong, and the
+        # only thing that notices is a comparison against the file.
+        "find": "0x08f,0xbbb,",
+        "into": "0x08f,0xbbc,",
+        "count": 1,
+        "caught_by": ["vera_palette"],
+    },
+    {
+        "name": "VIA IER reads back without bit 7",
+        "file": "src/via.c",
+        # W65C22S p27, Table 2-12 note 3: "If a read of this register is done,
+        # bit 7 will be Logic 1 and all other bits will reflect their
+        # enable/disable state."
+        "find": "return via->registers[14] | 0x80;",
+        "into": "return via->registers[14];",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA IER set and clear are the wrong way round",
+        "file": "src/via.c",
+        # W65C22S p26: bit 7 of the written value selects between setting and
+        # clearing the enables. Inverted, every attempt to disable an interrupt
+        # enables it instead.
+        "find": "if (value & 0x80) {",
+        "into": "if (!(value & 0x80)) {",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA IFR bit 7 ignores the enables",
+        "file": "src/via.c",
+        # W65C22S p26: IRQ = IFR6 & IER6 | IFR5 & IER5 | ... | IFR0 & IER0.
+        # Dropping the enable half reports an interrupt for a flag nobody asked
+        # to be told about.
+        "find": "irq = (ifr & via->registers[14]) != 0;",
+        "into": "irq = ifr != 0;",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA debug read of T1C-L acknowledges the timer",
+        "file": "src/via.c",
+        # W65C22S p27, Table 2-11: reading T1C-L low clears the T1 flag. That
+        # is a side effect the debugger must not perform, or opening a memory
+        # view on $9F14 acknowledges the guest's timer interrupt for it.
+        "find": "if (!debug) via->registers[13] &= ~0x40;",
+        "into": "via->registers[13] &= ~0x40;",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA T1 one-shot and free-run are swapped",
+        "file": "src/via.c",
+        # W65C22S p17-18: ACR bit 6 clear is one-shot, "a single Interrupt Flag
+        # each time the Timer is loaded"; set is free-run, where the flag is
+        # raised at every zero with no reload.
+        "find": "if (!(acr & 0x40)) via->timer_running[0] = false;",
+        "into": "if (acr & 0x40) via->timer_running[0] = false;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T1 loads its low byte from the write, not the latch",
+        "file": "src/via.c",
+        # W65C22S p17: "the microprocessor does not write directly into the T1
+        # low order counter. Instead, this half of the counter is loaded
+        # automatically from the low order register when the microprocessor
+        # writes into the high order register and counter."
+        "find": "via->timer_count[0] = ((unsigned)value << 8) | via->registers[6];",
+        "into": "via->timer_count[0] = ((unsigned)value << 8) | value;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T2 counts the clock in pulse mode",
+        "file": "src/via.c",
+        # W65C22S p19: T2 "operates in the One-Shot Mode only (as an interval
+        # timer), or as a pulse counter for counting negative pulses on PB6. A
+        # single control bit within ACR5 is used to select between these two
+        # modes."
+        "find": "tclk = (acr & 0x20) ? via->pb6_pulse_counts : clocks;",
+        "into": "tclk = clocks;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T2 re-arms itself after timing out",
+        "file": "src/via.c",
+        # W65C22S p19: T2 has no free-run mode, so its flag is raised once per
+        # load. Leaving it armed turns a one-shot into a repeating interrupt.
+        "find": "\t\t\tifr |= 0x20;\n\t\t\tvia->timer_running[1] = false;",
+        "into": "\t\t\tifr |= 0x20;",
+        "count": 1,
+        "caught_by": ["via_timers"],
+    },
+    {
+        "name": "banked RAM window is 4K instead of 8K",
+        "file": "src/memory.c",
+        # x16-docs Memory Map: "$A000-$BFFF Banked RAM (8 KB window into one of
+        # 256 banks for a total of 2 MB)". A short stride overlaps every bank
+        # with the top half of the one below it.
+        "find": "return BRAM[(ramBank << 13) + address - 0xa000];",
+        "into": "return BRAM[(ramBank << 12) + address - 0xa000];",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "banked RAM writes ignore the bank",
+        "file": "src/memory.c",
+        # The window is the point: every bank would otherwise be the same 8K,
+        # and a write through one bank would be visible through all of them.
+        "find": "BRAM[(memory_get_ram_bank() << 13) + address - 0xa000] = value;",
+        "into": "BRAM[address - 0xa000] = value;",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "the RAM bank register is masked to the installed banks",
+        "file": "src/memory.c",
+        # x16-docs Memory Map: "$0000 Current RAM bank (0-255)". Masking on the
+        # way in would make a bank beyond the installed RAM alias a real one
+        # instead of reaching nothing.
+        "find": "case 0:\n\t\t\tmemory_set_ram_bank(value);",
+        "into": "case 0:\n\t\t\tmemory_set_ram_bank(value & 0x3f);",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "an uninstalled RAM bank reads as zero",
+        "file": "src/memory.c",
+        # No oracle says what an uninstalled bank returns; the test records
+        # this emulator's answer as characterization. The mutation is here so
+        # that record cannot quietly stop describing anything.
+        "find": "\t\t\treturn (address >> 8) & 0xff; // open bus read\n\t\t}\n\t} else { // banked ROM",
+        "into": "\t\t\treturn 0;\n\t\t}\n\t} else { // banked ROM",
+        "count": 1,
+        "caught_by": ["memory_banking"],
+    },
+    {
+        "name": "a debug write charges the slow-I/O cycles",
+        "file": "src/memory.c",
+        # A debugger's edit updates the machine and does nothing else, so it
+        # spends no cycles -- the same reason a debug read spends none. Losing
+        # the guard makes using the debugger change program timing.
+        "find": "\t\t\t// slow IO2 range\n\t\t\tif (!debugOn) {\n\t\t\t\tclockticks6502 += 3;\n\t\t\t}\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
+        "into": "\t\t\t// slow IO2 range\n\t\t\tclockticks6502 += 3;\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
+    },
+    {
+        "name": "a program write to slow I/O is free",
+        "file": "src/memory.c",
+        # The other side of the same guard: a store the program executed still
+        # costs what it costs, and the debug case is only interesting against
+        # it.
+        "find": "\t\tif (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
+        "into": "\t\tif (false && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
+    },
+    {
+        "name": "a debug write reports a watchpoint",
+        "file": "src/memory.c",
+        # A watchpoint answers "when does the program touch this?". Breaking on
+        # the debugger's own edit answers a question nobody asked, and stops
+        # the machine while someone is typing into it.
+        "find": "if (!debugOn && debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "into": "if (debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "count": 1,
+        "caught_by": ["debug_write_path"],
+    },
 ]
 
 
@@ -313,6 +784,23 @@ def main():
         try:
             path.write_text(original.replace(m["find"], m["into"]),
                             encoding="utf-8")
+
+            # Delete the generated headers rather than trusting the build to
+            # notice they are stale. The generator fires on a timestamp
+            # comparison against the .opcodes file, and restoring the previous
+            # mutation stamps these to "now" -- so when a whole mutate, build
+            # and restore cycle lands inside one filesystem mtime tick, the
+            # mutated .opcodes is not newer than tables.h, generation is
+            # skipped, and the tests read the PREVIOUS opcode tables. The
+            # mutation then looks survived when nothing was ever built from it.
+            #
+            # That is machine-speed dependent, so it shows up as an occasional
+            # red build on CI and never locally. Deleting them cannot be
+            # defeated by any timestamp.
+            if path.suffix == ".opcodes":
+                for gen in gen_backups:
+                    gen.unlink(missing_ok=True)
+
             built, out = build(args.build_dir, passes=2)
             if not built:
                 # A mutation that will not compile proves nothing either way,
