@@ -22,6 +22,7 @@
 #include "midi.h"
 #include "debug_core.h"
 #include "debugger.h"
+#include "io_trace.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -31,6 +32,10 @@ uint8_t ROM[ROM_SIZE];
 extern uint8_t *CART;
 
 static uint8_t addr_ym = 0;
+
+// Defined below, next to the I/O dispatch it belongs to; declared here because
+// memory_init() installs it.
+static void io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles);
 
 bool randomizeRAM = false;
 bool reportUninitializedAccess = false;
@@ -54,6 +59,12 @@ void cpuio_write(uint8_t reg, uint8_t value);
 void
 memory_init()
 {
+	// The trace stamps each event with the PC and cycle count, which io_trace.c
+	// cannot reach for itself without pulling the CPU into every target that
+	// links memory.c -- including the two unit tests that pair it with fake
+	// devices. Handing it a provider keeps that module dependency-free.
+	io_trace_set_context_provider(io_trace_cpu_context);
+
 	// Initialize RAM array
 	RAM = calloc(RAM_SIZE, sizeof(uint8_t));
 	BRAM = calloc(BRAM_SIZE, sizeof(uint8_t));
@@ -205,6 +216,88 @@ read6502(uint16_t address, uint8_t bank) {
 	return real_read6502(address, bank, false, USE_CURRENT_X16_BANK);
 }
 
+// Which device an I/O-page address belongs to, for the trace. Kept here rather
+// than in io_trace.c because the MIDI card's base address is configurable, so
+// only the dispatch below actually knows the map.
+//
+// $9F3E/$9F3F are reported as IO_DEV_SPI, not IO_DEV_VERA: they are VERA
+// registers, but they are also the sole path to the SD card, and VERA capture
+// is off by default because its data ports would swamp the ring.
+static io_device_t
+io_trace_device_for(uint16_t address)
+{
+	if (address >= 0x9f00 && address < 0x9f10) {
+		return IO_DEV_VIA1;
+	} else if (has_via2 && address >= 0x9f10 && address < 0x9f20) {
+		return IO_DEV_VIA2;
+	} else if (address >= 0x9f3e && address < 0x9f40) {
+		return IO_DEV_SPI;
+	} else if (address >= 0x9f20 && address < 0x9f40) {
+		return IO_DEV_VERA;
+	} else if (address >= 0x9f40 && address < 0x9f60) {
+		return (address & 0x01) != 0 ? IO_DEV_YM : IO_DEV_OPENBUS;
+	} else if (address >= 0x9fb0 && address < 0x9fc0) {
+		return IO_DEV_EMU;
+	} else if (has_midi_card && (address & 0xfff0) == midi_card_addr) {
+		return IO_DEV_MIDI;
+	}
+	return IO_DEV_OPENBUS;
+}
+
+// Stamps trace events with where the machine was when they happened. Installed
+// from memory_init() so io_trace.c itself need not know about the CPU.
+static void
+io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles)
+{
+	*pc      = regs.pc;
+	*pc_bank = regs.k;
+	*cycles  = clockticks6502;
+}
+
+// The I/O page dispatch, lifted out of real_read6502() so the value it produces
+// can be traced. Reads here have side effects -- VERA's data ports
+// auto-increment, the SPI port consumes a byte -- so the caller records what
+// this returned and never re-reads to find out.
+static uint8_t
+io_read(uint16_t address, bool debugOn)
+{
+	if (!debugOn && address >= 0x9fa0) {
+		// slow IO5-7 range
+		clockticks6502 += 3;
+	}
+	if (address >= 0x9f00 && address < 0x9f10) {
+		return via1_read(address & 0xf, debugOn);
+	} else if (has_via2 && (address >= 0x9f10 && address < 0x9f20)) {
+		return via2_read(address & 0xf, debugOn);
+	} else if (address >= 0x9f20 && address < 0x9f40) {
+		return video_read(address & 0x1f, debugOn);
+	} else if (address >= 0x9f40 && address < 0x9f60) {
+		// slow IO2 range
+		if (!debugOn) {
+			clockticks6502 += 3;
+		}
+		if ((address & 0x01) != 0) { // partial decoding in this range
+			// A debug read must not flush audio: audio_render() advances
+			// the render write position, and the "no side effects"
+			// guarantee is what lets the debugger sweep the I/O page.
+			if (!debugOn) {
+				audio_render();
+			}
+			return YM_read_status();
+		}
+		return 0x9f; // open bus read
+	} else if (address >= 0x9fb0 && address < 0x9fc0) {
+		// emulator state
+		return emu_read(address & 0xf, debugOn);
+	} else if (has_midi_card && (address & 0xfff0) == midi_card_addr) {
+		// midi card
+		return midi_serial_read(address & 0xf, debugOn);
+	} else {
+		// future expansion
+		return 0x9f; // open bus read
+	}
+}
+
 uint8_t
 real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 {
@@ -219,41 +312,18 @@ real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 	if (address < 0x9f00) { // RAM
 		return RAM[address];
 	} else if (address < 0xa000) { // I/O
-		if (!debugOn && address >= 0x9fa0) {
-			// slow IO5-7 range
-			clockticks6502 += 3;
-		}
-		if (address >= 0x9f00 && address < 0x9f10) {
-			return via1_read(address & 0xf, debugOn);
-		} else if (has_via2 && (address >= 0x9f10 && address < 0x9f20)) {
-			return via2_read(address & 0xf, debugOn);
-		} else if (address >= 0x9f20 && address < 0x9f40) {
-			return video_read(address & 0x1f, debugOn);
-		} else if (address >= 0x9f40 && address < 0x9f60) {
-			// slow IO2 range
-			if (!debugOn) {
-				clockticks6502 += 3;
+		const uint8_t value = io_read(address, debugOn);
+		// A debug read stays out of the trace entirely. The trace records what
+		// the machine did; the debugger sweeping the I/O page to draw itself is
+		// not the machine, and letting it in would mean the act of watching
+		// filled the ring with its own observations.
+		if (!debugOn) {
+			const io_device_t dev = io_trace_device_for(address);
+			if (io_trace_wants(dev)) {
+				io_trace_access(dev, address, value, false);
 			}
-			if ((address & 0x01) != 0) { // partial decoding in this range
-				// A debug read must not flush audio: audio_render() advances
-				// the render write position, and the "no side effects"
-				// guarantee is what lets the debugger sweep the I/O page.
-				if (!debugOn) {
-					audio_render();
-				}
-				return YM_read_status();
-			}
-			return 0x9f; // open bus read
-		} else if (address >= 0x9fb0 && address < 0x9fc0) {
-			// emulator state
-			return emu_read(address & 0xf, debugOn);
-		} else if (has_midi_card && (address & 0xfff0) == midi_card_addr) {
-			// midi card
-			return midi_serial_read(address & 0xf, debugOn);
-		} else {
-			// future expansion
-			return 0x9f; // open bus read
 		}
+		return value;
 	} else if (address < 0xc000) { // banked RAM
 		int ramBank = x16Bank >= 0 ? (uint8_t)x16Bank : memory_get_ram_bank();
 		if (ramBank < num_ram_banks) {
@@ -334,6 +404,19 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 	if (address < 0x9f00) { // RAM
 		RAM[address] = value;
 	} else if (address < 0xa000) { // I/O
+		// Traced before dispatch, so that a decoded event the device emits in
+		// response -- an SD command completing, a file being opened -- is
+		// ordered after the write that caused it.
+		//
+		// A debug write stays out of the trace for the same reason a debug read
+		// does: the trace records what the machine did, and the debugger poking
+		// a register on the user's behalf is not the machine.
+		if (!debugOn) {
+			const io_device_t dev = io_trace_device_for(address);
+			if (io_trace_wants(dev)) {
+				io_trace_access(dev, address, value, true);
+			}
+		}
 		if (!debugOn && address >= 0x9fa0) {
 			// slow IO5-7 range
 			clockticks6502 += 3;

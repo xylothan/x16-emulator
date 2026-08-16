@@ -64,6 +64,20 @@
 #include "cpu/irq_ctx.h"  // interrupt context, incl. the 24-bit return PC
 #include "cpu/fake6502.h" // irq6502()
 
+// I/O panel: the event ring plus each device's side-effect-free debug snapshot.
+// Same rule as above -- the real headers, so a struct that changes shape breaks
+// the build here rather than silently misreading device state in the panel.
+#include "io_trace.h"   // the I/O event ring buffer
+#include "sdcard.h"     // sdcard_debug_get_state, sdcard_get_path
+#include "sdcard_fat.h" // the FAT index that names SD blocks
+#include "vera_spi.h"   // vera_spi_debug_get_state -- the SD data path
+#include "joystick.h"   // joystick_debug_get_state and the JOY_BIT_* layout
+#include "via.h"        // via_debug_get_state
+#include "i2c.h"        // i2c_debug_get_state
+#include "rtc.h"        // rtc_debug_get_state
+#include "ieee.h"       // ieee_debug_get_state -- host-FS files, by name
+#include "serial.h"     // serial_port, the IEC line states
+
 #ifdef __cplusplus
 extern "C" {
 #endif

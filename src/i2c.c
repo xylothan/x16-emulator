@@ -7,6 +7,7 @@
 #include "i2c.h"
 #include "smc.h"
 #include "rtc.h"
+#include "io_trace.h"
 
 #define LOG_LEVEL 0
 
@@ -23,6 +24,12 @@ static bool read_mode = false;
 static uint8_t value = 0;
 static int count = 0;
 static uint8_t device;
+
+// Debug-only session counters; pure increments, no effect on emulation.
+static uint32_t i2c_debug_transactions_started   = 0;
+static uint32_t i2c_debug_transactions_completed = 0;
+static uint32_t i2c_debug_bytes_read             = 0;
+static uint32_t i2c_debug_bytes_written          = 0;
 
 #define KBD_SIZE 16
 uint8_t kbd_buffer[KBD_SIZE];						//Ring buffer for key codes
@@ -108,15 +115,22 @@ i2c_step()
 			printf("I2C START\n");
 #endif
 			state = STATE_START;
+			i2c_debug_transactions_started++;
 		}
 
 		if (state == 1 && i2c_port.clk_in == 1 &&i2c_port.data_in == 1 &&  old_i2c_port.data_in == 0) {
 #if LOG_LEVEL >= 2
 			printf("I2C STOP\n");
 #endif
+			if (io_trace_wants(IO_DEV_I2C) && count > 0) {
+				const char *dname = (device == DEVICE_SMC) ? "SMC" : (device == DEVICE_RTC) ? "RTC" : "?";
+				io_trace_event(IO_DEV_I2C, "i2c STOP $%02X(%s) %s %d byte%s",
+					device, dname, read_mode ? "read" : "write", count, count == 1 ? "" : "s");
+			}
 			state = STATE_STOP;
 			count = 0;
 			read_mode = false;
+			i2c_debug_transactions_completed++;
 		}
 
 		if (state != STATE_STOP && i2c_port.clk_in == 1 && old_i2c_port.clk_in == 0) {
@@ -124,6 +138,7 @@ i2c_step()
 			if (state < 8) {
 				if (read_mode) {
 					if (state == 0) {
+						i2c_debug_bytes_read++;
 						value = i2c_read(device);
 					}
 					i2c_port.data_out = !!(value & 0x80);
@@ -176,15 +191,19 @@ i2c_step()
 #if LOG_LEVEL >= 3
 						printf("I2C ACK(%d) $%02X\n", count, value);
 #endif
-						i2c_port.data_out = 0;
-						count++;
+							if (count > 0) i2c_debug_bytes_written++;
+							i2c_port.data_out = 0;
+							count++;
 					} else {
 #if LOG_LEVEL >= 3
 						printf("I2C NACK(%d) $%02X\n", count, value);
 #endif
-						count = 0;
-						read_mode = false;
-					}
+							if (io_trace_wants(IO_DEV_I2C) && count == 0) {
+								io_trace_event(IO_DEV_I2C, "i2c NACK $%02X unknown device", device);
+							}
+							count = 0;
+							read_mode = false;
+						}
 				}
 				state = STATE_START;
 			}
@@ -228,6 +247,13 @@ uint8_t i2c_kbd_buffer_next() {
  **/
 void i2c_kbd_buffer_flush() {
 	kbd_tail = kbd_head = 0;
+}
+
+/**
+ * Returns number of values currently stored in the keyboard ring buffer
+ **/
+uint8_t i2c_kbd_buffer_count() {
+	return (KBD_SIZE + kbd_head - kbd_tail) & (KBD_SIZE - 1);
 }
 
 /**
@@ -402,4 +428,34 @@ mouse_set_device_id(uint8_t d) {
 			break;
 	}
 	i2c_mse_buffer_flush();
+}
+
+// Side-effect-free snapshot of I2C bus state for the ImGui debugger.
+void
+i2c_debug_get_state(i2c_debug_state_t *out)
+{
+	out->state    = state;
+	out->read_mode = read_mode;
+	out->value    = value;
+	out->count    = count;
+	out->device   = device;
+
+	switch (device) {
+		case 0x42: out->device_name[0] = 'S'; out->device_name[1] = 'M'; out->device_name[2] = 'C'; out->device_name[3] = '\0'; break;
+		case 0x6F: out->device_name[0] = 'R'; out->device_name[1] = 'T'; out->device_name[2] = 'C'; out->device_name[3] = '\0'; break;
+		default:   out->device_name[0] = '\0'; break;
+	}
+
+	out->clk_in  = i2c_port.clk_in;
+	out->data_in = i2c_port.data_in;
+	out->data_out = i2c_port.data_out;
+
+	out->transactions_started   = i2c_debug_transactions_started;
+	out->transactions_completed = i2c_debug_transactions_completed;
+	out->bytes_read             = i2c_debug_bytes_read;
+	out->bytes_written          = i2c_debug_bytes_written;
+
+	// keyboard buffer fill = (KBD_SIZE + head - tail) & (KBD_SIZE - 1)
+	out->kbd_fill = i2c_kbd_buffer_count();
+	out->mse_fill = i2c_mse_buffer_count();
 }
