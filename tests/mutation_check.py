@@ -291,10 +291,12 @@ MUTATIONS = [
     {
         "name": "a debug read of slow I/O costs cycles",
         "file": "src/memory.c",
-        # The write path now guards the same way, so this needs the read's own
-        # continuation to stay unique to it.
-        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
-        "into": "if (address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\treturn via1_read",
+        # The write path guards the same way, so this needs the read's own
+        # continuation to stay unique to it. The read's guard lives in
+        # io_read(), which is a function in its own right so that the value it
+        # returns can be traced -- hence one tab of indent here, not three.
+        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
+        "into": "if (address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
         "count": 1,
         "caught_by": ["debugon_contract"],
     },
