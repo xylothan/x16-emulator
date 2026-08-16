@@ -529,6 +529,50 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_palette"],
     },
+    {
+        "name": "VIA IER reads back without bit 7",
+        "file": "src/via.c",
+        # W65C22S p27, Table 2-12 note 3: "If a read of this register is done,
+        # bit 7 will be Logic 1 and all other bits will reflect their
+        # enable/disable state."
+        "find": "return via->registers[14] | 0x80;",
+        "into": "return via->registers[14];",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA IER set and clear are the wrong way round",
+        "file": "src/via.c",
+        # W65C22S p26: bit 7 of the written value selects between setting and
+        # clearing the enables. Inverted, every attempt to disable an interrupt
+        # enables it instead.
+        "find": "if (value & 0x80) {",
+        "into": "if (!(value & 0x80)) {",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA IFR bit 7 ignores the enables",
+        "file": "src/via.c",
+        # W65C22S p26: IRQ = IFR6 & IER6 | IFR5 & IER5 | ... | IFR0 & IER0.
+        # Dropping the enable half reports an interrupt for a flag nobody asked
+        # to be told about.
+        "find": "irq = (ifr & via->registers[14]) != 0;",
+        "into": "irq = ifr != 0;",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
+    {
+        "name": "VIA debug read of T1C-L acknowledges the timer",
+        "file": "src/via.c",
+        # W65C22S p27, Table 2-11: reading T1C-L low clears the T1 flag. That
+        # is a side effect the debugger must not perform, or opening a memory
+        # view on $9F14 acknowledges the guest's timer interrupt for it.
+        "find": "if (!debug) via->registers[13] &= ~0x40;",
+        "into": "via->registers[13] &= ~0x40;",
+        "count": 1,
+        "caught_by": ["via_irq"],
+    },
 ]
 
 
