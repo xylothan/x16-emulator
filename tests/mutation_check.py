@@ -148,6 +148,71 @@ MUTATIONS = [
         "caught_by": ["vera_psg"],
     },
     {
+        "name": "VERA ISR clears on a written zero",
+        "file": "src/video.c",
+        # top.v:440-442 clear a latch when the written bit is one:
+        #   irq_status_vsync_next = irq_status_vsync_r & !write_data[0];
+        # Inverting that acknowledges every pending source whenever a program
+        # clears one, which loses interrupts rather than reporting them wrong.
+        "find": "isr &= value ^ 0xff;",
+        "into": "isr &= value;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IEN stores a fifth enable bit",
+        "file": "src/video.c",
+        # top.v:175 reads bits 5:4 as 2'b0 and top.v:433-436 give them no write
+        # target, so a program cannot store anything there.
+        "find": "ien = value & 0xF;",
+        "into": "ien = value & 0x1F;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IRQLINE bit 8 comes from the wrong IEN bit",
+        "file": "src/video.c",
+        # top.v:432  irq_line_next[8] = write_data[7];
+        # The compare value is split across $9F26 and $9F28; taking the high
+        # bit from bit 6 puts it where the scanline readback is instead.
+        "find": "irq_line = (irq_line & 0xFF) | ((value >> 7) << 8);",
+        "into": "irq_line = (irq_line & 0xFF) | (((value >> 6) & 1) << 8);",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA ISR bit 3 latches instead of following the FIFO",
+        "file": "src/video.c",
+        # top.v:176 takes bit 3 from the audio_fifo_low wire, not a latch, so
+        # it reports the FIFO level at the instant of the read.
+        "find": "case 0x07: return isr | (pcm_is_fifo_almost_empty() ? 8 : 0);",
+        "into": "case 0x07: return isr;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA asserts IRQ regardless of the enables",
+        "file": "src/video.c",
+        # top.v:1200  assign extbus_irq_n = (irq_status & irq_enable) == 0;
+        # Dropping the mask interrupts on every VSYNC whether or not the
+        # program asked for one.
+        "find": "return (tmp_isr & ien) != 0;",
+        "into": "return tmp_isr != 0;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
+        "name": "VERA IEN bit 6 reports a stored bit, not the scanline",
+        "file": "src/video.c",
+        # top.v:175 sources bit 6 from scanline[8], live, with nothing writing
+        # it. A debugger reading IEN would otherwise show a raster position
+        # that never moves.
+        "find": "((scanline & 0x100) >> 2)",
+        "into": "0",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
+    {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
         # step6502()'s copy, four-space indented. exec6502()'s is eight-space
