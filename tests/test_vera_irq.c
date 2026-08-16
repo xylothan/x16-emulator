@@ -34,6 +34,9 @@
 #define IRQ_SPRCOL 0x04
 #define IRQ_AFLOW  0x08
 
+#define SPRITE_ATTR 0x1FC00
+#define SPRITE_GFX  0x01000
+
 // video_step() advances the scan position by PIXEL_FREQ * steps / mhz and
 // subtracts one scan width per call, so any step wider than VGA_SCAN_WIDTH
 // (800) advances exactly one line.
@@ -309,6 +312,159 @@ test_reading_the_status_does_not_clear_it(void)
 	check_eq(read_isr(), want, "and reading through it clears nothing either");
 }
 
+// ─── Sprite collision, ISR bits 7:4 ─────────────────────────────────────────
+//
+// Unlike the three status latches, the collision nibble is not part of the
+// interrupt register at all. It belongs to the sprite renderer, and the ISR
+// write path has no way to reach it.
+//
+// sprite_renderer.v:37
+//     assign collisions = frame_collision_mask_r;
+//
+// sprite_renderer.v:400-403
+//     if (frame_done) begin
+//         sprcol_irq                = (cur_collision_mask_r != 4'b0);
+//         frame_collision_mask_next = cur_collision_mask_r;
+//         cur_collision_mask_next   = 4'b0;
+//     end
+
+// Sixteen lines of 4bpp, eight bytes each, every pixel colour index 1.
+// Collisions are recorded for non-transparent pixels only, so index 0 would
+// never collide however the sprites are placed.
+static void
+fill_sprite_graphics(void)
+{
+	for (unsigned i = 0; i < 16 * 8; i++) {
+		video_space_write(SPRITE_GFX + i, 0x11);
+	}
+}
+
+// Eight attribute bytes per sprite. Byte 6 holds the collision mask in bits
+// 7:4 and the z-depth in bits 3:2; a z-depth of zero is not drawn.
+static void
+place_sprite(unsigned n, uint8_t mask, uint8_t zdepth)
+{
+	const uint32_t attr = SPRITE_ATTR + n * 8;
+
+	video_space_write(attr + 0, SPRITE_GFX >> 5);                  // address 12:5
+	video_space_write(attr + 1, 0x00);                             // 4bpp, address 16:13
+	video_space_write(attr + 2, 0x00);                             // X
+	video_space_write(attr + 3, 0x00);
+	video_space_write(attr + 4, 0x00);                             // Y
+	video_space_write(attr + 5, 0x00);
+	video_space_write(attr + 6, (uint8_t)(mask | (zdepth << 2)));
+	video_space_write(attr + 7, 0x50);                             // 16x16, palette offset 0
+}
+
+// Two sprites on the same pixels. The second one drawn sees the first one's
+// mask already in the line buffer, so the reported collision is the AND of
+// the two masks.
+static void
+arm_two_sprites(uint8_t mask_a, uint8_t mask_b, uint8_t zdepth_b)
+{
+	video_reset();
+	fill_sprite_graphics();
+	place_sprite(0, mask_a, 1);
+	place_sprite(1, mask_b, zdepth_b);
+
+	video_write(VERA_CTRL, 0x00);
+	video_write(0x09, 0x41); // DCSEL 0, $9F29: sprites on, VGA output
+}
+
+static void
+test_a_collision_latches_the_status_and_the_nibble(void)
+{
+	arm_two_sprites(0x70, 0xD0, 1);
+	step_frame();
+
+	check_eq(read_isr() & 0xF0, 0x50, "the nibble reports the masks the sprites share");
+	check_eq(read_isr() & IRQ_SPRCOL, IRQ_SPRCOL, "and the collision status latches with it");
+}
+
+// frame_collision_mask_next is assigned unconditionally at frame_done, so the
+// nibble describes the frame just ended and nothing earlier. The status bit
+// beside it is a latch and does not follow.
+static void
+test_the_nibble_is_replaced_each_frame_while_the_latch_holds(void)
+{
+	arm_two_sprites(0x70, 0xD0, 1);
+	step_frame();
+	check_eq(read_isr() & 0xF0, 0x50, "a collision in the first frame");
+
+	// Take the second sprite out of the picture, so the next frame collides
+	// with nothing.
+	place_sprite(1, 0xD0, 0);
+	step_frame();
+
+	check_eq(read_isr() & 0xF0, 0x00, "a frame without one replaces the nibble with zero");
+	check_eq(read_isr() & IRQ_SPRCOL, IRQ_SPRCOL, "while the status latch holds until written");
+}
+
+// top.v:440 clears the status latch and nothing beside it:
+//     irq_status_sprite_collision_next = irq_status_sprite_collision_r & !write_data[2];
+static void
+test_clearing_the_status_leaves_the_nibble(void)
+{
+	arm_two_sprites(0x70, 0xD0, 1);
+	step_frame();
+
+	video_write(VERA_ISR, IRQ_SPRCOL);
+	check_eq(read_isr() & IRQ_SPRCOL, 0, "the collision status clears when written");
+	check_eq(read_isr() & 0xF0, 0x50, "leaving the nibble it was reported with");
+
+	// The nibble has no clause in the ISR write at all, so the byte a program
+	// reaches for to acknowledge everything at once cannot touch it either.
+	arm_two_sprites(0x70, 0xD0, 1);
+	step_frame();
+	video_write(VERA_ISR, 0xFF);
+	check_divergent((read_isr() & 0xF0) == 0x50,
+	                "a write of $FF acknowledges the latches without disturbing the nibble",
+	                "video.c:2910 clears all eight bits, but ISR bits 7:4 are "
+	                "sprite_renderer.v's frame_collision_mask_r, which the write at "
+	                "top.v:438-443 cannot reach; on the machine the nibble holds until "
+	                "the next vblank replaces it");
+}
+
+// sprite_renderer.v:326-328
+//     wire [3:0] collision =
+//         linebuf_idx_r < 'd640 &&
+//         (!pixel_is_transparent && sprite_collision_mask_r != 4'b0) ? (linebuf_rddata[15:12] & sprite_collision_mask_r) : 4'b0;
+//
+// The mask is used directly. It was inverted until 4f46cb32 (2023-01-26, "Fix
+// sprite collision and improve write timings (again)"), which is the only
+// change to this expression in the RTL's history -- so masks that share no bit
+// distinguish the two forms rather than merely exercising one.
+static void
+test_masks_collide_only_where_they_overlap(void)
+{
+	arm_two_sprites(0x30, 0xC0, 1);
+	step_frame();
+
+	check_eq(read_isr() & 0xF0, 0x00, "disjoint masks do not collide");
+	check_eq(read_isr() & IRQ_SPRCOL, 0, "and raise no collision status");
+}
+
+// top.v:1198 builds irq_status from four bits, and the nibble is not among
+// them:
+//     wire [3:0] irq_status = {audio_fifo_low, irq_status_sprite_collision_r, irq_status_line_r, irq_status_vsync_r};
+static void
+test_the_nibble_cannot_raise_the_interrupt_line(void)
+{
+	arm_two_sprites(0x70, 0xD0, 1);
+	step_frame();
+
+	video_write(VERA_ISR, IRQ_VSYNC | IRQ_LINE | IRQ_SPRCOL);
+	for (unsigned i = 0; i < 1024; i++) {
+		video_write(VERA_AUDIO_DATA, 0x40);
+	}
+	check_eq(read_isr(), 0x50, "with every latch cleared only the nibble is left");
+
+	// Every enable there is: IEN has no bit for the nibble, which is the whole
+	// of why it cannot interrupt.
+	video_write(VERA_IEN, 0xFF);
+	check(!video_get_irq_out(), "which no enable can turn into an interrupt");
+}
+
 int
 main(void)
 {
@@ -321,5 +477,10 @@ main(void)
 	test_aflow_is_live_and_cannot_be_written_away();
 	test_the_irq_line_is_status_and_enable();
 	test_reading_the_status_does_not_clear_it();
+	test_a_collision_latches_the_status_and_the_nibble();
+	test_the_nibble_is_replaced_each_frame_while_the_latch_holds();
+	test_clearing_the_status_leaves_the_nibble();
+	test_masks_collide_only_where_they_overlap();
+	test_the_nibble_cannot_raise_the_interrupt_line();
 	return x16_test_summary("vera_irq");
 }

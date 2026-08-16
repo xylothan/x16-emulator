@@ -49,6 +49,7 @@ COMMIT_PSG = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"  # tag v48.0.1
 
 FILES = (
     ("fpga/source/top.v", COMMIT),                  # register decode, incl. 0x1B-0x1D
+    ("fpga/source/graphics/sprite_renderer.v", COMMIT),  # sprite collision mask and sprcol_irq
     ("fpga/source/audio/audio_fifo.v", COMMIT),     # the PCM FIFO itself
     ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
     ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC
