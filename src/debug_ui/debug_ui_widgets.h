@@ -47,6 +47,26 @@ dbgui_combo_width(const char *sample)
     return dbgui_field_width(sample) + ImGui::GetFrameHeight();
 }
 
+// ── Commit-on-Enter for numeric fields ──────────────────────────────────────
+// ImGuiInputTextFlags_EnterReturnsTrue is only supported by the InputText
+// family. InputScalar asserts on it (imgui_widgets.cpp:3666), and InputInt and
+// friends wrap InputScalar, so a debug build aborts the moment such a field is
+// drawn. Release builds compile the assert out and the flag happens to work,
+// because InputScalar passes its flags straight through to InputText -- which
+// makes this a combination that works only by accident and only where the
+// assertion is disabled.
+//
+// Call this immediately after the field instead. Deactivation-after-edit plus
+// an Enter in the same frame is the same condition, without the unsupported
+// flag: ImGui deactivates the item when Enter commits it, and the key state is
+// still readable that frame.
+static inline bool
+dbgui_committed_with_enter()
+{
+    return ImGui::IsItemDeactivatedAfterEdit() &&
+           (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+}
+
 // Table column sized to fit `content_w`, and its header text, plus the cell
 // padding on both sides. Pass content_w from one of the helpers above (or
 // ImGui::GetFrameHeight() for a lone checkbox).

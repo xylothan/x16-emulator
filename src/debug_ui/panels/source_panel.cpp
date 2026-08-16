@@ -713,7 +713,8 @@ source_panel_render(bool *p_open)
     ImGui::SameLine();
     ImGui::SetNextItemWidth(90);
     bool go = false;
-    if (ImGui::InputInt("##gotoln", &s_gotoLine, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+    ImGui::InputInt("##gotoln", &s_gotoLine, 0, 0);
+    if (dbgui_committed_with_enter())
         go = true;
     ImGui::SameLine();
     if (ImGui::Button("Go"))

@@ -239,10 +239,10 @@ add_breakpoint_row(void)
 	ImGui::TextUnformatted("Break at $");
 	ImGui::SameLine(0.0f, 0.0f);
 	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
-	const bool submit = ImGui::InputScalar("##bpaddr", ImGuiDataType_S32, &s_add_addr, nullptr, nullptr, "%04X",
-	                                       ImGuiInputTextFlags_CharsHexadecimal |
-	                                           ImGuiInputTextFlags_AutoSelectAll |
-	                                           ImGuiInputTextFlags_EnterReturnsTrue);
+	ImGui::InputScalar("##bpaddr", ImGuiDataType_S32, &s_add_addr, nullptr, nullptr, "%04X",
+	                   ImGuiInputTextFlags_CharsHexadecimal |
+	                       ImGuiInputTextFlags_AutoSelectAll);
+	const bool submit = dbgui_committed_with_enter();
 	ImGui::SetItemTooltip("Address to break at, in HEX. \"10\" means $10 (16), not ten.\n"
 	                      "Press Enter to add.");
 
@@ -408,11 +408,11 @@ draw_breakpoints()
 	                      "Nothing is added to the list above.");
 	ImGui::SameLine(0.0f, 0.0f);
 	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
-	const bool runto_submit = ImGui::InputScalar("##runto", ImGuiDataType_S32, &s_runto_addr,
-	                                             nullptr, nullptr, "%04X",
-	                                             ImGuiInputTextFlags_CharsHexadecimal |
-	                                                 ImGuiInputTextFlags_AutoSelectAll |
-	                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+	ImGui::InputScalar("##runto", ImGuiDataType_S32, &s_runto_addr,
+	                   nullptr, nullptr, "%04X",
+	                   ImGuiInputTextFlags_CharsHexadecimal |
+	                       ImGuiInputTextFlags_AutoSelectAll);
+	const bool runto_submit = dbgui_committed_with_enter();
 	ImGui::SetItemTooltip("Address to run to, in HEX. Press Enter to go.");
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!DEBUGIsPaused());
