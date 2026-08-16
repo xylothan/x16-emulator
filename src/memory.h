@@ -19,6 +19,11 @@ extern "C" {
 #define USE_CURRENT_X16_BANK (-1)
 #define debug_read6502(a, b, x) real_read6502((a), (b), true, (x))
 
+// The write half of the same contract. A debugger's edit updates the machine
+// and does nothing else: it spends no cycles and reports no watchpoint, because
+// the program did not store anything. The byte is simply what was always there.
+#define debug_write6502(a, b, v) real_write6502((a), (b), (v), true)
+
 // X16 r0-r15
 #define X16_REG_R0L (direct_page_add(2))
 #define X16_REG_R0H (direct_page_add(3))
@@ -56,6 +61,7 @@ extern "C" {
 uint8_t read6502(uint16_t address, uint8_t bank);
 uint8_t real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank);
 void write6502(uint16_t address, uint8_t bank, uint8_t value);
+void real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn);
 void vp6502();
 
 void memory_init();

@@ -277,6 +277,12 @@ real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank)
 void
 write6502(uint16_t address, uint8_t bank, uint8_t value)
 {
+	real_write6502(address, bank, value, false);
+}
+
+void
+real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
+{
 	if (!is_gen2) bank = 0;
 
 	if(reportUsageStatisticsFilename!=NULL) {
@@ -304,7 +310,11 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 	// set, so this costs one comparison per store outside a debugging session.
 	// Only bank 0 is watched: a non-zero program bank on Gen2 is flat RAM in a
 	// separate address space, which a 16-bit watch address cannot name.
-	if (debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {
+	//
+	// A debug write is not a store the program made, so it reports nothing: a
+	// watchpoint answers "when does the program touch this?", and breaking on
+	// the debugger's own edit answers a question nobody asked.
+	if (!debugOn && debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {
 		DEBUGBreakOnWatchpoint();
 	}
 
@@ -324,7 +334,7 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 	if (address < 0x9f00) { // RAM
 		RAM[address] = value;
 	} else if (address < 0xa000) { // I/O
-		if (address >= 0x9fa0) {
+		if (!debugOn && address >= 0x9fa0) {
 			// slow IO5-7 range
 			clockticks6502 += 3;
 		}
@@ -336,7 +346,9 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 			video_write(address & 0x1f, value);
 		} else if (address >= 0x9f40 && address < 0x9f60) {
 			// slow IO2 range
-			clockticks6502 += 3;
+			if (!debugOn) {
+				clockticks6502 += 3;
+			}
 			if ((address & 0x01) == 0) {   // YM reg (partially decoded)
 				addr_ym = value;
 			} else {                       // YM data (partially decoded)

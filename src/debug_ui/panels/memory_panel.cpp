@@ -27,8 +27,9 @@
 
 // ---------------------------------------------------------------------------
 // debug_ui_write6502 — declared (extern "C") in debug_ui_bridge.h. Defined here
-// for now; wraps the core write6502() so writes go through the *intended* path
-// (I/O side effects + watchpoints). For banked RAM/ROM, write6502() targets the
+// for now; wraps the core debug_write6502() so the edit updates the machine and
+// does nothing else: no cycles spent, no watchpoint reported. The byte reads as
+// though it had always been there. For banked RAM/ROM, the write targets the
 // currently mapped bank, so we temporarily point the mapping at the bank the
 // user is viewing and restore it. The emulator is paused in the debugger while
 // editing, so this bank juggling is not observable by the running program.
@@ -39,15 +40,15 @@ debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x16Ban
     if (x16Bank >= 0 && address >= 0xA000 && address < 0xC000) { // banked RAM
         uint8_t saved = memory_get_ram_bank();
         memory_set_ram_bank((uint8_t)x16Bank);
-        write6502(address, bank, value);
+        debug_write6502(address, bank, value);
         memory_set_ram_bank(saved);
     } else if (x16Bank >= 0 && address >= 0xC000) { // banked ROM / cartridge
         uint8_t saved = memory_get_rom_bank();
         memory_set_rom_bank((uint8_t)x16Bank);
-        write6502(address, bank, value);
+        debug_write6502(address, bank, value);
         memory_set_rom_bank(saved);
     } else {
-        write6502(address, bank, value);
+        debug_write6502(address, bank, value);
     }
 }
 
