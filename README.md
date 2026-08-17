@@ -47,7 +47,15 @@ Why X16Emu ADD
 | **The window doesn't freeze** | On Windows the emulator keeps running and painting while its window is dragged or resized. |
 | **Automated releases** | Every push is built for all platforms; tagging stages a draft release with all the assets attached, ready for a human to publish. |
 
-The debugger is documented in full under [Advanced Debugging](#advanced-debugging) below.
+[![The X16Emu ADD debugger stopped inside a cc65 assembly loop](./.gh/screenshots/debugger-overview.png)](./.gh/screenshots/debugger-overview.png)
+
+*Stopped mid-loop in a cc65 assembly program: your own source on the left with the current line
+highlighted, 65C816-aware registers and the X16 virtual registers `R0`–`R15` on the right, and a
+live hex editor underneath. Every panel is dockable, and the machine keeps running in its own
+window while you inspect it.*
+
+The debugger is documented in full, panel by panel and with a screenshot of each, under
+[Advanced Debugging](#advanced-debugging) below.
 
 Relationship to the official emulator
 -------------------------------------
@@ -355,27 +363,30 @@ running in its own window while you inspect it.
 
 #### Panels
 
-Every panel is dockable, closable and reopenable from the **View** menu.
+Every panel is dockable, closable and reopenable from the **View** menu. Each one is shown in
+[A tour of the panels](#a-tour-of-the-panels) below.
 
 | Panel | What it gives you |
 | --- | --- |
-| **Disassembly** | Live disassembly around the PC. Hovering an operand shows the effective address and the value there. Right-click for *Run to here* and *Toggle breakpoint*. |
-| **CPU** | Registers with 65C816-aware widths, decoded status flags, and the stack with the most recent push on top. A collapsible **Virtual Regs (R0–R15)** section shows the X16 pseudo-registers at `$02`–`$21`. A collapsible **Watch** section holds your own address watches — bank-qualified, up to 16 bytes each, editable, with hex/decimal/binary tooltips. |
-| **Memory** | A hex editor with three tabs: **CPU** (the CPU map), **Banked** (browse any RAM bank at `$A000`–`$BFFF`) and **VRAM** (VERA's full 17-bit address space). Drag to select a range, search by hex bytes or ASCII with Find Next/Prev, jump to an address, and watch changed bytes flash. Right-click to *Add to watch*, *Add range to watch*, *Copy address*, *Break on write* or *Clear selection*. Edits go through the normal write path, so I/O side effects happen and watchpoints fire. |
-| **Source** | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. For C, stepping moves a whole statement at a time rather than an instruction. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
-| **VERA** | Six tabs: **Registers** (all 32 registers `$9F20`–`$9F3F`, fields decoded), **Palette**, **Tiles**, **Sprites**, **Bitmap** and **Tilemap**. Each view decodes using the registers that actually rendered each scanline, so raster splits show up correctly rather than being flattened to the end-of-frame state. |
-| **Breakpoints** | Every breakpoint, with its condition and hit count. Enable, disable or delete individually. |
-| **Symbols** | A filterable list of every label from your `.dbg`, with live values. Right-click to *Go to*, *Toggle breakpoint* or *Run to here*. |
-| **Call Stack** | A heuristic 65xx stack unwind. Frames are named after the nearest enclosing label, so even code without debug info gets a useful name. Click a frame to jump there in both source and disassembly. |
-| **PSG** | VERA PSG voices with live register values, plus scope traces. |
-| **YM2151** | FM channel state and scope traces. |
-| **PCM** | VERA PCM state and scope traces. |
-| **I/O** | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. See [Watching I/O and file access](#watching-io-and-file-access). |
+| [**Disassembly**](#disassembly) | Live disassembly around the PC. Hovering an operand shows the effective address and the value there. Right-click for *Run to here* and *Toggle breakpoint*. |
+| [**CPU**](#cpu-virtual-registers-and-the-stack) | Registers with 65C816-aware widths, decoded status flags, and the stack with the most recent push on top. A collapsible **Virtual Regs (R0–R15)** section shows the X16 pseudo-registers at `$02`–`$21`. A collapsible **Watch** section holds your own address watches — bank-qualified, up to 16 bytes each, editable, with hex/decimal/binary tooltips. |
+| [**Memory**](#memory) | A hex editor with three tabs: **CPU** (the CPU map), **Banked** (browse any RAM bank at `$A000`–`$BFFF`) and **VRAM** (VERA's full 17-bit address space). Drag to select a range, search by hex bytes or ASCII with Find Next/Prev, jump to an address, and watch changed bytes flash. Right-click to *Add to watch*, *Add range to watch*, *Copy address*, *Break on write* or *Clear selection*. Edits go through the normal write path, so I/O side effects happen and watchpoints fire. |
+| [**Source**](#source-level-stepping) | Your original `.s`/`.c` source in tabs, with the current line highlighted and centred on each stop. For C, stepping moves a whole statement at a time rather than an instruction. Right-click for *Run to here* and *Toggle breakpoint*. **Open…** pre-loads a file so you can set breakpoints before the PC ever gets there. Hovering a label or number resolves it to an address and its live value. |
+| [**VERA**](#vera-graphics-debugging) | Six tabs: **Registers** (all 32 registers `$9F20`–`$9F3F`, fields decoded), **Palette**, **Tiles**, **Sprites**, **Bitmap** and **Tilemap**. Each view decodes using the registers that actually rendered each scanline, so raster splits show up correctly rather than being flattened to the end-of-frame state. |
+| [**Breakpoints**](#breakpoints) | Every breakpoint, with its condition and hit count. Enable, disable or delete individually. |
+| [**Symbols**](#symbols) | A filterable list of every label from your `.dbg`, with live values. Right-click to *Go to*, *Toggle breakpoint* or *Run to here*. |
+| [**Call Stack**](#call-stack) | A heuristic 65xx stack unwind. Frames are named after the nearest enclosing label, so even code without debug info gets a useful name. Click a frame to jump there in both source and disassembly. |
+| [**PSG**](#psg--veras-16-voice-sound-generator) | VERA PSG voices with live register values, plus scope traces. |
+| [**YM2151**](#ym2151--the-fm-chip) | FM channel state and scope traces. |
+| [**PCM**](#pcm--the-audio-fifo) | VERA PCM state and scope traces. |
+| [**I/O**](#watching-io-and-file-access) | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. |
 
 While the machine is paused, the audio panels keep drawing their scope traces by projecting from
 the current register state, so you can see what a voice *would* be doing at the moment you stopped.
 
 #### Toolbar
+
+![The debugger toolbar: menus, transport buttons, speed control and status readout](./.gh/screenshots/toolbar.png)
 
 Along the top, after the menus: **Continue**, **Pause**, **Step Into**, **Step Over**,
 **Step Out** (each greyed out when it does not apply and each showing its shortcut in the
@@ -400,6 +411,8 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 the Disassembly or Source panel, memory change highlighting and its duration, holding audio while
 paused, I/O capture and its per-device gating, and the global interface scale. Settings and your
 window layout are saved to `imgui.ini` and restored next run.
+
+![The Settings window, with Appearance, Navigation, Execution, Memory, Audio and Safety sections](./.gh/screenshots/settings.png)
 
 #### Keyboard shortcuts
 
@@ -428,16 +441,119 @@ These work in the emulator window and are handy while debugging graphics:
 | `Shift`+`F3` | Toggle sprites |
 | `Shift`+`F8` | Toggle KERNAL skip |
 
-#### Breakpoints and watchpoints
+### A tour of the panels
 
-Set breakpoints by clicking the gutter in the Disassembly or Source panel, pressing `F9`, using a
-right-click menu, or passing `-bp <address>` on the command line. Watchpoints break on writes to
-an address or a selected range — select bytes in the Memory panel and choose *Break on write*.
-Up to 64 watchpoints can be active at once.
+Every screenshot below comes from one session: a cc65 assembly program built with `ca65 -g`, run as
 
-Conditional breakpoints and hit counts are set through a DAP client; the syntax is documented
-under [Remote debugging with DAP](#remote-debugging-with-dap), and the resulting conditions and
-hit counts are visible in the Breakpoints panel.
+```
+x16emu -imgui -prg demo.prg -run -dbgfile demo.dbg -srcpath src
+```
+
+#### Source-level stepping
+
+![Source panel stopped on a highlighted line inside an assembly loop, with the file open in a tab](./.gh/screenshots/source-stepping.png)
+
+The Source panel shows the file the PC is actually in — comments, labels, original formatting and
+all — with the current line highlighted and centred on every stop. Files open as tabs and the panel
+switches between them on its own as execution crosses module boundaries, so a program split across
+a dozen `.s` files needs no bookkeeping from you.
+
+`F10` walks the highlight down the loop an instruction at a time while `A` and `X` track along in
+the CPU panel. **Open…** pre-loads a file the PC has not reached yet, so you can arm a breakpoint
+before it ever gets there, and hovering a label or a literal resolves it to an address and its
+live value.
+
+#### Disassembly
+
+![Disassembly panel showing raw bytes, mnemonics, resolved effective addresses and symbol names](./.gh/screenshots/disassembly.png)
+
+When the PC lands somewhere the debug info does not cover — KERNAL ROM, a trampoline, someone
+else's binary — the Disassembly panel takes over. Every operand is resolved to its effective
+address and annotated with the symbol living there (`=08AD point_at_cell`), so ROM code reads
+almost as well as your own. Right-click any line for *Run to here* or *Toggle breakpoint*.
+
+Which panel comes to the front on a break is a preference, not a rule: **Settings…** can switch to
+Disassembly whenever there is no source and switch back when there is.
+
+#### Call stack
+
+![Call Stack panel showing inner, middle and outer frames each resolved to a source file and line](./.gh/screenshots/call-stack.png)
+
+The 65C02 has no frame pointer, so this is a heuristic unwind of the hardware stack — but it is a
+useful one. Each frame is named after the nearest enclosing label and resolved back to a source
+file and line, and frames that fall outside your debug info are still labelled with where they are
+(`[KERNAL/ROM]`, `[stub/KERNAL RAM]`) rather than dropped. Click any frame to send both the Source
+and Disassembly panels to it.
+
+#### Symbols
+
+![Symbols panel listing every label with its address and live byte and word values](./.gh/screenshots/symbols-panel.png)
+
+Every label from the `.dbg`, filterable by name, each with its address and the byte and word
+currently living there. Double-click to go to a symbol; right-click for *Toggle breakpoint* or
+*Run to here*.
+
+#### CPU, virtual registers and the stack
+
+![CPU panel with registers, the X16 virtual registers R0-R15, decoded status flags and interrupt state](./.gh/screenshots/cpu-panel.png)
+
+Registers are shown at the width the CPU is actually using — the panel is 65C816-aware, so `A`,
+`X` and `Y` widen and narrow with the `M` and `X` flags instead of always reading as eight bits.
+Status flags are broken out as individual checkboxes, and every field is editable in place.
+
+Two things here are specific to the X16. **Virtual Regs (R0–R15)** decodes the sixteen 16-bit
+pseudo-registers the KERNAL and cc65 keep at `$02`–`$21`, so you read `R3` rather than working out
+which zero-page pair that was. The **Interrupts** block reports whether you are currently inside a
+handler and how deep, the VERA `IEN`/`ISR` state, and how many cycles remain until the next VSYNC.
+
+Below that sit the stack, most recent push first, and a **Watch** section for your own
+bank-qualified address watches — up to 16 bytes each, editable, with hex/decimal/binary tooltips.
+
+#### Memory
+
+![Memory panel hex editor showing a highlighted byte with its decimal, hex and binary preview](./.gh/screenshots/memory-panel.png)
+
+Three tabs: **CPU** for the processor's view, **Banked** for any RAM bank at `$A000`–`$BFFF`, and
+**VRAM** for VERA's full 17-bit space. Jump to an address, search by hex bytes or ASCII, drag to
+select a range, and watch bytes flash as they change. The selection is decoded underneath as
+decimal, hex and binary in the type of your choosing.
+
+Edits go through the emulator's normal write path rather than poking the array behind its back, so
+I/O side effects happen and watchpoints fire exactly as they would have if the program had done it.
+
+#### Breakpoints
+
+Set one by clicking the gutter in the Source or Disassembly panel, pressing `F9` at the PC, or
+right-clicking the line:
+
+![Right-click menu on a source line offering Run to here and Toggle breakpoint](./.gh/screenshots/source-context-menu.png)
+
+##### Conditions and hit counts
+
+A breakpoint that fires on all sixteen passes of a loop is rarely what you want. Every breakpoint
+carries an optional condition and ignore count, editable from the Breakpoints panel — no DAP client
+required:
+
+![The breakpoint condition editor, with a dropdown offering A, X, Y, SP, P, byte and word operands](./.gh/screenshots/breakpoint-condition-operands.png)
+
+The left operand is a register (`A`, `X`, `Y`, `SP`, `P`) or memory (`byte[addr]`, `word[addr]`);
+the comparison and the value complete it. The value box is **hex** — it is labelled with a `$` —
+so `$0A` is decimal ten:
+
+![The condition set to X == $0A, with an ignore-first-N-hits control and a hit counter](./.gh/screenshots/breakpoint-condition.png)
+
+Run, and the loop stops on exactly the pass you asked for — the eleventh, with the emulator having
+printed `0` through `10` and `X` still reading `$0A` because the `INX` has not happened yet:
+
+![Emulator screen showing the counter printed 0 to 10 where the conditional breakpoint stopped](./.gh/screenshots/demo-conditional-break-screen.png)
+
+The panel lists every breakpoint with its bank, hit count and condition, and has both a
+**Memory writes** section for watchpoints and a *Run to* box:
+
+![Breakpoints panel listing an execution breakpoint with one hit, plus the Memory writes section](./.gh/screenshots/breakpoints-panel.png)
+
+Conditions and hit counts set from a DAP client appear here too, and vice versa; the DAP syntax is
+documented under [Remote debugging with DAP](#remote-debugging-with-dap).
 
 ##### Catching early boot with `-bp`
 
@@ -470,6 +586,132 @@ The breakpoint belongs to the command line, not to whichever debugger displays i
 in the Breakpoints panel and to a DAP client, and neither can take it away — a client
 disconnecting leaves it exactly where you put it. Deleting it is a deliberate act: `F9` on the
 line, or the bin in the Breakpoints panel.
+
+#### Watchpoints — break on write
+
+A breakpoint stops when the PC reaches an address. A watchpoint stops when the *program writes to
+memory*, which is how you find what is corrupting a variable when you have no idea which code is to
+blame. Right-click any byte in the Memory panel — or drag-select a range first, for up to 64 active
+watchpoints:
+
+![Right-click menu on a memory byte offering Add to watch, Copy address and Break on write](./.gh/screenshots/memory-context-menu.png)
+
+Each watchpoint can carry a value filter, so you stop only when a particular value is written
+rather than on every store:
+
+![A break-on-write entry at $32A3 with the filter set to stop only when the written value is $42](./.gh/screenshots/watchpoints.png)
+
+Run, and the eight earlier writes (`01 02 04 08 10 20 40 80`) pass straight through:
+
+![Emulator screen showing the eight earlier writes printed, none of which stopped execution](./.gh/screenshots/demo-watchpoint-screen.png)
+
+Execution stops on the instruction after the store that actually mattered:
+
+![Source panel stopped on the line immediately after the store of $42 that triggered the watchpoint](./.gh/screenshots/watchpoint-hit.png)
+
+> **A note on names.** The debugger deliberately avoids the word *watchpoint* in the UI, because
+> the CPU panel's **Watch** list already means something else — addresses you are keeping an eye
+> on, which never stop execution. In the UI it is *Break on write* in the Memory panel's
+> right-click menu and **Memory writes** in the Breakpoints panel.
+
+#### VERA graphics debugging
+
+The VERA panel has six tabs. All of them read the chip directly rather than the finished frame, so
+they are live and correct even while the machine is stopped and the emulator window is showing a
+stale image — and crucially, each view decodes using the registers that actually rendered each
+scanline, so **raster splits show up as raster splits** instead of being flattened to whatever the
+registers happened to hold at end of frame.
+
+##### Registers
+
+![VERA Registers tab listing all 32 registers with a decoded summary of video mode and both layers](./.gh/screenshots/vera-registers.png)
+
+All 32 registers at `$9F20`–`$9F3F` in hex and binary, plus a **Decoded** block that spells out
+what they add up to: the data port address and increment, output mode, which layers and sprites are
+on, scaling, border colour, and each layer's depth, map size, map base, tile base and tile size.
+
+##### Palette
+
+![VERA Palette tab showing all 256 entries as colour swatches](./.gh/screenshots/vera-palette.png)
+
+All 256 entries from `$1FA00`–`$1FBFF` as swatches. Hover one for its index and 12-bit RGB value.
+
+##### Tiles
+
+![VERA Tiles tab decoding eight 8x8 4bpp tiles at 8x zoom](./.gh/screenshots/vera-tiles.png)
+
+Decodes VRAM as tiles at whatever base address, depth, size, palette offset and zoom you point it
+at, so you can confirm your art landed correctly before anything is drawn with it. Hover a tile for
+its address; click to select.
+
+##### Tilemap
+
+![VERA Tilemap tab rendering the 80x60 visible area of a 128x64 layer 0 tile map](./.gh/screenshots/vera-tilemap.png)
+
+Renders a layer's map through that layer's own registers — the same tile base, map base, map size
+and depth the hardware is using. **Follow raster** decodes each row with the registers that were in
+force when that row was drawn, which is what makes mid-screen register changes visible.
+
+Here is the same map on the emulated display a moment later, once layer 0 was switched on and the
+text layer's opaque background was cleared:
+
+![The emulator screen showing the tiled layer 0 running behind the text layer](./.gh/screenshots/demo-tilemap-screen.png)
+
+##### Sprites
+
+![VERA Sprites tab showing eight enabled sprites with image previews and decoded attributes](./.gh/screenshots/vera-sprites.png)
+
+All 128 sprite records at `$1FC00`, fully decoded: a rendered preview of each sprite's image, its
+data address, colour depth, size, X/Y position, Z-depth, palette offset and flip bits. **Hide
+disabled** collapses the list to just the sprites that are actually live.
+
+##### Bitmap
+
+![VERA Bitmap tab decoding a 320x240 4bpp bitmap straight out of VRAM](./.gh/screenshots/vera-bitmap.png)
+
+Decodes a bitmap-mode layer straight out of VRAM at the width, height and zoom you choose. Because
+it reads VRAM rather than the display, the image is visible while it is still being written and
+before the layer has been switched on at all.
+
+#### Audio debugging
+
+All three sound sources get a panel, and each shows raw register state, a decode of what that state
+*means*, and scope traces. While the machine is paused the panels keep drawing by projecting from
+the current register state, so you can see what a voice *would* be doing at the moment you stopped
+— the **Hold audio panels while paused** setting controls this.
+
+##### PSG — VERA's 16-voice sound generator
+
+![PSG panel showing per-voice waveform, frequency, decoded pitch in Hz, nearest note, pulse width, volume, pan and level](./.gh/screenshots/psg-panel.png)
+
+Every one of the 16 voices, with the raw frequency word decoded to Hz *and* to the nearest note
+with its cents error, the waveform, pulse width as a duty percentage, the volume both raw and after
+the hardware's lookup table, pan, and a live level meter. Selecting a voice expands the four
+registers behind it byte by byte. There are also **Registers** and **Scope** tabs, the latter with
+a trace per voice plus the summed output.
+
+##### YM2151 — the FM chip
+
+![YM2151 panel showing all eight FM channels with key code, decoded pitch, algorithm, feedback, pan and key-on state](./.gh/screenshots/fm-panel.png)
+
+All eight channels with their key code decoded to a note and a frequency, algorithm, feedback,
+pan, PMS/AMS, per-operator key-on state, envelope phase and output level.
+
+The **Algorithm** tab is the one worth knowing about: it draws the operator routing for the
+selected channel from the registers that were actually written, and box brightness follows live
+envelope attenuation, so you can watch a patch sound rather than reading its bytes.
+
+![The FM Algorithm tab drawing the four-operator routing diagram for algorithm 7](./.gh/screenshots/fm-algorithm.png)
+
+##### PCM — the audio FIFO
+
+![PCM panel decoding audio control, playback rate, FIFO fill level, read/write indices and AFLOW IRQ state](./.gh/screenshots/pcm-panel.png)
+
+The audio FIFO is the one sound source where the CPU has to keep up, so this panel is mostly about
+whether it is: FIFO fill level as a bar and a byte count, how many frames that is in milliseconds,
+read and write indices, and whether the `AFLOW` interrupt is currently asserted. Format, volume and
+playback rate are decoded from `AUDIO_CTRL` and `AUDIO_RATE`, and the panel reads the PCM block
+directly rather than through `$9F3B`, so inspecting it does not itself consume audio.
 
 #### Watching I/O and file access
 
