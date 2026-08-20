@@ -31,6 +31,10 @@
     Build, download a ROM, boot the emulator and run the DAP testbench against it.
 
 .EXAMPLE
+    .\build.ps1 -Dbg
+    Build tools/x16dbg, the .NET command-line DAP client.
+
+.EXAMPLE
     .\build.ps1 -Run -EmuArgs '-prg','MYPROG.PRG','-run'
     Build, then launch the emulator with extra arguments passed through to it.
 #>
@@ -76,6 +80,9 @@ param(
 
     # Seconds to let the machine reach BASIC before -DapTest starts asserting.
     [int]$BootWait = 25,
+
+    # Build tools/x16dbg, the .NET DAP client, instead of the emulator.
+    [switch]$Dbg,
 
     # Extra arguments passed straight to x16emu, e.g. -EmuArgs '-prg','A.PRG','-run'.
     # Named rather than trailing, because a bare -run would collide with this
@@ -288,6 +295,22 @@ Write-Note "Preset        : $presetName ($Config)"
 if ($Clean -and (Test-Path $buildDir)) {
     Write-Step "Removing $buildDir"
     Remove-Item -Recurse -Force $buildDir
+}
+
+# x16dbg is a .NET project, so it sits outside the CMake build entirely.
+if ($Dbg) {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        Fail "-Dbg needs the .NET SDK (dotnet) on PATH."
+    }
+    $dbgDir = Join-Path $RepoRoot 'tools\x16dbg'
+    if (-not (Test-Path $dbgDir)) { Fail "tools\x16dbg not found." }
+
+    Write-Step "Building tools/x16dbg ($Config)"
+    & dotnet build $dbgDir -c $Config --nologo
+    if ($LASTEXITCODE -ne 0) { Fail "x16dbg build failed." }
+    Write-Step "Done"
+    Write-Note "Run it with: dotnet run --project tools/x16dbg -- <command>"
+    exit 0
 }
 
 # Reconfigure when the cache is missing, when asked, or when the BUILD_TESTS

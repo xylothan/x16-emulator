@@ -226,6 +226,7 @@ CMake that can actually drive that generator, locates vcpkg, and selects the mat
 .\build.ps1 -Tests               # build and run the unit test suite
 .\build.ps1 -Run                 # build, then launch it
 .\build.ps1 -DapTest -FetchRom   # download a ROM, boot, run the DAP testbench
+.\build.ps1 -Dbg                 # build tools/x16dbg, the .NET DAP client
 ```
 
 Useful extras: `-Target <name>` for a single CMake target, `-Rom <path>` to point at a ROM (or set
@@ -999,7 +1000,8 @@ interactive mode, and `-h` for help. With no command it drops into an interactiv
 
 Commands, in both modes: `step`/`s`, `continue`/`c`, `break`/`b`, `status`/`t`, `reset`,
 `regs`/`r`, `setreg <reg> <hexval>`, `mem <addr>-<end>` or `mem <addr> <len>`,
-`setmem <addr> <hexdata>`, and `bp add|remove|list|clear <addr>`. Addresses are hex.
+`setmem <addr> <hexdata>`, `vram`/`v` and `setvram` for VERA's video RAM, `joy`/`j` to drive a
+controller port, and `bp add|remove|list|clear <addr>`. Addresses are hex.
 
 ```
 > b
@@ -1011,6 +1013,39 @@ Commands, in both modes: `step`/`s`, `continue`/`c`, `break`/`b`, `status`/`t`, 
   C000: A9 00 85 00 A9 01 85 01 A9 00 8D 00 02 A9 00 8D  |................|
 > c
 ```
+
+`vram` reads VERA's 17-bit video RAM, which is not in the CPU map — so `mem 1B000` and
+`vram 1B000` are two different memories at the same number — and `setvram` is the only way to
+write it. Both echo the bytes back after a write:
+
+```
+> vram 1B000 10
+  1B000: DF 64 20 64 20 64 20 64 20 64 20 64 E9 64 20 61  |.d d d d d d.d a|
+> setvram 1F9C0 CAFEBABE
+Wrote 4 bytes to vram:1F9C0
+  1F9C0: CA FE BA BE                                      |....            |
+```
+
+`joy <port 1-4>` drives a virtual SNES controller with no gamepad attached and no `-joy1`..`-joy4`
+flag. The button list is the complete held state, so anything left off it is released:
+
+```
+> joy 1 right a
+  Joystick 1: right a
+    mask=$FF7E  source=virtual
+> joy 1 start          (right and a let go)
+> joy 1                (query, changes nothing)
+> joy 1 none           (connected, nothing held — JOY(1) reads $00)
+> joy 1 release        (port empty again — JOY(1) reads $FF)
+```
+
+Buttons are `up down left right a b x y start select l r`.
+
+One caveat about one-shot mode: each command is its own debug session, and the emulator resumes
+when a session that paused it goes away — deliberately, so a headless machine cannot be left
+halted with nobody able to restart it. Commands that only inspect are fine, and memory, VRAM and
+joystick state persist either way, but anything that depends on staying stopped (`break`,
+`setreg`, stepping) belongs in interactive mode, where one session stays open.
 
 Web Site
 --------
