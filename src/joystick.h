@@ -44,6 +44,20 @@ void joystick_button_up(int instance_id, uint8_t button);
 void joystick_set_latch(bool value);
 void joystick_set_clock(bool value);
 
+// ─── Virtual joysticks ───────────────────────────────────────────────────────
+// A synthetic input source that needs no SDL controller, so automation (the DAP
+// x16/joystick request) can drive the SNES ports on a headless machine with no
+// gamepad attached. While a slot's virtual joystick is active it overrides any
+// physical controller bound to that slot; clearing it hands the slot back.
+//
+// mask is the same active-low layout as the debug snapshot's button_mask: a 0
+// bit means pressed. See JOY_BIT_* above. Bits 12-15 are ignored -- the latch
+// forces them to 1, as the hardware does.
+
+void joystick_set_virtual(int slot, uint16_t button_mask);
+void joystick_clear_virtual(int slot);
+bool joystick_virtual_active(int slot);
+
 // ─── Debugger accessor ───────────────────────────────────────────────────────
 // Side-effect-free snapshot of joystick state. Safe to call every frame from
 // the debugger while the emulation is running.
@@ -51,6 +65,7 @@ void joystick_set_clock(bool value);
 typedef struct {
 	bool     enabled;          // slot is enabled (Joystick_slots_enabled[i])
 	bool     controller_bound; // a real SDL controller is mapped to this slot
+	bool     virtual_active;   // a virtual joystick is driving this slot
 	uint16_t button_mask;      // current button state (0=pressed, see JOY_BIT_*)
 	uint16_t shift_mask;       // current shift register value being clocked out
 } joystick_slot_debug_t;

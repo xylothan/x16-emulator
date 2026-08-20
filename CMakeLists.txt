@@ -852,6 +852,24 @@ x16_add_test(via_timers NEEDS_SDL
     SOURCES tests/test_via_timers.c tests/support/via_fixture.c tests/support/harness.c
             src/via.c)
 
+# The SNES controller ports the VIA above clocks: the latch/shift register and
+# the virtual joystick that drives a port with no gamepad attached. io_trace.c
+# comes along because the latch path reports to it, and has no dependencies of
+# its own.
+x16_add_test(joystick NEEDS_SDL
+    SOURCES tests/test_joystick.c tests/support/harness.c
+            src/joystick.c src/io_trace.c)
+
+# joystick.c enumerates controllers through SDL, so unlike the NEEDS_SDL tests
+# that only want the headers, this one links the library. The test never calls
+# joystick_init() -- the virtual path exists precisely so it does not have to --
+# but those calls still have to resolve.
+if(TARGET joystick_test)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(joystick_test PRIVATE SDL2::SDL2)
+    endif()
+endif()
+
 # memory.c routes every I/O access, and carries the debugOn flag that says
 # whether a read is the debugger looking or the machine running. The devices
 # behind it are recording fakes; memory.c, debug_core.c and the CPU core are

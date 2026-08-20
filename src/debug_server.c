@@ -18,6 +18,7 @@
 #endif
 #include "video.h"
 #include "keyboard.h"
+#include "joystick.h"
 
 #include "cpu/fake6502.h"
 
@@ -1752,6 +1753,155 @@ static int handle_x16_type(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Custom: x16/joystick — drive a SNES controller port from a script ──
+//
+// Arguments:
+//   index:   slot 0-3 (required).
+//   buttons: array of names held down. The array is the complete held set, so
+//            anything absent is released -- that is what lets a script hold a
+//            direction across frames and then let go in a single request.
+//   mask:    raw 16-bit active-low mask (0 = pressed), an alternative to
+//            `buttons` for replaying a captured state verbatim.
+//   enabled: false releases the slot back to a physical controller.
+//
+// A request carrying neither `buttons` nor `mask` reports the slot's state
+// without changing it, so a test can assert what it just pressed.
+
+static const struct {
+    const char *name;
+    uint16_t    bit;
+    bool        alias;
+} dap_joy_buttons[] = {
+    {"up",     JOY_BIT_DPAD_UP,        false},
+    {"down",   JOY_BIT_DPAD_DOWN,      false},
+    {"left",   JOY_BIT_DPAD_LEFT,      false},
+    {"right",  JOY_BIT_DPAD_RIGHT,     false},
+    {"a",      JOY_BIT_A,              false},
+    {"b",      JOY_BIT_B,              false},
+    {"x",      JOY_BIT_X,              false},
+    {"y",      JOY_BIT_Y,              false},
+    {"start",  JOY_BIT_START,          false},
+    {"select", JOY_BIT_SELECT,         false},
+    {"l",      JOY_BIT_LEFT_SHOULDER,  false},
+    {"r",      JOY_BIT_RIGHT_SHOULDER, false},
+    // Aliases: accepted on input, never used to name a button on output.
+    {"back",   JOY_BIT_SELECT,         true},
+    {"lshoulder", JOY_BIT_LEFT_SHOULDER,  true},
+    {"rshoulder", JOY_BIT_RIGHT_SHOULDER, true},
+};
+
+#define DAP_JOY_BUTTON_COUNT ((int)(sizeof(dap_joy_buttons) / sizeof(dap_joy_buttons[0])))
+
+static bool dap_str_ieq(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static uint16_t dap_joy_bit_from_name(const char *name) {
+    for (int i = 0; i < DAP_JOY_BUTTON_COUNT; i++) {
+        if (dap_str_ieq(name, dap_joy_buttons[i].name)) return dap_joy_buttons[i].bit;
+    }
+    return 0;
+}
+
+// The held set, named. Active-low, so a cleared bit is a pressed button.
+static cJSON *dap_joy_buttons_array(uint16_t mask) {
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < DAP_JOY_BUTTON_COUNT; i++) {
+        if (dap_joy_buttons[i].alias) continue;
+        if (!(mask & dap_joy_buttons[i].bit)) {
+            cJSON_AddItemToArray(arr, cJSON_CreateString(dap_joy_buttons[i].name));
+        }
+    }
+    return arr;
+}
+
+static int handle_x16_joystick(int seq, cJSON *args) {
+    if (!args) {
+        send_dap_error_response(seq, "x16/joystick", "missing arguments");
+        return 0;
+    }
+
+    cJSON *index_item = cJSON_GetObjectItemCaseSensitive(args, "index");
+    if (!index_item || !cJSON_IsNumber(index_item)) {
+        send_dap_error_response(seq, "x16/joystick", "missing or non-numeric 'index'");
+        return 0;
+    }
+    int index = (int)index_item->valuedouble;
+    if (index < 0 || index >= NUM_JOYSTICKS) {
+        send_dap_error_response(seq, "x16/joystick", "'index' out of range (expected 0-3)");
+        return 0;
+    }
+
+    cJSON *enabled_item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+    cJSON *mask_item    = cJSON_GetObjectItemCaseSensitive(args, "mask");
+    cJSON *buttons_item = cJSON_GetObjectItemCaseSensitive(args, "buttons");
+
+    if (buttons_item && !cJSON_IsArray(buttons_item)) {
+        send_dap_error_response(seq, "x16/joystick", "'buttons' must be an array of names");
+        return 0;
+    }
+    if (mask_item && !cJSON_IsNumber(mask_item)) {
+        send_dap_error_response(seq, "x16/joystick", "'mask' must be a number");
+        return 0;
+    }
+
+    if (enabled_item && cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
+        joystick_clear_virtual(index);
+    } else if (buttons_item || mask_item) {
+        // Start from "nothing pressed" so an absent button is a released one.
+        uint16_t mask = 0xFFFF;
+        if (mask_item) {
+            mask = (uint16_t)(unsigned)mask_item->valuedouble;
+        }
+        if (buttons_item) {
+            cJSON *b;
+            cJSON_ArrayForEach(b, buttons_item) {
+                if (!cJSON_IsString(b) || !b->valuestring) continue;
+                uint16_t bit = dap_joy_bit_from_name(b->valuestring);
+                if (bit == 0) {
+                    char err[96];
+                    snprintf(err, sizeof(err), "unknown button '%s'", b->valuestring);
+                    send_dap_error_response(seq, "x16/joystick", err);
+                    return 0;
+                }
+                mask &= (uint16_t)~bit;
+            }
+        }
+        joystick_set_virtual(index, mask);
+    } else if (enabled_item && cJSON_IsBool(enabled_item)) {
+        // enabled:true on its own plugs a controller in with nothing held. That
+        // is a distinct state from an empty port -- a port being driven runs its
+        // shift register out, so the KERNAL reports a controller present -- and
+        // it is what a game that waits for one to be connected needs to see.
+        joystick_debug_state_t cur;
+        joystick_debug_get_state(&cur);
+        joystick_set_virtual(index,
+                             joystick_virtual_active(index) ? cur.slots[index].button_mask : 0xFFFF);
+    }
+    // Otherwise: no enabled/buttons/mask, so this is a query and changes nothing.
+
+    joystick_debug_state_t js;
+    joystick_debug_get_state(&js);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "index", index);
+    cJSON_AddNumberToObject(body, "mask", js.slots[index].button_mask);
+    cJSON_AddItemToObject(body, "buttons", dap_joy_buttons_array(js.slots[index].button_mask));
+    cJSON_AddBoolToObject(body, "enabled", js.slots[index].virtual_active);
+    cJSON_AddBoolToObject(body, "slotEnabled", js.slots[index].enabled);
+    cJSON_AddBoolToObject(body, "controllerBound", js.slots[index].controller_bound);
+    cJSON_AddNumberToObject(body, "shift", js.slots[index].shift_mask);
+    cJSON_AddNumberToObject(body, "data", js.data);
+    cJSON_AddBoolToObject(body, "latch", js.latch);
+    send_dap_response(seq, "x16/joystick", true, body);
+    return 0;
+}
+
 // ─── Custom: x16/registers — all CPU + KERNAL + VERA state ─────────
 
 static int handle_x16_registers(int seq, cJSON *args) {
@@ -2297,6 +2447,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/registers")) result = handle_x16_registers(seq, args);
     else if (!strcmp(cmd, "x16/sendKey"))   result = handle_x16_send_key(seq, args);
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
+    else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
 
     else if (!strcmp(cmd, "disassemble"))   result = handle_dap_disassemble(seq, args);
     else if (!strcmp(cmd, "setVariable"))   result = handle_dap_set_variable(seq, args);

@@ -1140,6 +1140,11 @@ draw_joystick_tab()
             ImGui::TextDisabled("disabled");
             help("Not enabled. Enable a slot with -joy1 .. -joy4 on the command line. A "
                  "disabled slot reads to the machine as \"nothing pressed\".");
+        } else if (s.virtual_active) {
+            ImGui::TextColored(COL_ON, "driven by a debug client");
+            help("A DAP client is holding this controller through the x16/joystick request, "
+                 "which needs no host gamepad. It overrides any gamepad bound to the slot "
+                 "until the client releases it.");
         } else if (!s.controller_bound) {
             ImGui::TextColored(COL_DIM, "enabled, no gamepad connected");
             help("The slot exists as far as the machine is concerned, but no host gamepad "

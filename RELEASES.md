@@ -54,7 +54,9 @@ official emulator.
 * Expression evaluation covering registers, memory, cc65 labels and equates, VRAM, and VERA
   registers — including `vera_line`, which reports the registers that actually rendered a given
   scanline
-* Scriptable keyboard, text and joystick input, making automated regression runs practical
+* Scriptable keyboard, text and joystick input, making automated regression runs practical. The
+  virtual SNES controllers need no gamepad attached and no `-joy1`..`-joy4` flag, so a headless CI
+  machine can drive a game that reads the controller ports
 * `tools/x16dbg`, a .NET command-line DAP client with one-shot and interactive modes
 
 **Source-level debugging (`-dbgfile`, `-srcpath`)**

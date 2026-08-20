@@ -190,7 +190,110 @@ time.sleep(0.3)
 msgs = recv_dap(sock, 1)
 check("connection still live after pipelining", msgs, "response", "threads")
 
-# 13. Ownership: a session must take away only what it asked for.
+# 13. x16/joystick: hold, read back, release.
+#
+# The only way a script can drive a game that reads the SNES ports. The state is
+# level-based rather than edge-based -- the button list is the complete held set
+# -- so what matters is that a press survives being read, that a button left off
+# the list is released, and that the port hands itself back when the session is
+# done with it. None of that is visible without a running emulator, because the
+# port is only enabled and only latched by the machine.
+
+def joystick(seq, args, pause=0.3):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/joystick",
+                    "arguments": args})
+    time.sleep(pause)
+    for m in recv_dap(sock, 1):
+        if m.get("type") == "response" and m.get("command") == "x16/joystick":
+            return m
+    return None
+
+
+def check_joystick(name, resp, want):
+    global passed, failed
+    if resp is None or not resp.get("success"):
+        print("  FAIL %s: no successful response" % name)
+        failed += 1
+        return None
+    body = resp.get("body", {})
+    for key, expected in want.items():
+        got = body.get(key)
+        if key == "buttons":
+            got = sorted(got or [])
+            expected = sorted(expected)
+        if got != expected:
+            print("  FAIL %s: %s was %r, expected %r" % (name, key, got, expected))
+            failed += 1
+            return body
+    print("  PASS %s" % name)
+    passed += 1
+    return body
+
+
+# Active low, so a held button is a cleared bit: A is bit 0, and the latch forces
+# bits 12-15 high.
+check_joystick("x16/joystick holds a button",
+               joystick(93, {"index": 0, "buttons": ["a"]}),
+               {"index": 0, "mask": 0xFFFE, "buttons": ["a"], "enabled": True,
+                "slotEnabled": True})
+
+# Driving a port must not need -joy1..-joy4, or headless automation could not
+# use it at all.
+check_joystick("x16/joystick enables the port it drives",
+               joystick(94, {"index": 2, "buttons": ["left", "b"]}),
+               {"index": 2, "slotEnabled": True, "enabled": True,
+                "buttons": ["left", "b"]})
+
+# No buttons and no mask is a query: it must report the held state without
+# disturbing it, which is what lets a test assert what it just pressed.
+check_joystick("x16/joystick queries without changing state",
+               joystick(95, {"index": 0}),
+               {"index": 0, "mask": 0xFFFE, "buttons": ["a"], "enabled": True})
+
+# The list is the whole held set, so a button left off it is released.
+check_joystick("x16/joystick releases buttons left off the list",
+               joystick(96, {"index": 0, "buttons": ["start"]}),
+               {"index": 0, "buttons": ["start"], "enabled": True})
+
+# A raw mask replays a captured state verbatim.
+check_joystick("x16/joystick accepts a raw mask",
+               joystick(97, {"index": 1, "mask": 0xFFFF & ~(1 << 4)}),
+               {"index": 1, "buttons": ["up"], "enabled": True})
+
+check_joystick("x16/joystick releases the port",
+               joystick(98, {"index": 0, "enabled": False}),
+               {"index": 0, "mask": 0xFFFF, "buttons": [], "enabled": False})
+
+# enabled:true on its own connects a controller with nothing held. That is not
+# the same as an empty port -- a driven port runs its shift register out, so the
+# KERNAL sees a controller -- and it is what a game waiting for one needs.
+check_joystick("x16/joystick connects a controller with nothing held",
+               joystick(99, {"index": 0, "enabled": True}),
+               {"index": 0, "mask": 0xFFFF, "buttons": [], "enabled": True,
+                "slotEnabled": True})
+
+# Leave the machine as it was found, so anything running after this is not
+# holding a direction it never asked for.
+for _slot in (0, 1, 2):
+    joystick(100 + _slot, {"index": _slot, "enabled": False})
+
+m = joystick(102, {"index": 9, "buttons": ["a"]})
+if m is not None and not m.get("success"):
+    print("  PASS x16/joystick rejects a port that does not exist")
+    passed += 1
+else:
+    print("  FAIL x16/joystick rejects a port that does not exist")
+    failed += 1
+
+m = joystick(103, {"index": 0, "buttons": ["turbo"]})
+if m is not None and not m.get("success"):
+    print("  PASS x16/joystick rejects an unknown button")
+    passed += 1
+else:
+    print("  FAIL x16/joystick rejects an unknown button")
+    failed += 1
+
+# 14. Ownership: a session must take away only what it asked for.
 #
 # The core records who wanted each breakpoint, so a client disconnecting clears
 # its own and leaves everything else armed. Reconstructing that from outside the

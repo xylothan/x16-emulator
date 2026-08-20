@@ -926,7 +926,17 @@ runs of a game practical:
 | --- | --- | --- |
 | `x16/sendKey` | `key` (SDL key name like `"Return"`/`"A"`/`"Left"`, or a numeric scancode), `action` (`"press"` (default), `"down"`, `"up"`), optional `modifiers` (array of key names held around the key) | Injects a key event through the same path as a physical key press. |
 | `x16/type` | `text` (string) | Types a string into the KERNAL keyboard buffer, like a clipboard paste. Ideal for BASIC lines and filenames; supports the `\Xnn` hex escape. |
-| `x16/joystick` | `index` (slot 0–3), `buttons` (array of `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `start`, `select`, `l`, `r`), optional `mask` (raw 16-bit active-low), `enabled` (set `false` to release the slot back to a physical controller) | Holds or releases a virtual SNES controller. Buttons not listed are released. |
+| `x16/joystick` | `index` (port 0–3), `buttons` (array of `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `start`, `select`, `l`, `r`), optional `mask` (raw 16-bit active-low), `enabled` (`false` releases the port back to a physical controller; `true` on its own connects one with nothing held) | Holds or releases a virtual SNES controller. Buttons not listed are released, so one request sets the whole held state. |
+
+`x16/joystick` needs no gamepad and no `-joy1`..`-joy4` flag: driving a port enables it, so a
+headless CI machine can play a game that reads the controller. Sending neither `buttons` nor
+`mask` reports the port's state without changing it, which is how a test asserts what it just
+pressed. Every request answers with the resulting `mask`, the held `buttons`, and whether a
+physical controller is bound.
+
+While a port is held its shift register behaves as an attached controller's does, so the KERNAL
+reports a joystick present — `JOY(1)` reads `$00` with nothing held rather than `$FF`. Releasing
+it with `enabled: false` makes the port read empty again.
 
 There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state as JSON in one call.
 
