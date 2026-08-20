@@ -882,6 +882,25 @@ Four scopes are exposed on every stack frame: **Registers** (including the 65C81
 current RAM/ROM bank), **Virtual Registers** (R0–R15), **Zero Page** and **Stack**. Memory reads
 and writes use 24-bit addresses, so the high byte selects the 65C816 program bank on a GS machine.
 
+##### Reading and writing VRAM
+
+VERA's video RAM is not in the CPU map — the CPU reaches it only through the data port, one
+auto-incrementing byte at a time — so `readMemory` and `writeMemory` take a `vram:` prefix on
+`memoryReference` to address VERA's 17-bit space directly:
+
+```
+readMemory  { "memoryReference": "vram:1B000", "count": 32 }
+writeMemory { "memoryReference": "vram:1B000", "data": "3q2+7w==" }
+```
+
+VRAM addresses default to hex, with `$` and `0x` accepted too; a bare reference is still a CPU
+address. The echoed `address` keeps the prefix, so paging through VRAM by feeding it back with an
+`offset` stays in the right space. This is the only way to write VRAM over DAP, and unlike the
+`vram` console expression it is not capped at 128 bytes and returns binary rather than text.
+
+A reference that cannot be parsed is now rejected. It used to fall back to address 0, so a typo
+answered `success: true` with the bytes from the wrong memory and nothing to say so.
+
 #### Conditional breakpoints
 
 Put a condition string on a breakpoint in `setBreakpoints`. Terms are joined with `&&`.
@@ -908,7 +927,7 @@ These work in a watch or REPL window, in addition to plain registers and address
 | `$C000`, `$01C000`, `0xC000` | The byte at that CPU address (24-bit; high byte is the 65C816 bank) |
 | `A`, `X`, `Y`, `SP`, `PC`, `P` | Register values, sized for the current CPU mode |
 | `regs_all` | A one-line summary of every register |
-| `vram ADDR [COUNT]` | VERA VRAM bytes, from a 17-bit hex address |
+| `vram ADDR [COUNT]` | VERA VRAM bytes, from a 17-bit hex address (capped at 128; for bulk or binary access use `readMemory` with a `vram:` reference) |
 | `vera_reg` | All 32 VERA registers |
 | `vera_line LINE` | The layer registers that actually rendered that display scanline — the way to catch a raster split |
 | `bp_add ADDR`, `bp_remove ADDR`, `bp_list`, `bp_clear` | Manage breakpoints |

@@ -49,6 +49,8 @@ official emulator.
 * New Debug Adapter Protocol server over TCP, default port 9009, for VS Code, Visual Studio or
   any other DAP-compliant client
 * Breakpoints, stepping, stack traces, scopes, variables, memory read/write and disassembly
+* VRAM read and write through `readMemory`/`writeMemory` with a `vram:` reference, reaching VERA's
+  17-bit space that the CPU map cannot address
 * Conditional breakpoints on registers and memory (`A == $05`, `byte[$1234] != 0`), bank-pinned
   conditions (`bank == 2`), and hit counts
 * Expression evaluation covering registers, memory, cc65 labels and equates, VRAM, and VERA

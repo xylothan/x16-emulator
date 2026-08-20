@@ -674,6 +674,55 @@ static uint32_t dap_parse_num(const char *s) {
     return (uint32_t)strtoul(s, NULL, 0);
 }
 
+static bool dap_has_prefix_i(const char *s, const char *prefix) {
+    while (*prefix) {
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return false;
+        s++; prefix++;
+    }
+    return true;
+}
+
+// Parse a DAP memoryReference. A bare number is a CPU address (24-bit
+// bank:addr); a "vram:" prefix selects VERA's 17-bit video address space, which
+// is not in the CPU map and so cannot be reached through a CPU address at all.
+// VRAM references default to hex, since every VRAM address in the docs and the
+// debugger is written that way.
+//
+// Fails rather than falling back to zero on a reference it cannot read. The old
+// behaviour ran the string through strtoul and used whatever came out, so a
+// typo, a "$C000" and a "vram:1B000" all quietly returned the bytes at CPU
+// address 0 with success:true -- the wrong memory, with nothing in the response
+// to say so.
+static bool dap_parse_mem_ref(const char *s, bool *is_vram, uint32_t *out) {
+    if (!s) return false;
+    while (*s == ' ') s++;
+
+    *is_vram = false;
+    if (dap_has_prefix_i(s, "vram:")) {
+        *is_vram = true;
+        s += 5;
+        while (*s == ' ') s++;
+    }
+
+    int base = *is_vram ? 16 : 0;
+    if (s[0] == '$') {
+        s++;
+        base = 16;
+    } else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+        base = 16;
+    }
+
+    char *endp = NULL;
+    unsigned long v = strtoul(s, &endp, base);
+    if (!endp || endp == s) return false;
+    while (*endp == ' ') endp++;
+    if (*endp) return false;
+
+    *out = (uint32_t)v;
+    return true;
+}
+
 // Non-intrusive VERA register read for debug views. AUDIO_CTRL (0x1B) runs
 // audio_render() and SPI_DATA (0x1E) starts a real SPI transfer *on read*
 // (video_read ignores debugOn for them), so never poll those — return 0.
@@ -1533,11 +1582,18 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
         return 0;
     }
 
-    uint32_t addr = (uint32_t)strtoul(ref_item->valuestring, NULL, 0);
+    uint32_t addr = 0;
+    bool is_vram = false;
+    if (!dap_parse_mem_ref(ref_item->valuestring, &is_vram, &addr)) {
+        send_dap_error_response(seq, "readMemory", "unparseable memoryReference (expected a CPU address like 0xC000, or vram:1B000)");
+        return 0;
+    }
     int offset = (offset_item && cJSON_IsNumber(offset_item)) ? (int)offset_item->valuedouble : 0;
     int count = (int)count_item->valuedouble;
-    addr = (uint32_t)(((int)addr + offset)) & 0xFFFFFF; // 24-bit CPU address (bank:addr)
+    const uint32_t addr_mask = is_vram ? 0x1FFFF : 0xFFFFFF;
+    addr = (uint32_t)((int)addr + offset) & addr_mask;
     if (count > 4096) count = 4096;
+    if (count < 0) count = 0;
 
     // Build base64 data (DAP readMemory uses base64)
     // For simplicity, send as hex-encoded data with unreadableBytes=0
@@ -1553,9 +1609,11 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
     // 24-bit linear read: the high byte of the address is the 65C816 bank byte.
     // For bank 0 this is the classic X16 map (I/O + windowed banks following the
     // live mapping); banks 1-255 are flat RAM in gen2/GS. Spans bank boundaries.
+    // VRAM is a separate 17-bit space behind VERA, so it wraps within itself.
     for (int i = 0; i < count; i++) {
-        uint32_t cur = (addr + (uint32_t)i) & 0xFFFFFF;
-        raw[i] = debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), USE_CURRENT_X16_BANK);
+        uint32_t cur = (addr + (uint32_t)i) & addr_mask;
+        raw[i] = is_vram ? video_space_read(cur)
+                         : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), USE_CURRENT_X16_BANK);
     }
 
     // Base64 encode
@@ -1575,7 +1633,11 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
 
     cJSON *body = cJSON_CreateObject();
     char addr_str[16];
-    if (is_gen2)
+    // Echoed in the space it was read from, so a client can page through VRAM by
+    // feeding this straight back with an offset.
+    if (is_vram)
+        snprintf(addr_str, sizeof(addr_str), "vram:0x%05X", addr & 0x1FFFF);
+    else if (is_gen2)
         snprintf(addr_str, sizeof(addr_str), "0x%06X", addr & 0xFFFFFF);
     else
         snprintf(addr_str, sizeof(addr_str), "0x%04X", addr & 0xFFFF);
@@ -1613,9 +1675,15 @@ static int handle_dap_write_memory(int seq, cJSON *args) {
         return 0;
     }
 
-    uint32_t addr = (uint32_t)strtoul(ref_item->valuestring, NULL, 0);
+    uint32_t addr = 0;
+    bool is_vram = false;
+    if (!dap_parse_mem_ref(ref_item->valuestring, &is_vram, &addr)) {
+        send_dap_error_response(seq, "writeMemory", "unparseable memoryReference (expected a CPU address like 0xC000, or vram:1B000)");
+        return 0;
+    }
     int offset = (offset_item && cJSON_IsNumber(offset_item)) ? (int)offset_item->valuedouble : 0;
-    addr = (uint32_t)(((int)addr + offset)) & 0xFFFFFF; // 24-bit CPU address (bank:addr)
+    const uint32_t addr_mask = is_vram ? 0x1FFFF : 0xFFFFFF;
+    addr = (uint32_t)((int)addr + offset) & addr_mask;
 
     const char *b64 = data_item->valuestring;
     int b64_len = (int)strlen(b64);
@@ -1642,9 +1710,16 @@ static int handle_dap_write_memory(int seq, cJSON *args) {
     // Write into emulated RAM using 24-bit linear addressing: the high byte of
     // the address is the 65C816 bank byte (bank 0 = classic X16 map incl. the
     // windowed banks + I/O side effects; banks 1-255 = flat RAM in gen2/GS).
+    // A vram: reference goes straight into VERA's 17-bit space instead, which is
+    // the only way to write it -- the CPU reaches VRAM only through the data
+    // port, one auto-incrementing byte at a time.
     for (int i = 0; i < out; i++) {
-        uint32_t cur = (addr + (uint32_t)i) & 0xFFFFFF;
-        debug_write6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), raw[i]);
+        uint32_t cur = (addr + (uint32_t)i) & addr_mask;
+        if (is_vram) {
+            video_space_write(cur, raw[i]);
+        } else {
+            debug_write6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), raw[i]);
+        }
     }
 
     free(raw);

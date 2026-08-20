@@ -1,4 +1,4 @@
-import socket, json, time, sys
+import socket, json, time, sys, base64
 
 def send_dap(sock, msg):
     body = json.dumps(msg)
@@ -293,7 +293,92 @@ else:
     print("  FAIL x16/joystick rejects an unknown button")
     failed += 1
 
-# 14. Ownership: a session must take away only what it asked for.
+# 14. readMemory/writeMemory against VRAM.
+#
+# VRAM is not in the CPU map -- the CPU reaches it only through VERA's data
+# port, one auto-incrementing byte at a time -- so a "vram:" reference is the
+# only way a DAP client can read or write it. Nothing here is checkable from the
+# unit tests: it needs a real VERA with a real framebuffer behind it.
+
+def read_mem(seq, ref, count):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "readMemory",
+                    "arguments": {"memoryReference": ref, "count": count}})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("type") == "response" and m.get("command") == "readMemory":
+            return m
+    return None
+
+
+def write_mem(seq, ref, data):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "writeMemory",
+                    "arguments": {"memoryReference": ref,
+                                  "data": base64.b64encode(bytes(data)).decode()}})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("type") == "response" and m.get("command") == "writeMemory":
+            return m
+    return None
+
+
+def mem_bytes(resp):
+    if not resp or not resp.get("success"):
+        return None
+    return base64.b64decode(resp.get("body", {}).get("data", ""))
+
+
+def expect(name, cond):
+    global passed, failed
+    if cond:
+        print("  PASS %s" % name)
+        passed += 1
+    else:
+        print("  FAIL %s" % name)
+        failed += 1
+
+
+# The same number means different memory in each space, which is the whole
+# reason the prefix has to exist.
+cpu = mem_bytes(read_mem(110, "0x1B000", 16))
+vram = mem_bytes(read_mem(111, "vram:1B000", 16))
+expect("readMemory reads VRAM", vram is not None and len(vram) == 16)
+expect("VRAM and the same CPU address are different memory", cpu is not None and vram != cpu)
+
+# The echoed address has to come back in the space it was read from, or paging
+# through VRAM by feeding it back would silently land in the CPU map.
+r = read_mem(112, "vram:1B000", 4)
+expect("the echoed address keeps the vram: prefix",
+       r is not None and r.get("body", {}).get("address", "").lower().startswith("vram:"))
+
+# A round trip through the write path. $1F9C0 is in the sprite attribute area,
+# well clear of the text screen the READY prompt is sitting on.
+scratch = "vram:1F9C0"
+before = mem_bytes(read_mem(113, scratch, 4))
+write_mem(114, scratch, [0xDE, 0xAD, 0xBE, 0xEF])
+after = mem_bytes(read_mem(115, scratch, 4))
+expect("writeMemory writes VRAM", after == b"\xde\xad\xbe\xef")
+if before is not None:
+    write_mem(116, scratch, list(before))
+    expect("the scratch bytes restore", mem_bytes(read_mem(117, scratch, 4)) == before)
+
+# $ and 0x have to mean the same address, and an offset has to apply in the
+# space the reference named.
+a = mem_bytes(read_mem(118, "vram:$1B000", 8))
+b = mem_bytes(read_mem(119, "vram:0x1B000", 8))
+expect("vram: accepts $ and 0x alike", a is not None and a == b == vram[:8])
+
+# The trap this replaced: strtoul returned 0 for anything it could not read, so
+# a typo answered success with the bytes at CPU address 0 and nothing in the
+# response to say it was the wrong memory.
+for bad in ("vram:zzz", "notanaddress", "vram:"):
+    r = read_mem(120, bad, 4)
+    expect("readMemory rejects %r instead of reading address 0" % bad,
+           r is not None and not r.get("success"))
+
+r = read_mem(121, "$C000", 4)
+expect("readMemory accepts a $-prefixed CPU address", r is not None and r.get("success"))
+
+# 15. Ownership: a session must take away only what it asked for.
 #
 # The core records who wanted each breakpoint, so a client disconnecting clears
 # its own and leaves everything else armed. Reconstructing that from outside the
