@@ -1,4 +1,7 @@
 rom.bin
+# Where build.ps1 -FetchRom and the CI fetch-rom action drop the ROM image and
+# its symbol files. Downloaded per build, never committed.
+/latest_rom/
 src/rom_labels.h
 src/rom_lst.h
 src/basload_labels.h

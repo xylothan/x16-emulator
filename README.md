@@ -216,6 +216,30 @@ Steps for compiling WebAssembly/HTML5 can be found [here][webassembly].
 
 ### Windows Build
 
+`build.ps1` at the repo root wraps all of this. It finds the installed Visual Studio, picks the
+CMake that can actually drive that generator, locates vcpkg, and selects the matching preset from
+`CMakePresets.json`:
+
+```powershell
+.\build.ps1                      # Debug build of the emulator
+.\build.ps1 -Config Release      # Release build
+.\build.ps1 -Tests               # build and run the unit test suite
+.\build.ps1 -Run                 # build, then launch it
+.\build.ps1 -DapTest -FetchRom   # download a ROM, boot, run the DAP testbench
+```
+
+Useful extras: `-Target <name>` for a single CMake target, `-Rom <path>` to point at a ROM (or set
+`X16_ROM`), `-Clean` / `-Reconfigure`, `-Force` to stop an emulator that is holding `x16emu.exe`
+open, and `-EmuArgs '-prg','A.PRG','-run'` to pass arguments through to the emulator.
+`Get-Help .\build.ps1 -Full` lists them all.
+
+Two things it exists to save you from: the CMake on `PATH` is often older than the installed
+Visual Studio and does not know its generator, which fails with a wall of generator names that
+never mentions the real problem; and a running emulator holds its own `.exe` open, so the link step
+dies with a bare `LNK1104` that says nothing about why.
+
+#### Building by hand
+
 The Windows releases are built with **MSVC and CMake**, using vcpkg for dependencies and custom
 triplets in `vcpkg-triplets/` that link everything statically. That is what produces the
 self-contained `x16emu.exe` in the release packages:

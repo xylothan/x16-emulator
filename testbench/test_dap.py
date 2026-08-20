@@ -1,5 +1,11 @@
 import socket, json, time, sys, base64
 
+# The port is an argument so a run can dodge whatever else on the machine has
+# already claimed 9009 -- a stray emulator or an editor's DAP client connecting
+# to this one will otherwise hijack the session halfway through the suite.
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9009
+
+
 def send_dap(sock, msg):
     body = json.dumps(msg)
     header = "Content-Length: %d\r\n\r\n" % len(body)
@@ -35,11 +41,11 @@ def recv_dap(sock, timeout=3):
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
-    sock.connect(('127.0.0.1', 9009))
+    sock.connect(('127.0.0.1', PORT))
 except ConnectionRefusedError:
-    print("ERROR: Cannot connect to DAP server on port 9009. Is emulator running with -debugport?")
+    print("ERROR: Cannot connect to DAP server on port %d. Is emulator running with -debugport?" % PORT)
     sys.exit(1)
-print("Connected to DAP server on port 9009")
+print("Connected to DAP server on port %d" % PORT)
 
 passed = 0
 failed = 0
@@ -436,7 +442,7 @@ sock.close()
 time.sleep(0.5)
 
 after_session = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-after_session.connect(('127.0.0.1', 9009))
+after_session.connect(('127.0.0.1', PORT))
 send_dap(after_session, {"seq": 1, "type": "request", "command": "initialize",
                          "arguments": {"adapterID": "test"}})
 time.sleep(0.5)
@@ -469,7 +475,7 @@ time.sleep(0.3)
 
 # 14. Disconnect
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect(('127.0.0.1', 9009))
+sock.connect(('127.0.0.1', PORT))
 send_dap(sock, {"seq": 1, "type": "request", "command": "initialize",
                 "arguments": {"adapterID": "test"}})
 time.sleep(0.4)
@@ -489,7 +495,7 @@ sock.close()
 # re-parsed before it had written a byte, and was dropped on connect. For the
 # life of the process.
 probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-probe.connect(('127.0.0.1', 9009))
+probe.connect(('127.0.0.1', PORT))
 probe.sendall(b"Content-Length: 100000\r\n\r\n")
 time.sleep(0.5)
 probe.close()
@@ -497,7 +503,7 @@ time.sleep(0.5)
 
 try:
     after = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    after.connect(('127.0.0.1', 9009))
+    after.connect(('127.0.0.1', PORT))
     time.sleep(0.5)          # let a poll run before we send anything
     send_dap(after, {"seq": 1, "type": "request", "command": "initialize",
                      "arguments": {"adapterID": "test"}})
