@@ -926,6 +926,26 @@ address. The echoed `address` keeps the prefix, so paging through VRAM by feedin
 A reference that cannot be parsed is now rejected. It used to fall back to address 0, so a typo
 answered `success: true` with the bytes from the wrong memory and nothing to say so.
 
+#### Instruction breakpoints and banks
+
+`setInstructionBreakpoints` takes an `instructionReference` in either form:
+
+```
+setInstructionBreakpoints { "breakpoints": [ { "instructionReference": "33:A555" } ] }
+setInstructionBreakpoints { "breakpoints": [ { "instructionReference": "0x33A555" } ] }
+```
+
+`bb:aaaa` names a RAM/ROM window bank explicitly and means exactly what `-bp bb:aaaa` means, hex on
+both sides. In the packed 24-bit form the high byte is read as the machine could have produced it:
+the 65C816 program bank on a GS, and the window bank otherwise, since `read6502` forces the program
+bank to zero elsewhere. A bare 16-bit address names no bank and breaks in whichever one is mapped.
+
+Naming a bank for an address the window registers do not reach — anything below `$A000`, or a
+non-zero GS program bank — is refused with `verified: false` and a `message`, as is giving the bank
+twice. Previously a banked reference was recorded against the *program* bank, which on a non-GS
+machine is always zero, so the breakpoint matched nothing while the client had been told
+`verified: true`. An `offset` displaces the address within its bank and no longer carries into it.
+
 #### Conditional breakpoints
 
 Put a condition string on a breakpoint in `setBreakpoints`. Terms are joined with `&&`.

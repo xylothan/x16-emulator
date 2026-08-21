@@ -2264,6 +2264,45 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
 }
 
 // ─── setInstructionBreakpoints ───────────────────────────────────────
+
+// One field of a "bb:aaaa" reference. Unprefixed digits are hex, which is what
+// -bp means by the same notation; dap_parse_num()'s base-0 rule would read the
+// bank in "33:A555" as decimal.
+static uint32_t dap_parse_hex_field(const char *s) {
+    while (*s == ' ') s++;
+    if (s[0] == '$')
+        return (uint32_t)strtoul(s + 1, NULL, 16);
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        return (uint32_t)strtoul(s + 2, NULL, 16);
+    return (uint32_t)strtoul(s, NULL, 16);
+}
+
+// Resolve an instructionReference into a core breakpoint, or fail.
+//
+// The X16 bank was the dimension this path did not have. A reference was read as
+// `pc | program_bank << 16` with x16Bank left at ANY, but read6502 forces the
+// program bank to zero off a Gen2, so any non-zero top byte built an entry whose
+// bank could never equal the running one: it was rejected on every instruction
+// while the client had been told "verified": true. Breakpoints in banked RAM --
+// exactly the ones worth setting from an editor -- silently did nothing.
+//
+// Which field a bank byte belongs in is debug_bp_from_ref()'s to decide, so that
+// this and -bp cannot drift apart on it. Only the syntax is here: "bb:aaaa" is
+// accepted and means what -bp means by it.
+static bool dap_parse_instruction_ref(const char *s, long offset, struct breakpoint *out) {
+    if (!s) return false;
+    while (*s == ' ') s++;
+
+    const char *colon = strchr(s, ':');
+    if (colon) {
+        unsigned long bank = dap_parse_hex_field(s);
+        unsigned long a    = dap_parse_hex_field(colon + 1);
+        if (bank > 0xFF || a > 0xFFFF) return false;
+        return debug_bp_from_ref((long)a, (int)bank, offset, out);
+    }
+    return debug_bp_from_ref((long)dap_parse_num(s), DEBUG_BANK_ANY, offset, out);
+}
+
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
     debug_bp_clear_owner(DEBUG_OWNER_DAP_INSTRUCTION);
     num_instr_bps = 0;
@@ -2277,25 +2316,25 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
         cJSON *ir  = cJSON_GetObjectItemCaseSensitive(ib, "instructionReference");
         cJSON *off = cJSON_GetObjectItemCaseSensitive(ib, "offset");
         cJSON *rb  = cJSON_CreateObject();
+        long   offset = (off && cJSON_IsNumber(off)) ? (long)off->valuedouble : 0;
+        struct breakpoint bp;
         bool verified = false;
-        if (ir && cJSON_IsString(ir)) {
-            long addr = (long)dap_parse_num(ir->valuestring);
-            if (off && cJSON_IsNumber(off)) addr += (long)off->valuedouble;
-            // Up to 24 bits: the disassembly and stack frames hand out
-            // "0x%06X" references including the program bank, so rejecting
-            // anything above $FFFF silently refused the very addresses this
-            // server told the client to use.
-            if (addr >= 0 && addr <= 0xFFFFFF && num_instr_bps < 128) {
-                struct breakpoint bp = { (int)(addr & 0xFFFF), (uint8_t)(addr >> 16), -1, 0, false };
-                if (debug_bp_add_for(bp, DEBUG_OWNER_DAP_INSTRUCTION) != DEBUG_ADD_FULL) {
-                    instr_bp_banks[num_instr_bps] = (uint8_t)(addr >> 16);
-                    instr_bp_addrs[num_instr_bps++] = (uint16_t)(addr & 0xFFFF);
-                    cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
-                    verified = true;
-                }
+        if (ir && cJSON_IsString(ir)
+            && dap_parse_instruction_ref(ir->valuestring, offset, &bp)
+            && num_instr_bps < 128) {
+            if (debug_bp_add_for(bp, DEBUG_OWNER_DAP_INSTRUCTION) != DEBUG_ADD_FULL) {
+                instr_bp_banks[num_instr_bps] = bp.bank;
+                instr_bp_addrs[num_instr_bps++] = (uint16_t)bp.pc;
+                cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
+                verified = true;
             }
         }
         cJSON_AddBoolToObject(rb, "verified", verified);
+        // Verified used to be the only thing said about a breakpoint, which made
+        // "armed" and "accepted but inert" look identical from the client side.
+        if (!verified)
+            cJSON_AddStringToObject(rb, "message",
+                                    "address could not be resolved to an armable breakpoint");
         cJSON_AddItemToArray(arr, rb);
     }
     cJSON_AddItemToObject(body, "breakpoints", arr);
