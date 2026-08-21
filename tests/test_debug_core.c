@@ -1468,6 +1468,97 @@ main(void)
 		reset_all();
 	}
 
+	// ── Address references: which field a bank byte lands in ────────────────
+	//
+	// The DAP instruction-breakpoint path had no X16 bank dimension. It read a
+	// reference as `pc | bank << 16` into the program-bank field and left the
+	// window selector at ANY, so a breakpoint in banked RAM was recorded against
+	// a program bank a gen1 never runs in: accepted, reported verified, and
+	// silently dead. These pin the interpretation, which is the part a caller
+	// cannot be trusted to re-derive.
+	{
+		reset_all();
+		is_gen2 = false;
+		struct breakpoint bp;
+
+		check(debug_bp_from_ref(0xA555, DEBUG_BANK_ANY, 0, &bp)
+		          && bp.pc == 0xA555 && bp.bank == 0 && bp.x16Bank == DEBUG_BANK_ANY,
+		      "a bare address names no bank and matches whichever is mapped");
+
+		// The regression: off a Gen2 the program bank is always zero, so the
+		// only bank a top byte can be talking about is the window's.
+		check(debug_bp_from_ref(0x33A555, DEBUG_BANK_ANY, 0, &bp)
+		          && bp.pc == 0xA555 && bp.bank == 0 && bp.x16Bank == 0x33,
+		      "a packed bank byte is the window bank on a gen1, not the program bank");
+
+		// "bb:aaaa", the form -bp takes, has to arrive at the same entry.
+		struct breakpoint colon;
+		check(debug_bp_from_ref(0xA555, 0x33, 0, &colon)
+		          && colon.pc == bp.pc && colon.bank == bp.bank
+		          && colon.x16Bank == bp.x16Bank,
+		      "the bb:aaaa form and the packed form describe one breakpoint");
+
+		// ...and it has to actually fire, which is what the old entry never did.
+		// Added through the real table and matched through the real rule.
+		check(debug_bp_add(bp) == 0, "the resolved breakpoint goes into the table");
+		g_ram_bank = 0x33;
+		bool armed = debug_bp_is_set(0xA555, 0);
+		g_ram_bank = 0x34;
+		check(armed && !debug_bp_is_set(0xA555, 0),
+		      "and fires in the bank it named, and only there");
+
+		// What the old code built, stated directly: the window bank left in the
+		// program-bank field. A gen1 runs in program bank 0, so nothing matches.
+		reset_all();
+		is_gen2 = false;
+		debug_bp_add(bp_at(0xA555, 0x33, DEBUG_BANK_ANY));
+		bool dead = true;
+		for (int b = 0; b < 0x40; b++) {
+			g_ram_bank = (uint8_t)b;
+			if (debug_bp_is_set(0xA555, 0))
+				dead = false;
+		}
+		check(dead, "a window bank left in the program-bank field can never match");
+
+		reset_all();
+		is_gen2 = false;
+
+		// A bank selects nothing below $A000, so naming one there is a request
+		// that cannot be honoured rather than one to quietly widen to ANY.
+		check(!debug_bp_from_ref(0x330555, DEBUG_BANK_ANY, 0, &bp),
+		      "a bank packed onto an unbanked address is refused");
+		check(!debug_bp_from_ref(0x0555, 0x33, 0, &bp),
+		      "and so is one named alongside it");
+
+		check(!debug_bp_from_ref(0x33A555, 0x34, 0, &bp),
+		      "a bank given twice, two different ways, is refused");
+
+		check(!debug_bp_from_ref(-1, DEBUG_BANK_ANY, 0, &bp)
+		          && !debug_bp_from_ref(0x1000000, DEBUG_BANK_ANY, 0, &bp),
+		      "a reference outside 24 bits is refused");
+
+		// The offset is a displacement within the bank; letting it carry would
+		// move the breakpoint to an address nobody named.
+		check(debug_bp_from_ref(0x33A555, DEBUG_BANK_ANY, 0x10, &bp)
+		          && bp.pc == 0xA565 && bp.x16Bank == 0x33,
+		      "an offset moves the address and leaves the bank alone");
+		check(debug_bp_from_ref(0xFFFF, DEBUG_BANK_ANY, 1, &bp) && bp.pc == 0x0000,
+		      "and wraps inside 16 bits rather than into the bank byte");
+
+		// -- Gen2: there a top byte really is the program bank, which is what
+		// the disassembly and the stack frames hand out.
+		is_gen2 = true;
+		check(debug_bp_from_ref(0x01A555, DEBUG_BANK_ANY, 0, &bp)
+		          && bp.pc == 0xA555 && bp.bank == 1 && bp.x16Bank == DEBUG_BANK_ANY,
+		      "on a Gen2 a packed bank byte is the program bank");
+		check(debug_bp_from_ref(0xA555, 5, 0, &bp)
+		          && bp.pc == 0xA555 && bp.bank == 0 && bp.x16Bank == 5,
+		      "and program bank 0 there is still the windowed map");
+
+		reset_all();
+		is_gen2 = true;
+	}
+
 	debug_core_free();
 
 	if (failures) {
