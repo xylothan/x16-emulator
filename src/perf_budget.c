@@ -7,7 +7,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
+
+// Rounding and absolute value, done by hand rather than with <math.h>.
+//
+// perf_budget.c is linked into unit tests that link nothing else -- that is the
+// whole point of it taking the machine as arguments -- and it is also linked
+// into memory.c's test targets. lrintf() and fabsf() are intrinsics on MSVC but
+// real libm symbols on glibc, so using them meant every one of those targets
+// had to grow a -lm it does not otherwise need. Both values rounded here are
+// positive, so the naive form is exact and obviously correct.
+static uint32_t
+round_pos(float v)
+{
+	return (uint32_t)(v + 0.5f);
+}
+
+static float
+abs_f(float v)
+{
+	return v < 0.0f ? -v : v;
+}
 
 bool perf_budget_enabled = false;
 
@@ -95,9 +114,9 @@ recompute_budget(void)
 	// Vsyncs per unit of work. Above 1 the work may span several frames; below
 	// 1 the caller is asking for a routine to fit inside part of one.
 	const float ratio = vsync / cfg_target_fps;
-	int         n     = (int)lrintf(ratio);
+	int         n     = (int)round_pos(ratio);
 
-	if (n >= 1 && fabsf(ratio - (float)n) <= 0.05f * (float)n) {
+	if (n >= 1 && abs_f(ratio - (float)n) <= 0.05f * (float)n) {
 		// Close enough to a whole number of vsyncs to be what was meant.
 		if (n > PERF_PERIOD_MAX)
 			n = PERF_PERIOD_MAX;
@@ -111,7 +130,7 @@ recompute_budget(void)
 		if (n > PERF_PERIOD_MAX)
 			n = PERF_PERIOD_MAX;
 		budget_frames = n;
-		budget_cycles = (uint32_t)lrintf((float)cfg_cycles_per_frame * ratio);
+		budget_cycles = round_pos((float)cfg_cycles_per_frame * ratio);
 		if (budget_cycles == 0)
 			budget_cycles = 1;
 	}
