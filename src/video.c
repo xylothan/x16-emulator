@@ -25,6 +25,7 @@
 #include "vera_spi.h"
 #include "vera_psg.h"
 #include "vera_pcm.h"
+#include "sprite_trace.h"
 #include "icon.h"
 #include "sdcard.h"
 #include "i2c.h"
@@ -225,6 +226,32 @@ uint16_t vga_scan_pos_y;
 float ntsc_half_cnt;
 uint16_t ntsc_scan_pos_y;
 int frame_count = 0;
+
+// CPU cycles elapsed, accumulated from the counts video_step() is handed. Kept
+// here rather than read from clockticks6502 so that video.c does not pull the
+// CPU in: the eight test targets that link this file supply a host fixture, not
+// a processor. The sum is exact -- main.c passes each instruction's cycle count
+// once, and the mid-line raster calls pass zero.
+static uint32_t sprite_trace_cpu_cycles = 0;
+
+// The display line the beam is on right now, for stamping attribute writes.
+// SPRITE_TRACE_NO_LINE outside the active display, where a write is an ordinary
+// full-frame update rather than a raster-timed one.
+static uint16_t
+sprite_trace_current_line(void)
+{
+	int y;
+	if (reg_composer[0] & 2) {
+		y = (ntsc_scan_pos_y < SCAN_HEIGHT) ? (int)ntsc_scan_pos_y - NTSC_Y_OFFSET_LOW
+		                                    : (int)ntsc_scan_pos_y - NTSC_Y_OFFSET_HIGH;
+	} else {
+		y = (int)vga_scan_pos_y - VGA_Y_OFFSET;
+	}
+	if (y < 0 || y >= SPRITE_TRACE_LINES) {
+		return SPRITE_TRACE_NO_LINE;
+	}
+	return (uint16_t)y;
+}
 
 static uint8_t framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT * 4];
 #ifndef __EMSCRIPTEN__
@@ -765,6 +792,22 @@ refresh_sprite_properties(const uint16_t sprite)
 	props->palette_offset = (sprite_data[sprite][7] & 0x0f) << 4;
 }
 
+// Store one byte of a sprite's attributes, telling the trace what it replaced.
+// Both VRAM write paths funnel through here so the two cannot drift apart: a
+// multiplexer driven by VERA FX would otherwise go unrecorded.
+static void
+sprite_attr_write(uint32_t address, uint8_t value)
+{
+	const uint8_t slot   = (address >> 3) & 0x7f;
+	const uint8_t offset = address & 0x7;
+	if (sprite_trace_active) {
+		sprite_trace_note_write(slot, offset, sprite_data[slot][offset], value,
+		                        sprite_trace_current_line(), sprite_trace_cpu_cycles);
+	}
+	sprite_data[slot][offset] = value;
+	refresh_sprite_properties(slot);
+}
+
 struct video_palette
 {
 	uint32_t entries[256];
@@ -823,71 +866,127 @@ render_sprite_line(const uint16_t y)
 	memset(sprite_line_z, 0, SCREEN_WIDTH);
 	memset(sprite_line_mask, 0, SCREEN_WIDTH);
 
+	// Sprite tracing mirrors the budget in `spent`, which unlike sprite_budget
+	// does not stop at zero. That difference is the point: sprite_budget is
+	// uint16_t and the inner pixel loop's `break` only leaves that loop, so the
+	// next sprite's decrement underflows it to 65535 and every remaining sprite
+	// on the line renders for free. Real VERA drops them. Correcting the
+	// renderer here would change what every existing program draws, so the
+	// behaviour is left alone and `spent` records the demand the line really
+	// made -- which is what a multiplexer needs to see.
+	const bool trace = sprite_trace_active;
+	uint32_t   spent = 0;
+	uint16_t   traced_evaluated = 0;
+	uint16_t   traced_drawn     = 0;
+	uint16_t   traced_cut_slot  = SPRITE_TRACE_NO_LINE;
+	if (trace) {
+		sprite_trace_line_begin(y, sprite_trace_cpu_cycles);
+	}
+
 	uint16_t sprite_budget = 800 + 1;
 	for (int i = 0; i < NUM_SPRITES; i++) {
+		const uint16_t budget_before = sprite_budget;
+		uint8_t        tflags        = SPRITE_TRACE_EVALUATED;
+
 		// one clock per lookup
-		sprite_budget--; if (sprite_budget == 0) break;
+		sprite_budget--;
+		if (sprite_budget == 0) {
+			if (trace) {
+				spent += (uint16_t)(budget_before - sprite_budget);
+				traced_evaluated++;
+				sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 1,
+				                       (uint8_t)(tflags | SPRITE_TRACE_CUT));
+				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+					traced_cut_slot = (uint16_t)i;
+				}
+			}
+			break;
+		}
 		const struct video_sprite_properties *props = &sprite_properties[i];
 
-		if (props->sprite_zdepth == 0) {
-			continue;
-		}
+		// Enabled, and this line falls inside the sprite. Both were `continue`s
+		// before; folding them into one condition lets the trace record the
+		// slot on every path out of the iteration.
+		if (props->sprite_zdepth != 0 && y >= props->sprite_y &&
+		    y < props->sprite_y + props->sprite_height) {
+			tflags |= SPRITE_TRACE_ONSCREEN;
 
-		// check whether this line falls within the sprite
-		if (y < props->sprite_y || y >= props->sprite_y + props->sprite_height) {
-			continue;
-		}
+			const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
 
-		const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
+			int16_t       eff_sx      = (props->hflip ? (props->sprite_width - 1) : 0);
+			const int16_t eff_sx_incr = props->hflip ? -1 : 1;
 
-		int16_t       eff_sx      = (props->hflip ? (props->sprite_width - 1) : 0);
-		const int16_t eff_sx_incr = props->hflip ? -1 : 1;
+			const uint8_t *bitmap_data = video_ram + props->sprite_address + (eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
 
-		const uint8_t *bitmap_data = video_ram + props->sprite_address + (eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
-
-		uint8_t unpacked_sprite_line[64];
-		const uint16_t width = (props->sprite_width<64? props->sprite_width : 64);
-		const uint8_t vram_fetch_mask = ((2 - props->color_mode) << 2) - 1;
-		if (props->color_mode == 0) {
-			// 4bpp
-			expand_4bpp_data(unpacked_sprite_line, bitmap_data, width);
-		} else {
-			// 8bpp
-			memcpy(unpacked_sprite_line, bitmap_data, width);
-		}
-
-		for (uint16_t sx = 0; sx < props->sprite_width; ++sx) {
-			const uint16_t line_x = props->sprite_x + sx;
-			if (line_x >= SCREEN_WIDTH) {
-				eff_sx += eff_sx_incr;
-				continue;
+			uint8_t unpacked_sprite_line[64];
+			const uint16_t width = (props->sprite_width<64? props->sprite_width : 64);
+			const uint8_t vram_fetch_mask = ((2 - props->color_mode) << 2) - 1;
+			if (props->color_mode == 0) {
+				// 4bpp
+				expand_4bpp_data(unpacked_sprite_line, bitmap_data, width);
+			} else {
+				// 8bpp
+				memcpy(unpacked_sprite_line, bitmap_data, width);
 			}
 
-			// one clock per fetched 32 bits
-			if (!(sx & vram_fetch_mask)) {
+			for (uint16_t sx = 0; sx < props->sprite_width; ++sx) {
+				const uint16_t line_x = props->sprite_x + sx;
+				if (line_x >= SCREEN_WIDTH) {
+					eff_sx += eff_sx_incr;
+					continue;
+				}
+
+				// one clock per fetched 32 bits
+				if (!(sx & vram_fetch_mask)) {
+					sprite_budget--; if (sprite_budget == 0) break;
+				}
+
+				// one clock per rendered pixel
 				sprite_budget--; if (sprite_budget == 0) break;
-			}
 
-			// one clock per rendered pixel
-			sprite_budget--; if (sprite_budget == 0) break;
+				uint8_t col_index = unpacked_sprite_line[eff_sx];
+				eff_sx += eff_sx_incr;
 
-			uint8_t col_index = unpacked_sprite_line[eff_sx];
-			eff_sx += eff_sx_incr;
+				// palette offset
+				if (col_index > 0) {
+					sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;
+					sprite_line_mask[line_x] |= props->sprite_collision_mask;
 
-			// palette offset
-			if (col_index > 0) {
-				sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;
-				sprite_line_mask[line_x] |= props->sprite_collision_mask;
-
-				if (props->sprite_zdepth > sprite_line_z[line_x]) {
-					if (col_index < 16) {
-						col_index += props->palette_offset;
+					if (props->sprite_zdepth > sprite_line_z[line_x]) {
+						if (col_index < 16) {
+							col_index += props->palette_offset;
+						}
+						sprite_line_col[line_x] = col_index;
+						sprite_line_z[line_x] = props->sprite_zdepth;
+						tflags |= SPRITE_TRACE_DREW;
 					}
-					sprite_line_col[line_x] = col_index;
-					sprite_line_z[line_x] = props->sprite_zdepth;
 				}
 			}
 		}
+
+		if (trace) {
+			// Modular arithmetic, so this stays correct across the underflow
+			// described above: one sprite can never consume 65536 cycles.
+			const uint16_t used = (uint16_t)(budget_before - sprite_budget);
+			spent += used;
+			if (spent > SPRITE_TRACE_LINE_BUDGET - 1) {
+				tflags |= SPRITE_TRACE_CUT;
+				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+					traced_cut_slot = (uint16_t)i;
+				}
+			}
+			traced_evaluated++;
+			if (tflags & SPRITE_TRACE_DREW) {
+				traced_drawn++;
+			}
+			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], used, tflags);
+		}
+	}
+
+	if (trace) {
+		sprite_trace_line_end(y, (uint16_t)(spent > 0xFFFF ? 0xFFFF : spent),
+		                      spent > SPRITE_TRACE_LINE_BUDGET - 1, traced_cut_slot,
+		                      traced_evaluated, traced_drawn);
 	}
 }
 
@@ -1436,6 +1535,7 @@ video_step(float mhz, float steps, bool midline)
 	uint16_t y = 0;
 	bool ntsc_mode = reg_composer[0] & 2;
 	bool new_frame = false;
+	sprite_trace_cpu_cycles += (uint32_t)steps;
 	vga_scan_pos_x += PIXEL_FREQ * steps / mhz;
 	if (vga_scan_pos_x > VGA_SCAN_WIDTH) {
 		vga_scan_pos_x -= VGA_SCAN_WIDTH;
@@ -1512,6 +1612,13 @@ video_step(float mhz, float steps, bool midline)
 				}
 			}
 		}
+	}
+
+	// Roll the sprite trace at the frame boundary: finish the frame just ended,
+	// publish it for the debugger, and seed the next one from the attribute
+	// table as it stands now, which is what the beam will start out drawing.
+	if (new_frame && sprite_trace_active) {
+		sprite_trace_frame_advance((uint32_t)frame_count, sprite_trace_cpu_cycles, sprite_data);
 	}
 
 	return new_frame;
@@ -2392,8 +2499,7 @@ video_space_write(uint32_t address, uint8_t value)
 		palette[address & 0x1ff] = value;
 		video_palette.dirty = true;
 	} else if (address >= ADDR_SPRDATA_START && address < ADDR_SPRDATA_END) {
-		sprite_data[(address >> 3) & 0x7f][address & 0x7] = value;
-		refresh_sprite_properties((address >> 3) & 0x7f);
+		sprite_attr_write(address, value);
 	}
 }
 
@@ -2421,8 +2527,7 @@ fx_video_space_write(uint32_t address, bool nibble, uint8_t value)
 		palette[address & 0x1ff] = value;
 		video_palette.dirty = true;
 	} else if (address >= ADDR_SPRDATA_START && address < ADDR_SPRDATA_END) {
-		sprite_data[(address >> 3) & 0x7f][address & 0x7] = value;
-		refresh_sprite_properties((address >> 3) & 0x7f);
+		sprite_attr_write(address, value);
 	}
 }
 

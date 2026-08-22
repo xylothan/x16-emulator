@@ -284,6 +284,7 @@ set(X16_SOURCES
     src/io_trace.c
     src/disasm.c
     src/video.c
+    src/sprite_trace.c
     src/i2c.c
     src/smc.c
     src/rtc.c
@@ -349,6 +350,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
         src/debug_ui/panels/vera_panel.cpp
+        src/debug_ui/panels/sprite_multiplex_panel.cpp
         src/debug_ui/panels/source_panel.cpp
         src/debug_ui/panels/breakpoints_panel.cpp
         src/debug_ui/panels/symbols_panel.cpp
@@ -645,6 +647,13 @@ x16_add_test(vera_pcm
 x16_add_test(io_trace
     SOURCES tests/test_io_trace.c tests/support/harness.c src/io_trace.c)
 
+# sprite_trace.c is fed scalars by video.c rather than reaching into it, which is
+# what lets the multiplexing analysis -- generation lifetimes, effective versus
+# phantom sprites, budget overrun, burst costing -- be driven directly here
+# without standing up a VERA.
+x16_add_test(sprite_trace
+    SOURCES tests/test_sprite_trace.c tests/support/harness.c src/sprite_trace.c)
+
 # The FAT index parses untrusted binary data, so the test builds synthetic FAT16
 # and FAT32 images and reads them back. It stubs the five file-access functions
 # onto stdio rather than linking src/files.c, which would drag in SDL and zlib
@@ -662,7 +671,23 @@ x16_add_test(vera_psg
 # they have no dependencies of their own.
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+# Sprite multiplexing end to end: attributes rewritten part-way down a frame,
+# measured through the real renderer rather than through the recorder's API.
+x16_add_test(sprite_multiplex NEEDS_SDL
+    SOURCES tests/test_sprite_multiplex.c tests/support/video_fixture.c tests/support/harness.c
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+
+if(TARGET sprite_multiplex_test)
+    target_include_directories(sprite_multiplex_test PRIVATE src src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(sprite_multiplex_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(sprite_multiplex_test PRIVATE m)
+    endif()
+endif()
 
 # video.c includes gif.h, which is vendored rather than sitting alongside it.
 # It also calls SDL directly from its host half, so unlike the other NEEDS_SDL
@@ -748,7 +773,7 @@ add_test(NAME vera_palette
 # Register banking: the same addresses carry different registers per DCSEL.
 x16_add_test(vera_regbank NEEDS_SDL
     SOURCES tests/test_vera_regbank.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_regbank_test)
     target_include_directories(vera_regbank_test PRIVATE src/extern/include)
@@ -765,7 +790,7 @@ endif()
 # check side effects; this links the real video.c.
 x16_add_test(vera_debug_read NEEDS_SDL
     SOURCES tests/test_vera_debug_read.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_debug_read_test)
     target_include_directories(vera_debug_read_test PRIVATE src/extern/include)
@@ -781,7 +806,7 @@ endif()
 # IEN bits a write can store.
 x16_add_test(vera_irq NEEDS_SDL
     SOURCES tests/test_vera_irq.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_irq_test)
     target_include_directories(vera_irq_test PRIVATE src/extern/include)
@@ -797,7 +822,7 @@ endif()
 # was derived from.
 x16_add_test(vera_reset NEEDS_SDL
     SOURCES tests/test_vera_reset.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_reset_test)
     target_include_directories(vera_reset_test PRIVATE src/extern/include)
@@ -812,7 +837,7 @@ endif()
 # The layer registers, and the map and tile base addresses derived from them.
 x16_add_test(vera_layer NEEDS_SDL
     SOURCES tests/test_vera_layer.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_layer_test)
     target_include_directories(vera_layer_test PRIVATE src/extern/include)
@@ -828,7 +853,7 @@ endif()
 # address path.
 x16_add_test(vera_layer_rows NEEDS_SDL
     SOURCES tests/test_vera_layer_rows.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            src/video.c src/sprite_trace.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
 
 if(TARGET vera_layer_rows_test)
     target_include_directories(vera_layer_rows_test PRIVATE src/extern/include)
