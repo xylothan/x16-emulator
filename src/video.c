@@ -2279,6 +2279,23 @@ video_get_scanline_count(void)
 	return SCREEN_HEIGHT;
 }
 
+uint32_t
+video_frame_dot_clocks(void)
+{
+	const bool ntsc_mode = reg_composer[0] & 2;
+	// The counters video_step() compares against: a VGA line is a whole
+	// scan width, an NTSC line is a half-scan, and either way a frame is
+	// signalled after SCAN_HEIGHT of them.
+	return ntsc_mode ? (uint32_t)NTSC_HALF_SCAN_WIDTH * SCAN_HEIGHT
+	                 : (uint32_t)VGA_SCAN_WIDTH * SCAN_HEIGHT;
+}
+
+uint16_t
+video_frame_scanlines(void)
+{
+	return SCAN_HEIGHT;
+}
+
 // Size, in layer pixels, of the image the composer is actually putting on
 // screen: the active display window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled
 // by DC_HSCALE/DC_VSCALE. The composer advances the layer by scale/128 of a

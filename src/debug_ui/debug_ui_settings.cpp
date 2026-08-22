@@ -60,6 +60,11 @@ fields(int *count)
         { "IoCapI2c",            &s.io_cap_i2c,             nullptr, nullptr },
         { "IoCapJoy",            &s.io_cap_joy,             nullptr, nullptr },
         { "IoFatAutoIndex",      &s.io_fat_autoindex,       nullptr, nullptr },
+        { "PerfAlwaysOn",        &s.perf_always_on,         nullptr, nullptr },
+        { "PerfTargetFps",       nullptr, &s.perf_target_fps, nullptr },
+        { "PerfIdleMode",        nullptr, nullptr, &s.perf_idle_mode },
+        { "PerfCapacity",        nullptr, nullptr, &s.perf_capacity },
+        { "PerfGraphFrames",     nullptr, nullptr, &s.perf_graph_frames },
     };
     *count = (int)(sizeof(table) / sizeof(table[0]));
     return table;

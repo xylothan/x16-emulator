@@ -39,6 +39,8 @@
 #include "debug_server.h"
 #include "source_view.h"
 #include "code_map.h"
+#include "perf_budget.h"
+#include "cpu/irq_ctx.h"
 #include "utf8.h"
 #include "iso_8859_15.h"
 #include "joystick.h"
@@ -2078,6 +2080,59 @@ code_map_record_current(void)
 	code_map_record(regs.pc, regs.k, memory_get_ram_bank(), memory_get_rom_bank(), status);
 }
 
+// Keep the budget module in step with the machine. The video mode can change
+// under the guest (VGA and NTSC have different frame periods) and -mhz sets the
+// clock, so the frame period is recomputed rather than latched once at startup.
+//
+// The budget deliberately follows the machine's NATIVE clock, not
+// timing_get_speed_khz(): the speed control exists so a routine can be watched
+// at 25 kHz, and a budget that shrank to match would report every frame as a
+// catastrophic overrun for a machine that is running perfectly well.
+static inline void
+perf_budget_sync_machine(void)
+{
+	// PIXEL_FREQ is 25 MHz, so cycles = mhz * dot_clocks / 25.
+	const uint32_t dots = video_frame_dot_clocks();
+	perf_budget_configure((uint32_t)MHZ * 1000u,
+	                      (uint32_t)(((uint64_t)MHZ * dots) / 25u),
+	                      video_frame_scanlines());
+}
+
+// Record one executed instruction against the performance budget. `pc`/`pbank`
+// are the instruction that just RAN -- regs.pc has already moved on to the next
+// one by the time this is called.
+//
+// The enabled test is here rather than only inside perf_budget_step() because
+// arguments are evaluated before the callee can decline them: cpu_irq_depth()
+// is a real call, and leaving it to be made on every instruction of every run
+// would be the whole cost of profiling paid by machines that are not profiling.
+static inline void
+perf_budget_record(uint32_t clocks, uint16_t pc, uint8_t pbank)
+{
+	if (!perf_budget_enabled)
+		return;
+	perf_budget_step(clocks, pc, pbank, waiting != 0, cpu_irq_depth());
+}
+
+// Close a frame, charging it the host time that emulating and drawing it took.
+// Called before timing_update(), so the throttle's sleep is excluded: what a
+// perf panel wants to know is how long the work took, not how long we then
+// waited around to stay in sync.
+static inline void
+perf_budget_close_frame(void)
+{
+	static uint64_t mark = 0;
+	uint32_t        host_us = 0;
+	const uint64_t  now  = SDL_GetPerformanceCounter();
+	const uint64_t  freq = SDL_GetPerformanceFrequency();
+	if (mark && freq)
+		host_us = (uint32_t)(((now - mark) * 1000000ULL) / freq);
+	mark = now;
+
+	perf_budget_sync_machine();
+	perf_budget_frame_end(host_us);
+}
+
 // Advance the emulator from inside the OS modal window move/resize loop (see
 // video_win32.c). That loop blocks emulator_loop() entirely, so without this
 // the machine would freeze while the window is dragged.
@@ -2139,9 +2194,12 @@ emulator_step_during_move(void)
 			continue;
 		}
 		instruction_counter += waiting ^ 0x1;
+		const uint16_t perf_pc    = regs.pc;
+		const uint8_t  perf_pbank = regs.k;
 		step6502();
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
+		perf_budget_record(clocks, perf_pc, perf_pbank);
 		via1_step(clocks);
 		vera_spi_step(MHZ, clocks);
 		if (has_serial) {
@@ -2177,6 +2235,7 @@ emulator_step_during_move(void)
 	// frame looks no different from the one already on screen.
 	if (new_frame) {
 		video_present_no_input();
+		perf_budget_close_frame();
 	}
 	timing_update_no_sleep();
 
@@ -2348,9 +2407,12 @@ emulator_loop(void *param)
 		if ((debugger_enabled || imgui_debugger_enabled) && !waiting) {
 			code_map_record_current();
 		}
+		const uint16_t perf_pc    = regs.pc;
+		const uint8_t  perf_pbank = regs.k;
 		step6502();
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
+		perf_budget_record(clocks, perf_pc, perf_pbank);
 		bool new_frame = false;
 		via1_step(clocks);
 		vera_spi_step(MHZ, clocks);
@@ -2388,6 +2450,10 @@ emulator_loop(void *param)
 			if (!video_update()) {
 				break;
 			}
+
+			// Before timing_update(), which sleeps off whatever surplus the
+			// frame left: the budget wants the cost of the work, not the wait.
+			perf_budget_close_frame();
 
 			timing_update();
 #ifdef __EMSCRIPTEN__
