@@ -57,7 +57,23 @@ write_slot(int slot, uint16_t line, uint32_t cycle, uint32_t addr, int x, int y,
 
 // One scanline of rendering. `drawing_slot` is the slot that put pixels down on
 // this line, or -1 for none. Every slot is reported as evaluated, which is what
-// the real renderer does until its budget runs out.
+// the real renderer does until its line timer runs out.
+static void
+end_line(uint16_t line, uint32_t demand, uint16_t drawn, uint16_t dropped)
+{
+	sprite_line_stat_t st;
+	memset(&st, 0, sizeof(st));
+	const bool over = demand > SPRITE_TRACE_LINE_BUDGET;
+	st.budget_used  = (uint16_t)(over ? SPRITE_TRACE_LINE_BUDGET : demand);
+	st.demand       = demand;
+	st.evaluated    = SPRITE_TRACE_SLOTS;
+	st.drawn        = drawn;
+	st.dropped      = dropped;
+	st.cut_slot     = over ? 0 : SPRITE_TRACE_NO_LINE;
+	st.exhausted    = over;
+	sprite_trace_line_end(line, &st);
+}
+
 static void
 render_line_with(uint16_t line, uint32_t cycle, int drawing_slot, uint16_t budget)
 {
@@ -72,8 +88,7 @@ render_line_with(uint16_t line, uint32_t cycle, int drawing_slot, uint16_t budge
 		sprite_trace_note_slot(line, (uint8_t)slot, attrs[slot],
 		                       (uint16_t)(slot == drawing_slot ? budget : 1), flags);
 	}
-	sprite_trace_line_end(line, budget, budget > SPRITE_TRACE_LINE_BUDGET - 1,
-	                      SPRITE_TRACE_NO_LINE, SPRITE_TRACE_SLOTS, drawn);
+	end_line(line, budget, drawn, 0);
 }
 
 static void
@@ -258,9 +273,11 @@ test_budget_overrun_is_reported(void)
 	if (!f) {
 		return;
 	}
-	check_eq(f->summary.lines_exhausted, 1u, "one scanline is over budget");
+	check_eq(f->summary.lines_exhausted, 1u, "one scanline ran out of render time");
 	check_eq(f->summary.peak_line, 4u, "the peak is the overloaded line");
-	check_eq(f->summary.peak_budget, 1500u, "the peak records the demand, not the ceiling");
+	check_eq(f->summary.peak_demand, 1500u, "the peak records what the line wanted");
+	check_eq(f->summary.peak_budget, (uint32_t)SPRITE_TRACE_LINE_BUDGET,
+	         "but only the ceiling was actually spent");
 	check(f->lines[4].exhausted, "the line is marked exhausted");
 	check(!f->lines[3].exhausted, "a line within budget is not");
 }
@@ -283,7 +300,7 @@ test_writes_are_costed_in_bursts(void)
 	for (uint32_t i = 0; i < 5; i++) {
 		sprite_trace_note_write(1, (uint8_t)i, 0, (uint8_t)(i + 1), 0, 5000 + i * 10);
 	}
-	sprite_trace_line_end(0, 10, false, SPRITE_TRACE_NO_LINE, 128, 0);
+	end_line(0, 10, 0, 0);
 	sprite_trace_frame_advance(2, 10000, attrs);
 
 	const sprite_trace_frame_t *f = sprite_trace_last_frame();
@@ -306,7 +323,7 @@ test_writes_are_costed_in_bursts(void)
 	for (uint32_t i = 0; i < 5; i++) {
 		sprite_trace_note_write(1, (uint8_t)i, 0, (uint8_t)(i + 1), 0, 15000 + i * 10);
 	}
-	sprite_trace_line_end(0, 10, false, SPRITE_TRACE_NO_LINE, 128, 0);
+	end_line(0, 10, 0, 0);
 	sprite_trace_frame_advance(4, 20000, attrs);
 
 	f = sprite_trace_last_frame();

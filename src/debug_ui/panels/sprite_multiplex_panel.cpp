@@ -189,21 +189,23 @@ draw_overview(const sprite_trace_frame_t *f)
                            "  %u writes past the buffer were counted but not timed.",
                            f->mutations_dropped);
 
-    // ── Cost, requirement 4b: VERA's own per-scanline sprite budget ─────────
+    // ── Cost, requirement 4b: VERA's own per-scanline sprite render time ────
     ImGui::Separator();
-    ImGui::TextUnformatted("VERA sprite fetch budget");
-    ImGui::Text("  Peak demand: %u cycles on line %u (ceiling %d)",
-                s.peak_budget, s.peak_line, SPRITE_TRACE_LINE_BUDGET);
+    ImGui::TextUnformatted("VERA sprite render time");
+    ImGui::Text("  Peak: line %u wanted %u of %d clocks", s.peak_line, s.peak_demand,
+                SPRITE_TRACE_LINE_BUDGET);
     if (s.lines_exhausted) {
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f),
-                           "  %u scanlines exceed the budget — real VERA drops sprites on these.",
-                           s.lines_exhausted);
-        ImGui::TextDisabled("  This emulator still draws them: render_sprite_line()'s uint16_t");
-        ImGui::TextDisabled("  budget underflows past zero, so everything after the first");
-        ImGui::TextDisabled("  overrun on a line renders for free. Treat these lines as a");
-        ImGui::TextDisabled("  hardware risk the emulator will not reproduce.");
+                           "  %u scanlines ran out of time — %u sprites were dropped.",
+                           s.lines_exhausted, s.sprites_dropped);
+        ImGui::TextDisabled("  Dropped exactly as VERA drops them: when render_time_r hits 798");
+        ImGui::TextDisabled("  the sprite search and the line renderer both stop, so the sprite");
+        ImGui::TextDisabled("  in flight is left part-drawn and every slot after it is skipped.");
+        ImGui::TextDisabled("  Move sprites off these lines or make them narrower.");
     } else {
-        ImGui::TextDisabled("  No scanline exceeds the budget.");
+        float head = s.peak_demand ? 100.0f * (float)s.peak_demand / (float)SPRITE_TRACE_LINE_BUDGET
+                                   : 0.0f;
+        ImGui::TextDisabled("  No scanline ran out of time — worst line is at %.0f%% of it.", head);
     }
 }
 
@@ -322,14 +324,18 @@ draw_ribbon(const sprite_trace_frame_t *f)
             ImGui::Text("resident %u lines, drew on %u", g.lines_resident, g.lines_drawn);
             ImGui::Text("this line: %s%s%s", (fl & SPRITE_TRACE_DREW) ? "drew " : "",
                         (fl & SPRITE_TRACE_ONSCREEN) ? "on-screen " : "",
-                        (fl & SPRITE_TRACE_CUT) ? "PAST BUDGET" : "");
-            ImGui::Text("cost %u VERA cycles", f->line_budget[i]);
+                        (fl & SPRITE_TRACE_CUT) ? "DROPPED (out of render time)" : "");
+            ImGui::Text("cost %u VERA clocks", f->line_budget[i]);
         } else {
             ImGui::TextDisabled("slot not reached by the renderer on this line");
         }
         ImGui::Separator();
-        ImGui::Text("line total: %u/%d VERA cycles%s", f->lines[line].budget_used,
-                    SPRITE_TRACE_LINE_BUDGET, f->lines[line].exhausted ? "  OVER" : "");
+        ImGui::Text("line wanted %u of %d clocks%s", f->lines[line].demand,
+                    SPRITE_TRACE_LINE_BUDGET,
+                    f->lines[line].exhausted ? "  — RAN OUT" : "");
+        if (f->lines[line].dropped)
+            ImGui::TextColored(ImVec4(1, 0.4f, 0.35f, 1), "%u sprite(s) dropped on this line",
+                               f->lines[line].dropped);
         ImGui::EndTooltip();
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
@@ -346,10 +352,11 @@ void
 draw_budget(const sprite_trace_frame_t *f)
 {
     const sprite_frame_summary_t &s = f->summary;
-    ImGui::Text("Peak %u on line %u.  %u scanline(s) over the %d-cycle ceiling.",
-                s.peak_budget, s.peak_line, s.lines_exhausted, SPRITE_TRACE_LINE_BUDGET);
-    ImGui::TextDisabled("Height is the sprite work a scanline demanded. Bars above the white "
-                        "line are sprites real VERA would not have finished.");
+    ImGui::Text("Peak: line %u wanted %u of %d clocks.  %u scanline(s) ran out, %u sprites dropped.",
+                s.peak_line, s.peak_demand, SPRITE_TRACE_LINE_BUDGET, s.lines_exhausted,
+                s.sprites_dropped);
+    ImGui::TextDisabled("Height is the render time a scanline wanted. Anything above the white "
+                        "line did not get drawn — on hardware or here.");
 
     ImDrawList  *dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -362,16 +369,16 @@ draw_budget(const sprite_trace_frame_t *f)
 
     // Scale to the peak, but never compress the ceiling below three-quarters
     // height, so an ordinary frame does not look alarmingly full.
-    float top = (float)(s.peak_budget > SPRITE_TRACE_LINE_BUDGET * 4 / 3
-                            ? s.peak_budget
-                            : SPRITE_TRACE_LINE_BUDGET * 4 / 3);
+    float top = (float)(s.peak_demand > (uint32_t)(SPRITE_TRACE_LINE_BUDGET * 4 / 3)
+                            ? s.peak_demand
+                            : (uint32_t)(SPRITE_TRACE_LINE_BUDGET * 4 / 3));
     const float bw = w / (float)NUM_LINES;
 
     for (int line = 0; line < NUM_LINES; ++line) {
         const sprite_line_stat_t &st = f->lines[line];
-        if (!st.budget_used)
+        if (!st.demand)
             continue;
-        float frac = (float)st.budget_used / top;
+        float frac = (float)st.demand / top;
         float bh   = frac * h;
         ImU32 col  = st.exhausted ? IM_COL32(235, 70, 60, 255) : IM_COL32(90, 170, 240, 255);
         dl->AddRectFilled(ImVec2(origin.x + line * bw, origin.y + h - bh),
@@ -383,19 +390,20 @@ draw_budget(const sprite_trace_frame_t *f)
     dl->AddLine(ImVec2(origin.x, ceil_y), ImVec2(origin.x + w, ceil_y),
                 IM_COL32(255, 255, 255, 200));
     dl->AddText(ImVec2(origin.x + 4, ceil_y - 16), IM_COL32(255, 255, 255, 200),
-                "VERA ceiling (801)");
+                "VERA render time (798 clocks)");
 
     if (hovered) {
         const int line = clampi((int)((ImGui::GetMousePos().x - origin.x) / bw), 0, NUM_LINES - 1);
         const sprite_line_stat_t &st = f->lines[line];
         ImGui::BeginTooltip();
         ImGui::Text("line %d", line);
-        ImGui::Text("sprite cycles: %u / %d", st.budget_used, SPRITE_TRACE_LINE_BUDGET);
+        ImGui::Text("wanted %u clocks, spent %u of %d", st.demand, st.budget_used,
+                    SPRITE_TRACE_LINE_BUDGET);
         ImGui::Text("slots reached: %u, drawing: %u", st.evaluated, st.drawn);
-        if (st.exhausted && st.cut_slot != SPRITE_TRACE_NO_LINE)
+        if (st.exhausted)
             ImGui::TextColored(ImVec4(1, 0.4f, 0.35f, 1),
-                               "budget ran out at slot %u — later slots would drop on hardware",
-                               st.cut_slot);
+                               "ran out at slot %u — %u sprite(s) dropped", st.cut_slot,
+                               st.dropped);
         ImGui::Text("CPU cycles on this line: %u", st.cpu_cycles);
         ImGui::EndTooltip();
     }

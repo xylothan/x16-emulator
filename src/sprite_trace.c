@@ -375,19 +375,16 @@ sprite_trace_note_slot(uint16_t line, uint8_t slot, const uint8_t attr[8],
 }
 
 void
-sprite_trace_line_end(uint16_t line, uint16_t budget_used, bool exhausted, uint16_t cut_slot,
-                      uint16_t evaluated, uint16_t drawn)
+sprite_trace_line_end(uint16_t line, const sprite_line_stat_t *result)
 {
-	if (!sprite_trace_active || !allocated || line >= SPRITE_TRACE_LINES) {
+	if (!sprite_trace_active || !allocated || line >= SPRITE_TRACE_LINES || !result) {
 		return;
 	}
 	sprite_line_stat_t *st = &recording->lines[line];
-	st->budget_used        = budget_used;
-	st->exhausted          = exhausted;
-	st->cut_slot           = cut_slot;
-	st->evaluated          = evaluated;
-	st->drawn              = drawn;
-	st->rendered           = true;
+	const uint32_t      keep_cycles = st->cpu_cycles;
+	*st                             = *result;
+	st->cpu_cycles                  = keep_cycles;
+	st->rendered                    = true;
 }
 
 // Walk the finished residency map once and turn it into per-generation totals
@@ -474,10 +471,15 @@ finalize(trace_buffer_t *b, uint32_t end_cycle)
 	for (uint16_t line = 0; line < SPRITE_TRACE_LINES; line++) {
 		const sprite_line_stat_t *st = &b->lines[line];
 		s->budget_used_total += st->budget_used;
+		s->sprites_dropped += st->dropped;
 		if (st->exhausted) {
 			s->lines_exhausted++;
 		}
-		if (st->budget_used > s->peak_budget) {
+		// Ranked by demand, not by clocks used: once several lines are over the
+		// ceiling they all report the same usage, and the worst one is the one
+		// that wanted the most.
+		if (st->demand > s->peak_demand) {
+			s->peak_demand = st->demand;
 			s->peak_budget = st->budget_used;
 			s->peak_line   = line;
 		}

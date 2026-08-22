@@ -61,10 +61,10 @@ extern "C" {
 #define SPRITE_TRACE_SLOTS 128
 #define SPRITE_TRACE_LINES 480
 
-// Must match the budget render_sprite_line() enforces. Kept here so the panel
-// can draw the ceiling without reaching into video.c, and asserted against the
-// renderer's own constant at the hook site.
-#define SPRITE_TRACE_LINE_BUDGET 801
+// Clocks the sprite renderer gets per scanline, matching render_time_done in
+// sprite_renderer.v:44 and SPRITE_RENDER_TIME in video.c. Kept here so the
+// panel can draw the ceiling without reaching into video.c.
+#define SPRITE_TRACE_LINE_BUDGET 798
 
 // Marks a generation that was already in the attribute table when the frame
 // started, rather than written during it.
@@ -124,12 +124,14 @@ typedef struct {
 
 // What one scanline's sprite rendering cost and whether it fit.
 typedef struct {
-	uint16_t budget_used;   // of SPRITE_TRACE_LINE_BUDGET
-	uint16_t evaluated;     // slots the renderer got to before the budget ran out
+	uint16_t budget_used;   // clocks actually used, never above the ceiling
+	uint32_t demand;        // clocks the line wanted, which may exceed it
+	uint16_t evaluated;     // slots the renderer got to before time ran out
 	uint16_t drawn;         // slots that put pixels on this line
-	uint16_t cut_slot;      // slot the budget ran out in, or SPRITE_TRACE_NO_LINE
+	uint16_t dropped;       // slots on this line that time ran out before drawing
+	uint16_t cut_slot;      // first slot time ran out in, or SPRITE_TRACE_NO_LINE
 	uint32_t cpu_cycles;    // CPU cycles the guest spent while the beam was on this line
-	bool     exhausted;     // the budget hit zero, so later slots never rendered
+	bool     exhausted;     // the line ran out of time, so later slots were dropped
 	bool     rendered;      // render_sprite_line() ran for this line at all
 } sprite_line_stat_t;
 
@@ -153,10 +155,12 @@ typedef struct {
 	uint32_t mutation_cycles;    // CPU cycles spanned by those runs
 	uint32_t burst_gap;          // the gap threshold those two were computed with
 
-	uint16_t lines_exhausted;    // scanlines where the sprite budget ran out
-	uint32_t budget_used_total;  // summed sprite-fetch cycles over the frame
-	uint16_t peak_line;          // scanline with the highest budget use
-	uint16_t peak_budget;        // that line's budget use
+	uint16_t lines_exhausted;    // scanlines that ran out of sprite render time
+	uint32_t sprites_dropped;    // slot/line pairs that time ran out before drawing
+	uint32_t budget_used_total;  // summed sprite render clocks over the frame
+	uint16_t peak_line;          // scanline that wanted the most render time
+	uint16_t peak_budget;        // that line's clocks actually used
+	uint32_t peak_demand;        // that line's clocks wanted, ceiling or not
 	bool     multiplexing;       // any slot held more than one drawn value
 } sprite_frame_summary_t;
 
@@ -220,9 +224,10 @@ void sprite_trace_line_begin(uint16_t line, uint32_t cpu_cycle);
 void sprite_trace_note_slot(uint16_t line, uint8_t slot, const uint8_t attr[8],
                             uint16_t budget_used, uint8_t flags);
 
-// render_sprite_line() has finished this line.
-void sprite_trace_line_end(uint16_t line, uint16_t budget_used, bool exhausted,
-                           uint16_t cut_slot, uint16_t evaluated, uint16_t drawn);
+// render_sprite_line() has finished this line. `result` carries the whole line
+// tally; the caller fills in what it measured and leaves cpu_cycles and
+// rendered to the trace.
+void sprite_trace_line_end(uint16_t line, const sprite_line_stat_t *result);
 
 // ─── Reading ───────────────────────────────────────────────────────────────
 

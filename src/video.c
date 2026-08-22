@@ -63,6 +63,17 @@
 
 #define NUM_SPRITES 128
 
+// Clocks the sprite renderer gets per scanline before both of its state
+// machines are forced to DONE.
+//
+//   sprite_renderer.v:44  wire render_time_done = (render_time_r == 'd798);
+//
+// render_time_r is cleared by line_render_start and counts every clock after,
+// so this is elapsed time for the line rather than an amount of work. The
+// comment above it in the RTL gives the reason for the number: "Limit render
+// time so that VGA and composite mode get the same amount of render time".
+#define SPRITE_RENDER_TIME 798
+
 // both VGA and NTSC
 #define SCAN_HEIGHT 525
 #define PIXEL_FREQ 25.0
@@ -866,130 +877,221 @@ render_sprite_line(const uint16_t y)
 	memset(sprite_line_z, 0, SCREEN_WIDTH);
 	memset(sprite_line_mask, 0, SCREEN_WIDTH);
 
-	// Sprite tracing mirrors the budget in `spent`, which unlike sprite_budget
-	// does not stop at zero. That difference is the point: sprite_budget is
-	// uint16_t and the inner pixel loop's `break` only leaves that loop, so the
-	// next sprite's decrement underflows it to 65535 and every remaining sprite
-	// on the line renders for free. Real VERA drops them. Correcting the
-	// renderer here would change what every existing program draws, so the
-	// behaviour is left alone and `spent` records the demand the line really
-	// made -- which is what a multiplexer needs to see.
+	// Timing follows sprite_renderer.v, which runs two state machines against
+	// one shared line timer:
+	//
+	//   sprite_renderer.v:44   wire render_time_done = (render_time_r == 'd798);
+	//   sprite_renderer.v:171  if (render_time_done) sf_state_next = SF_DONE;
+	//   sprite_renderer.v:349  if (render_time_done) state_next = STATE_DONE;
+	//
+	// render_time_r is reset by line_render_start and counts every clock
+	// afterwards, so the limit is elapsed time for the line, not a quantity of
+	// work. When it expires both machines are forced to DONE and stay there
+	// until the next line: the search stops, and the sprite in flight stops
+	// part-drawn. Sprites are never free -- once the line is out of time,
+	// everything after it is simply not on screen.
+	//
+	// SF_FIND_SPRITE (sprite_renderer.v:146-160) advances one slot per clock
+	// whenever the slot is disabled or off the line, and it does so whether or
+	// not the line renderer is busy, so stepping over empty slots overlaps with
+	// drawing. Only a slot that needs rendering stalls, waiting on !render_busy.
+	// That overlap is why `t` and `render_free_at` are tracked separately;
+	// charging all 128 lookups serially would drop sprites the hardware draws.
+	//
+	// Known divergence: STATE_WAIT_FETCH is charged one clock, its best case.
+	// Real VERA shares the VRAM bus with the layer renderers, so a contended
+	// fetch takes longer and slightly fewer sprites fit than modelled here.
 	const bool trace = sprite_trace_active;
-	uint32_t   spent = 0;
 	uint16_t   traced_evaluated = 0;
 	uint16_t   traced_drawn     = 0;
 	uint16_t   traced_cut_slot  = SPRITE_TRACE_NO_LINE;
+	uint16_t   traced_dropped   = 0;
+	uint32_t   traced_tail      = 0; // cost of the part-drawn sprite left unfinished
 	if (trace) {
 		sprite_trace_line_begin(y, sprite_trace_cpu_cycles);
 	}
 
-	uint16_t sprite_budget = 800 + 1;
-	for (int i = 0; i < NUM_SPRITES; i++) {
-		const uint16_t budget_before = sprite_budget;
-		uint8_t        tflags        = SPRITE_TRACE_EVALUATED;
+	uint32_t t              = 0; // render_time_r: clocks used on this line
+	uint32_t render_free_at = 0; // clock the line renderer returns to STATE_IDLE
+	int      stopped_at     = NUM_SPRITES; // first slot the line never reached
 
-		// one clock per lookup
-		sprite_budget--;
-		if (sprite_budget == 0) {
-			if (trace) {
-				spent += (uint16_t)(budget_before - sprite_budget);
-				traced_evaluated++;
-				sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 1,
-				                       (uint8_t)(tflags | SPRITE_TRACE_CUT));
-				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
-					traced_cut_slot = (uint16_t)i;
-				}
-			}
+	for (int i = 0; i < NUM_SPRITES; i++) {
+		if (t >= SPRITE_RENDER_TIME) {
+			// render_time_done: SF_DONE, so this slot is never looked at.
+			stopped_at = i;
 			break;
 		}
+
+		const uint32_t t_before = t;
+		uint8_t        tflags   = SPRITE_TRACE_EVALUATED;
 		const struct video_sprite_properties *props = &sprite_properties[i];
 
-		// Enabled, and this line falls inside the sprite. Both were `continue`s
-		// before; folding them into one condition lets the trace record the
-		// slot on every path out of the iteration.
-		if (props->sprite_zdepth != 0 && y >= props->sprite_y &&
-		    y < props->sprite_y + props->sprite_height) {
-			tflags |= SPRITE_TRACE_ONSCREEN;
+		const bool on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
+		                     y < props->sprite_y + props->sprite_height;
 
-			const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
+		if (!on_line) {
+			t++; // one clock to step over the slot, overlapped with rendering
+			if (trace) {
+				traced_evaluated++;
+				sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i],
+				                       (uint16_t)(t - t_before), tflags);
+			}
+			continue;
+		}
 
-			int16_t       eff_sx      = (props->hflip ? (props->sprite_width - 1) : 0);
-			const int16_t eff_sx_incr = props->hflip ? -1 : 1;
+		tflags |= SPRITE_TRACE_ONSCREEN;
 
-			const uint8_t *bitmap_data = video_ram + props->sprite_address + (eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
+		// SF_FIND_SPRITE holds here until the line renderer is idle, then takes
+		// two clocks to hand the sprite over (SF_FIND_SPRITE, SF_START_RENDER).
+		if (t < render_free_at) {
+			t = render_free_at;
+		}
+		if (t >= SPRITE_RENDER_TIME) {
+			stopped_at = i;
+			break;
+		}
+		t += 2;
 
-			uint8_t unpacked_sprite_line[64];
-			const uint16_t width = (props->sprite_width<64? props->sprite_width : 64);
-			const uint8_t vram_fetch_mask = ((2 - props->color_mode) << 2) - 1;
-			if (props->color_mode == 0) {
-				// 4bpp
-				expand_4bpp_data(unpacked_sprite_line, bitmap_data, width);
-			} else {
-				// 8bpp
-				memcpy(unpacked_sprite_line, bitmap_data, width);
+		const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
+
+		int16_t       eff_sx      = (props->hflip ? (props->sprite_width - 1) : 0);
+		const int16_t eff_sx_incr = props->hflip ? -1 : 1;
+
+		const uint8_t *bitmap_data = video_ram + props->sprite_address + (eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
+
+		uint8_t unpacked_sprite_line[64];
+		const uint16_t width = (props->sprite_width<64? props->sprite_width : 64);
+		const uint8_t vram_fetch_mask = ((2 - props->color_mode) << 2) - 1;
+		if (props->color_mode == 0) {
+			// 4bpp
+			expand_4bpp_data(unpacked_sprite_line, bitmap_data, width);
+		} else {
+			// 8bpp
+			memcpy(unpacked_sprite_line, bitmap_data, width);
+		}
+
+		// The line renderer's own clock, running from STATE_IDLE's single clock
+		// into the fetch/render loop.
+		uint32_t rt        = t + 1;
+		bool     truncated = false;
+		uint16_t sx        = 0;
+
+		for (; sx < props->sprite_width; ++sx) {
+			// one clock per fetched 32 bits
+			if (!(sx & vram_fetch_mask)) {
+				if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
+				rt++;
 			}
 
-			for (uint16_t sx = 0; sx < props->sprite_width; ++sx) {
-				const uint16_t line_x = props->sprite_x + sx;
-				if (line_x >= SCREEN_WIDTH) {
-					eff_sx += eff_sx_incr;
-					continue;
-				}
+			// one clock per pixel, charged whether or not the pixel lands on
+			// screen: STATE_RENDER steps linebuf_idx_r past the edge just the
+			// same (sprite_renderer.v:317-319), so a sprite hanging off the
+			// side costs its full width.
+			if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
+			rt++;
 
-				// one clock per fetched 32 bits
-				if (!(sx & vram_fetch_mask)) {
-					sprite_budget--; if (sprite_budget == 0) break;
-				}
-
-				// one clock per rendered pixel
-				sprite_budget--; if (sprite_budget == 0) break;
-
-				uint8_t col_index = unpacked_sprite_line[eff_sx];
+			const uint16_t line_x = props->sprite_x + sx;
+			if (line_x >= SCREEN_WIDTH) {
 				eff_sx += eff_sx_incr;
+				continue;
+			}
 
-				// palette offset
-				if (col_index > 0) {
-					sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;
-					sprite_line_mask[line_x] |= props->sprite_collision_mask;
+			uint8_t col_index = unpacked_sprite_line[eff_sx];
+			eff_sx += eff_sx_incr;
 
-					if (props->sprite_zdepth > sprite_line_z[line_x]) {
-						if (col_index < 16) {
-							col_index += props->palette_offset;
-						}
-						sprite_line_col[line_x] = col_index;
-						sprite_line_z[line_x] = props->sprite_zdepth;
-						tflags |= SPRITE_TRACE_DREW;
+			// palette offset
+			if (col_index > 0) {
+				sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;
+				sprite_line_mask[line_x] |= props->sprite_collision_mask;
+
+				if (props->sprite_zdepth > sprite_line_z[line_x]) {
+					if (col_index < 16) {
+						col_index += props->palette_offset;
 					}
+					sprite_line_col[line_x] = col_index;
+					sprite_line_z[line_x] = props->sprite_zdepth;
+					tflags |= SPRITE_TRACE_DREW;
 				}
 			}
 		}
 
+		render_free_at = rt;
+
 		if (trace) {
-			// Modular arithmetic, so this stays correct across the underflow
-			// described above: one sprite can never consume 65536 cycles.
-			const uint16_t used = (uint16_t)(budget_before - sprite_budget);
-			spent += used;
-			if (spent > SPRITE_TRACE_LINE_BUDGET - 1) {
-				tflags |= SPRITE_TRACE_CUT;
-				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
-					traced_cut_slot = (uint16_t)i;
-				}
-			}
 			traced_evaluated++;
 			if (tflags & SPRITE_TRACE_DREW) {
 				traced_drawn++;
 			}
-			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], used, tflags);
+			if (truncated) {
+				tflags |= SPRITE_TRACE_CUT;
+				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+					traced_cut_slot = (uint16_t)i;
+				}
+				// Time can run out before this sprite lands a single pixel, in
+				// which case it is as dropped as the ones the search never
+				// reached, and has to be counted with them.
+				if (!(tflags & SPRITE_TRACE_DREW)) {
+					traced_dropped++;
+				}
+				const uint32_t left = (uint32_t)(props->sprite_width - sx);
+				traced_tail = left + left / (vram_fetch_mask + 1u);
+			}
+			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i],
+			                       (uint16_t)(rt - t_before), tflags);
+		}
+
+		if (truncated) {
+			// render_time_done fired mid-sprite: the rest of the line is gone.
+			stopped_at = i + 1;
+			break;
 		}
 	}
 
-	if (trace) {
-		sprite_trace_line_end(y, (uint16_t)(spent > 0xFFFF ? 0xFFFF : spent),
-		                      spent > SPRITE_TRACE_LINE_BUDGET - 1, traced_cut_slot,
-		                      traced_evaluated, traced_drawn);
+	if (!trace) {
+		return;
 	}
-}
 
+	uint32_t used = (t > render_free_at ? t : render_free_at);
+	if (used > SPRITE_RENDER_TIME) {
+		used = SPRITE_RENDER_TIME;
+	}
+	uint32_t demand = used + traced_tail;
+
+	// What the line would have needed had it not run out. Pure arithmetic --
+	// no VRAM is read and nothing is drawn -- so "how far over was this line"
+	// survives the sprites being dropped, which is the number a multiplexer is
+	// actually tuning against.
+	for (int i = stopped_at; i < NUM_SPRITES; i++) {
+		const struct video_sprite_properties *p = &sprite_properties[i];
+		const bool on_line = p->sprite_zdepth != 0 && y >= p->sprite_y &&
+		                     y < p->sprite_y + p->sprite_height;
+		if (!on_line) {
+			demand++;
+			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 0, SPRITE_TRACE_EVALUATED);
+			continue;
+		}
+		const uint16_t per_fetch = (uint16_t)((2 - p->color_mode) << 2);
+		demand += 3u + p->sprite_width + (uint32_t)(p->sprite_width / per_fetch);
+		traced_dropped++;
+		if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+			traced_cut_slot = (uint16_t)i;
+		}
+		sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 0,
+		                       (uint8_t)(SPRITE_TRACE_EVALUATED | SPRITE_TRACE_ONSCREEN |
+		                                 SPRITE_TRACE_CUT));
+	}
+
+	sprite_line_stat_t st;
+	memset(&st, 0, sizeof(st));
+	st.budget_used = (uint16_t)used;
+	st.demand      = demand;
+	st.evaluated   = traced_evaluated;
+	st.drawn       = traced_drawn;
+	st.dropped     = traced_dropped;
+	st.cut_slot    = traced_cut_slot;
+	st.exhausted   = (stopped_at < NUM_SPRITES);
+	sprite_trace_line_end(y, &st);
+}
 static void
 render_layer_line_text(uint8_t layer, uint16_t y)
 {
