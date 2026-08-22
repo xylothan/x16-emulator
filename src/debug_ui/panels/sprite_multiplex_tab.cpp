@@ -1,20 +1,20 @@
-// Commander X16 Emulator — Sprite Multiplex panel.
+// Commander X16 Emulator — the VERA panel's sprite multiplexing tab.
 //
-// The VERA panel's sprite tab shows the attribute table as it stands right now.
-// For a program that multiplexes -- rewriting slots from a raster IRQ so 128
-// hardware sprites show far more than 128 sprites -- that view is close to
+// The VERA panel's Sprites tab shows the attribute table as it stands right
+// now. For a program that multiplexes -- rewriting slots from a raster IRQ so
+// 128 hardware sprites show far more than 128 sprites -- that view is close to
 // useless: it shows whichever band of the screen happened to be written last,
-// and the rest of the frame is simply gone. This panel shows the frame instead
-// of the table.
+// and the rest of the frame is simply gone. This tab shows the frame instead of
+// the table, which is why it sits directly alongside it.
 //
 // Everything here reads sprite_trace, which records what render_sprite_line()
 // actually did on every scanline. Nothing on screen is inferred from the
 // attribute table's current contents.
 
 #include "imgui.h"
-#include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
 #include "debug_ui.h"
+#include "sprite_multiplex_tab.h"
 
 #include "sprite_trace.h"
 
@@ -31,19 +31,6 @@ constexpr int NUM_SLOTS = SPRITE_TRACE_SLOTS;
 constexpr int NUM_LINES = SPRITE_TRACE_LINES;
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-inline uint8_t expand4(uint8_t v) { return (uint8_t)((v << 4) | v); }
-
-void
-build_palette(uint32_t out[256])
-{
-    for (int i = 0; i < 256; ++i) {
-        uint8_t b0 = video_space_read(0x1FA00 + i * 2);
-        uint8_t b1 = video_space_read(0x1FA00 + i * 2 + 1);
-        out[i] = 0xFF000000u | ((uint32_t)expand4(b0 & 0x0f) << 16) |
-                 ((uint32_t)expand4((b0 >> 4) & 0x0f) << 8) | (uint32_t)expand4(b1 & 0x0f);
-    }
-}
 
 // A stable colour per distinct sprite graphic, so the same artwork reused in
 // several slots reads as the same thing across the whole ribbon.
@@ -493,16 +480,13 @@ draw_effective(const sprite_trace_frame_t *f)
 // frame the player saw, which no single read of the attribute table can show.
 // ---------------------------------------------------------------------------
 void
-rebuild_ghost(const sprite_trace_frame_t *f)
+rebuild_ghost(const sprite_trace_frame_t *f, const uint32_t pal[256])
 {
     if (!s_ghost_px)
         s_ghost_px = (uint32_t *)malloc((size_t)640 * 480 * 4);
     if (!s_ghost_px)
         return;
     memset(s_ghost_px, 0, (size_t)640 * 480 * 4);
-
-    uint32_t pal[256];
-    build_palette(pal);
 
     // Walk the residency map so each sprite contributes exactly the scanlines
     // it drew on -- reconstructing from first_line/last_line would paint over
@@ -549,13 +533,13 @@ rebuild_ghost(const sprite_trace_frame_t *f)
 }
 
 void
-draw_ghost(const sprite_trace_frame_t *f)
+draw_ghost(const sprite_trace_frame_t *f, const uint32_t pal[256])
 {
     static bool auto_refresh = true;
     ImGui::Checkbox("Follow live frames", &auto_refresh);
     ImGui::SameLine();
     if (ImGui::Button("Rebuild") || (auto_refresh && f->summary.frame != s_ghost_frame)) {
-        rebuild_ghost(f);
+        rebuild_ghost(f, pal);
         s_ghost_frame = f->summary.frame;
     }
     ImGui::SameLine();
@@ -577,15 +561,11 @@ draw_ghost(const sprite_trace_frame_t *f)
 }
 
 // ---------------------------------------------------------------------------
-void
-sprite_multiplex_render(bool *p_open)
-{
-    ImGui::SetNextWindowSize(ImVec2(900, 620), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Sprite Multiplex", p_open)) {
-        ImGui::End();
-        return;
-    }
+} // namespace
 
+void
+draw_sprite_multiplex_tab(const uint32_t pal[256])
+{
     if (ImGui::Checkbox("Record sprite raster activity", &s_enabled)) {
         s_alloc_failed = !sprite_trace_set_enabled(s_enabled);
         if (s_alloc_failed)
@@ -610,26 +590,20 @@ sprite_multiplex_render(bool *p_open)
         ImGui::Separator();
         ImGui::TextWrapped(
             "Enable recording and let a frame complete.\n\n"
-            "This panel reconstructs a frame from what render_sprite_line() actually did on "
-            "each scanline, so a program that rewrites sprite attributes from a raster IRQ "
-            "shows up as what it really drew rather than whatever the attribute table happens "
-            "to hold when you look at it.");
-        ImGui::End();
+            "The Sprites tab reads the attribute table as it stands now. This one "
+            "reconstructs a frame from what render_sprite_line() actually did on each "
+            "scanline, so a program that rewrites sprite attributes from a raster IRQ shows "
+            "up as what it really drew rather than whatever the table happens to hold when "
+            "you look at it.");
         return;
     }
 
-    if (ImGui::BeginTabBar("mux_tabs")) {
+    if (ImGui::BeginTabBar("mux_subtabs", ImGuiTabBarFlags_DrawSelectedOverline)) {
         if (ImGui::BeginTabItem("Overview")) { draw_overview(f); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Raster ribbon")) { draw_ribbon(f); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Budget")) { draw_budget(f); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Render time")) { draw_budget(f); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Effective sprites")) { draw_effective(f); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Frame ghost")) { draw_ghost(f); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Frame ghost")) { draw_ghost(f, pal); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
-
-    ImGui::End();
 }
-
-} // namespace
-
-static DebugPanelRegistration s_reg("Sprite Multiplex", sprite_multiplex_render, false);

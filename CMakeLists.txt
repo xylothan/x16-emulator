@@ -350,7 +350,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
         src/debug_ui/panels/vera_panel.cpp
-        src/debug_ui/panels/sprite_multiplex_panel.cpp
+        src/debug_ui/panels/sprite_multiplex_tab.cpp
         src/debug_ui/panels/source_panel.cpp
         src/debug_ui/panels/breakpoints_panel.cpp
         src/debug_ui/panels/symbols_panel.cpp
