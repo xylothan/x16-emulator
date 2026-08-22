@@ -192,10 +192,21 @@ not switch off a panel somebody is reading.
 | `tests/test_perf_budget.c` | The classification and statistics, driven directly. |
 | `testbench/test_dap.py` | The DAP surface against a real running machine. |
 
-## Not covered yet
+## Not covered here
 
-Bandwidth budgets — VERA data-port bytes per frame, VRAM fetch load against
-VERA's per-scanline budget, and the sprite-per-line limit — are a separate piece
-of work. The emulator does not currently model VERA's sprite render budget at
-all, so that part is new instrumentation in the renderer rather than a new view
-over existing state.
+This module accounts for **CPU cycles**. VERA's own bandwidth is a separate
+question and is not measured here:
+
+* **Layer fetches** — layer 0/1 tile and map reads in `render_layer_line_tile()`,
+  `render_layer_line_text()` and `render_layer_line_bitmap()`, which vary with
+  tile mode, bitmap mode and colour depth.
+* **The CPU's data-port traffic** through `$9F23`/`$9F24`, which is the one piece
+  of VERA bandwidth a program controls directly.
+* **VERA FX** writes.
+
+Sprite render time is the exception: it is modelled, but by the VERA sprite
+renderer rather than by anything here, and it is reported in the VERA panel's
+**Multiplex → Render time** view rather than in this budget. It is a per-scanline
+time ceiling that really does drop sprites, which is a different shape of
+question from "how many cycles did my code use", so the two are deliberately
+kept apart rather than blended into one number that would mean neither.
