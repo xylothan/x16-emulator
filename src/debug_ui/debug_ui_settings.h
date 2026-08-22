@@ -68,6 +68,18 @@ struct DebugUiSettings {
     // named. Off means the SD tab still works, it just reports LBAs.
     bool io_fat_autoindex = true;
 
+    // --- Performance budget --------------------------------------------------
+    // The Performance panel arms profiling while it is open, so this is only
+    // for the cases where that is not what is wanted: leaving it running after
+    // the panel is closed (to keep a DAP client fed), or holding it off
+    // entirely. Like the I/O trace, this is a feature that costs the running
+    // machine something -- an add and a table lookup on every instruction.
+    bool  perf_always_on   = false; // keep profiling when the panel is closed
+    float perf_target_fps  = 60.0f;
+    int   perf_idle_mode   = 0;    // perf_idle_mode_t
+    int   perf_capacity    = 3600; // frames of history; 60s at 60Hz
+    int   perf_graph_frames = 240; // frames drawn in the panel's graph
+
     // --- Safety -------------------------------------------------------------
     // Most register edits are recoverable pokes. A few are not: they change
     // machine state the running program has already committed to, and it will

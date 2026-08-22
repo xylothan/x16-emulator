@@ -23,6 +23,7 @@
 #include "debug_core.h"
 #include "debugger.h"
 #include "io_trace.h"
+#include "perf_budget.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -388,6 +389,14 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 		DEBUGBreakOnWatchpoint();
 	}
 
+	// A store is the signal the budget's spin detector runs on: a loop that
+	// writes nothing is waiting, and a loop that writes is computing. A debug
+	// write is excluded for the same reason it is excluded from watchpoints and
+	// the I/O trace -- the debugger poking memory is not the program running.
+	if (!debugOn) {
+		perf_budget_note_store();
+	}
+
 	// Write to memory
 	if (is_gen2 && bank != 0) {
 		if (bank < num_banks) {
@@ -626,6 +635,8 @@ emu_recorder_set(gif_recorder_command_t command)
 // 10: read: cpu clock bits 16-23
 // 11: write: write character to STDOUT of console
 // 11: read: cpu clock MSB bits 24-31
+// 12: write: performance budget marker (see perf_budget.h for the protocol)
+// 12: read: marker protocol version, so guest code can feature-detect
 // POKE $9FB3,1:PRINT"ECHO MODE IS ON":POKE $9FB3,0
 void
 emu_write(uint8_t reg, uint8_t value)
@@ -659,6 +670,7 @@ emu_write(uint8_t reg, uint8_t value)
 			fflush(stdout);
 			break;
 		}
+		case 12: perf_budget_marker_write(value); break;
 		default: printf("WARN: Invalid register %x\n", DEVICE_EMULATOR + reg);
 	}
 }
@@ -694,6 +706,8 @@ emu_read(uint8_t reg, bool debugOn)
 	} else if (reg == 11) {
 		return (clock_snap >> 24) & 0xff;
 
+	} else if (reg == 12) {
+		return perf_budget_marker_read();
 	} else if (reg == 13) {
 		return keymap;
 	} else if (reg == 14) {
