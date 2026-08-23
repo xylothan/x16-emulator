@@ -49,6 +49,29 @@ SDL_main`, which collides with their `int main(void)` and raises C4026, fatal
 under `/WX`. They report as *Not Run* rather than failing. The other 25 pass and
 are the ones to watch; do not go hunting for a regression you did not cause.
 
+**A green local build is necessary, never sufficient.** Because those 11 never
+compile on Windows, their *link step never runs here either* — and four of them
+(`memory_banking`, `debugon_contract`, `debug_write_path`, `watchpoint_purity`)
+link the real `src/memory.c` against `tests/support/fake_devices.c`. So anything
+`memory.c` newly calls must also exist in `fake_devices.c`, and on Windows only
+CI can tell you it does not.
+
+Two Linux-only link failures have already shipped this way: `lrintf`/`fabsf` out
+of `perf_budget.c` (MSVC intrinsics, glibc libm symbols), and a missing
+`video_set_debug_write` stub after `memory.c` started calling it. Both times the
+code was correct on Windows, both times the failure was one push away from being
+visible, and both times **completion was claimed before the push**. That is the
+actual lesson, and it is broader than the MSVC gap:
+
+> Push and let CI answer before claiming a result.
+
+One live tripwire of exactly this shape, once the performance work lands (PRs #79
+and #80, which is where `perf_budget.c` and `vera_bandwidth.c` come from):
+`src/vera_bandwidth.c` is deliberately *not* in those four link sets, and does
+not need to be while `memory.c` reaches VERA only through `video_write()` and
+`video_set_debug_write()`. The day anything in `memory.c` calls
+`vera_bandwidth_*` directly, all four break together.
+
 The DAP testbench needs a running emulator:
 
 ```powershell
