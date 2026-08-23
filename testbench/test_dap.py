@@ -384,6 +384,115 @@ for bad in ("vram:zzz", "notanaddress", "vram:"):
 r = read_mem(121, "$C000", 4)
 expect("readMemory accepts a $-prefixed CPU address", r is not None and r.get("success"))
 
+# 15b. x16/perfStats and x16/perfConfig: the guest performance budget.
+#
+# The arithmetic is pinned by tests/test_perf_budget.c, which drives the module
+# directly. What can only be checked here is that the surface is wired to a real
+# machine: that the frame period it reports is the one VERA is actually scanning
+# at, and that a target frame rate means what the header says it means.
+
+
+def perf(seq, args=None):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/perfConfig",
+                    "arguments": args if args is not None else {}})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("command") == "x16/perfConfig":
+            return m
+    return None
+
+
+# Frames only complete while the machine runs, and the stepping tests above left
+# it stopped. Nothing here means anything against a paused CPU.
+send_dap(sock, {"seq": 129, "type": "request", "command": "continue",
+                "arguments": {"threadId": 1}})
+time.sleep(0.5)
+recv_dap(sock, 1)
+
+r = perf(130, {"enabled": True, "targetFps": 60, "idleMode": "auto", "reset": True})
+expect("x16/perfConfig arms profiling", r is not None and r.get("success"))
+budget = r["body"]["budget"] if r and r.get("success") else {}
+expect("profiling reports itself enabled", budget.get("enabled") is True)
+
+# 8 MHz over a VGA frame: 8e6 * (800*525) / 25e6. The emulator derives this from
+# the video timing rather than hardcoding it, so a wrong answer here means the
+# budget is being measured against a frame the machine is not scanning.
+expect("a VGA frame at 8 MHz is 134400 cycles", budget.get("cyclesPerFrame") == 134400)
+expect("which is 256 cycles per scanline", budget.get("cyclesPerScanline") == 256)
+expect("the 60 fps budget is one whole frame",
+       budget.get("budgetCycles") == 134400 and budget.get("framesPerBudget") == 1)
+
+# A lower target buys more frames, not longer ones.
+r = perf(131, {"targetFps": 30})
+b30 = r["body"]["budget"] if r and r.get("success") else {}
+expect("30 fps spans two vsyncs", b30.get("framesPerBudget") == 2)
+expect("and doubles the budget", b30.get("budgetCycles") == 268800)
+expect("without changing the frame period", b30.get("cyclesPerFrame") == 134400)
+
+# A target faster than the machine scans is the other question -- "must this fit
+# in half a frame?" -- and gets a fractional budget rather than being rounded
+# up to a whole one.
+r = perf(132, {"targetFps": 120})
+b120 = r["body"]["budget"] if r and r.get("success") else {}
+expect("a sub-frame target gets a fraction of a frame",
+       b120.get("budgetCycles", 0) < 134400 * 0.6)
+
+perf(133, {"targetFps": 60})
+
+time.sleep(1.0)  # let some frames accumulate
+send_dap(sock, {"seq": 134, "type": "request", "command": "x16/perfStats",
+                "arguments": {"windows": [1, 0], "includeFrames": 3}})
+time.sleep(0.5)
+stats = None
+for m in recv_dap(sock, 2):
+    if m.get("command") == "x16/perfStats":
+        stats = m
+expect("x16/perfStats responds", stats is not None and stats.get("success"))
+
+if stats and stats.get("success"):
+    body = stats["body"]
+    cur = body.get("current", {})
+    expect("a completed frame is reported", bool(cur))
+    expect("the frame holds a frame's worth of cycles",
+           130000 <= cur.get("totalCycles", 0) <= 140000)
+    # The invariant the whole classification rests on.
+    expect("work and idle account for every cycle",
+           cur.get("workCycles", 0) + cur.get("idleCycles", -1) == cur.get("totalCycles"))
+
+    wins = body.get("windows", [])
+    expect("both requested windows came back", len(wins) == 2)
+    if wins:
+        bw = wins[0].get("budgetWork", {})
+        expect("percentiles are ordered",
+               bw.get("min", 0) <= bw.get("p50", 0) <= bw.get("p95", 0) <= bw.get("max", 0))
+        expect("the window reports overrun accounting",
+               "overruns" in wins[0] and "overrunPct" in wins[0])
+    frames = body.get("frames", [])
+    expect("raw frame samples came back", len(frames) == 3)
+    if len(frames) >= 2:
+        expect("raw frames are oldest first", frames[0]["frame"] < frames[-1]["frame"])
+
+# Zones are attributed by address, so one drawn over ROM must collect something.
+r = perf(135, {"reset": True,
+               "zones": [{"name": "kernal", "start": 0xC000, "end": 0xFFFF}]})
+expect("zones can be declared over DAP", r is not None and r.get("success"))
+time.sleep(0.8)
+send_dap(sock, {"seq": 136, "type": "request", "command": "x16/perfStats",
+                "arguments": {"windows": [1]}})
+time.sleep(0.5)
+for m in recv_dap(sock, 2):
+    if m.get("command") == "x16/perfStats":
+        zones = m["body"].get("zones", [])
+        expect("the declared zone came back", len(zones) == 1)
+        if zones:
+            expect("the zone is named as declared", zones[0].get("name") == "kernal")
+            expect("and has window statistics", "window30s" in zones[0])
+
+# Leave the machine as we found it: profiling costs it something per instruction.
+r = perf(137, {"enabled": False, "zones": []})
+expect("profiling can be switched back off",
+       r is not None and r["body"]["budget"].get("enabled") is False)
+
 # 15. Ownership: a session must take away only what it asked for.
 #
 # The core records who wanted each breakpoint, so a client disconnecting clears

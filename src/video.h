@@ -63,6 +63,17 @@ bool video_get_layer_line_state(uint8_t layer, uint16_t line, uint8_t out_regs[7
                                 uint16_t *out_layer_row);
 uint16_t video_get_scanline_count(void);
 
+// The frame period video_step() actually raises a new frame on, expressed in
+// VERA's 25 MHz dot clock and in scanlines. Together with the CPU clock these
+// give the cycles a program has between vsyncs, which is what a performance
+// budget is measured against.
+//
+// NTSC reports a FIELD, not a full interlaced frame, because a field is what
+// video_step() signals a new frame at -- and it is also what a program syncing
+// to VSYNC actually gets.
+uint32_t video_frame_dot_clocks(void);
+uint16_t video_frame_scanlines(void);
+
 // Size in layer pixels of the image the composer is actually displaying: the
 // active window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled by DC_HSCALE/VSCALE.
 // Viewers use this to size themselves to the current video mode.

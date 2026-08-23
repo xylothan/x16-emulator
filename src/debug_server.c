@@ -8,6 +8,7 @@
 #include "debugger.h"
 #include "disasm.h"
 #include "code_map.h"
+#include "perf_budget.h"
 #include "glue.h"
 #include "memory.h"
 #include "source_view.h"
@@ -428,6 +429,9 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsStepInTargetsRequest", true);
     cJSON_AddBoolToObject(caps, "supportsConditionalBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsHitConditionalBreakpoints", true);
+    // Non-standard, so that a client can tell this emulator's performance
+    // budget surface from one that would reject the requests.
+    cJSON_AddBoolToObject(caps, "supportsX16PerfStats", true);
     send_dap_response(seq, "initialize", true, caps);
 
     dap_session_active = true;
@@ -2070,6 +2074,295 @@ static int handle_x16_registers(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Performance budget (x16/perfStats, x16/perfConfig) ─────────────────────
+// Exposes the guest cycle budget accounting from perf_budget.c so that tooling
+// -- a VS Code extension, a CI job, a profiling script -- can watch for
+// regressions without a human reading a panel.
+//
+// Statistics are answered while the machine runs free: nothing here stops it,
+// and the server is polled from the emulation thread, so the numbers cannot be
+// torn by a concurrent update.
+
+static cJSON *perf_stat_json(const perf_stat_t *s) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "min", s->min);
+    cJSON_AddNumberToObject(o, "mean", s->mean);
+    cJSON_AddNumberToObject(o, "p50", s->p50);
+    cJSON_AddNumberToObject(o, "p95", s->p95);
+    cJSON_AddNumberToObject(o, "p99", s->p99);
+    cJSON_AddNumberToObject(o, "max", s->max);
+    return o;
+}
+
+static void perf_window_name(float seconds, char *out, size_t outsz) {
+    if (seconds <= 0.0f) snprintf(out, outsz, "session");
+    else                 snprintf(out, outsz, "%gs", (double)seconds);
+}
+
+// Accepts either a number of seconds or a name ("30s", "session"), so a client
+// can send back the same window labels it was given.
+static float perf_window_seconds(const cJSON *item) {
+    if (cJSON_IsNumber(item)) return (float)item->valuedouble;
+    if (cJSON_IsString(item) && item->valuestring) {
+        if (!strcmp(item->valuestring, "session")) return 0.0f;
+        return (float)atof(item->valuestring); // "30s" -> 30
+    }
+    return 0.0f;
+}
+
+static cJSON *perf_budget_json(void) {
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddBoolToObject(b, "enabled", perf_budget_is_enabled());
+    cJSON_AddNumberToObject(b, "targetFps", perf_budget_get_target_fps());
+    cJSON_AddNumberToObject(b, "vsyncHz", perf_budget_vsync_hz());
+    cJSON_AddNumberToObject(b, "machineKhz", (double)MHZ * 1000.0);
+    cJSON_AddNumberToObject(b, "cyclesPerFrame", perf_budget_cycles_per_frame());
+    cJSON_AddNumberToObject(b, "cyclesPerScanline", perf_budget_cycles_per_scanline());
+    cJSON_AddNumberToObject(b, "budgetCycles", perf_budget_budget_cycles());
+    cJSON_AddNumberToObject(b, "framesPerBudget", perf_budget_frames_per_budget());
+    cJSON_AddNumberToObject(b, "historyFrames", perf_budget_capacity());
+    cJSON_AddNumberToObject(b, "totalFrames", perf_budget_total_frames());
+    const char *mode = "auto";
+    switch (perf_budget_get_idle_mode()) {
+        case PERF_IDLE_MARKERS: mode = "markers"; break;
+        case PERF_IDLE_NONE:    mode = "none";    break;
+        default:                mode = "auto";    break;
+    }
+    cJSON_AddStringToObject(b, "idleMode", mode);
+    cJSON_AddBoolToObject(b, "warpMode", warp_mode);
+    return b;
+}
+
+static cJSON *perf_frame_json(const perf_frame_t *f) {
+    cJSON *o = cJSON_CreateObject();
+    const uint32_t budget = perf_budget_budget_cycles();
+    cJSON_AddNumberToObject(o, "frame", f->frame);
+    cJSON_AddNumberToObject(o, "totalCycles", f->total);
+    cJSON_AddNumberToObject(o, "workCycles", perf_frame_work(f));
+    cJSON_AddNumberToObject(o, "idleCycles", f->idle);
+    cJSON_AddNumberToObject(o, "irqCycles", f->irq);
+    cJSON_AddNumberToObject(o, "mainCycles",
+                            perf_frame_work(f) > f->irq ? perf_frame_work(f) - f->irq : 0);
+    cJSON_AddNumberToObject(o, "budgetWorkCycles", f->period_work);
+    cJSON_AddNumberToObject(o, "instructions", f->instructions);
+    cJSON_AddNumberToObject(o, "hostUs", f->host_us);
+    cJSON_AddNumberToObject(o, "utilizationPct",
+                            budget ? 100.0 * (double)f->period_work / (double)budget : 0.0);
+    cJSON_AddBoolToObject(o, "overBudget", budget && f->period_work > budget);
+    return o;
+}
+
+static int handle_x16_perf_stats(int seq, cJSON *args) {
+    // A client asking for statistics is a client that wants them collected.
+    // Arming here rather than making it a separate round trip means the common
+    // case -- attach, poll, read -- just works.
+    if (!perf_budget_owner_wants(PERF_OWNER_DAP) && !perf_budget_is_enabled()) {
+        perf_budget_arm(PERF_OWNER_DAP, true);
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "budget", perf_budget_json());
+
+    perf_frame_t last;
+    if (perf_budget_last_frame(&last)) {
+        cJSON_AddItemToObject(body, "current", perf_frame_json(&last));
+    }
+
+    // Windows: whatever the client asked for, else a useful default spread.
+    static const float defaults[] = {1.0f, 10.0f, 30.0f, 60.0f, 0.0f};
+    cJSON *req = args ? cJSON_GetObjectItemCaseSensitive(args, "windows") : NULL;
+    cJSON *windows = cJSON_CreateArray();
+    const int nreq = (req && cJSON_IsArray(req)) ? cJSON_GetArraySize(req) : 0;
+    const int nwin = nreq > 0 ? nreq : (int)(sizeof defaults / sizeof defaults[0]);
+    for (int i = 0; i < nwin; i++) {
+        const float secs = nreq > 0 ? perf_window_seconds(cJSON_GetArrayItem(req, i))
+                                    : defaults[i];
+        perf_window_t w;
+        if (!perf_budget_window(secs, &w)) continue;
+
+        char name[32];
+        perf_window_name(secs, name, sizeof name);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddNumberToObject(o, "seconds", secs);
+        cJSON_AddNumberToObject(o, "frames", w.frames);
+        cJSON_AddNumberToObject(o, "budgetCycles", w.budget_cycles);
+        cJSON_AddItemToObject(o, "work", perf_stat_json(&w.work));
+        cJSON_AddItemToObject(o, "budgetWork", perf_stat_json(&w.budget_work));
+        cJSON_AddItemToObject(o, "total", perf_stat_json(&w.total));
+        cJSON_AddItemToObject(o, "irq", perf_stat_json(&w.irq));
+        cJSON_AddItemToObject(o, "hostUs", perf_stat_json(&w.host_us));
+        cJSON_AddNumberToObject(o, "overruns", w.overruns);
+        cJSON_AddNumberToObject(o, "overrunPct", w.overrun_pct);
+        cJSON_AddNumberToObject(o, "worstOverrunCycles", w.worst_overrun);
+        cJSON_AddNumberToObject(o, "worstFrame", w.worst_frame);
+        cJSON_AddNumberToObject(o, "meanUtilizationPct", w.mean_utilization);
+        cJSON_AddNumberToObject(o, "p95UtilizationPct", w.p95_utilization);
+        cJSON_AddNumberToObject(o, "maxUtilizationPct", w.max_utilization);
+        cJSON_AddItemToArray(windows, o);
+    }
+    cJSON_AddItemToObject(body, "windows", windows);
+
+    cJSON *incz = args ? cJSON_GetObjectItemCaseSensitive(args, "includeZones") : NULL;
+    if (!incz || !cJSON_IsFalse(incz)) {
+        cJSON *zones = cJSON_CreateArray();
+        const int nz = perf_budget_zone_count();
+        for (int i = 0; i < nz; i++) {
+            perf_zone_t z;
+            if (!perf_budget_zone_get(i, &z)) continue;
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "id", i);
+            cJSON_AddStringToObject(o, "name", z.name);
+            cJSON_AddBoolToObject(o, "isMarker", z.is_marker);
+            cJSON_AddBoolToObject(o, "isIdle", z.is_idle);
+            if (z.is_marker) {
+                cJSON_AddNumberToObject(o, "markerId", z.marker_id);
+            } else {
+                cJSON_AddNumberToObject(o, "start", z.start);
+                cJSON_AddNumberToObject(o, "end", z.end);
+                cJSON_AddNumberToObject(o, "bank", z.bank);
+            }
+            if (i < PERF_RING_ZONES) {
+                perf_frame_t lf;
+                if (perf_budget_last_frame(&lf))
+                    cJSON_AddNumberToObject(o, "current", lf.zone[i]);
+            }
+            perf_stat_t st;
+            if (perf_budget_zone_window(i, 30.0f, &st))
+                cJSON_AddItemToObject(o, "window30s", perf_stat_json(&st));
+            cJSON_AddItemToArray(zones, o);
+        }
+        cJSON_AddItemToObject(body, "zones", zones);
+    }
+
+    cJSON *incf = args ? cJSON_GetObjectItemCaseSensitive(args, "includeFrames") : NULL;
+    if (incf && cJSON_IsNumber(incf) && incf->valuedouble > 0) {
+        int want = (int)incf->valuedouble;
+        const int have = perf_budget_frame_count();
+        if (want > have) want = have;
+        cJSON *frames = cJSON_CreateArray();
+        // Oldest first, so a client can append them to a series it is keeping.
+        for (int i = want - 1; i >= 0; i--) {
+            perf_frame_t f;
+            if (perf_budget_frame_at(i, &f))
+                cJSON_AddItemToArray(frames, perf_frame_json(&f));
+        }
+        cJSON_AddItemToObject(body, "frames", frames);
+    }
+
+    send_dap_response(seq, "x16/perfStats", true, body);
+    return 0;
+}
+
+// Whether the client wants pushed overrun notifications, and when the last one
+// went out. Coalescing is the point: a program that misses its budget usually
+// misses it for many frames running, and one event per frame would be a flood
+// that says nothing the first one did not.
+static bool     perf_overrun_events = false;
+static uint32_t perf_overrun_last_ms = 0;
+#define PERF_OVERRUN_EVENT_INTERVAL_MS 1000
+
+static int handle_x16_perf_config(int seq, cJSON *args) {
+    if (!args) {
+        send_dap_error_response(seq, "x16/perfConfig", "missing arguments");
+        return 0;
+    }
+
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+    if (cJSON_IsBool(item)) {
+        const bool want = cJSON_IsTrue(item);
+        if (!perf_budget_arm(PERF_OWNER_DAP, want)) {
+            send_dap_error_response(seq, "x16/perfConfig",
+                                    "could not allocate the history ring");
+            return 0;
+        }
+        // Turning profiling on is as clear a statement of intent as there is,
+        // so overrun events follow it unless the client says otherwise below.
+        perf_overrun_events = want;
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "targetFps");
+    if (cJSON_IsNumber(item) && item->valuedouble > 0)
+        perf_budget_set_target_fps((float)item->valuedouble);
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "idleMode");
+    if (cJSON_IsString(item) && item->valuestring) {
+        if (!strcmp(item->valuestring, "auto"))         perf_budget_set_idle_mode(PERF_IDLE_AUTO);
+        else if (!strcmp(item->valuestring, "markers")) perf_budget_set_idle_mode(PERF_IDLE_MARKERS);
+        else if (!strcmp(item->valuestring, "none"))    perf_budget_set_idle_mode(PERF_IDLE_NONE);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "historyFrames");
+    if (cJSON_IsNumber(item) && item->valuedouble >= 2)
+        perf_budget_set_capacity((int)item->valuedouble);
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "overrunEvents");
+    if (cJSON_IsBool(item))
+        perf_overrun_events = cJSON_IsTrue(item);
+
+    // Zones, when given, REPLACE the address zones wholesale: a client that
+    // owns the zone list wants to declare it, not diff it. Marker regions the
+    // guest opened are not the client's to remove, but zone_clear takes them
+    // too -- they are re-created by the next marker write.
+    item = cJSON_GetObjectItemCaseSensitive(args, "zones");
+    if (cJSON_IsArray(item)) {
+        perf_budget_zone_clear();
+        const int n = cJSON_GetArraySize(item);
+        for (int i = 0; i < n; i++) {
+            cJSON *z = cJSON_GetArrayItem(item, i);
+            if (!cJSON_IsObject(z)) continue;
+            cJSON *jn = cJSON_GetObjectItemCaseSensitive(z, "name");
+            cJSON *js = cJSON_GetObjectItemCaseSensitive(z, "start");
+            cJSON *je = cJSON_GetObjectItemCaseSensitive(z, "end");
+            cJSON *jb = cJSON_GetObjectItemCaseSensitive(z, "bank");
+            cJSON *ji = cJSON_GetObjectItemCaseSensitive(z, "idle");
+            if (!cJSON_IsNumber(js) || !cJSON_IsNumber(je)) continue;
+            perf_budget_zone_add(cJSON_IsString(jn) ? jn->valuestring : "zone",
+                                 (uint16_t)js->valuedouble, (uint16_t)je->valuedouble,
+                                 cJSON_IsNumber(jb) ? (int16_t)jb->valuedouble : (int16_t)-1,
+                                 cJSON_IsTrue(ji));
+        }
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "reset");
+    if (cJSON_IsTrue(item))
+        perf_budget_reset();
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "budget", perf_budget_json());
+    cJSON_AddBoolToObject(body, "overrunEvents", perf_overrun_events);
+    send_dap_response(seq, "x16/perfConfig", true, body);
+    return 0;
+}
+
+// Push accumulated budget overruns to the client. Called once per poll, which
+// is once per emulated frame.
+static void perf_poll_overruns(void) {
+    if (!perf_overrun_events || client_sock == SOCKET_INVALID) return;
+    if (!perf_budget_is_enabled()) return;
+
+    const uint32_t now = SDL_GetTicks();
+    if (now - perf_overrun_last_ms < PERF_OVERRUN_EVENT_INTERVAL_MS) return;
+
+    perf_overrun_report_t r;
+    if (!perf_budget_drain_overruns(&r)) {
+        // Nothing to report. The clock is still advanced so that a run of clean
+        // seconds does not make the first bad one fire instantly.
+        perf_overrun_last_ms = now;
+        return;
+    }
+    perf_overrun_last_ms = now;
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "sinceLastEventFrames", r.frames);
+    cJSON_AddNumberToObject(body, "overruns", r.overruns);
+    cJSON_AddNumberToObject(body, "worstOverrunCycles", r.worst_overrun);
+    cJSON_AddNumberToObject(body, "worstFrame", r.worst_frame);
+    cJSON_AddNumberToObject(body, "worstUtilizationPct", r.worst_utilization);
+    cJSON_AddNumberToObject(body, "budgetCycles", perf_budget_budget_cycles());
+    send_dap_event("x16/perfBudgetOverrun", body);
+}
+
 static int handle_dap_disassemble(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "disassemble", "missing arguments");
@@ -2562,6 +2855,8 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/sendKey"))   result = handle_x16_send_key(seq, args);
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
+    else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
+    else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
 
     else if (!strcmp(cmd, "disassemble"))   result = handle_dap_disassemble(seq, args);
     else if (!strcmp(cmd, "setVariable"))   result = handle_dap_set_variable(seq, args);
@@ -2799,6 +3094,10 @@ int debug_server_poll(void) {
 
     try_accept();
     if (client_sock == SOCKET_INVALID) return 0;
+
+    // Push any budget overruns before reading: a client that never polls still
+    // learns that the guest is missing its frame.
+    perf_poll_overruns();
 
     // Receive data (non-blocking)
     int space = RECV_BUF_SIZE - recv_buf_len - 2; // -2 for null terminator space
