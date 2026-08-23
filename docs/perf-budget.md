@@ -305,19 +305,31 @@ Sprite render time is modelled separately and reported in the VERA panel's
 **Multiplex → Render time** view. The Bandwidth section links to it rather than
 drawing it twice.
 
-The two now meet at a real number. `SPRITE_TRACE_LINE_BUDGET` (798) is
-**wall clock**, not bus accesses: `render_time_r` increments every clock
-(`sprite_renderer.v:43-56`), including the `STATE_RENDER` clocks when the
-renderer is painting and holding no strobe at all. So it is the envelope sprite
-work must finish inside, not a share of bandwidth.
+The two now meet at a real number — but only after a conversion, because they
+are measured in **different clocks**.
+
+`SPRITE_TRACE_LINE_BUDGET` (798) is **wall clock**: `render_time_r` increments
+every clock (`sprite_renderer.v:43-56`), including the `STATE_RENDER` clocks when
+the renderer is painting and holding no strobe at all. Everything in the
+Bandwidth section is **bus occupancy**. A sprite spends 2 clocks fetching a word
+and then 8 rendering it at 4 bpp, so its render time runs about five times its
+bus time — and a full 4 bpp sprite line is roughly 158 bus clocks, nowhere near
+798.
+
+Subtracting one from the other therefore overstates sprite pressure fivefold and
+warns about lines that comfortably fit, which is worse than not reporting it at
+all. `vera_bandwidth_sprite_bus_clocks()` does the conversion, and the per-line
+tooltip shows both figures with their units named. Every clock in the
+`x16/perfStats` `bandwidth` object is bus occupancy, and it says so in a
+`clockUnits` field so a client cannot make the same mistake more quietly.
 
 Sprites are also *last* on the bus. What layers and the CPU leave is what they
-get, so the per-line tooltip shows the headroom left after both — and says so
-when a line's sprite demand exceeds it. That is the known gap made expressible:
-the sprite model charges `STATE_WAIT_FETCH` one clock, the uncontended best case,
-so on a line the layers have filled it under-charges. The panel can now show
-*which* lines those are; making the sprite model itself contention-aware would
-mean simulating the arbiter cycle by cycle, and is not done.
+get, so the tooltip shows the headroom after both and says when a line's sprite
+fetches exceed it. That is the known gap made expressible: the sprite model
+charges `STATE_WAIT_FETCH` one clock where the bus takes two, so on a line the
+layers have filled it flatters itself. Making the sprite model itself
+contention-aware would mean simulating the arbiter cycle by cycle, and is not
+done.
 
 ## Where this is implemented
 

@@ -2202,11 +2202,17 @@ static cJSON *vera_bandwidth_json(void) {
 
     // How much of each scanline was still free when the layers and the CPU had
     // taken their share. Sprites are last on the bus (vram_if.v:142-157), so
-    // this is what they were really competing for -- see the note on the
-    // sprite render-time view in the Performance panel.
-    cJSON_AddNumberToObject(o, "spriteHeadroomAtPeak",
+    // this is what they were really competing for.
+    //
+    // Named "bus" deliberately. Every clock figure in this object is BUS
+    // OCCUPANCY, which is not the clock the sprite views report: sprite render
+    // time is wall clock and runs about five times higher, so a client that
+    // subtracted one from the other would conclude a comfortable line was
+    // oversubscribed. Convert sprite width and colour depth to fetches first.
+    cJSON_AddNumberToObject(o, "spriteBusHeadroomClocksAtPeak",
                             f.peak_clocks < VERA_BW_LINE_CLOCKS
                                 ? VERA_BW_LINE_CLOCKS - f.peak_clocks : 0);
+    cJSON_AddStringToObject(o, "clockUnits", "bus");
 
     cJSON *port = cJSON_CreateObject();
     cJSON_AddNumberToObject(port, "readBytes", f.port_reads);

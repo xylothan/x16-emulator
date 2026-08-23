@@ -418,6 +418,50 @@ main(void)
 		         "with both contributions summed into it");
 	}
 
+	// ── Sprite render time is NOT bus time ──────────────────────────────────
+	//
+	// The units trap this module exists on the right side of. sprite_trace
+	// measures render_time_r, which ticks every clock including the ones
+	// painting the line buffer with the bus idle; everything here is bus
+	// occupancy. Subtracting one from the other is wrong by the duty cycle.
+	{
+		// 4bpp: one 32-bit word per 8 pixels, two clocks a fetch.
+		check_eq(vera_bandwidth_sprite_bus_clocks(64, 0), 16,
+		         "a 64-wide 4bpp sprite fetches 8 words: 16 bus clocks");
+		check_eq(vera_bandwidth_sprite_bus_clocks(8, 0), 2,
+		         "an 8-wide 4bpp sprite is one word");
+		// 8bpp: one word per 4 pixels, so twice the bus for the same width.
+		check_eq(vera_bandwidth_sprite_bus_clocks(64, 1), 32,
+		         "the same sprite at 8bpp costs twice the bus");
+		check_eq(vera_bandwidth_sprite_bus_clocks(8, 1), 4, "and an 8-wide one is two words");
+		// A width that is not a whole number of words still fetches the last
+		// partial one.
+		check_eq(vera_bandwidth_sprite_bus_clocks(12, 0), 4,
+		         "a 12-wide 4bpp sprite still pays for its partial last word");
+
+		// The relationship that makes the conversion necessary. A 4bpp sprite
+		// spends 2 bus clocks and 8 render clocks per word, so its render time
+		// is five times its bus time. SPRITE_TRACE_LINE_BUDGET is 798 RENDER
+		// clocks; the bus cost of filling a line with 4bpp sprites is nothing
+		// like that number.
+		const uint16_t words_in_a_full_line = 798 / 10; // 2 bus + 8 render
+		const uint32_t bus = (uint32_t)words_in_a_full_line * VERA_BW_ACCESS_CLOCKS;
+		check_eq(bus, 158,
+		         "a full 4bpp sprite line is about 158 bus clocks, not 798 -- "
+		         "which is why the two numbers must never be subtracted");
+		check(bus < VERA_BW_LINE_CLOCKS / 4,
+		      "sprite bus time is a small share of the scanline, however close "
+		      "to its render-time ceiling the line runs");
+
+		// The specific false alarm the conversion prevents: 700 render clocks
+		// against 160 free bus clocks looks oversubscribed and is not.
+		const uint16_t seventy_words = 700 / 10;
+		check(vera_bandwidth_sprite_bus_clocks((uint16_t)(seventy_words * 8), 0) <= 160,
+		      "700 render clocks of 4bpp sprites fit inside 160 free bus "
+		      "clocks, so comparing render time against bus time would warn "
+		      "about a line that is comfortably fine");
+	}
+
 	// ── Off means off ───────────────────────────────────────────────────────
 	{
 		vera_bandwidth_set_enabled(false);

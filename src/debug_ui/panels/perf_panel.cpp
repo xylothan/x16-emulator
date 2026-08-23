@@ -727,19 +727,44 @@ draw_bandwidth(void)
 		// (vram_if.v:142-157). Crossed with the sprite trace HERE rather than
 		// inside vera_bandwidth.c, which is what keeps that module free of any
 		// dependency on this one.
+		//
+		// The sprite figures have to be CONVERTED first. sprite_trace measures
+		// render time -- render_time_r ticks every clock, including the ones
+		// painting the line buffer with the bus idle -- while everything here
+		// is bus occupancy. Comparing the two directly overstates sprite
+		// pressure about fivefold at 4 bpp and would warn about lines that
+		// comfortably fit.
 		const uint32_t taken = layer_clocks + port_clocks;
 		const uint32_t left  = taken < VERA_BW_LINE_CLOCKS ? VERA_BW_LINE_CLOCKS - taken : 0;
 		ImGui::Separator();
-		ImGui::Text("left for sprites: %u clocks", left);
+		ImGui::Text("left for sprites: %u bus clocks", left);
+
 		const sprite_trace_frame_t *sf = sprite_trace_last_frame();
 		if (sf && line < SPRITE_TRACE_LINES) {
 			const sprite_line_stat_t &ss = sf->lines[line];
 			if (ss.demand) {
-				ImGui::Text("sprites wanted %u", ss.demand);
-				if (ss.demand > left)
+				// Sum the fetches of the sprites that were actually on this
+				// line. A slot cut short by the render-time ceiling fetched
+				// less than its full width, so this is an upper bound on
+				// exhausted lines -- which the sprite view already flags.
+				uint32_t sprite_bus = 0;
+				for (int slot = 0; slot < SPRITE_TRACE_SLOTS; ++slot) {
+					const size_t k = (size_t)line * SPRITE_TRACE_SLOTS + slot;
+					if (!(sf->line_flags[k] & SPRITE_TRACE_ONSCREEN))
+						continue;
+					const uint16_t g = sf->line_gen[k];
+					if (g == SPRITE_TRACE_NO_GEN || g >= sf->gen_count)
+						continue;
+					const sprite_gen_t &gen = sf->gens[g];
+					sprite_bus += vera_bandwidth_sprite_bus_clocks(gen.width, gen.color_mode);
+				}
+				ImGui::Text("sprites: %u bus clocks (%u render clocks)", sprite_bus, ss.demand);
+				if (sprite_bus > left)
 					ImGui::TextColored(ImVec4(1, 0.75f, 0.30f, 1),
-					                   "more than was free: the sprite model charges\n"
-					                   "one clock a fetch, so it flatters this line");
+					                   "more bus than was free: sprites are last in\n"
+					                   "priority, so they wait -- and the sprite model\n"
+					                   "charges one clock a fetch where the bus takes\n"
+					                   "two, so it flatters this line");
 			}
 		}
 		ImGui::EndTooltip();
@@ -751,9 +776,12 @@ draw_bandwidth(void)
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
 		    "Sprites are LAST on VERA's bus (vram_if.v:142-157), so what the\n"
-		    "layers and the CPU leave is what they get. The sprite model\n"
-		    "charges one clock per fetch, which is the uncontended best case --\n"
-		    "on a line the layers have filled, it under-charges.");
+		    "layers and the CPU leave is what they get.\n\n"
+		    "Two different clocks, and they must not be subtracted from each\n"
+		    "other: everything here is BUS OCCUPANCY, while the Render time\n"
+		    "view measures WALL CLOCK -- render_time_r ticks even while the\n"
+		    "renderer paints with the bus idle, so it runs about five times\n"
+		    "higher at 4 bpp. The tooltip above converts before comparing.");
 	}
 }
 

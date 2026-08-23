@@ -551,7 +551,11 @@ if bwstats and bwstats.get("success"):
     expect("percentile and mean are ordered",
            bwb.get("meanLineClocks", 0) <= bwb.get("p95LineClocks", 0) <= peak_clocks)
     expect("sprites are left the rest of the scanline",
-           bwb.get("spriteHeadroomAtPeak", -1) == 800 - peak_clocks)
+           bwb.get("spriteBusHeadroomClocksAtPeak", -1) == 800 - peak_clocks)
+    # Every clock in this object is bus occupancy, not sprite render time. The
+    # two differ by the sprite renderer's duty cycle, and a client that
+    # subtracted one from the other would be wrong by about fivefold.
+    expect("and the clock unit is declared", bwb.get("clockUnits") == "bus")
 
     port = bwb.get("port", {})
     expect("the data port is reported", isinstance(port, dict) and "writeBytes" in port)

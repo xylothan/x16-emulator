@@ -1051,8 +1051,13 @@ and VERA FX amplification, where one `sta` can move four bytes.
 Its headline is `peakLineClocks` against `lineClocks` (800), **not** a percentage of VERA's total
 bandwidth: a frame uses maybe a fifth of the chip's 100 MB/s, so percent-of-peak would be true and
 useless. One scanline is the window that genuinely runs out. Sprites are last on that bus, so
-`spriteHeadroomAtPeak` is what the sprite renderer was really competing for; sprite render time
-itself has its own view in the VERA panel under **Multiplex → Render time**.
+`spriteBusHeadroomClocksAtPeak` is what the sprite renderer was really competing for.
+
+Every clock figure in `bandwidth` is **bus occupancy**, and `clockUnits` says so. That is a
+different clock from the one the sprite views report: sprite render time is wall clock and runs
+about five times higher, because it ticks while the renderer paints with the bus idle. Convert
+before comparing the two — sprite render time has its own view in the VERA panel under
+**Multiplex → Render time**.
 
 The emulator also pushes an **`x16/perfBudgetOverrun` event** when the guest misses its budget,
 coalesced to at most one per second with a count and the worst frame in that period — so tooling

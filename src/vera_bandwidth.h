@@ -228,6 +228,27 @@ uint8_t vera_bandwidth_pixels_per_word(bool bitmap_mode, uint8_t color_depth,
 uint8_t vera_bandwidth_words_per_tile_line(bool bitmap_mode, uint8_t color_depth,
                                            uint8_t tile_width);
 
+// Bus clocks one sprite's pixel fetches occupy on one scanline.
+//
+// THE UNITS TRAP THIS EXISTS TO CLOSE. sprite_trace reports a line's sprite
+// cost as RENDER TIME: `demand` and `budget_used` come from render_time_r
+// (sprite_renderer.v:43-56), which ticks EVERY clock -- including the
+// STATE_RENDER clocks when the renderer is painting the line buffer and holding
+// no bus strobe at all. Everything this module reports is BUS OCCUPANCY. The
+// two differ by the sprite renderer's duty cycle, roughly five to one at 4 bpp,
+// so subtracting one from the other overstates contention badly enough to warn
+// about lines that comfortably fit -- and a false alarm in a diagnostic is
+// worse than no diagnostic. Convert with this before comparing.
+//
+// A sprite fetches one 32-bit word per 8 pixels at 4 bpp and per 4 at 8 bpp,
+// and each fetch holds the bus VERA_BW_ACCESS_CLOCKS. `color_mode` is 0 for
+// 4 bpp and 1 for 8 bpp, matching the sprite attribute bit.
+//
+// The render clocks are not lost, they are simply not this module's business:
+// they are what the VERA panel's Multiplex -> Render time view measures, and
+// they are what actually drops sprites.
+uint16_t vera_bandwidth_sprite_bus_clocks(uint16_t sprite_width, uint8_t color_mode);
+
 // ─── The hot path ───────────────────────────────────────────────────────────
 // Read directly by the inline guards, so flipping it takes effect immediately.
 extern bool vera_bandwidth_active;

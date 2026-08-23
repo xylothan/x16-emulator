@@ -62,6 +62,22 @@ vera_bandwidth_words_per_tile_line(bool bitmap_mode, uint8_t color_depth, uint8_
 	}
 }
 
+// Bus clocks a sprite's fetches occupy. See the header for why this conversion
+// has to exist: sprite_trace measures render time, this module measures bus
+// time, and the two are not the same clock.
+//
+// One 32-bit word per 8 pixels at 4 bpp, per 4 at 8 bpp -- the emulator's own
+// sprite loop uses the same divisor as vram_fetch_mask in render_sprite_line().
+// Rounded up, because a sprite whose width is not a whole number of words still
+// fetches the last partial one.
+uint16_t
+vera_bandwidth_sprite_bus_clocks(uint16_t sprite_width, uint8_t color_mode)
+{
+	const uint16_t per_word = (uint16_t)(color_mode ? 4 : 8);
+	const uint16_t words    = (uint16_t)((sprite_width + per_word - 1) / per_word);
+	return (uint16_t)(words * VERA_BW_ACCESS_CLOCKS);
+}
+
 uint16_t
 vera_bandwidth_layer_line_fetches(const vera_bw_layer_t *layer)
 {
