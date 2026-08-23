@@ -65,6 +65,16 @@ actual lesson, and it is broader than the MSVC gap:
 
 > Push and let CI answer before claiming a result.
 
+Broader still, because CI is only the commonest case: **check what is true where
+the artifact will live, not where you are standing.** A branch is judged by CI,
+not by your worktree. A file that ships to `origin/main` is read against
+`origin/main`, not against whatever your local `main` happens to have merged.
+
+The paragraph below is the third instance of that same error, kept rather than
+quietly corrected: it was first drafted citing `perf_budget.c` and
+`vera_bandwidth.c` as though they existed, because they existed *where the author
+was standing* — an unmerged local `main` — while on `origin/main` they did not.
+
 One live tripwire of exactly this shape, once the performance work lands (PRs #79
 and #80, which is where `perf_budget.c` and `vera_bandwidth.c` come from):
 `src/vera_bandwidth.c` is deliberately *not* in those four link sets, and does
