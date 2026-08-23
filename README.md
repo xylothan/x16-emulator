@@ -826,8 +826,10 @@ Everything here is also available over DAP — see
 [Profiling the guest](#profiling-the-guest-how-much-of-a-frame-is-your-code-using) — so CI can
 watch for regressions without a human reading a panel.
 
-Profiling costs the running machine an add and a table lookup per instruction, so the panel arms
-it while open and disarms it when closed.
+The panel is open and docked with the other bottom-row views by default, so a normal `-imgui`
+session profiles from boot — the numbers are only useful if they are already there when you go
+looking. That costs the running machine an add and a table lookup per instruction; close the tab
+and it stops.
 
 ### Source-level debugging with cc65
 
@@ -1089,8 +1091,9 @@ budget doubles. A target faster than the machine scans is the opposite question 
 routine fit in half a frame?" — and gets a fractional budget. On an 8 MHz machine a VGA frame is
 exactly 134,400 cycles, or 256 per scanline.
 
-Profiling costs the running machine an add and a table lookup per instruction, so it is off until
-something asks for it, and the Performance panel disarms it again when closed.
+Profiling costs the running machine an add and a table lookup per instruction. The Performance
+panel is open by default, so `-imgui` profiles from boot and closing the tab stops it; without the
+panel, nothing is collected until a DAP client asks.
 
 #### x16dbg, the bundled command-line client
 

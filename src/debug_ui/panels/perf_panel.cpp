@@ -13,12 +13,18 @@
 // halves of "what is eating my frame?", and the frames worth looking at are the
 // ones where they disagree.
 //
-// PROFILING IS ARMED BY OPENING THE PANEL, and disarmed by closing it, in the
-// same spirit as the audio scope rings that self-arm on read. It is the one
-// debugger feature besides the I/O trace that costs the running machine
-// anything per instruction, so it should not be running when nobody is looking
-// at it. Settings > "keep profiling when the panel is closed" overrides this,
-// for the case where a DAP client is being fed and the panel is shut.
+// PROFILING IS ARMED BY THE PANEL BEING OPEN, and disarmed by closing it. This
+// panel ships open and docked with the other bottom-row views, so a normal
+// `-imgui` session profiles from boot -- which is the point: the numbers are
+// only useful if they are already there when you go looking, and a panel that
+// starts empty and fills over the next minute answers nothing about the frame
+// that made you open it.
+//
+// What that costs the running machine is an add, one array index and a couple
+// of branches per instruction, in the same class as the
+// code_map_record_current() call `-imgui` already makes on every instruction.
+// Close the tab and it stops; System > Settings has the reverse (keep profiling
+// with the panel shut, for feeding a DAP client).
 #include "imgui.h"
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
@@ -838,6 +844,6 @@ perf_panel_render(bool *p_open)
 	dbgui_window_end();
 }
 
-DebugPanelRegistration s_reg("Performance", perf_panel_render, false);
+DebugPanelRegistration s_reg("Performance", perf_panel_render, true);
 
 } // namespace
