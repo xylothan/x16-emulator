@@ -120,6 +120,22 @@ int debug_normalise_bank(int selector, int addr, uint8_t pbank);
 // registers still apply.
 int debug_current_x16_bank(int pc, uint8_t pbank);
 
+// Build a breakpoint from an address reference, deciding what a packed bank byte
+// meant. `ref` is up to 24 bits: the low 16 are the address, and a non-zero top
+// byte is the 65C816 program bank on a Gen2 and the RAM/ROM window bank
+// otherwise -- read6502 forces the program bank to zero off Gen2, so a top byte
+// there cannot be one. `explicit_bank` carries a window bank the caller was told
+// separately (the "bb:aaaa" form), or DEBUG_BANK_ANY; naming one both ways is
+// refused rather than resolved. `offset` is a byte displacement, wrapped inside
+// the 16-bit address so it cannot carry into the bank.
+//
+// Returns false when the request could never match -- a bank named for an
+// address no window register reaches, or a reference out of range -- so a caller
+// can say so instead of arming an entry that silently never fires. `out` is
+// left alone on failure, and receives an unowned, disabled entry on success,
+// ready for debug_bp_add_for().
+bool debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoint *out);
+
 // ---- Table management ------------------------------------------------------
 // Breakpoints are identified by all three of (pc, bank, x16Bank), so the same
 // address in two different RAM banks is two different breakpoints.
