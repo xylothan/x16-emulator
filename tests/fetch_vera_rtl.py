@@ -56,6 +56,15 @@ FILES = (
     ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
     ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC
     ("fpga/source/audio/psg.v", COMMIT_PSG),        # R48: see above
+    # The VRAM bandwidth model in src/vera_bandwidth.c rests on these. It claims
+    # a per-scanline clock window, a bus width, an access cost and a priority
+    # order, and every one of those numbers is quoted from here.
+    ("fpga/source/vram_if.v", COMMIT),              # the one VRAM bus: 4-way fixed priority, one access per clock
+    ("fpga/source/main_ram.v", COMMIT),             # 32k x 32 BRAM array, which is why an access is 4 bytes
+    ("fpga/source/video/video_vga.v", COMMIT),      # H_TOTAL 800, V_TOTAL 525: the scanline clock window
+    ("fpga/source/graphics/composer.v", COMMIT),    # line_render_start, so a line is fetched during the one before it
+    ("fpga/source/graphics/layer_line_buffer.v", COMMIT),  # the double buffer that makes that prefetch possible
+    ("fpga/source/addr_data.v", COMMIT),            # the $9F23/$9F24 data port and the FX engine behind it
 )
 
 

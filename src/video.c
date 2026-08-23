@@ -26,6 +26,7 @@
 #include "vera_psg.h"
 #include "vera_pcm.h"
 #include "sprite_trace.h"
+#include "vera_bandwidth.h"
 #include "icon.h"
 #include "sdcard.h"
 #include "i2c.h"
@@ -1366,6 +1367,81 @@ static uint8_t calculate_line_col_index(uint8_t spr_zindex, uint8_t spr_col_inde
 	return col_index;
 }
 
+// The five things VERA's layer renderer decodes a mode from, lifted out of the
+// emulator's much larger property struct. vera_bandwidth.c is unit-tested
+// without video.c, so it takes these rather than a pointer to something only
+// this file knows how to build.
+//
+// Read from prev_layer_properties[1], the same latched copy the renderers use,
+// so a raster split is followed rather than averaged away.
+//
+// `scrolled` is the one that is not a straight copy: the RTL starts the line
+// buffer at 0 - subtile_hscroll (layer_renderer.v:499-501), so a layer scrolled
+// off a tile boundary renders one tile more than the screen strictly needs.
+// Bitmap modes force hscroll to zero (refresh_layer_properties()), so they
+// never pay it.
+static vera_bw_layer_t
+vera_bw_layer_of(uint8_t layer)
+{
+	const struct video_layer_properties *p = &prev_layer_properties[1][layer];
+	vera_bw_layer_t out;
+
+	out.enabled     = layer_line_enable[layer] != 0;
+	out.bitmap_mode = p->bitmap_mode;
+	out.color_depth = p->color_depth;
+	// tile_width means "the wide one" in both families: 16px tiles, or the
+	// 640-wide bitmap.
+	out.tile_width  = (uint8_t)(p->bitmap_mode ? (p->tilew > 320) : (p->tilew_log2 > 3));
+	out.scrolled    = !p->bitmap_mode && (p->hscroll & p->tilew_max) != 0;
+
+	return out;
+}
+
+// Set while the DEBUGGER is writing, so its pokes at $9F23/$9F24 are not
+// charged to the guest.
+//
+// video_read() is told directly, as a debugOn argument, and returns before any
+// accounting. video_write() has no such parameter and some eighty call sites
+// that would all have to change to give it one, so memory.c raises this flag
+// around a debug write instead. The rule it enforces is the same one the read
+// path already follows: if opening a memory view moved the guest's numbers,
+// the numbers would be worthless.
+static bool debug_port_write = false;
+
+void
+video_set_debug_write(bool on)
+{
+	debug_port_write = on;
+}
+
+// One byte through the data port. Wrapped rather than called inline because
+// the enabled test has to happen BEFORE sprite_trace_current_line() runs: C
+// evaluates arguments before the callee can decline them, and that helper is a
+// branch and three global loads on VERA's hot path.
+static void
+note_port_traffic(bool write, uint8_t vram_bytes)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_port(write, vram_bytes, sprite_trace_current_line());
+}
+
+static void
+note_port_fx_cache_write(void)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_fx_cache_write(sprite_trace_current_line());
+}
+
+static void
+note_port_fx_affine(void)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_fx_affine(sprite_trace_current_line());
+}
+
 static void
 render_line(uint16_t y, float scan_pos_x)
 {
@@ -1487,6 +1563,33 @@ render_line(uint16_t y, float scan_pos_x)
 
 	if (sprite_line_enable) {
 		render_sprite_line(eff_y);
+	}
+
+	// Charge this line's VERA fetch traffic. Deliberately ABOVE the warp guard
+	// below, unlike everything else here.
+	//
+	// Under -warp the emulator skips the layer rendering for 63 frames in 64,
+	// but VERA would not: the guest's registers say what the chip fetches, and
+	// the chip does not know the host is in a hurry. Charging below the guard
+	// reported a warping machine as using no VRAM bandwidth at all, which is
+	// how this ended up here -- it is exactly the kind of thing only a test
+	// against a real running machine finds.
+	//
+	// Affordable precisely because the count is MODELLED from the registers
+	// rather than counted off the render_layer_line_* calls: it is a few
+	// arithmetic ops whether or not anything is drawn. See vera_bandwidth.h.
+	//
+	// Indexed by the DISPLAY line y, not by eff_y. eff_y is the source row
+	// after DC_VSCALE, so in a 320x240 mode it advances once per two display
+	// lines -- and the hardware fetches once per DISPLAY line regardless
+	// (composer.v raises line_render_start per scanline). Charging eff_y both
+	// halved the frame's totals and filed layer traffic under a different index
+	// from the CPU port traffic on the same physical scanline, which is what
+	// the peak-line figure is built out of.
+	if (vera_bandwidth_active) {
+		const vera_bw_layer_t l0 = vera_bw_layer_of(0);
+		const vera_bw_layer_t l1 = vera_bw_layer_of(1);
+		vera_bandwidth_line(y, &l0, &l1);
 	}
 
 	if (warp_mode && (frame_count & 63)) {
@@ -1721,6 +1824,19 @@ video_step(float mhz, float steps, bool midline)
 	// table as it stands now, which is what the beam will start out drawing.
 	if (new_frame && sprite_trace_active) {
 		sprite_trace_frame_advance((uint32_t)frame_count, sprite_trace_cpu_cycles, sprite_data);
+	}
+
+	// And the bandwidth frame, on the same boundary and for the same reason:
+	// this is VERA's own frame, which is the one its bus traffic belongs to.
+	// perf_budget closes its frame from main.c instead, because CPU cycles are
+	// the CPU's business -- the two are driven by the same vsync, so the panel
+	// can show them side by side.
+	//
+	// frame_count has already been incremented above, and this closes the frame
+	// that just ENDED, so it is stamped with the ordinal one below -- matching
+	// sprite_trace, which takes frame_count as the frame it is about to start.
+	if (new_frame) {
+		vera_bandwidth_frame_end((uint32_t)(frame_count - 1));
 	}
 
 	return new_frame;
@@ -2870,9 +2986,18 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 
 			uint8_t value = io_rddata[reg - 3];
 
-			if (reg == 4 && fx_addr1_mode == 3)
+			// One byte off the data port, charged to VERA's bus. The debugOn
+			// return above means the debugger's own reads never reach here,
+			// which matters: opening a memory view must not change the number
+			// the developer is trying to read.
+			note_port_traffic(false, 1);
+
+			if (reg == 4 && fx_addr1_mode == 3) {
+				// Affine mode translates through the tile map first, so this
+				// read costs a second fetch the guest never asked for.
+				note_port_fx_affine();
 				fx_affine_prefetch();
-			else
+			} else
 				io_rddata[reg - 3] = video_space_read(io_addr[reg - 3]);
 
 			if (fx_cache_fill) {
@@ -3024,6 +3149,9 @@ void video_write(uint8_t reg, uint8_t value) {
 		case 0x04: {
 			if (fx_2bit_poking && fx_addr1_mode) {
 				fx_2bit_poking = false;
+				// Still a guest byte through the port reaching VRAM, even
+				// though it takes its own path out of this switch below.
+				note_port_traffic(true, 1);
 				uint8_t mask = value >> 6;
 				switch (mask) {
 					case 0x00:
@@ -3089,6 +3217,11 @@ void video_write(uint8_t reg, uint8_t value) {
 
 			if (fx_cache_write) {
 				address &= 0x1fffc;
+				// One store, four bytes into VRAM. This is the whole reason FX
+				// is worth charging separately: the CPU issued a single write
+				// and the bus moved four times as much as an ordinary one.
+				note_port_traffic(true, 4);
+				note_port_fx_cache_write();
 				if (fx_trans_writes) {
 					if (fx_4bit_mode) {
 						nibble_mask[0] = (((ram_wrdata[0] & 0xf0) == 0) << 1) | ((ram_wrdata[0] & 0x0f) == 0);
@@ -3113,6 +3246,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				fx_vram_cache_write(address+2, ram_wrdata[2], nibble_mask[2]);
 				fx_vram_cache_write(address+3, ram_wrdata[3], nibble_mask[3]);
 			} else {
+				note_port_traffic(true, 1);
 				fx_video_space_write(address, nibble, wrdata_to_use); // Normal write
 			}
 

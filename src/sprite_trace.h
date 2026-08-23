@@ -62,8 +62,15 @@ extern "C" {
 #define SPRITE_TRACE_LINES 480
 
 // Clocks the sprite renderer gets per scanline, matching render_time_done in
-// sprite_renderer.v:44 and SPRITE_RENDER_TIME in video.c. Kept here so the
+// sprite_renderer.v:43 and SPRITE_RENDER_TIME in video.c. Kept here so the
 // panel can draw the ceiling without reaching into video.c.
+//
+// It is WALL CLOCK, not bus accesses: render_time_r increments every clock
+// (sprite_renderer.v:46-56), including the STATE_RENDER clocks when the
+// renderer is painting the line buffer and holding no bus strobe at all. So
+// this is the outer envelope a line's sprite work must finish inside, not a
+// share of VRAM bandwidth -- see src/vera_bandwidth.h, which charges the same
+// 800-clock line window that this 798 is measured against.
 #define SPRITE_TRACE_LINE_BUDGET 798
 
 // Marks a generation that was already in the attribute table when the frame

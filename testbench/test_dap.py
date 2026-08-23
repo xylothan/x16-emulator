@@ -493,7 +493,134 @@ r = perf(137, {"enabled": False, "zones": []})
 expect("profiling can be switched back off",
        r is not None and r["body"]["budget"].get("enabled") is False)
 
-# 15. Ownership: a session must take away only what it asked for.
+# 15c. VERA bandwidth: the other half of "what is eating my frame?".
+#
+# The arithmetic is pinned by tests/test_vera_bandwidth.c, which drives the
+# model directly against the RTL's decode tables. What can only be checked here
+# is that it is wired to a real machine and to a real display mode -- a booted
+# ROM sits at the BASIC prompt in 1bpp text mode on layer 1, so there are
+# numbers that MUST appear and bounds they cannot leave.
+send_dap(sock, {"seq": 138, "type": "request", "command": "x16/perfConfig",
+                "arguments": {"enabled": True, "reset": True}})
+time.sleep(1.0)  # let several frames land
+send_dap(sock, {"seq": 139, "type": "request", "command": "x16/perfStats",
+                "arguments": {"windows": [1]}})
+time.sleep(0.5)
+bwstats = None
+for m in recv_dap(sock, 2):
+    if m.get("command") == "x16/perfStats":
+        bwstats = m
+
+expect("x16/perfStats carries a bandwidth object",
+       bwstats is not None and "bandwidth" in bwstats.get("body", {}))
+
+if bwstats and bwstats.get("success"):
+    bwb = bwstats["body"]["bandwidth"]
+
+    # The bus geometry, quoted from the RTL. If these drift, every figure built
+    # on them is wrong, and the unit tests would not notice a bad constant
+    # reaching the wire.
+    expect("a scanline is 800 clocks", bwb.get("lineClocks") == 800)
+    expect("a VRAM access is four bytes", bwb.get("bytesPerAccess") == 4)
+    expect("and costs two clocks", bwb.get("accessClocks") == 2)
+    expect("VGA scans 525 lines", bwb.get("scanlinesPerFrame") == 525)
+
+    expect("bandwidth accounting reports itself enabled", bwb.get("enabled") is True)
+    expect("a frame has been accounted", bwb.get("linesActive", 0) > 0)
+
+    # The BASIC prompt is a text-mode screen on layer 1, so layer 1 must be
+    # fetching and the peak line must be a real number of clocks.
+    layers = bwb.get("layers", [])
+    expect("both layers are reported", len(layers) == 2)
+    if len(layers) == 2:
+        expect("layer 1 is fetching at the BASIC prompt",
+               layers[1].get("fetches", 0) > 0)
+        expect("its bytes are its fetches times four",
+               layers[1].get("bytes") == layers[1].get("fetches", 0) * 4)
+        # 1bpp 8px tiles: 40 map + 80 data = 120 a line, 121-123 when scrolled.
+        # Checked as a range because hscroll and the scroll tile move it.
+        peak = layers[1].get("peakFetches", 0)
+        expect("a text-mode line fetches about 120 words", 118 <= peak <= 126)
+
+    # The headline. It must be inside the window a scanline actually has --
+    # a text screen is nowhere near filling the bus.
+    peak_clocks = bwb.get("peakLineClocks", 0)
+    expect("the peak scanline is a real cost", peak_clocks > 0)
+    expect("and fits inside the scanline", peak_clocks <= 800)
+    expect("so no line is over budget", bwb.get("linesOverBudget", -1) == 0)
+    expect("percentile and mean are ordered",
+           bwb.get("meanLineClocks", 0) <= bwb.get("p95LineClocks", 0) <= peak_clocks)
+    expect("sprites are left the rest of the scanline",
+           bwb.get("spriteBusHeadroomClocksAtPeak", -1) == 800 - peak_clocks)
+    # Every clock in this object is bus occupancy, not sprite render time. The
+    # two differ by the sprite renderer's duty cycle, and a client that
+    # subtracted one from the other would be wrong by about fivefold.
+    expect("and the clock unit is declared", bwb.get("clockUnits") == "bus")
+
+    port = bwb.get("port", {})
+    expect("the data port is reported", isinstance(port, dict) and "writeBytes" in port)
+
+# The data port is the part a program controls, and the debugger is NOT a
+# program. Two different paths have to be kept off the books, and only the
+# first is directly observable from here:
+#
+#   * writeMemory with a "vram:" reference reaches VRAM through
+#     video_space_write(), around the $9F23 path entirely. Checked below.
+#   * writeMemory to the CPU address $9F23 goes through real_write6502() with
+#     debugOn set, which raises video_set_debug_write() so the accounting
+#     declines it. That one cannot be pinned reliably from out here -- under
+#     -warp the frames roll far faster than requests arrive, so a burst of
+#     debugger pokes never lands in one frame whether it is charged or not.
+#     video.c carries the guard and the comment instead.
+#
+# If either were charged, opening a memory view would move the numbers the
+# developer is trying to read.
+send_dap(sock, {"seq": 140, "type": "request", "command": "x16/perfConfig",
+                "arguments": {"reset": True}})
+time.sleep(0.3)
+recv_dap(sock, 1)
+send_dap(sock, {"seq": 141, "type": "request", "command": "writeMemory",
+                "arguments": {"memoryReference": "vram:1B000",
+                              "data": base64.b64encode(bytes(64)).decode()}})
+time.sleep(0.5)
+recv_dap(sock, 1)
+
+# Sampling has to be generous here, and it is worth saying why. The bandwidth
+# figures are per-frame, and a machine sitting at the BASIC prompt touches VRAM
+# only when the cursor blinks -- measured at about 8 frames in 120. Under -warp
+# thousands of emulated frames pass between two requests, so each reply shows an
+# essentially random frame. One sample would be a coin toss; a hundred makes
+# missing the blink altogether vanishingly unlikely.
+#
+# Requests are pipelined in batches rather than sent one at a time because
+# recv_dap() blocks for its whole timeout, so a request-reply-request loop would
+# spend a minute here to gather what this gathers in seconds.
+debugger_charged = False
+guest_port_bytes = 0
+seq = 142
+for _ in range(5):
+    for _ in range(20):
+        send_dap(sock, {"seq": seq, "type": "request", "command": "x16/perfStats",
+                        "arguments": {"windows": [1], "includeZones": False}})
+        seq += 1
+        time.sleep(0.03)
+    for m in recv_dap(sock, 1):
+        if m.get("command") != "x16/perfStats":
+            continue
+        p = m.get("body", {}).get("bandwidth", {}).get("port", {})
+        guest_port_bytes = max(guest_port_bytes,
+                               p.get("writeBytes", 0) + p.get("readBytes", 0))
+        # 64 bytes landing in one frame could only be the DAP write above.
+        if p.get("writeBytes", 0) >= 64:
+            debugger_charged = True
+
+expect("a debugger VRAM write is not charged to the guest", not debugger_charged)
+expect("but the guest's own data-port traffic is", guest_port_bytes > 0)
+
+# Leave the machine as we found it.
+perf(seq, {"enabled": False})
+
+
 #
 # The core records who wanted each breakpoint, so a client disconnecting clears
 # its own and leaves everything else armed. Reconstructing that from outside the

@@ -61,6 +61,8 @@
 #include "smc.h"          // smc_requested_reset
 #include "timing.h"       // absolute kHz speed control
 #include "perf_budget.h"  // guest cycle budget accounting
+#include "vera_bandwidth.h" // VERA VRAM fetch and data-port bandwidth
+#include "sprite_trace.h" // sprite multiplexing and per-line render time
 #include "video.h"        // video_read/video_space_* and the VERA debug views
 #include "cpu/irq_ctx.h"  // interrupt context, incl. the 24-bit return PC
 #include "cpu/fake6502.h" // irq6502()

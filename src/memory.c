@@ -435,7 +435,13 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 		} else if (has_via2 && (address >= 0x9f10 && address < 0x9f20)) {
 			via2_write(address & 0xf, value);
 		} else if (address >= 0x9f20 && address < 0x9f40) {
+			// video_write() has no debugOn parameter -- eighty-odd call sites
+			// would have to change to give it one -- so the debugger announces
+			// itself instead. VERA's bandwidth accounting must not charge the
+			// guest for a poke the developer made from a memory view.
+			video_set_debug_write(debugOn);
 			video_write(address & 0x1f, value);
+			video_set_debug_write(false);
 		} else if (address >= 0x9f40 && address < 0x9f60) {
 			// slow IO2 range
 			if (!debugOn) {
