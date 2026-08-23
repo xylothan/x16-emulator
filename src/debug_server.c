@@ -9,6 +9,7 @@
 #include "disasm.h"
 #include "code_map.h"
 #include "perf_budget.h"
+#include "vera_bandwidth.h"
 #include "glue.h"
 #include "memory.h"
 #include "source_view.h"
@@ -2152,6 +2153,78 @@ static cJSON *perf_frame_json(const perf_frame_t *f) {
     return o;
 }
 
+// VERA's side of the same question. Deliberately a sub-object of perfStats
+// rather than a request of its own: a developer asking "what is eating my
+// frame?" should get the CPU answer and the bus answer in one round trip,
+// because the interesting cases are the ones where the two disagree.
+//
+// The headline is peakLineClocks against lineClocks (800), NOT a percentage of
+// VERA's total bandwidth. A frame uses maybe a fifth of the chip's 100 MB/s and
+// reporting that would be true and useless -- the scanline is the window that
+// actually runs out. See src/vera_bandwidth.h.
+static cJSON *vera_bandwidth_json(void) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "enabled", vera_bandwidth_is_enabled());
+    cJSON_AddNumberToObject(o, "lineClocks", VERA_BW_LINE_CLOCKS);
+    cJSON_AddNumberToObject(o, "bytesPerAccess", VERA_BW_BYTES_PER_ACCESS);
+    cJSON_AddNumberToObject(o, "accessClocks", VERA_BW_ACCESS_CLOCKS);
+    cJSON_AddNumberToObject(o, "scanlinesPerFrame", vera_bandwidth_scanlines_per_frame());
+
+    vera_bw_frame_t f;
+    if (!vera_bandwidth_last_frame(&f)) {
+        return o;
+    }
+
+    cJSON_AddNumberToObject(o, "frame", f.frame);
+    cJSON_AddNumberToObject(o, "linesActive", f.lines_active);
+
+    cJSON *layers = cJSON_CreateArray();
+    for (int i = 0; i < 2; i++) {
+        cJSON *l = cJSON_CreateObject();
+        cJSON_AddNumberToObject(l, "fetches", f.layer_fetches[i]);
+        cJSON_AddNumberToObject(l, "bytes", f.layer_bytes[i]);
+        cJSON_AddNumberToObject(l, "peakLine", f.layer_peak_line[i]);
+        cJSON_AddNumberToObject(l, "peakFetches", f.layer_peak_fetches[i]);
+        cJSON_AddItemToArray(layers, l);
+    }
+    cJSON_AddItemToObject(o, "layers", layers);
+
+    // Per-scanline pressure: the headline.
+    cJSON_AddNumberToObject(o, "peakLine", f.peak_line);
+    cJSON_AddNumberToObject(o, "peakLineClocks", f.peak_clocks);
+    cJSON_AddNumberToObject(o, "p95LineClocks", f.p95_clocks);
+    cJSON_AddNumberToObject(o, "meanLineClocks", f.mean_clocks);
+    cJSON_AddNumberToObject(o, "linesOverBudget", f.lines_over);
+    cJSON_AddNumberToObject(o, "peakLinePct",
+                            100.0 * (double)f.peak_clocks / (double)VERA_BW_LINE_CLOCKS);
+    cJSON_AddNumberToObject(o, "totalFetches", f.total_fetches);
+    cJSON_AddNumberToObject(o, "totalClocks", f.total_clocks);
+
+    // How much of each scanline was still free when the layers and the CPU had
+    // taken their share. Sprites are last on the bus (vram_if.v:142-157), so
+    // this is what they were really competing for -- see the note on the
+    // sprite render-time view in the Performance panel.
+    cJSON_AddNumberToObject(o, "spriteHeadroomAtPeak",
+                            f.peak_clocks < VERA_BW_LINE_CLOCKS
+                                ? VERA_BW_LINE_CLOCKS - f.peak_clocks : 0);
+
+    cJSON *port = cJSON_CreateObject();
+    cJSON_AddNumberToObject(port, "readBytes", f.port_reads);
+    cJSON_AddNumberToObject(port, "writeBytes", f.port_writes);
+    cJSON_AddNumberToObject(port, "accesses", f.port_accesses);
+    cJSON_AddNumberToObject(port, "vramBytes", f.port_vram_bytes);
+    cJSON_AddNumberToObject(port, "fxCacheWrites", f.fx_cache_writes);
+    cJSON_AddNumberToObject(port, "fxAffineFetches", f.fx_affine_fetches);
+    // Bytes that reached VRAM per byte the CPU pushed. Above 1.0 means FX is
+    // doing work the CPU did not pay for, which is the point of using it.
+    const uint32_t stores = f.port_reads + f.port_writes;
+    cJSON_AddNumberToObject(port, "amplification",
+                            stores ? (double)f.port_vram_bytes / (double)stores : 0.0);
+    cJSON_AddItemToObject(o, "port", port);
+
+    return o;
+}
+
 static int handle_x16_perf_stats(int seq, cJSON *args) {
     // A client asking for statistics is a client that wants them collected.
     // Arming here rather than making it a separate round trip means the common
@@ -2159,9 +2232,13 @@ static int handle_x16_perf_stats(int seq, cJSON *args) {
     if (!perf_budget_owner_wants(PERF_OWNER_DAP) && !perf_budget_is_enabled()) {
         perf_budget_arm(PERF_OWNER_DAP, true);
     }
+    if (!vera_bandwidth_owner_wants(VERA_BW_OWNER_DAP) && !vera_bandwidth_is_enabled()) {
+        vera_bandwidth_arm(VERA_BW_OWNER_DAP, true);
+    }
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddItemToObject(body, "budget", perf_budget_json());
+    cJSON_AddItemToObject(body, "bandwidth", vera_bandwidth_json());
 
     perf_frame_t last;
     if (perf_budget_last_frame(&last)) {
@@ -2279,6 +2356,10 @@ static int handle_x16_perf_config(int seq, cJSON *args) {
         // Turning profiling on is as clear a statement of intent as there is,
         // so overrun events follow it unless the client says otherwise below.
         perf_overrun_events = want;
+        // The bandwidth accounting follows the same switch. Two requests to
+        // answer one question ("profile this machine") would be a surface
+        // nobody wants to remember.
+        vera_bandwidth_arm(VERA_BW_OWNER_DAP, want);
     }
 
     item = cJSON_GetObjectItemCaseSensitive(args, "targetFps");
@@ -2325,11 +2406,14 @@ static int handle_x16_perf_config(int seq, cJSON *args) {
     }
 
     item = cJSON_GetObjectItemCaseSensitive(args, "reset");
-    if (cJSON_IsTrue(item))
+    if (cJSON_IsTrue(item)) {
         perf_budget_reset();
+        vera_bandwidth_reset();
+    }
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddItemToObject(body, "budget", perf_budget_json());
+    cJSON_AddItemToObject(body, "bandwidth", vera_bandwidth_json());
     cJSON_AddBoolToObject(body, "overrunEvents", perf_overrun_events);
     send_dap_response(seq, "x16/perfConfig", true, body);
     return 0;

@@ -88,6 +88,11 @@ bool video_get_irq_out(void);
 void video_save(SDL_RWops *f);
 uint8_t video_read(uint8_t reg, bool debugOn);
 void video_write(uint8_t reg, uint8_t value);
+
+// Announce that the next video_write() is the DEBUGGER's, not the guest's, so
+// its data-port traffic is not charged to VERA's bandwidth accounting.
+// video_read() is told the same thing directly, as its debugOn argument.
+void video_set_debug_write(bool on);
 void video_update_title(const char* window_title);
 
 uint8_t via1_read(uint8_t reg, bool debug);

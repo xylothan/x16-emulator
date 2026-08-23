@@ -1034,13 +1034,25 @@ There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state
 The 6502 never idles — it burns every cycle of a frame whether your code is working or spinning
 on a vsync flag — so "cycles per frame" is always 100% and tells you nothing. The emulator
 therefore classifies cycles as **work** or **waiting**, and reports the work against a frame
-budget. See [docs/perf-budget.md](docs/perf-budget.md) for how the classification works and
-where it can be fooled.
+budget. It measures VERA's VRAM bandwidth alongside, because a program can have cycles to spare
+and still run out of bus. See [docs/perf-budget.md](docs/perf-budget.md) for how the
+classification works, what the bandwidth model is derived from, and where each can be fooled.
 
 | Command | Arguments | Effect |
 | --- | --- | --- |
-| `x16/perfStats` | optional `windows` (array of seconds, or names like `"30s"`/`"session"`), `includeZones` (default true), `includeFrames` (raw per-frame samples, oldest first) | Returns the budget, the last completed frame, and rolling statistics — min/mean/p50/p95/p99/max, budget overruns and the worst one — per window. Asking arms profiling if it was off. |
+| `x16/perfStats` | optional `windows` (array of seconds, or names like `"30s"`/`"session"`), `includeZones` (default true), `includeFrames` (raw per-frame samples, oldest first) | Returns the budget, the last completed frame, rolling statistics — min/mean/p50/p95/p99/max, budget overruns and the worst one — per window, and a `bandwidth` object with VERA's VRAM traffic. Asking arms both if they were off. |
 | `x16/perfConfig` | `enabled`, `targetFps`, `idleMode` (`"auto"`/`"markers"`/`"none"`), `historyFrames`, `overrunEvents`, `zones` (array of `{name, start, end, bank, idle}`), `reset` | Configures the above. `zones` replaces the address zones wholesale. |
+
+The **`bandwidth`** object answers the other half of "what is eating my frame?": what VERA's VRAM
+bus did, rather than what the CPU did. It reports per-layer fetches and bytes, the CPU's own
+traffic through `$9F23`/`$9F24` — the one piece of VERA bandwidth a program controls directly —
+and VERA FX amplification, where one `sta` can move four bytes.
+
+Its headline is `peakLineClocks` against `lineClocks` (800), **not** a percentage of VERA's total
+bandwidth: a frame uses maybe a fifth of the chip's 100 MB/s, so percent-of-peak would be true and
+useless. One scanline is the window that genuinely runs out. Sprites are last on that bus, so
+`spriteHeadroomAtPeak` is what the sprite renderer was really competing for; sprite render time
+itself has its own view in the VERA panel under **Multiplex → Render time**.
 
 The emulator also pushes an **`x16/perfBudgetOverrun` event** when the guest misses its budget,
 coalesced to at most one per second with a count and the worst frame in that period — so tooling

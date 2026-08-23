@@ -40,6 +40,7 @@
 #include "source_view.h"
 #include "code_map.h"
 #include "perf_budget.h"
+#include "vera_bandwidth.h"
 #include "cpu/irq_ctx.h"
 #include "utf8.h"
 #include "iso_8859_15.h"
@@ -2096,6 +2097,11 @@ perf_budget_sync_machine(void)
 	perf_budget_configure((uint32_t)MHZ * 1000u,
 	                      (uint32_t)(((uint64_t)MHZ * dots) / 25u),
 	                      video_frame_scanlines());
+
+	// The bandwidth model needs the same scanline count, and nothing else: its
+	// per-line window is VERA's own 800 clocks, which no emulator setting can
+	// move.
+	vera_bandwidth_configure(video_frame_scanlines());
 }
 
 // Record one executed instruction against the performance budget. `pc`/`pbank`
