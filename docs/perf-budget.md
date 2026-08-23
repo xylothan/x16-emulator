@@ -189,6 +189,12 @@ not switch off a panel somebody is reading. The bandwidth accounting below
 follows the same switch and the same ownership rule, so "profile this machine" is
 one decision rather than two.
 
+The panel ships open, so `-imgui` profiles from boot. That is deliberate: a
+window that starts empty and fills over the next minute cannot answer anything
+about the frame that made you open it, and the per-instruction cost is in the
+same class as what the debugger already spends on the code map. A run with no
+panel and no client still costs only the guard.
+
 The bandwidth side costs a few arithmetic ops per scanline rather than per
 instruction — 480 lines against 134,400 cycles — and its buffers are two fixed
 6 KB arrays, so there is nothing to allocate and nothing that can fail to.
