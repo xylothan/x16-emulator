@@ -109,6 +109,13 @@ void video_write(uint8_t reg, uint8_t value) { note_write(FAKE_VERA, reg, value)
 void midi_serial_write(uint8_t reg, uint8_t value) { note_write(FAKE_MIDI, reg, value); }
 void YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value); }
 
+// memory.c brackets its VERA writes with this so the bandwidth accounting can
+// tell a debugger's poke from a store the guest made. There is no accounting
+// here to tell, and the flag is not part of what these tests assert about, so
+// it is swallowed rather than recorded -- noting it would put an extra event in
+// every trace the write tests compare against.
+void video_set_debug_write(bool debug) { (void)debug; }
+
 // YM_read_status() has no debug parameter, so this cannot behave differently
 // for a debug read. Recorded as a real read, which is the honest reading of a
 // signature that carries no way to say otherwise.
