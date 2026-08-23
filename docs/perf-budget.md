@@ -1,5 +1,12 @@
 # Performance budgets: telling work apart from waiting
 
+Two budgets, in one panel and one DAP response: the **CPU's cycles**, and
+**VERA's VRAM bandwidth**. They answer the same question — "what is eating my
+frame?" — from the two ends that can independently run out, and the frames worth
+looking at are the ones where they disagree.
+
+The cycle model comes first; [VERA's bandwidth](#veras-bandwidth) is below.
+
 ## The problem
 
 "How much of my frame am I using?" has no direct answer on a 6502, because the
@@ -178,35 +185,170 @@ window nobody asks for costs nothing.
 Profiling runs while **any** owner wants it — the ImGui panel or a DAP client —
 mirroring the ownership rule the core already applies to breakpoints. Closing the
 panel does not strand a client with a dead feed, and a client disconnecting does
-not switch off a panel somebody is reading.
+not switch off a panel somebody is reading. The bandwidth accounting below
+follows the same switch and the same ownership rule, so "profile this machine" is
+one decision rather than two.
+
+The panel ships open, so `-imgui` profiles from boot. That is deliberate: a
+window that starts empty and fills over the next minute cannot answer anything
+about the frame that made you open it, and the per-instruction cost is in the
+same class as what the debugger already spends on the code map. A run with no
+panel and no client still costs only the guard.
+
+The bandwidth side costs a few arithmetic ops per scanline rather than per
+instruction — 480 lines against 134,400 cycles — and its buffers are two fixed
+6 KB arrays, so there is nothing to allocate and nothing that can fail to.
+
+## VERA's bandwidth
+
+Everything above accounts for **CPU cycles**. VERA has its own budget, and a
+program can have cycles to spare and still tear, drop sprites or run out of room
+to push pixels — so `src/vera_bandwidth.c` measures the VRAM bus alongside.
+
+### What the bus is
+
+Quoted from the RTL, which for an FPGA is not a description of the hardware but
+*is* the hardware. Pinned to `X16Community/vera-module` tag **v47.0.2**, the same
+commit `tests/fetch_vera_rtl.py` fetches, so every line below can be checked.
+
+| Fact | Source |
+| --- | --- |
+| A scanline is 800 clocks (640 + 16 + 96 + 48), 525 lines a frame | `video_vga.v:27-37` |
+| VRAM is 32 bits wide, so **an access is four bytes** | `main_ram.v:7-10` |
+| An access costs **two clocks**: strobe, then ack | `layer_renderer.v:250-271` |
+| One bus, **fixed priority: CPU > layer 0 > layer 1 > sprites** | `vram_if.v:142-157`, wired at `top.v:680-713` |
+| A tile map word holds **two** 16-bit entries, so a map fetch every two tiles | `layer_renderer.v:113`, `:305` |
+| The layer renderer always fills **640 pixels**, then stops | `layer_renderer.v:488` |
+
+### Why the headline is a scanline
+
+VERA's peak is 25 MHz × 4 bytes = 100 MB/s, and a real program uses perhaps a
+fifth of it. "Percent of total bandwidth" would therefore sit near 20% forever
+and say nothing — the same trap as raw cycles-per-frame always being 100%.
+
+The **800 clocks of one scanline** is the window that genuinely runs out, and at
+full load it exactly does:
+
+```
+layer 0, 8bpp bitmap    160 fetches x 2 = 320 clocks
+layer 1, 8bpp bitmap    160 fetches x 2 = 320 clocks
+sprites, 4bpp, full line                = 160 clocks
+                                          ----
+                                           800   = one scanline
+```
+
+So the panel reports peak, p95 and mean **clocks per scanline**, and names the
+line the peak fell on.
+
+### Fetches per scanline
+
+| Tile mode | 8px tiles | 16px tiles |
+| --- | --- | --- |
+| 1 bpp | 120 | 60 |
+| 2 bpp | 120 | 60 |
+| 4 bpp | 120 | 100 |
+| 8 bpp | 200 | 180 |
+
+| Bitmap mode | 1 bpp | 2 bpp | 4 bpp | 8 bpp |
+| --- | --- | --- | --- | --- |
+| Fetches | 20 | 40 | 80 | 160 |
+
+Two things in that table surprise people:
+
+* **A 320-wide bitmap costs the same as a 640-wide one.** `layer_renderer` has
+  no scale input at all; `DC_HSCALE` is applied by the composer when it *reads*
+  the line buffer. The renderer just fills to 640 pixels and runs off the end of
+  its own line. Halving the width buys VRAM, not bandwidth.
+* **Scrolling is not free.** The renderer starts at `0 - subtile_hscroll`
+  (`layer_renderer.v:499-501`), so a layer scrolled off a tile boundary draws one
+  tile more than the screen needs — three extra fetches at 8 bpp.
+
+### The data port, and VERA FX
+
+`$9F23`/`$9F24` is the one piece of VERA bandwidth a program controls directly,
+so it is reported on its own: bytes read, bytes written, and what reached VRAM.
+An 8 MHz CPU can issue roughly 64 accesses a scanline — a 4-cycle `sta` is 12.5
+VERA clocks — which is about **33 KB a frame** and a ceiling no program can pass.
+
+FX is where those two numbers come apart. A cache write is one store that moves
+**four** bytes, and an affine read costs a second fetch to translate the map. The
+panel reports the ratio, because "bytes into VRAM per byte the CPU pushed" is the
+whole reason to use FX.
+
+The debugger's own reads and writes are never charged. `writeMemory` with a
+`vram:` reference reaches VRAM through `video_space_write()`, around the port
+entirely; a write to the CPU address `$9F23` raises `video_set_debug_write()` so
+the accounting declines it; and the read path is already guarded by `debugOn`.
+If opening a memory view moved the number, the number would be worthless.
+
+### Where the model is wrong
+
+Stated plainly, because a bandwidth figure nobody can calibrate is worse than
+none.
+
+* **Fetches are modelled from the layer registers, not observed.** The
+  emulator's renderer is a *pixel* loop — 640 columns reading a byte at a time,
+  re-reading the same byte in 320-wide modes — and never fetches 32 bits at once
+  the way the hardware does. Counting those calls would measure the emulator's
+  inner loop rather than VERA's bus. The cost is that a bug in the emulator's
+  renderer will not show up here.
+* **Clocks are a lower bound; accesses are exact.** Two clocks per access is the
+  uncontended cost. Under contention a lower-priority client holds its strobe and
+  waits, burning more. Trust the access counts; read the clock totals as "at
+  least this bad".
+* **The scroll tile is an assumption.** Which tile is "every other" for the map
+  fetch depends on the scrolled tile counter's parity, so the count can be one
+  out at the margin.
+* **A line is fetched during the line before it.** The layer line buffer is
+  double-buffered (`top.v` `active_line_buf_r`, `composer.v`). Fetches are
+  reported against the line they *paint*, which is where a developer looks.
+* **FX is covered where the emulator implements it** — the four-byte cache write
+  and the affine prefetch — not as a whole model of `addr_data.v`.
+
+### Sprites, and the contention this makes visible
+
+Sprite render time is modelled separately and reported in the VERA panel's
+**Multiplex → Render time** view. The Bandwidth section links to it rather than
+drawing it twice.
+
+The two now meet at a real number — but only after a conversion, because they
+are measured in **different clocks**.
+
+`SPRITE_TRACE_LINE_BUDGET` (798) is **wall clock**: `render_time_r` increments
+every clock (`sprite_renderer.v:43-56`), including the `STATE_RENDER` clocks when
+the renderer is painting and holding no strobe at all. Everything in the
+Bandwidth section is **bus occupancy**. A sprite spends 2 clocks fetching a word
+and then 8 rendering it at 4 bpp, so its render time runs about five times its
+bus time — and a full 4 bpp sprite line is roughly 158 bus clocks, nowhere near
+798.
+
+Subtracting one from the other therefore overstates sprite pressure fivefold and
+warns about lines that comfortably fit, which is worse than not reporting it at
+all. `vera_bandwidth_sprite_bus_clocks()` does the conversion, and the per-line
+tooltip shows both figures with their units named. Every clock in the
+`x16/perfStats` `bandwidth` object is bus occupancy, and it says so in a
+`clockUnits` field so a client cannot make the same mistake more quietly.
+
+Sprites are also *last* on the bus. What layers and the CPU leave is what they
+get, so the tooltip shows the headroom after both and says when a line's sprite
+fetches exceed it. That is the known gap made expressible: the sprite model
+charges `STATE_WAIT_FETCH` one clock where the bus takes two, so on a line the
+layers have filled it flatters itself. Making the sprite model itself
+contention-aware would mean simulating the arbiter cycle by cycle, and is not
+done.
 
 ## Where this is implemented
 
 | File | Role |
 | --- | --- |
-| `src/perf_budget.{c,h}` | All the accounting. Reaches for no emulator state — everything arrives as a function argument — so it is unit-tested with no CPU, no memory, no video and no SDL. |
+| `src/perf_budget.{c,h}` | All the cycle accounting. Reaches for no emulator state — everything arrives as a function argument — so it is unit-tested with no CPU, no memory, no video and no SDL. |
+| `src/vera_bandwidth.{c,h}` | The VRAM bus model, dependency-free for the same reason. |
 | `src/main.c` | Per-instruction and frame-boundary hooks. |
 | `src/memory.c` | The store signal the spin detector needs, and the `$9FBC` register. |
-| `src/debug_ui/panels/perf_panel.cpp` | The Performance panel. |
+| `src/video.c` | Per-scanline layer modes, data-port traffic, and the VERA frame boundary. |
+| `src/debug_ui/panels/perf_panel.cpp` | The Performance panel, CPU and bandwidth in one place. |
 | `src/debug_server.c` | `x16/perfStats`, `x16/perfConfig`, and the `x16/perfBudgetOverrun` event. |
 | `tests/test_perf_budget.c` | The classification and statistics, driven directly. |
-| `testbench/test_dap.py` | The DAP surface against a real running machine. |
+| `tests/test_vera_bandwidth.c` | The fetch model, checked against the RTL's decode tables. |
+| `testbench/test_dap.py` | Both DAP surfaces against a real running machine. |
 
-## Not covered here
-
-This module accounts for **CPU cycles**. VERA's own bandwidth is a separate
-question and is not measured here:
-
-* **Layer fetches** — layer 0/1 tile and map reads in `render_layer_line_tile()`,
-  `render_layer_line_text()` and `render_layer_line_bitmap()`, which vary with
-  tile mode, bitmap mode and colour depth.
-* **The CPU's data-port traffic** through `$9F23`/`$9F24`, which is the one piece
-  of VERA bandwidth a program controls directly.
-* **VERA FX** writes.
-
-Sprite render time is the exception: it is modelled, but by the VERA sprite
-renderer rather than by anything here, and it is reported in the VERA panel's
-**Multiplex → Render time** view rather than in this budget. It is a per-scanline
-time ceiling that really does drop sprites, which is a different shape of
-question from "how many cycles did my code use", so the two are deliberately
-kept apart rather than blended into one number that would mean neither.

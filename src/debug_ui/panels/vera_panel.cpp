@@ -20,6 +20,7 @@
 #include "debug_ui_bridge.h"
 #include "debug_ui.h"
 #include "debug_ui_widgets.h" // dbgui_hover_value_tooltip / dbgui_format_binary
+#include "sprite_multiplex_tab.h"
 
 #include <SDL.h>
 #include <stdint.h>
@@ -1010,6 +1011,13 @@ vera_panel_render(bool *p_open)
             }
             if (ImGui::BeginTabItem("Sprites")) {
                 draw_sprites_tab(pal);
+                ImGui::EndTabItem();
+            }
+            // Directly after Sprites: that tab shows the attribute table as it
+            // stands, this one shows what the frame actually drew, and for a
+            // multiplexed frame the two are very different things.
+            if (ImGui::BeginTabItem("Multiplex")) {
+                draw_sprite_multiplex_tab(pal);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Bitmap")) {

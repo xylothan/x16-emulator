@@ -4,16 +4,27 @@
 // whatever they are targeting) how much of the frame is their code using, and
 // how much room is left?
 //
-// The accounting is not done here. src/perf_budget.c owns it, because the same
-// numbers are served over DAP and neither surface should have its own idea of
-// what a frame cost. This file is a reader and a control panel.
+// The accounting is not done here. src/perf_budget.c owns the cycle budget and
+// src/vera_bandwidth.c owns the VRAM bus figures, because the same numbers are
+// served over DAP and neither surface should have its own idea of what a frame
+// cost. This file is a reader and a control panel.
 //
-// PROFILING IS ARMED BY OPENING THE PANEL, and disarmed by closing it, in the
-// same spirit as the audio scope rings that self-arm on read. It is the one
-// debugger feature besides the I/O trace that costs the running machine
-// anything per instruction, so it should not be running when nobody is looking
-// at it. Settings > "keep profiling when the panel is closed" overrides this,
-// for the case where a DAP client is being fed and the panel is shut.
+// CPU CYCLES AND VERA BANDWIDTH SHARE THIS PANEL on purpose. They are two
+// halves of "what is eating my frame?", and the frames worth looking at are the
+// ones where they disagree.
+//
+// PROFILING IS ARMED BY THE PANEL BEING OPEN, and disarmed by closing it. This
+// panel ships open and docked with the other bottom-row views, so a normal
+// `-imgui` session profiles from boot -- which is the point: the numbers are
+// only useful if they are already there when you go looking, and a panel that
+// starts empty and fills over the next minute answers nothing about the frame
+// that made you open it.
+//
+// What that costs the running machine is an add, one array index and a couple
+// of branches per instruction, in the same class as the
+// code_map_record_current() call `-imgui` already makes on every instruction.
+// Close the tab and it stops; System > Settings has the reverse (keep profiling
+// with the panel shut, for feeding a DAP client).
 #include "imgui.h"
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
@@ -566,6 +577,220 @@ draw_controls(void)
 		debug_ui_settings_mark_dirty();
 }
 
+// ---------------------------------------------------------------------------
+// Bandwidth: VERA's side of "what is eating my frame?".
+//
+// The CPU budget above and this share one panel deliberately. The interesting
+// frames are the ones where the two disagree -- code with cycles to spare that
+// still cannot get its pixels through the bus, or a bus with room left over
+// while the CPU drowns.
+//
+// The unit is CLOCKS OF ONE SCANLINE, not a percentage of VERA's total
+// bandwidth. A frame uses maybe a fifth of the chip's 100 MB/s, so a
+// percent-of-peak reading would sit near 20% forever and tell nobody anything
+// -- the same trap as reporting raw cycles-per-frame, which is always 100%.
+// The scanline is the window that genuinely runs out.
+void
+draw_bandwidth(void)
+{
+	vera_bw_frame_t f;
+	if (!vera_bandwidth_last_frame(&f)) {
+		ImGui::TextDisabled("No completed frame yet.");
+		return;
+	}
+
+	const float peak_pct = 100.0f * (float)f.peak_clocks / (float)VERA_BW_LINE_CLOCKS;
+
+	ImGui::Text("Peak scanline:");
+	ImGui::SameLine();
+	ImGui::TextColored(utilization_color(peak_pct), "%u of %d clocks (%.1f%%)",
+	                   (unsigned)f.peak_clocks, VERA_BW_LINE_CLOCKS, peak_pct);
+	ImGui::SameLine();
+	ImGui::TextDisabled("on line %u", (unsigned)f.peak_line);
+
+	ImGui::Text("p95 %u   mean %u   over budget: %u line(s)", (unsigned)f.p95_clocks,
+	            (unsigned)f.mean_clocks, (unsigned)f.lines_over);
+
+	// ── Layers ──────────────────────────────────────────────────────────────
+	if (ImGui::BeginTable("bw_layers", 4,
+	                      ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Source");
+		ImGui::TableSetupColumn("Fetches/frame");
+		ImGui::TableSetupColumn("Bytes/frame");
+		ImGui::TableSetupColumn("Peak line");
+		ImGui::TableHeadersRow();
+
+		for (int i = 0; i < 2; i++) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::Text("Layer %d", i);
+			ImGui::TableNextColumn();
+			ImGui::Text("%u", (unsigned)f.layer_fetches[i]);
+			ImGui::TableNextColumn();
+			ImGui::Text("%u", (unsigned)f.layer_bytes[i]);
+			ImGui::TableNextColumn();
+			ImGui::Text("%u on line %u", (unsigned)f.layer_peak_fetches[i],
+			            (unsigned)f.layer_peak_line[i]);
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("CPU port");
+		ImGui::TableNextColumn();
+		ImGui::Text("%u", (unsigned)f.port_accesses);
+		ImGui::TableNextColumn();
+		ImGui::Text("%u", (unsigned)f.port_vram_bytes);
+		ImGui::TableNextColumn();
+		ImGui::TextDisabled("-");
+
+		ImGui::EndTable();
+	}
+
+	// ── The data port, which is the part a program controls directly ────────
+	ImGui::Spacing();
+	const uint32_t moved = f.port_reads + f.port_writes;
+	ImGui::Text("Data port ($9F23/$9F24): %u bytes written, %u read", (unsigned)f.port_writes,
+	            (unsigned)f.port_reads);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("An 8 MHz CPU can issue roughly 64 accesses a scanline\n"
+		                  "(a 4-cycle sta is 12.5 VERA clocks), so about 33 KB a\n"
+		                  "frame is the ceiling no program can push past.");
+	}
+	if (f.fx_cache_writes || f.fx_affine_fetches) {
+		const double amp = moved ? (double)f.port_vram_bytes / (double)moved : 0.0;
+		ImGui::Text("VERA FX: %u cache write(s), %u affine fetch(es) — %.2fx amplification",
+		            (unsigned)f.fx_cache_writes, (unsigned)f.fx_affine_fetches, amp);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Bytes that reached VRAM per byte the CPU pushed.\n"
+			                  "An FX cache write moves four bytes for one store,\n"
+			                  "which is the whole reason to use it.");
+		}
+	}
+
+	// ── Per-scanline bars, drawn like the sprite render-time view ───────────
+	uint16_t              nlines = 0;
+	const vera_bw_line_t *lines  = vera_bandwidth_last_lines(&nlines);
+	if (!lines || !nlines)
+		return;
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Height is the bus time a scanline wanted. Anything above the white "
+	                    "line is more than the scanline has.");
+
+	ImDrawList  *dl     = ImGui::GetWindowDrawList();
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	const float  w      = ImGui::GetContentRegionAvail().x;
+	const float  h      = 180.0f;
+	ImGui::InvisibleButton("bw_lines", ImVec2(w, h));
+	const bool hovered = ImGui::IsItemHovered();
+
+	dl->AddRectFilled(origin, ImVec2(origin.x + w, origin.y + h), IM_COL32(18, 18, 22, 255));
+
+	// Same scaling rule as the sprite view: track the peak, but never squash
+	// the ceiling below three-quarters height, so an ordinary frame does not
+	// look alarmingly full.
+	const float floor_top = (float)VERA_BW_LINE_CLOCKS * 4.0f / 3.0f;
+	float       top       = (float)f.peak_clocks > floor_top ? (float)f.peak_clocks : floor_top;
+	const float bw        = w / (float)nlines;
+
+	for (uint16_t line = 0; line < nlines; ++line) {
+		const vera_bw_line_t &st = lines[line];
+		const uint32_t        clocks = vera_bw_line_clocks(&st);
+		if (!clocks)
+			continue;
+		const float bh  = ((float)clocks / top) * h;
+		const ImU32 col = clocks > VERA_BW_LINE_CLOCKS ? IM_COL32(235, 70, 60, 255)
+		                                               : IM_COL32(120, 200, 140, 255);
+		dl->AddRectFilled(ImVec2(origin.x + line * bw, origin.y + h - bh),
+		                  ImVec2(origin.x + line * bw + (bw > 1.0f ? bw : 1.0f), origin.y + h),
+		                  col);
+	}
+
+	const float ceil_y = origin.y + h - ((float)VERA_BW_LINE_CLOCKS / top) * h;
+	dl->AddLine(ImVec2(origin.x, ceil_y), ImVec2(origin.x + w, ceil_y),
+	            IM_COL32(255, 255, 255, 200));
+	dl->AddText(ImVec2(origin.x + 4, ceil_y - 16), IM_COL32(255, 255, 255, 200),
+	            "one scanline (800 clocks)");
+
+	if (hovered && bw > 0.0f) {
+		int line = (int)((ImGui::GetMousePos().x - origin.x) / bw);
+		if (line < 0)
+			line = 0;
+		if (line >= (int)nlines)
+			line = nlines - 1;
+		const vera_bw_line_t &st = lines[line];
+		const uint32_t layer_clocks =
+		    ((uint32_t)st.layer_fetches[0] + st.layer_fetches[1]) * VERA_BW_ACCESS_CLOCKS;
+		const uint32_t port_clocks = (uint32_t)st.port_accesses * VERA_BW_ACCESS_CLOCKS;
+
+		ImGui::BeginTooltip();
+		ImGui::Text("line %d", line);
+		ImGui::Text("layer 0: %u fetches, layer 1: %u", st.layer_fetches[0], st.layer_fetches[1]);
+		ImGui::Text("CPU port: %u access(es)", st.port_accesses);
+		ImGui::Text("%u of %d clocks", layer_clocks + port_clocks, VERA_BW_LINE_CLOCKS);
+
+		// What was left for the sprite renderer, which is last on the bus
+		// (vram_if.v:142-157). Crossed with the sprite trace HERE rather than
+		// inside vera_bandwidth.c, which is what keeps that module free of any
+		// dependency on this one.
+		//
+		// The sprite figures have to be CONVERTED first. sprite_trace measures
+		// render time -- render_time_r ticks every clock, including the ones
+		// painting the line buffer with the bus idle -- while everything here
+		// is bus occupancy. Comparing the two directly overstates sprite
+		// pressure about fivefold at 4 bpp and would warn about lines that
+		// comfortably fit.
+		const uint32_t taken = layer_clocks + port_clocks;
+		const uint32_t left  = taken < VERA_BW_LINE_CLOCKS ? VERA_BW_LINE_CLOCKS - taken : 0;
+		ImGui::Separator();
+		ImGui::Text("left for sprites: %u bus clocks", left);
+
+		const sprite_trace_frame_t *sf = sprite_trace_last_frame();
+		if (sf && line < SPRITE_TRACE_LINES) {
+			const sprite_line_stat_t &ss = sf->lines[line];
+			if (ss.demand) {
+				// Sum the fetches of the sprites that were actually on this
+				// line. A slot cut short by the render-time ceiling fetched
+				// less than its full width, so this is an upper bound on
+				// exhausted lines -- which the sprite view already flags.
+				uint32_t sprite_bus = 0;
+				for (int slot = 0; slot < SPRITE_TRACE_SLOTS; ++slot) {
+					const size_t k = (size_t)line * SPRITE_TRACE_SLOTS + slot;
+					if (!(sf->line_flags[k] & SPRITE_TRACE_ONSCREEN))
+						continue;
+					const uint16_t g = sf->line_gen[k];
+					if (g == SPRITE_TRACE_NO_GEN || g >= sf->gen_count)
+						continue;
+					const sprite_gen_t &gen = sf->gens[g];
+					sprite_bus += vera_bandwidth_sprite_bus_clocks(gen.width, gen.color_mode);
+				}
+				ImGui::Text("sprites: %u bus clocks (%u render clocks)", sprite_bus, ss.demand);
+				if (sprite_bus > left)
+					ImGui::TextColored(ImVec4(1, 0.75f, 0.30f, 1),
+					                   "more bus than was free: sprites are last in\n"
+					                   "priority, so they wait -- and the sprite model\n"
+					                   "charges one clock a fetch where the bus takes\n"
+					                   "two, so it flatters this line");
+			}
+		}
+		ImGui::EndTooltip();
+	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Sprite render time has its own view: VERA panel \xe2\x86\x92 Multiplex "
+	                    "\xe2\x86\x92 Render time.");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+		    "Sprites are LAST on VERA's bus (vram_if.v:142-157), so what the\n"
+		    "layers and the CPU leave is what they get.\n\n"
+		    "Two different clocks, and they must not be subtracted from each\n"
+		    "other: everything here is BUS OCCUPANCY, while the Render time\n"
+		    "view measures WALL CLOCK -- render_time_r ticks even while the\n"
+		    "renderer paints with the bus idle, so it runs about five times\n"
+		    "higher at 4 bpp. The tooltip above converts before comparing.");
+	}
+}
+
 void
 perf_panel_render(bool *p_open)
 {
@@ -577,6 +802,7 @@ perf_panel_render(bool *p_open)
 	const bool want = (p_open ? *p_open : true) || s.perf_always_on;
 	if (want != armed) {
 		perf_budget_arm(PERF_OWNER_UI, want);
+		vera_bandwidth_arm(VERA_BW_OWNER_UI, want);
 		if (want) {
 			perf_budget_set_capacity(s.perf_capacity);
 			perf_budget_set_target_fps(s.perf_target_fps);
@@ -608,6 +834,8 @@ perf_panel_render(bool *p_open)
 		draw_statistics();
 	if (ImGui::CollapsingHeader("Breakdown", ImGuiTreeNodeFlags_DefaultOpen))
 		draw_breakdown();
+	if (ImGui::CollapsingHeader("Bandwidth", ImGuiTreeNodeFlags_DefaultOpen))
+		draw_bandwidth();
 	if (ImGui::CollapsingHeader("Zones"))
 		draw_zone_editor();
 	if (ImGui::CollapsingHeader("Settings"))
@@ -616,6 +844,6 @@ perf_panel_render(bool *p_open)
 	dbgui_window_end();
 }
 
-DebugPanelRegistration s_reg("Performance", perf_panel_render, false);
+DebugPanelRegistration s_reg("Performance", perf_panel_render, true);
 
 } // namespace

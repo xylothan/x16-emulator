@@ -25,6 +25,8 @@
 #include "vera_spi.h"
 #include "vera_psg.h"
 #include "vera_pcm.h"
+#include "sprite_trace.h"
+#include "vera_bandwidth.h"
 #include "icon.h"
 #include "sdcard.h"
 #include "i2c.h"
@@ -61,6 +63,17 @@
 #define ADDR_SPRDATA_END    0x20000
 
 #define NUM_SPRITES 128
+
+// Clocks the sprite renderer gets per scanline before both of its state
+// machines are forced to DONE.
+//
+//   sprite_renderer.v:44  wire render_time_done = (render_time_r == 'd798);
+//
+// render_time_r is cleared by line_render_start and counts every clock after,
+// so this is elapsed time for the line rather than an amount of work. The
+// comment above it in the RTL gives the reason for the number: "Limit render
+// time so that VGA and composite mode get the same amount of render time".
+#define SPRITE_RENDER_TIME 798
 
 // both VGA and NTSC
 #define SCAN_HEIGHT 525
@@ -225,6 +238,32 @@ uint16_t vga_scan_pos_y;
 float ntsc_half_cnt;
 uint16_t ntsc_scan_pos_y;
 int frame_count = 0;
+
+// CPU cycles elapsed, accumulated from the counts video_step() is handed. Kept
+// here rather than read from clockticks6502 so that video.c does not pull the
+// CPU in: the eight test targets that link this file supply a host fixture, not
+// a processor. The sum is exact -- main.c passes each instruction's cycle count
+// once, and the mid-line raster calls pass zero.
+static uint32_t sprite_trace_cpu_cycles = 0;
+
+// The display line the beam is on right now, for stamping attribute writes.
+// SPRITE_TRACE_NO_LINE outside the active display, where a write is an ordinary
+// full-frame update rather than a raster-timed one.
+static uint16_t
+sprite_trace_current_line(void)
+{
+	int y;
+	if (reg_composer[0] & 2) {
+		y = (ntsc_scan_pos_y < SCAN_HEIGHT) ? (int)ntsc_scan_pos_y - NTSC_Y_OFFSET_LOW
+		                                    : (int)ntsc_scan_pos_y - NTSC_Y_OFFSET_HIGH;
+	} else {
+		y = (int)vga_scan_pos_y - VGA_Y_OFFSET;
+	}
+	if (y < 0 || y >= SPRITE_TRACE_LINES) {
+		return SPRITE_TRACE_NO_LINE;
+	}
+	return (uint16_t)y;
+}
 
 static uint8_t framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT * 4];
 #ifndef __EMSCRIPTEN__
@@ -765,6 +804,22 @@ refresh_sprite_properties(const uint16_t sprite)
 	props->palette_offset = (sprite_data[sprite][7] & 0x0f) << 4;
 }
 
+// Store one byte of a sprite's attributes, telling the trace what it replaced.
+// Both VRAM write paths funnel through here so the two cannot drift apart: a
+// multiplexer driven by VERA FX would otherwise go unrecorded.
+static void
+sprite_attr_write(uint32_t address, uint8_t value)
+{
+	const uint8_t slot   = (address >> 3) & 0x7f;
+	const uint8_t offset = address & 0x7;
+	if (sprite_trace_active) {
+		sprite_trace_note_write(slot, offset, sprite_data[slot][offset], value,
+		                        sprite_trace_current_line(), sprite_trace_cpu_cycles);
+	}
+	sprite_data[slot][offset] = value;
+	refresh_sprite_properties(slot);
+}
+
 struct video_palette
 {
 	uint32_t entries[256];
@@ -823,20 +878,80 @@ render_sprite_line(const uint16_t y)
 	memset(sprite_line_z, 0, SCREEN_WIDTH);
 	memset(sprite_line_mask, 0, SCREEN_WIDTH);
 
-	uint16_t sprite_budget = 800 + 1;
+	// Timing follows sprite_renderer.v, which runs two state machines against
+	// one shared line timer:
+	//
+	//   sprite_renderer.v:44   wire render_time_done = (render_time_r == 'd798);
+	//   sprite_renderer.v:171  if (render_time_done) sf_state_next = SF_DONE;
+	//   sprite_renderer.v:349  if (render_time_done) state_next = STATE_DONE;
+	//
+	// render_time_r is reset by line_render_start and counts every clock
+	// afterwards, so the limit is elapsed time for the line, not a quantity of
+	// work. When it expires both machines are forced to DONE and stay there
+	// until the next line: the search stops, and the sprite in flight stops
+	// part-drawn. Sprites are never free -- once the line is out of time,
+	// everything after it is simply not on screen.
+	//
+	// SF_FIND_SPRITE (sprite_renderer.v:146-160) advances one slot per clock
+	// whenever the slot is disabled or off the line, and it does so whether or
+	// not the line renderer is busy, so stepping over empty slots overlaps with
+	// drawing. Only a slot that needs rendering stalls, waiting on !render_busy.
+	// That overlap is why `t` and `render_free_at` are tracked separately;
+	// charging all 128 lookups serially would drop sprites the hardware draws.
+	//
+	// Known divergence: STATE_WAIT_FETCH is charged one clock, its best case.
+	// Real VERA shares the VRAM bus with the layer renderers, so a contended
+	// fetch takes longer and slightly fewer sprites fit than modelled here.
+	const bool trace = sprite_trace_active;
+	uint16_t   traced_evaluated = 0;
+	uint16_t   traced_drawn     = 0;
+	uint16_t   traced_cut_slot  = SPRITE_TRACE_NO_LINE;
+	uint16_t   traced_dropped   = 0;
+	uint32_t   traced_tail      = 0; // cost of the part-drawn sprite left unfinished
+	if (trace) {
+		sprite_trace_line_begin(y, sprite_trace_cpu_cycles);
+	}
+
+	uint32_t t              = 0; // render_time_r: clocks used on this line
+	uint32_t render_free_at = 0; // clock the line renderer returns to STATE_IDLE
+	int      stopped_at     = NUM_SPRITES; // first slot the line never reached
+
 	for (int i = 0; i < NUM_SPRITES; i++) {
-		// one clock per lookup
-		sprite_budget--; if (sprite_budget == 0) break;
+		if (t >= SPRITE_RENDER_TIME) {
+			// render_time_done: SF_DONE, so this slot is never looked at.
+			stopped_at = i;
+			break;
+		}
+
+		const uint32_t t_before = t;
+		uint8_t        tflags   = SPRITE_TRACE_EVALUATED;
 		const struct video_sprite_properties *props = &sprite_properties[i];
 
-		if (props->sprite_zdepth == 0) {
+		const bool on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
+		                     y < props->sprite_y + props->sprite_height;
+
+		if (!on_line) {
+			t++; // one clock to step over the slot, overlapped with rendering
+			if (trace) {
+				traced_evaluated++;
+				sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i],
+				                       (uint16_t)(t - t_before), tflags);
+			}
 			continue;
 		}
 
-		// check whether this line falls within the sprite
-		if (y < props->sprite_y || y >= props->sprite_y + props->sprite_height) {
-			continue;
+		tflags |= SPRITE_TRACE_ONSCREEN;
+
+		// SF_FIND_SPRITE holds here until the line renderer is idle, then takes
+		// two clocks to hand the sprite over (SF_FIND_SPRITE, SF_START_RENDER).
+		if (t < render_free_at) {
+			t = render_free_at;
 		}
+		if (t >= SPRITE_RENDER_TIME) {
+			stopped_at = i;
+			break;
+		}
+		t += 2;
 
 		const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
 
@@ -856,20 +971,31 @@ render_sprite_line(const uint16_t y)
 			memcpy(unpacked_sprite_line, bitmap_data, width);
 		}
 
-		for (uint16_t sx = 0; sx < props->sprite_width; ++sx) {
+		// The line renderer's own clock, running from STATE_IDLE's single clock
+		// into the fetch/render loop.
+		uint32_t rt        = t + 1;
+		bool     truncated = false;
+		uint16_t sx        = 0;
+
+		for (; sx < props->sprite_width; ++sx) {
+			// one clock per fetched 32 bits
+			if (!(sx & vram_fetch_mask)) {
+				if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
+				rt++;
+			}
+
+			// one clock per pixel, charged whether or not the pixel lands on
+			// screen: STATE_RENDER steps linebuf_idx_r past the edge just the
+			// same (sprite_renderer.v:317-319), so a sprite hanging off the
+			// side costs its full width.
+			if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
+			rt++;
+
 			const uint16_t line_x = props->sprite_x + sx;
 			if (line_x >= SCREEN_WIDTH) {
 				eff_sx += eff_sx_incr;
 				continue;
 			}
-
-			// one clock per fetched 32 bits
-			if (!(sx & vram_fetch_mask)) {
-				sprite_budget--; if (sprite_budget == 0) break;
-			}
-
-			// one clock per rendered pixel
-			sprite_budget--; if (sprite_budget == 0) break;
 
 			uint8_t col_index = unpacked_sprite_line[eff_sx];
 			eff_sx += eff_sx_incr;
@@ -885,12 +1011,88 @@ render_sprite_line(const uint16_t y)
 					}
 					sprite_line_col[line_x] = col_index;
 					sprite_line_z[line_x] = props->sprite_zdepth;
+					tflags |= SPRITE_TRACE_DREW;
 				}
 			}
 		}
-	}
-}
 
+		render_free_at = rt;
+
+		if (trace) {
+			traced_evaluated++;
+			if (tflags & SPRITE_TRACE_DREW) {
+				traced_drawn++;
+			}
+			if (truncated) {
+				tflags |= SPRITE_TRACE_CUT;
+				if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+					traced_cut_slot = (uint16_t)i;
+				}
+				// Time can run out before this sprite lands a single pixel, in
+				// which case it is as dropped as the ones the search never
+				// reached, and has to be counted with them.
+				if (!(tflags & SPRITE_TRACE_DREW)) {
+					traced_dropped++;
+				}
+				const uint32_t left = (uint32_t)(props->sprite_width - sx);
+				traced_tail = left + left / (vram_fetch_mask + 1u);
+			}
+			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i],
+			                       (uint16_t)(rt - t_before), tflags);
+		}
+
+		if (truncated) {
+			// render_time_done fired mid-sprite: the rest of the line is gone.
+			stopped_at = i + 1;
+			break;
+		}
+	}
+
+	if (!trace) {
+		return;
+	}
+
+	uint32_t used = (t > render_free_at ? t : render_free_at);
+	if (used > SPRITE_RENDER_TIME) {
+		used = SPRITE_RENDER_TIME;
+	}
+	uint32_t demand = used + traced_tail;
+
+	// What the line would have needed had it not run out. Pure arithmetic --
+	// no VRAM is read and nothing is drawn -- so "how far over was this line"
+	// survives the sprites being dropped, which is the number a multiplexer is
+	// actually tuning against.
+	for (int i = stopped_at; i < NUM_SPRITES; i++) {
+		const struct video_sprite_properties *p = &sprite_properties[i];
+		const bool on_line = p->sprite_zdepth != 0 && y >= p->sprite_y &&
+		                     y < p->sprite_y + p->sprite_height;
+		if (!on_line) {
+			demand++;
+			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 0, SPRITE_TRACE_EVALUATED);
+			continue;
+		}
+		const uint16_t per_fetch = (uint16_t)((2 - p->color_mode) << 2);
+		demand += 3u + p->sprite_width + (uint32_t)(p->sprite_width / per_fetch);
+		traced_dropped++;
+		if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
+			traced_cut_slot = (uint16_t)i;
+		}
+		sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i], 0,
+		                       (uint8_t)(SPRITE_TRACE_EVALUATED | SPRITE_TRACE_ONSCREEN |
+		                                 SPRITE_TRACE_CUT));
+	}
+
+	sprite_line_stat_t st;
+	memset(&st, 0, sizeof(st));
+	st.budget_used = (uint16_t)used;
+	st.demand      = demand;
+	st.evaluated   = traced_evaluated;
+	st.drawn       = traced_drawn;
+	st.dropped     = traced_dropped;
+	st.cut_slot    = traced_cut_slot;
+	st.exhausted   = (stopped_at < NUM_SPRITES);
+	sprite_trace_line_end(y, &st);
+}
 static void
 render_layer_line_text(uint8_t layer, uint16_t y)
 {
@@ -1165,6 +1367,81 @@ static uint8_t calculate_line_col_index(uint8_t spr_zindex, uint8_t spr_col_inde
 	return col_index;
 }
 
+// The five things VERA's layer renderer decodes a mode from, lifted out of the
+// emulator's much larger property struct. vera_bandwidth.c is unit-tested
+// without video.c, so it takes these rather than a pointer to something only
+// this file knows how to build.
+//
+// Read from prev_layer_properties[1], the same latched copy the renderers use,
+// so a raster split is followed rather than averaged away.
+//
+// `scrolled` is the one that is not a straight copy: the RTL starts the line
+// buffer at 0 - subtile_hscroll (layer_renderer.v:499-501), so a layer scrolled
+// off a tile boundary renders one tile more than the screen strictly needs.
+// Bitmap modes force hscroll to zero (refresh_layer_properties()), so they
+// never pay it.
+static vera_bw_layer_t
+vera_bw_layer_of(uint8_t layer)
+{
+	const struct video_layer_properties *p = &prev_layer_properties[1][layer];
+	vera_bw_layer_t out;
+
+	out.enabled     = layer_line_enable[layer] != 0;
+	out.bitmap_mode = p->bitmap_mode;
+	out.color_depth = p->color_depth;
+	// tile_width means "the wide one" in both families: 16px tiles, or the
+	// 640-wide bitmap.
+	out.tile_width  = (uint8_t)(p->bitmap_mode ? (p->tilew > 320) : (p->tilew_log2 > 3));
+	out.scrolled    = !p->bitmap_mode && (p->hscroll & p->tilew_max) != 0;
+
+	return out;
+}
+
+// Set while the DEBUGGER is writing, so its pokes at $9F23/$9F24 are not
+// charged to the guest.
+//
+// video_read() is told directly, as a debugOn argument, and returns before any
+// accounting. video_write() has no such parameter and some eighty call sites
+// that would all have to change to give it one, so memory.c raises this flag
+// around a debug write instead. The rule it enforces is the same one the read
+// path already follows: if opening a memory view moved the guest's numbers,
+// the numbers would be worthless.
+static bool debug_port_write = false;
+
+void
+video_set_debug_write(bool on)
+{
+	debug_port_write = on;
+}
+
+// One byte through the data port. Wrapped rather than called inline because
+// the enabled test has to happen BEFORE sprite_trace_current_line() runs: C
+// evaluates arguments before the callee can decline them, and that helper is a
+// branch and three global loads on VERA's hot path.
+static void
+note_port_traffic(bool write, uint8_t vram_bytes)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_port(write, vram_bytes, sprite_trace_current_line());
+}
+
+static void
+note_port_fx_cache_write(void)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_fx_cache_write(sprite_trace_current_line());
+}
+
+static void
+note_port_fx_affine(void)
+{
+	if (!vera_bandwidth_active || debug_port_write)
+		return;
+	vera_bandwidth_note_fx_affine(sprite_trace_current_line());
+}
+
 static void
 render_line(uint16_t y, float scan_pos_x)
 {
@@ -1286,6 +1563,33 @@ render_line(uint16_t y, float scan_pos_x)
 
 	if (sprite_line_enable) {
 		render_sprite_line(eff_y);
+	}
+
+	// Charge this line's VERA fetch traffic. Deliberately ABOVE the warp guard
+	// below, unlike everything else here.
+	//
+	// Under -warp the emulator skips the layer rendering for 63 frames in 64,
+	// but VERA would not: the guest's registers say what the chip fetches, and
+	// the chip does not know the host is in a hurry. Charging below the guard
+	// reported a warping machine as using no VRAM bandwidth at all, which is
+	// how this ended up here -- it is exactly the kind of thing only a test
+	// against a real running machine finds.
+	//
+	// Affordable precisely because the count is MODELLED from the registers
+	// rather than counted off the render_layer_line_* calls: it is a few
+	// arithmetic ops whether or not anything is drawn. See vera_bandwidth.h.
+	//
+	// Indexed by the DISPLAY line y, not by eff_y. eff_y is the source row
+	// after DC_VSCALE, so in a 320x240 mode it advances once per two display
+	// lines -- and the hardware fetches once per DISPLAY line regardless
+	// (composer.v raises line_render_start per scanline). Charging eff_y both
+	// halved the frame's totals and filed layer traffic under a different index
+	// from the CPU port traffic on the same physical scanline, which is what
+	// the peak-line figure is built out of.
+	if (vera_bandwidth_active) {
+		const vera_bw_layer_t l0 = vera_bw_layer_of(0);
+		const vera_bw_layer_t l1 = vera_bw_layer_of(1);
+		vera_bandwidth_line(y, &l0, &l1);
 	}
 
 	if (warp_mode && (frame_count & 63)) {
@@ -1436,6 +1740,7 @@ video_step(float mhz, float steps, bool midline)
 	uint16_t y = 0;
 	bool ntsc_mode = reg_composer[0] & 2;
 	bool new_frame = false;
+	sprite_trace_cpu_cycles += (uint32_t)steps;
 	vga_scan_pos_x += PIXEL_FREQ * steps / mhz;
 	if (vga_scan_pos_x > VGA_SCAN_WIDTH) {
 		vga_scan_pos_x -= VGA_SCAN_WIDTH;
@@ -1512,6 +1817,26 @@ video_step(float mhz, float steps, bool midline)
 				}
 			}
 		}
+	}
+
+	// Roll the sprite trace at the frame boundary: finish the frame just ended,
+	// publish it for the debugger, and seed the next one from the attribute
+	// table as it stands now, which is what the beam will start out drawing.
+	if (new_frame && sprite_trace_active) {
+		sprite_trace_frame_advance((uint32_t)frame_count, sprite_trace_cpu_cycles, sprite_data);
+	}
+
+	// And the bandwidth frame, on the same boundary and for the same reason:
+	// this is VERA's own frame, which is the one its bus traffic belongs to.
+	// perf_budget closes its frame from main.c instead, because CPU cycles are
+	// the CPU's business -- the two are driven by the same vsync, so the panel
+	// can show them side by side.
+	//
+	// frame_count has already been incremented above, and this closes the frame
+	// that just ENDED, so it is stamped with the ordinal one below -- matching
+	// sprite_trace, which takes frame_count as the frame it is about to start.
+	if (new_frame) {
+		vera_bandwidth_frame_end((uint32_t)(frame_count - 1));
 	}
 
 	return new_frame;
@@ -2409,8 +2734,7 @@ video_space_write(uint32_t address, uint8_t value)
 		palette[address & 0x1ff] = value;
 		video_palette.dirty = true;
 	} else if (address >= ADDR_SPRDATA_START && address < ADDR_SPRDATA_END) {
-		sprite_data[(address >> 3) & 0x7f][address & 0x7] = value;
-		refresh_sprite_properties((address >> 3) & 0x7f);
+		sprite_attr_write(address, value);
 	}
 }
 
@@ -2438,8 +2762,7 @@ fx_video_space_write(uint32_t address, bool nibble, uint8_t value)
 		palette[address & 0x1ff] = value;
 		video_palette.dirty = true;
 	} else if (address >= ADDR_SPRDATA_START && address < ADDR_SPRDATA_END) {
-		sprite_data[(address >> 3) & 0x7f][address & 0x7] = value;
-		refresh_sprite_properties((address >> 3) & 0x7f);
+		sprite_attr_write(address, value);
 	}
 }
 
@@ -2663,9 +2986,18 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 
 			uint8_t value = io_rddata[reg - 3];
 
-			if (reg == 4 && fx_addr1_mode == 3)
+			// One byte off the data port, charged to VERA's bus. The debugOn
+			// return above means the debugger's own reads never reach here,
+			// which matters: opening a memory view must not change the number
+			// the developer is trying to read.
+			note_port_traffic(false, 1);
+
+			if (reg == 4 && fx_addr1_mode == 3) {
+				// Affine mode translates through the tile map first, so this
+				// read costs a second fetch the guest never asked for.
+				note_port_fx_affine();
 				fx_affine_prefetch();
-			else
+			} else
 				io_rddata[reg - 3] = video_space_read(io_addr[reg - 3]);
 
 			if (fx_cache_fill) {
@@ -2817,6 +3149,9 @@ void video_write(uint8_t reg, uint8_t value) {
 		case 0x04: {
 			if (fx_2bit_poking && fx_addr1_mode) {
 				fx_2bit_poking = false;
+				// Still a guest byte through the port reaching VRAM, even
+				// though it takes its own path out of this switch below.
+				note_port_traffic(true, 1);
 				uint8_t mask = value >> 6;
 				switch (mask) {
 					case 0x00:
@@ -2882,6 +3217,11 @@ void video_write(uint8_t reg, uint8_t value) {
 
 			if (fx_cache_write) {
 				address &= 0x1fffc;
+				// One store, four bytes into VRAM. This is the whole reason FX
+				// is worth charging separately: the CPU issued a single write
+				// and the bus moved four times as much as an ordinary one.
+				note_port_traffic(true, 4);
+				note_port_fx_cache_write();
 				if (fx_trans_writes) {
 					if (fx_4bit_mode) {
 						nibble_mask[0] = (((ram_wrdata[0] & 0xf0) == 0) << 1) | ((ram_wrdata[0] & 0x0f) == 0);
@@ -2906,6 +3246,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				fx_vram_cache_write(address+2, ram_wrdata[2], nibble_mask[2]);
 				fx_vram_cache_write(address+3, ram_wrdata[3], nibble_mask[3]);
 			} else {
+				note_port_traffic(true, 1);
 				fx_video_space_write(address, nibble, wrdata_to_use); // Normal write
 			}
 
