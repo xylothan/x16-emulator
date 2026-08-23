@@ -88,6 +88,51 @@ bp_matches(int pc, uint8_t bank, const struct breakpoint *bp)
 	       && bank_selector_matches(bp->x16Bank, pc, bank);
 }
 
+// See debug_core.h. The rule this encodes is the one a caller cannot be trusted
+// to re-derive: which field a packed bank byte belongs in. Putting it in the
+// program-bank field on a gen1 builds an entry bp_matches() rejects on every
+// instruction, because the running program bank is always zero there -- an
+// accepted breakpoint that never fires, which is worse than a refused one.
+bool
+debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoint *out)
+{
+	if (!out || ref < 0 || ref > 0xFFFFFF)
+		return false;
+	if (explicit_bank != DEBUG_BANK_ANY && (explicit_bank < 0 || explicit_bank > 0xFF))
+		return false;
+
+	int     addr    = (int)(ref & 0xFFFF);
+	uint8_t pbank   = 0;
+	int     x16bank = explicit_bank;
+
+	uint8_t top = (uint8_t)((ref >> 16) & 0xFF);
+	if (top) {
+		// Two answers to the same question; refuse rather than silently
+		// preferring one of them.
+		if (explicit_bank != DEBUG_BANK_ANY)
+			return false;
+		if (is_gen2)
+			pbank = top;
+		else
+			x16bank = (int)top;
+	}
+
+	addr = (int)(((long)addr + offset) & 0xFFFF);
+
+	// A bank named where the window registers select nothing can never be
+	// satisfied. Arming it under ANY instead would put the breakpoint in
+	// whichever bank happened to be mapped -- not what was asked for.
+	if (x16bank != DEBUG_BANK_ANY && normalise_bank(x16bank, addr, pbank) == DEBUG_BANK_ANY)
+		return false;
+
+	out->pc      = addr;
+	out->bank    = pbank;
+	out->x16Bank = x16bank;
+	out->owners  = 0;
+	out->enabled = false;
+	return true;
+}
+
 static void cond_forget_all(void);
 
 // ---------------------------------------------------------------------------

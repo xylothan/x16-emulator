@@ -282,6 +282,7 @@ set(X16_SOURCES
     src/cpu/fake6502.c
     src/memory.c
     src/io_trace.c
+    src/perf_budget.c
     src/disasm.c
     src/video.c
     src/sprite_trace.c
@@ -359,6 +360,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/fm_panel.cpp
         src/debug_ui/panels/pcm_panel.cpp
         src/debug_ui/panels/io_panel.cpp
+    src/debug_ui/panels/perf_panel.cpp
     )
 
     list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
@@ -654,6 +656,13 @@ x16_add_test(io_trace
 x16_add_test(sprite_trace
     SOURCES tests/test_sprite_trace.c tests/support/harness.c src/sprite_trace.c)
 
+# perf_budget.c takes everything it knows about the machine as an argument, for
+# exactly this reason: the cycle classification and the statistics on top of it
+# can be driven directly, with no CPU to run, no video to raise a frame and no
+# SDL to link.
+x16_add_test(perf_budget
+    SOURCES tests/test_perf_budget.c tests/support/harness.c src/perf_budget.c)
+
 # The FAT index parses untrusted binary data, so the test builds synthetic FAT16
 # and FAT32 images and reads them back. It stubs the five file-access functions
 # onto stdio rather than linking src/files.c, which would drag in SDL and zlib
@@ -903,7 +912,7 @@ x16_add_test(debugon_contract NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_debugon_contract.c tests/support/fake_devices.c
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
-            src/io_trace.c)
+            src/io_trace.c src/perf_budget.c)
 
 # RAM and ROM banking: the registers at $0000 and $0001 and the windows they
 # steer. Same real memory.c and fake devices as the debugOn tests.
@@ -911,7 +920,7 @@ x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_memory_banking.c tests/support/fake_devices.c
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
-            src/io_trace.c)
+            src/io_trace.c src/perf_budget.c)
 
 # The write half of the debugOn contract, which does not exist: pins what a
 # debugger's edit costs and disturbs, since nothing can tell it apart from a
@@ -920,7 +929,7 @@ x16_add_test(debug_write_path NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_debug_write_path.c tests/support/fake_devices.c
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
-            src/io_trace.c)
+            src/io_trace.c src/perf_budget.c)
 
 # The watchpoint hook sits on the store path, so this links the same real
 # memory.c, debug_core.c and CPU core as the debugOn tests, and asserts that
@@ -929,7 +938,7 @@ x16_add_test(watchpoint_purity NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/test_watchpoint_purity.c tests/support/fake_devices.c
             tests/support/signature.c tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
-            src/io_trace.c)
+            src/io_trace.c src/perf_budget.c)
 
 # Build summary
 

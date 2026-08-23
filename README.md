@@ -35,7 +35,7 @@ Why X16Emu ADD
 
 |  |  |
 | --- | --- |
-| **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints, I/O and file access, and VERA/PSG/FM/PCM inspectors. |
+| **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints, I/O and file access, VERA/PSG/FM/PCM inspectors, and a performance budget view. |
 | **Source-level debugging** | Point it at a cc65 `.dbg` file and step through the original `.s`/`.c` source, with labels, equates and live values. `.dbg` files auto-load, including for overlays the program `LOAD`s at runtime. |
 | **Debug from an editor** | A built-in DAP server means breakpoints, stepping, watches, memory and disassembly in VS Code, Visual Studio, or any DAP-speaking client. |
 | **Conditional breakpoints** | Break on `A == $05`, `byte[$1234] != 0`, a specific RAM bank, or the Nth hit. |
@@ -290,7 +290,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 
 | Option | What it does |
 |---|---|
-| `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, and I/O ports and file access. Additive: independent of, and combinable with, `-debug`. |
+| `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, I/O ports and file access, and the performance budget. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
@@ -308,7 +308,10 @@ Using the emulated machine
 Running the X16 itself — the keyboard layouts, BASIC and the screen editor, SD card images, the
 host filesystem interface, GIF and WAV recording, the emulator I/O registers at `$9FB0`-`$9FBF`,
 the CRT cartridge format, the `makecart` tool, and the WebEmulator's URL options — is identical
-to the official emulator and is documented there. ADD changes none of it.
+to the official emulator and is documented there, with one addition: ADD uses the otherwise unused
+register **`$9FBC`** for [performance budget markers](docs/perf-budget.md), which a program can
+write to say exactly where its frame work begins and ends. It reads back a protocol version, so
+guest code can detect whether the emulator it is running under understands them.
 
 * [Official emulator README][upstream-readme] — command line options, recording, I/O registers,
   SD card images, HostFS, the CRT format and `makecart`
@@ -405,6 +408,7 @@ Every panel is dockable, closable and reopenable from the **View** menu. Each on
 | [**YM2151**](#ym2151--the-fm-chip) | FM channel state and scope traces. |
 | [**PCM**](#pcm--the-audio-fifo) | VERA PCM state and scope traces. |
 | [**I/O**](#watching-io-and-file-access) | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. |
+| [**Performance**](#performance-budgets) | How much of a frame your code actually uses. Work / interrupt / waiting split against a 60, 30 or arbitrary fps budget, a per-frame history graph with the budget drawn across it, rolling min/mean/p50/p95/p99/max with budget overruns, and a per-routine breakdown by address zone or guest marker. |
 
 While the machine is paused, the audio panels keep drawing their scope traces by projecting from
 the current register state, so you can see what a voice *would* be doing at the moment you stopped.
@@ -788,6 +792,43 @@ The index is a snapshot, not a live view. If the machine writes to a FAT or a di
 is marked **STALE** and you rebuild it by hand. That is deliberate: quietly serving a filename
 that has since become wrong would be worse than admitting the index has aged.
 
+#### Performance budgets
+
+The 6502 never idles. It burns every cycle of a frame whether your code is working or spinning on
+a vsync flag, so "cycles per frame" is always 100% and tells you nothing. The **Performance**
+panel answers the question you actually have — *how much of the frame is my code using, and how
+much room is left?* — by telling **work** apart from **waiting**.
+
+Pick a target frame rate and it shows the split against that budget: a stacked bar of work,
+interrupt time and idle drawn to the width of the budget, so overrunning visibly runs off the end
+rather than quietly rescaling. Headroom is reported in cycles *and* scanlines, which is the unit
+most X16 code is written in. On an 8 MHz machine a VGA frame is exactly 134,400 cycles, or 256 per
+scanline.
+
+`Target FPS` asks how many vsyncs your frame work may span. The frame period is fixed by VERA, so
+asking for 30 fps does not make frames longer — it means the work may take two of them and the
+budget doubles. A target faster than the machine scans is the opposite question ("must this fit in
+half a frame?") and gets a fractional budget.
+
+Below that: a per-frame history graph with the budget drawn across it and overruns in red; rolling
+statistics over 1s / 10s / 30s / 60s / session with min, mean, p50, p95, p99, max and budget
+overruns; and a **breakdown** attributing cycles to named routines. Zones can be drawn by address
+— or picked straight off a symbol from your `.dbg`, since nobody knows the extent of
+`sprite_update` by heart — and a zone can be flagged *idle* to declare "cycles here are waiting".
+
+Waiting is found automatically: `WAI`, plus a store-free tight loop, which covers polling `$9F27`
+and polling a flag an IRQ handler sets. It cannot see a wait loop that stores or calls a
+subroutine — mark those as an idle zone, or bracket the real work with `$9FBC` markers from the
+guest for exact attribution. [docs/perf-budget.md](docs/perf-budget.md) documents the model and
+its limits in full.
+
+Everything here is also available over DAP — see
+[Profiling the guest](#profiling-the-guest-how-much-of-a-frame-is-your-code-using) — so CI can
+watch for regressions without a human reading a panel.
+
+Profiling costs the running machine an add and a table lookup per instruction, so the panel arms
+it while open and disarms it when closed.
+
 ### Source-level debugging with cc65
 
 Build with debug info, and the emulator will show you your own source instead of raw disassembly.
@@ -903,6 +944,10 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
+Custom requests: `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats` and
+`x16/perfConfig`. The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
+the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
+
 Four scopes are exposed on every stack frame: **Registers** (including the 65C816 extras and the
 current RAM/ROM bank), **Virtual Registers** (R0–R15), **Zero Page** and **Stack**. Memory reads
 and writes use 24-bit addresses, so the high byte selects the 65C816 program bank on a GS machine.
@@ -925,6 +970,26 @@ address. The echoed `address` keeps the prefix, so paging through VRAM by feedin
 
 A reference that cannot be parsed is now rejected. It used to fall back to address 0, so a typo
 answered `success: true` with the bytes from the wrong memory and nothing to say so.
+
+#### Instruction breakpoints and banks
+
+`setInstructionBreakpoints` takes an `instructionReference` in either form:
+
+```
+setInstructionBreakpoints { "breakpoints": [ { "instructionReference": "33:A555" } ] }
+setInstructionBreakpoints { "breakpoints": [ { "instructionReference": "0x33A555" } ] }
+```
+
+`bb:aaaa` names a RAM/ROM window bank explicitly and means exactly what `-bp bb:aaaa` means, hex on
+both sides. In the packed 24-bit form the high byte is read as the machine could have produced it:
+the 65C816 program bank on a GS, and the window bank otherwise, since `read6502` forces the program
+bank to zero elsewhere. A bare 16-bit address names no bank and breaks in whichever one is mapped.
+
+Naming a bank for an address the window registers do not reach — anything below `$A000`, or a
+non-zero GS program bank — is refused with `verified: false` and a `message`, as is giving the bank
+twice. Previously a banked reference was recorded against the *program* bank, which on a non-GS
+machine is always zero, so the breakpoint matched nothing while the client had been told
+`verified: true`. An `offset` displaces the address within its bank and no longer carries into it.
 
 #### Conditional breakpoints
 
@@ -983,6 +1048,32 @@ reports a joystick present — `JOY(1)` reads `$00` with nothing held rather tha
 it with `enabled: false` makes the port read empty again.
 
 There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state as JSON in one call.
+
+#### Profiling the guest: how much of a frame is your code using?
+
+The 6502 never idles — it burns every cycle of a frame whether your code is working or spinning
+on a vsync flag — so "cycles per frame" is always 100% and tells you nothing. The emulator
+therefore classifies cycles as **work** or **waiting**, and reports the work against a frame
+budget. See [docs/perf-budget.md](docs/perf-budget.md) for how the classification works and
+where it can be fooled.
+
+| Command | Arguments | Effect |
+| --- | --- | --- |
+| `x16/perfStats` | optional `windows` (array of seconds, or names like `"30s"`/`"session"`), `includeZones` (default true), `includeFrames` (raw per-frame samples, oldest first) | Returns the budget, the last completed frame, and rolling statistics — min/mean/p50/p95/p99/max, budget overruns and the worst one — per window. Asking arms profiling if it was off. |
+| `x16/perfConfig` | `enabled`, `targetFps`, `idleMode` (`"auto"`/`"markers"`/`"none"`), `historyFrames`, `overrunEvents`, `zones` (array of `{name, start, end, bank, idle}`), `reset` | Configures the above. `zones` replaces the address zones wholesale. |
+
+The emulator also pushes an **`x16/perfBudgetOverrun` event** when the guest misses its budget,
+coalesced to at most one per second with a count and the worst frame in that period — so tooling
+can spot a regression without polling.
+
+`targetFps` asks *how many vsyncs your frame work may span*. The frame period is fixed by VERA, so
+asking for 30 fps does not make frames longer: it means the work may take two of them, and the
+budget doubles. A target faster than the machine scans is the opposite question — "must this
+routine fit in half a frame?" — and gets a fractional budget. On an 8 MHz machine a VGA frame is
+exactly 134,400 cycles, or 256 per scanline.
+
+Profiling costs the running machine an add and a table lookup per instruction, so it is off until
+something asks for it, and the Performance panel disarms it again when closed.
 
 #### x16dbg, the bundled command-line client
 

@@ -60,6 +60,7 @@
 #include "glue.h"         // is_gen2, num_banks, num_ram_banks, MHZ, warp_mode
 #include "smc.h"          // smc_requested_reset
 #include "timing.h"       // absolute kHz speed control
+#include "perf_budget.h"  // guest cycle budget accounting
 #include "video.h"        // video_read/video_space_* and the VERA debug views
 #include "cpu/irq_ctx.h"  // interrupt context, incl. the 24-bit return PC
 #include "cpu/fake6502.h" // irq6502()
