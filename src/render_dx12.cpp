@@ -16,6 +16,7 @@
 
 #include "render_dx12_vs.h"
 #include "render_dx12_ps.h"
+#include "render_dx12_interop.h"
 
 namespace {
 
@@ -57,6 +58,7 @@ struct Dx12Texture {
 	UINT uploadFrame;
 	UINT64 uploadSerial;
 	render_pixel_format_t sourceFormat;
+	DXGI_FORMAT dxgiFormat;
 	render_scale_quality_t quality;
 	render_color_t color;
 	D3D12_RESOURCE_STATES state;
@@ -161,7 +163,7 @@ buffer_desc(UINT64 size)
 }
 
 D3D12_RESOURCE_DESC
-texture_desc(UINT width, UINT height)
+texture_desc(UINT width, UINT height, DXGI_FORMAT format)
 {
 	D3D12_RESOURCE_DESC result = {};
 	result.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -169,10 +171,19 @@ texture_desc(UINT width, UINT height)
 	result.Height = height;
 	result.DepthOrArraySize = 1;
 	result.MipLevels = 1;
-	result.Format = kFormat;
+	result.Format = format;
 	result.SampleDesc.Count = 1;
 	result.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	return result;
+}
+
+// The DXGI format a source pixel format is expanded into on upload. The 4-bit
+// VERA format is widened to BGRA on the CPU, so it shares BGRA's texture.
+DXGI_FORMAT
+dxgi_format_for(render_pixel_format_t format)
+{
+	return format == RENDER_PIXEL_FORMAT_RGBA8888 ? DXGI_FORMAT_R8G8B8A8_UNORM
+	                                              : DXGI_FORMAT_B8G8R8A8_UNORM;
 }
 
 void
@@ -379,7 +390,8 @@ bool
 create_texture_resources(Dx12Backend *backend, Dx12Texture *texture)
 {
 	D3D12_HEAP_PROPERTIES defaultHeap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-	D3D12_RESOURCE_DESC textureDescription = texture_desc(texture->width, texture->height);
+	D3D12_RESOURCE_DESC textureDescription =
+		texture_desc(texture->width, texture->height, texture->dxgiFormat);
 	HRESULT result = backend->device->CreateCommittedResource(
 		&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDescription, D3D12_RESOURCE_STATE_COPY_DEST,
 		NULL, IID_PPV_ARGS(&texture->resource));
@@ -412,7 +424,7 @@ create_texture_resources(Dx12Backend *backend, Dx12Texture *texture)
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
 	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srv.Format = kFormat;
+	srv.Format = texture->dxgiFormat;
 	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srv.Texture2D.MipLevels = 1;
 	backend->device->CreateShaderResourceView(texture->resource, &srv,
@@ -456,9 +468,7 @@ update_texture(Dx12Texture *texture, const render_rect_t *requested,
 	for (int y = 0; y < rect.h; ++y) {
 		uint8_t *row = destination + static_cast<UINT64>(y) * texture->uploadPitch;
 		const uint8_t *sourceRow = source + static_cast<ptrdiff_t>(y) * pitch;
-		if (texture->sourceFormat == RENDER_PIXEL_FORMAT_BGRA8888) {
-			memcpy(row, sourceRow, static_cast<size_t>(rect.w) * 4);
-		} else {
+		if (texture->sourceFormat == RENDER_PIXEL_FORMAT_RGBA4444) {
 			for (int x = 0; x < rect.w; ++x) {
 				const uint16_t packed = static_cast<uint16_t>(sourceRow[x * 2]) |
 				                        (static_cast<uint16_t>(sourceRow[x * 2 + 1]) << 8);
@@ -467,6 +477,10 @@ update_texture(Dx12Texture *texture, const render_rect_t *requested,
 				row[x * 4 + 2] = static_cast<uint8_t>(((packed >> 12) & 0x0f) * 17);
 				row[x * 4 + 3] = static_cast<uint8_t>((packed & 0x0f) * 17);
 			}
+		} else {
+			// BGRA8888 and RGBA8888 each already match their texture's DXGI
+			// format byte for byte.
+			memcpy(row, sourceRow, static_cast<size_t>(rect.w) * 4);
 		}
 	}
 
@@ -476,7 +490,7 @@ update_texture(Dx12Texture *texture, const render_rect_t *requested,
 	D3D12_TEXTURE_COPY_LOCATION sourceLocation = {};
 	sourceLocation.pResource = texture->uploads[backend->activeFrame];
 	sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-	sourceLocation.PlacedFootprint.Footprint.Format = kFormat;
+	sourceLocation.PlacedFootprint.Footprint.Format = texture->dxgiFormat;
 	sourceLocation.PlacedFootprint.Footprint.Width = static_cast<UINT>(rect.w);
 	sourceLocation.PlacedFootprint.Footprint.Height = static_cast<UINT>(rect.h);
 	sourceLocation.PlacedFootprint.Footprint.Depth = 1;
@@ -1013,7 +1027,8 @@ dx12_texture_create(render_backend_t *base, render_pixel_format_t format,
 {
 	Dx12Backend *backend = reinterpret_cast<Dx12Backend *>(base);
 	if (!backend->healthy || width <= 0 || height <= 0 ||
-	    (format != RENDER_PIXEL_FORMAT_BGRA8888 && format != RENDER_PIXEL_FORMAT_RGBA4444)) {
+	    (format != RENDER_PIXEL_FORMAT_BGRA8888 && format != RENDER_PIXEL_FORMAT_RGBA4444 &&
+	     format != RENDER_PIXEL_FORMAT_RGBA8888)) {
 		return NULL;
 	}
 	Dx12Texture *texture = new (std::nothrow) Dx12Texture();
@@ -1025,6 +1040,7 @@ dx12_texture_create(render_backend_t *base, render_pixel_format_t format,
 	texture->width = static_cast<UINT>(width);
 	texture->height = static_cast<UINT>(height);
 	texture->sourceFormat = format;
+	texture->dxgiFormat = dxgi_format_for(format);
 	texture->quality = quality;
 	texture->color = { 255, 255, 255, 255 };
 	texture->state = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -1222,6 +1238,138 @@ const render_backend_ops_t dx12_ops = {
 };
 
 } // namespace
+
+// ── Shared-device interop (render_dx12_interop.h) ───────────────────────────
+// The ImGui debugger renders into a second swap chain on this backend's device
+// and queue. Everything it needs is handed out here, behind an ops-table check
+// so an SDL backend can never be mistaken for a native one.
+namespace {
+
+Dx12Backend *
+native_backend(render_backend_t *base)
+{
+	if (!base || base->ops != &dx12_ops) {
+		return NULL;
+	}
+	Dx12Backend *backend = reinterpret_cast<Dx12Backend *>(base);
+	return backend->healthy ? backend : NULL;
+}
+
+} // namespace
+
+bool
+render_dx12_is_native(render_backend_t *base)
+{
+	return native_backend(base) != NULL;
+}
+
+ID3D12Device *
+render_dx12_device(render_backend_t *base)
+{
+	Dx12Backend *backend = native_backend(base);
+	return backend ? backend->device : NULL;
+}
+
+ID3D12CommandQueue *
+render_dx12_queue(render_backend_t *base)
+{
+	Dx12Backend *backend = native_backend(base);
+	return backend ? backend->queue : NULL;
+}
+
+ID3D12DescriptorHeap *
+render_dx12_srv_heap(render_backend_t *base)
+{
+	Dx12Backend *backend = native_backend(base);
+	return backend ? backend->srvHeap : NULL;
+}
+
+bool
+render_dx12_srv_allocate(render_backend_t *base, unsigned int *slot)
+{
+	Dx12Backend *backend = native_backend(base);
+	if (!backend || !slot) {
+		return false;
+	}
+	UINT descriptor = 0;
+	if (!allocate_descriptor(backend, &descriptor)) {
+		return false;
+	}
+	*slot = descriptor;
+	return true;
+}
+
+void
+render_dx12_srv_free(render_backend_t *base, unsigned int slot)
+{
+	// Deliberately not gated on healthy: a slot still has to go back to the
+	// free list when the device was lost, or a later recovery leaks it.
+	if (!base || base->ops != &dx12_ops) {
+		return;
+	}
+	free_descriptor(reinterpret_cast<Dx12Backend *>(base), static_cast<UINT>(slot));
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE
+render_dx12_srv_cpu_handle(render_backend_t *base, unsigned int slot)
+{
+	Dx12Backend *backend = native_backend(base);
+	if (!backend) {
+		D3D12_CPU_DESCRIPTOR_HANDLE empty = {};
+		return empty;
+	}
+	return srv_cpu_handle(backend, static_cast<UINT>(slot));
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE
+render_dx12_srv_gpu_handle(render_backend_t *base, unsigned int slot)
+{
+	Dx12Backend *backend = native_backend(base);
+	if (!backend) {
+		D3D12_GPU_DESCRIPTOR_HANDLE empty = {};
+		return empty;
+	}
+	return srv_gpu_handle(backend, static_cast<UINT>(slot));
+}
+
+bool
+render_dx12_texture_gpu_handle(render_texture_t *base, D3D12_GPU_DESCRIPTOR_HANDLE *handle)
+{
+	if (!base || !handle) {
+		return false;
+	}
+	Dx12Backend *backend = native_backend(base->backend);
+	if (!backend) {
+		return false;
+	}
+	Dx12Texture *texture = reinterpret_cast<Dx12Texture *>(base);
+	if (!texture->hasDescriptor) {
+		return false;
+	}
+	*handle = srv_gpu_handle(backend, texture->descriptor);
+	return true;
+}
+
+bool
+render_dx12_flush_pending(render_backend_t *base)
+{
+	Dx12Backend *backend = native_backend(base);
+	if (!backend) {
+		return false;
+	}
+	return finish_commands(backend);
+}
+
+bool
+render_dx12_wait_idle(render_backend_t *base)
+{
+	if (!base || base->ops != &dx12_ops) {
+		return false;
+	}
+	Dx12Backend *backend = reinterpret_cast<Dx12Backend *>(base);
+	wait_for_idle_if_available(backend);
+	return backend->healthy;
+}
 
 extern "C" render_backend_t *
 render_backend_create_dx12(SDL_Window *window)

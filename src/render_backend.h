@@ -25,7 +25,8 @@ typedef struct render_color {
 
 typedef enum render_pixel_format {
 	RENDER_PIXEL_FORMAT_BGRA8888,
-	RENDER_PIXEL_FORMAT_RGBA4444
+	RENDER_PIXEL_FORMAT_RGBA4444,
+	RENDER_PIXEL_FORMAT_RGBA8888
 } render_pixel_format_t;
 
 typedef enum render_texture_access {

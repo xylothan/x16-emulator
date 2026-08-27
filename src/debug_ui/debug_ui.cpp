@@ -8,11 +8,16 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h" // regs + execution-control (DEBUGContinue/…/DEBUGIsRunning)
 #include "debug_ui_settings.h" // user preferences (System → Settings...)
+#include "debug_ui_image.h"  // panel image textures (SDL_Texture or shared DX12)
+#include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* for the first-run default layout
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+#ifdef HAS_DX12
+#include "backends/imgui_impl_dx12.h"
+#endif
 
 #include <cstdarg>
 #include <cstdio>
@@ -21,6 +26,7 @@
 static SDL_Window   *s_window      = nullptr;
 static SDL_Renderer *s_renderer    = nullptr;
 static bool          s_initialized = false;
+static bool          s_native_dx12 = false; // renderer backend is imgui_impl_dx12
 static bool          s_enabled     = false;
 static bool          s_build_default_layout = false; // install a dock layout on first run
 static bool          s_show_demo    = false;         // Help → ImGui Demo (vendored imgui_demo.cpp)
@@ -86,6 +92,7 @@ debug_ui_find_mono_font(void)
 static void
 debug_ui_build_fonts(ImGuiIO &io)
 {
+    memset(s_fonts, 0, sizeof(s_fonts));
     const char *path = debug_ui_find_mono_font();
     s_scalable_font  = (path != nullptr);
 
@@ -178,14 +185,14 @@ debug_ui_apply_ui_scale(void)
     ImGui::GetIO().FontDefault = debug_ui_font_for_size(s_font_sizes[0] * want, nullptr);
 }
 
-extern "C" void
-debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
+// Everything that is independent of which renderer backend draws the debugger:
+// the ImGui context, settings, fonts, style and the first-run layout decision.
+// Both debug_ui_init and debug_ui_init_dx12 run this before attaching their
+// platform/renderer backends.
+static void
+debug_ui_create_context(SDL_Window *win)
 {
-    if (s_initialized) {
-        return;
-    }
-    s_window   = win;
-    s_renderer = ren;
+    s_window = win;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -252,12 +259,88 @@ debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
             s_build_default_layout = false;
         }
     }
+}
 
-    ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
-    ImGui_ImplSDLRenderer2_Init(ren);
+extern "C" bool
+debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
+{
+    if (s_initialized) {
+        return true;
+    }
+    if (win == nullptr || ren == nullptr) {
+        return false;
+    }
 
+    debug_ui_create_context(win);
+    s_renderer = ren;
+
+    if (!ImGui_ImplSDL2_InitForSDLRenderer(win, ren)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDL2_InitForSDLRenderer failed.\n");
+        ImGui::DestroyContext();
+        s_window   = nullptr;
+        s_renderer = nullptr;
+        return false;
+    }
+    if (!ImGui_ImplSDLRenderer2_Init(ren)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDLRenderer2_Init failed.\n");
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        s_window   = nullptr;
+        s_renderer = nullptr;
+        return false;
+    }
+
+    // Panel images become SDL_Textures on this renderer.
+    debug_ui_image_use_sdl(ren);
+
+    s_native_dx12 = false;
     s_initialized = true;
     s_enabled     = true;
+    return true;
+}
+
+extern "C" bool
+debug_ui_init_dx12(SDL_Window *win, render_backend_t *backend)
+{
+#ifdef HAS_DX12
+    if (s_initialized) {
+        return true;
+    }
+    if (win == nullptr || backend == nullptr) {
+        return false;
+    }
+
+    debug_ui_create_context(win);
+
+    // SDL still owns the window and the event stream; only the drawing moves to
+    // D3D12, so this is the plain "some D3D renderer" platform init.
+    if (!ImGui_ImplSDL2_InitForD3D(win)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDL2_InitForD3D failed.\n");
+        ImGui::DestroyContext();
+        s_window = nullptr;
+        return false;
+    }
+    if (!debug_ui_dx12_init(win, backend)) {
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        s_window = nullptr;
+        return false;
+    }
+
+    // Panel images become RGBA8888 textures on the shared backend, so their
+    // SRVs land in the same shader-visible heap the debugger binds.
+    debug_ui_image_use_dx12(backend);
+
+    s_renderer    = nullptr;
+    s_native_dx12 = true;
+    s_initialized = true;
+    s_enabled     = true;
+    return true;
+#else
+    (void)win;
+    (void)backend;
+    return false;
+#endif
 }
 
 extern "C" void
@@ -717,18 +800,25 @@ debug_ui_build_default_layout(ImGuiID dockspace_id)
     }
 }
 
-extern "C" void
+extern "C" bool
 debug_ui_render(void)
 {
     if (!s_initialized) {
-        return;
+        return false;
     }
 
     // Interface scale is read from settings and applied to the style + default
     // font. Must happen before NewFrame, which latches the current font.
     debug_ui_apply_ui_scale();
 
-    ImGui_ImplSDLRenderer2_NewFrame();
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        ImGui_ImplDX12_NewFrame();
+    } else
+#endif
+    {
+        ImGui_ImplSDLRenderer2_NewFrame();
+    }
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     // Publish any cross-panel goto requested last frame so every panel sees it.
@@ -772,12 +862,21 @@ debug_ui_render(void)
 
     ImGui::Render();
 
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        // A failure here is the secondary swap chain's, not the emulator's:
+        // the caller drops this window back to the SDLRenderer2 path.
+        return debug_ui_dx12_render();
+    }
+#endif
+
     ImGuiIO &io = ImGui::GetIO();
     SDL_RenderSetScale(s_renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
     SDL_SetRenderDrawColor(s_renderer, 24, 24, 24, 255);
     SDL_RenderClear(s_renderer);
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), s_renderer);
     SDL_RenderPresent(s_renderer);
+    return true;
 }
 
 extern "C" void
@@ -786,12 +885,24 @@ debug_ui_shutdown(void)
     if (!s_initialized) {
         return;
     }
-    ImGui_ImplSDLRenderer2_Shutdown();
+    // Panel textures first: in the native mode they live on the shared DX12
+    // backend, and their descriptors have to go back before anything that
+    // shares that heap is torn down.
+    debug_ui_image_release_all();
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        debug_ui_dx12_shutdown();
+    } else
+#endif
+    {
+        ImGui_ImplSDLRenderer2_Shutdown();
+    }
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
 
     s_window      = nullptr;
     s_renderer    = nullptr;
+    s_native_dx12 = false;
     s_initialized = false;
     s_enabled     = false;
 }
@@ -1012,4 +1123,3 @@ debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len)
     s_watch_req_pending = false;
     return true;
 }
-

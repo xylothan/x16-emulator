@@ -8,17 +8,21 @@
 //   * Tilemap  — a layer's tile/text map (from the layer registers).
 //
 // Technique: each viewer decodes VRAM into an RGBA (ABGR8888) pixel buffer,
-// uploads it to a STREAMING SDL_Texture via the debugger's SDL_Renderer, and
-// shows it with ImGui::Image. Textures are function-static and only recreated
-// when their dimensions change, so there is no per-frame allocation/leak. Only
-// the active tab decodes each frame (ImGui::BeginTabItem gates the work), so the
-// cost of the heavier viewers is only paid when they are visible. All VRAM
-// access goes through video_space_read()/debug_ui_vram_read_range(), which mask
-// the address into the 17-bit VRAM space, so reads can never go out of bounds.
+// uploads it to a STREAMING texture obtained from the debugger's image
+// abstraction (debug_ui_image.h — an SDL_Texture on the SDL renderer, or a
+// texture on the shared DirectX 12 backend when the debugger is drawn natively),
+// and shows it with ImGui::Image. Textures are function-static and only
+// recreated when their dimensions change, so there is no per-frame
+// allocation/leak. Only the active tab decodes each frame (ImGui::BeginTabItem
+// gates the work), so the cost of the heavier viewers is only paid when they are
+// visible. All VRAM access goes through video_space_read()/
+// debug_ui_vram_read_range(), which mask the address into the 17-bit VRAM space,
+// so reads can never go out of bounds.
 #include "imgui.h"
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"
 #include "debug_ui.h"
+#include "debug_ui_image.h"   // GPU-backed panel images for ImGui::Image
 #include "debug_ui_widgets.h" // dbgui_hover_value_tooltip / dbgui_format_binary
 
 #include <SDL.h>
@@ -53,44 +57,11 @@ build_palette(uint32_t out[256])
 }
 
 // A lazily-created, resizable STREAMING texture. Kept as a file-/function-static
-// so it lives for the app's lifetime; recreated only when the size changes.
-struct GfxTexture {
-    SDL_Texture *tex = nullptr;
-    int          w   = 0;
-    int          h   = 0;
-
-    bool ensure(int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return false;
-        if (tex && w == width && h == height)
-            return true;
-        if (tex) {
-            SDL_DestroyTexture(tex);
-            tex = nullptr;
-        }
-        SDL_Renderer *ren = debug_ui_get_renderer();
-        if (!ren)
-            return false;
-        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
-                                SDL_TEXTUREACCESS_STREAMING, width, height);
-        if (!tex)
-            return false;
-        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest); // crisp zoomed pixels
-        w = width;
-        h = height;
-        return true;
-    }
-
-    void update(const uint32_t *pixels)
-    {
-        if (tex)
-            SDL_UpdateTexture(tex, nullptr, pixels, w * (int)sizeof(uint32_t));
-    }
-
-    ImTextureID id() const { return (ImTextureID)(intptr_t)tex; }
-};
+// so it lives for the app's lifetime; recreated only when the size changes. The
+// backing GPU object depends on how the debugger window is drawn, which is what
+// DebugUiImage hides — and it registers itself with the debugger so the texture
+// is released before the renderer or the shared DX12 backend goes away.
+using GfxTexture = DebugUiImage;
 
 // A reusable, growable RGBA scratch buffer for building images.
 struct PixelBuffer {
@@ -986,7 +957,7 @@ vera_panel_render(bool *p_open)
 {
     if (ImGui::Begin("VERA", p_open)) {
         dbgui_window_zoom("vera");
-        if (debug_ui_get_renderer() == nullptr) {
+        if (!debug_ui_image_available()) {
             ImGui::TextUnformatted("Debugger renderer unavailable.");
             dbgui_window_end();
             return;

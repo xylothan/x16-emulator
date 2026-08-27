@@ -109,6 +109,10 @@ static bool legacy_debug_ui_initialized = false;
 // ImGui debugger window (separate; created only when -imgui is passed).
 static SDL_Window *imgui_window = NULL;
 static SDL_Renderer *imgui_renderer = NULL;
+// True while the debugger window is drawn with the native DirectX 12 renderer,
+// sharing the main backend's device/queue/SRV heap. Mutually exclusive with
+// imgui_renderer, which stays NULL in that mode.
+static bool imgui_native_dx12 = false;
 static Uint32 imgui_window_id = 0;
 #endif
 bool mouse_grabbed = false;
@@ -376,6 +380,15 @@ video_reset()
 // watch, this fires synchronously from inside that modal loop and keeps the
 // last good frame on screen. (The matching timing re-base in timing.c stops
 // the post-drag fast-forward.)
+static void
+video_clear_output(void)
+{
+	// The legacy debugger leaves its final line color active. Reset it so that
+	// letterbox bars stay black instead of inheriting the overlay's white.
+	render_backend_set_draw_color(renderer, (render_color_t){ 0, 0, 0, SDL_ALPHA_OPAQUE });
+	render_backend_clear(renderer);
+}
+
 static int SDLCALL
 video_move_resize_watch(void *userdata, SDL_Event *event)
 {
@@ -390,7 +403,7 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 			case SDL_WINDOWEVENT_MOVED:
 			case SDL_WINDOWEVENT_EXPOSED:
 				in_watch = true;
-				render_backend_clear(renderer);
+				video_clear_output();
 				render_backend_copy(renderer, sdlTexture, NULL, NULL);
 				if (debugger_enabled && showDebugOnRender != 0) {
 					DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -402,7 +415,7 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 			case SDL_WINDOWEVENT_SIZE_CHANGED:
 				in_watch = true;
 				render_backend_resize(renderer, event->window.data1, event->window.data2);
-				render_backend_clear(renderer);
+				video_clear_output();
 				render_backend_copy(renderer, sdlTexture, NULL, NULL);
 				if (debugger_enabled && showDebugOnRender != 0) {
 					DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -592,18 +605,35 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 			960, 720,
 			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 		if (imgui_window) {
-			// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
-			// presented from the emulator thread, so a vsync'd present would
-			// block it for up to a refresh interval every frame -- capping the
-			// machine at the monitor's rate and defeating warp mode entirely.
-			// The main window does not vsync either; timing.c does the
-			// throttling. debug_ui_render() is rate-limited instead (see
-			// video_render_all_ex).
-			imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+#ifdef HAS_DX12
+			// With a native DX12 main output, draw the debugger natively too,
+			// on the very same device, command queue and shader-visible SRV
+			// heap. No second SDL_Renderer is created in that case.
+			if (renderer_name && SDL_strcasecmp(renderer_name, "dx12") == 0) {
+				imgui_native_dx12 = debug_ui_init_dx12(imgui_window, renderer);
+				if (!imgui_native_dx12) {
+					printf("Warning: The native DX12 debugger renderer could not be "
+					       "initialized; falling back to SDL.\n");
+				}
+			}
+#endif
+			if (!imgui_native_dx12) {
+				// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
+				// presented from the emulator thread, so a vsync'd present would
+				// block it for up to a refresh interval every frame -- capping the
+				// machine at the monitor's rate and defeating warp mode entirely.
+				// The main window does not vsync either; timing.c does the
+				// throttling. debug_ui_render() is rate-limited instead (see
+				// video_render_all_ex).
+				imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+				if (imgui_renderer && !debug_ui_init(imgui_window, imgui_renderer)) {
+					SDL_DestroyRenderer(imgui_renderer);
+					imgui_renderer = NULL;
+				}
+			}
 		}
-		if (imgui_window && imgui_renderer) {
+		if (imgui_window && (imgui_renderer || imgui_native_dx12)) {
 			imgui_window_id = SDL_GetWindowID(imgui_window);
-			debug_ui_init(imgui_window, imgui_renderer);
 #ifdef _WIN32
 			// Keep both windows painted while the OS holds us in a modal
 			// move/resize loop dragging the debugger window. Emulation does
@@ -636,6 +666,43 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 	return true;
 }
 
+#ifdef HAS_IMGUI
+// Put the debugger window back on an ordinary SDL_Renderer with the ImGui
+// SDLRenderer2 backend. Used both when the native debugger swap chain fails on
+// its own -- the healthy main DX12 backend is left completely alone in that
+// case -- and after a main-window device loss has already torn it down.
+// Everything the ImGui side owned is gone by the time this runs, so it only has
+// to build the SDL renderer and re-init. On failure the debugger is retired for
+// the session, exactly as a failed window would have been at start-up.
+static void
+video_debug_ui_use_sdl_renderer(void)
+{
+	if (!imgui_window) {
+		return;
+	}
+	if (!imgui_renderer) {
+		imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+	}
+	if (imgui_renderer && debug_ui_init(imgui_window, imgui_renderer)) {
+		return;
+	}
+	fprintf(stderr, "Warning: The debugger window could not be recovered: %s\n", SDL_GetError());
+	if (imgui_renderer) {
+		SDL_DestroyRenderer(imgui_renderer);
+		imgui_renderer = NULL;
+	}
+#ifdef _WIN32
+	extern void video_win32_remove_move_hook(SDL_Window *window);
+	video_win32_remove_move_hook(imgui_window);
+#endif
+	SDL_DestroyWindow(imgui_window);
+	imgui_window = NULL;
+	imgui_window_id = 0;
+	imgui_debugger_enabled = false;
+	printf("The graphical debugger is disabled for the rest of this session.\n");
+}
+#endif
+
 // Device removal is terminal for this compact backend instance. Recreate the
 // legacy renderer and its debugger font texture rather than retaining COM
 // objects whose device has been lost.
@@ -651,6 +718,16 @@ video_fallback_to_sdl(void)
 		DEBUGFreeUI();
 		legacy_debug_ui_initialized = false;
 	}
+#ifdef HAS_IMGUI
+	// The ImGui debugger borrowed this backend's device, queue and SRV heap, so
+	// it has to be torn down before the backend is -- and brought back up on an
+	// SDL renderer afterwards.
+	const bool restore_imgui_ui = imgui_native_dx12;
+	if (restore_imgui_ui) {
+		debug_ui_shutdown();
+		imgui_native_dx12 = false;
+	}
+#endif
 	render_backend_texture_destroy(sdlTexture);
 	sdlTexture = NULL;
 	render_backend_destroy(renderer);
@@ -679,6 +756,11 @@ video_fallback_to_sdl(void)
 		DEBUGInitUI(renderer);
 		legacy_debug_ui_initialized = true;
 	}
+#ifdef HAS_IMGUI
+	if (restore_imgui_ui) {
+		video_debug_ui_use_sdl_renderer();
+	}
+#endif
 	return true;
 }
 
@@ -1747,7 +1829,7 @@ video_render_all_ex(bool new_frame)
 		}
 	}
 
-	render_backend_clear(renderer);
+	video_clear_output();
 	render_backend_copy(renderer, sdlTexture, NULL, NULL);
 
 	if (debugger_enabled && showDebugOnRender != 0) {
@@ -1766,13 +1848,23 @@ video_render_all_ex(bool new_frame)
 	// the debugger unresponsive. Wall-clock 60Hz is right at both ends. The
 	// throttle's repaint path (new_frame == false) calls in too, which is what
 	// keeps the UI live while the machine is running slowly.
-	if (imgui_renderer != NULL) {
+	if (imgui_window != NULL && (imgui_renderer != NULL || imgui_native_dx12)) {
 		static Uint32 last_ui_ticks = 0;
 		const Uint32 now = SDL_GetTicks();
 		// Unsigned subtraction, so this stays correct across the 49-day wrap.
 		if (now - last_ui_ticks >= 16) {
 			last_ui_ticks = now;
-			debug_ui_render();
+			if (!debug_ui_render() && imgui_native_dx12) {
+				// Only the debugger's own swap chain failed. The main DX12
+				// backend is still healthy, so leave it alone and move just
+				// this window back to SDL.
+				fprintf(stderr,
+				        "Warning: The native DX12 debugger renderer failed; switching that "
+				        "window to SDL.\n");
+				debug_ui_shutdown();
+				imgui_native_dx12 = false;
+				video_debug_ui_use_sdl_renderer();
+			}
 		}
 	}
 #endif
@@ -1821,7 +1913,7 @@ video_render_all(void)
 bool
 video_debug_ui_available(void)
 {
-	return imgui_window != NULL && imgui_renderer != NULL;
+	return imgui_window != NULL && (imgui_renderer != NULL || imgui_native_dx12);
 }
 
 static void video_imgui_debug_key(SDL_Keysym ks);
@@ -2352,10 +2444,13 @@ video_end()
 
 #ifdef HAS_IMGUI
 	// Tear the UI down before its renderer and window: the ImGui SDL backends
-	// hold both and free renderer-owned textures on shutdown. Safe no-ops if
-	// -imgui was never passed or the window failed to open.
-	if (imgui_window && imgui_renderer) {
+	// hold both and free renderer-owned textures on shutdown, and the native
+	// DX12 path holds descriptors in the main backend's shared heap, which is
+	// destroyed further down. Safe no-ops if -imgui was never passed or the
+	// window failed to open.
+	if (imgui_window && (imgui_renderer || imgui_native_dx12)) {
 		debug_ui_shutdown();
+		imgui_native_dx12 = false;
 	}
 	if (imgui_renderer) {
 		SDL_DestroyRenderer(imgui_renderer);

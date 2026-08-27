@@ -367,6 +367,15 @@ if(USE_IMGUI)
         src/extern/imgui/backends/imgui_impl_sdlrenderer2.cpp
     )
 
+    # The DirectX 12 renderer backend, for drawing the debugger window on the
+    # emulator's native DX12 device. Locally patched to use the checked-in
+    # DXBC in imgui_impl_dx12_{vs,ps}.h instead of calling D3DCompile(), so no
+    # build or run of this emulator needs a shader compiler. Still vendored, so
+    # it inherits the warning suppression below.
+    if(USE_DX12)
+        list(APPEND IMGUI_SOURCES src/extern/imgui/backends/imgui_impl_dx12.cpp)
+    endif()
+
     # The debug_ui module: a C-callable core plus self-registering panels.
     # Adding a panel means dropping a file under src/debug_ui/panels/ and
     # listing it here.
@@ -374,6 +383,7 @@ if(USE_IMGUI)
         src/debug_ui/debug_ui.cpp
         src/debug_ui/debug_ui_panels.cpp
         src/debug_ui/debug_ui_settings.cpp
+        src/debug_ui/debug_ui_image.cpp
         src/debug_ui/panels/memory_panel.cpp
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
@@ -386,6 +396,10 @@ if(USE_IMGUI)
         src/debug_ui/panels/fm_panel.cpp
         src/debug_ui/panels/pcm_panel.cpp
     )
+
+    if(USE_DX12)
+        list(APPEND DEBUG_UI_SOURCES src/debug_ui/debug_ui_dx12.cpp)
+    endif()
 
     list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
 endif()

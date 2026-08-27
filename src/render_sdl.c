@@ -29,6 +29,10 @@ sdl_pixel_format(render_pixel_format_t format)
 			return SDL_PIXELFORMAT_RGB888;
 		case RENDER_PIXEL_FORMAT_RGBA4444:
 			return SDL_PIXELFORMAT_RGBA4444;
+		case RENDER_PIXEL_FORMAT_RGBA8888:
+			// Byte order R,G,B,A in memory, i.e. the 0xAABBGGRR words the
+			// debugger panels build.
+			return SDL_PIXELFORMAT_ABGR8888;
 	}
 	return SDL_PIXELFORMAT_UNKNOWN;
 }
