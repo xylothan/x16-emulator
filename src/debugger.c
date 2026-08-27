@@ -270,14 +270,15 @@ static inline bool hitBreakpoint(int pc, uint8_t bank, struct breakpoint bp) {
 
 // *******************************************************************************************
 //
-//			This is used to determine who is in control. If it returns zero then
-//			everything runs normally till the next call.
-//			If it returns +ve, then it will update the video, and loop round.
-//			If it returns -ve, then exit.
+//			This determines who is in control. The public normal wrapper owns
+//			the paused UI; the no-pump wrapper stops before entering it.
+//			Zero means execute, positive means remain paused, negative means exit.
 //
 // *******************************************************************************************
 
-int  DEBUGGetCurrentStatus(void) {
+static int
+DEBUGGetCurrentStatusEx(bool allow_ui_pump)
+{
 
 	SDL_Event event;
 	if (currentPC < 0) currentPC = regs.pc;                                      // Initialise current PC displayed.
@@ -436,6 +437,14 @@ int  DEBUGGetCurrentStatus(void) {
 	// before: -bp does ask for it.)
 	const bool imguiOwnsUI = (!debug_window_enabled && video_debug_ui_available());
 
+	// A Windows move/resize callback runs inside the OS's nested window
+	// procedure. It still needs every stop-state transition above, but must
+	// return before any paused frontend work below. A pending single-step is
+	// executable; a stopped machine remains stopped.
+	if (!allow_ui_pump && currentMode != DMODE_RUN) {
+		return (currentMode == DMODE_STOP) ? 1 : 0;
+	}
+
 	// A DAP client can drive the run state while we are halted, so give it a
 	// turn before any front end blocks: continue/step arriving over the socket
 	// has to be able to get us moving again, whichever UI is up.
@@ -537,6 +546,18 @@ int  DEBUGGetCurrentStatus(void) {
 	}
 
 	return 0;                                                               // Run wild, run free.
+}
+
+int
+DEBUGGetCurrentStatus(void)
+{
+	return DEBUGGetCurrentStatusEx(true);
+}
+
+int
+DEBUGGetCurrentStatusNoPump(void)
+{
+	return DEBUGGetCurrentStatusEx(false);
 }
 
 // *******************************************************************************************

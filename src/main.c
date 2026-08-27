@@ -2161,19 +2161,11 @@ emulator_step_during_move(void)
 	if (in_step) {
 		return;
 	}
-	// Leave the machine alone whenever any debugger is in play. Breakpoints are
-	// honoured by DEBUGGetCurrentStatus(), which also drives the debugger's own
-	// window and event pump and so cannot be called from inside the OS modal
-	// loop; stepping here without it would run straight through breakpoints.
-	// Dragging with -debug therefore behaves as it always has -- and the same
-	// has to hold for -imgui, whose window is move-hooked too, so a drag of
-	// either window cannot run the CPU behind the UI's back.
-	//
-	// The DAP server counts too, and for the same reason -- a client's
-	// breakpoints are the same breakpoints. The guest can clear
-	// debugger_enabled by writing $9FB0, so testing that alone would let a drag
-	// step past a breakpoint a client is waiting on.
-	if (debugger_enabled || imgui_debugger_enabled || debug_server_is_enabled()) {
+	// DAP dispatch can spend up to 500 ms dropping a client that stopped reading.
+	// Do not put that bounded send loop inside the OS window procedure. Local
+	// debuggers use the no-pump status path below; DAP retains its existing
+	// pause-during-drag behaviour until its output path is independently queued.
+	if (debug_server_is_enabled()) {
 		return;
 	}
 
@@ -2187,22 +2179,35 @@ emulator_step_during_move(void)
 	in_step = true;
 
 	bool new_frame = false;
+	bool ran_instruction = false;
 	uint32_t steps = 0;
 	const uint32_t slice_start = SDL_GetTicks();
 	do {
+		// Preserve the normal loop's breakpoint, watchpoint, interrupt and step
+		// transitions without entering a debugger SDL event pump from this
+		// nested window procedure. Check before the first instruction and every
+		// one after it, so a breakpointed instruction is never executed.
+		if ((debugger_enabled
+		     || (imgui_debugger_enabled && video_debug_ui_available()))
+		    && DEBUGGetCurrentStatusNoPump() != 0) {
+			break;
+		}
 		if (handle_ieee_intercept()) {
 			// Polled here too: this loop can run many intercepts without ever
 			// returning to the main loop, and only one completed load is held
 			// at a time, so a second would overwrite the first. Reachable only
-			// via -dbgauto without -debug, since dragging bails out above when
-			// the debugger is enabled.
+			// via -dbgauto; the status check repeats before the next instruction.
 			dbg_load_poll();
 			continue;
 		}
 		instruction_counter += waiting ^ 0x1;
 		const uint16_t perf_pc    = regs.pc;
 		const uint8_t  perf_pbank = regs.k;
+		if ((debugger_enabled || imgui_debugger_enabled) && !waiting) {
+			code_map_record_current();
+		}
 		step6502();
+		ran_instruction = true;
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
 		perf_budget_record(clocks, perf_pc, perf_pbank);
@@ -2243,7 +2248,9 @@ emulator_step_during_move(void)
 		video_present_no_input();
 		perf_budget_close_frame();
 	}
-	timing_update_no_sleep();
+	if (ran_instruction) {
+		timing_update_no_sleep();
+	}
 
 	in_step = false;
 }

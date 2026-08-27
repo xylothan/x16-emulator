@@ -29,6 +29,9 @@ void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
 void DEBUGBreakOnWatchpoint(void);
 int  DEBUGGetCurrentStatus(void);
+// Preserve execution-control and stop checks without entering either debugger
+// UI pump. Used from nested host event loops that cannot safely poll SDL.
+int  DEBUGGetCurrentStatusNoPump(void);
 void DEBUGInitUI(SDL_Renderer *pRenderer);
 void DEBUGFreeUI();
 
