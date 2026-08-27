@@ -140,6 +140,7 @@ int window_scale = 1;
 float screen_x_scale = 1.0;
 float window_opacity = 1.0;
 char *scale_quality = "best";
+char *render_driver = NULL;
 bool test_init_complete=false;
 bool headless = false;
 bool fullscreen = false;
@@ -484,6 +485,19 @@ parse_breakpoint_arg(const char *arg, struct breakpoint *out)
 }
 
 static void
+print_render_drivers(void)
+{
+	printf("Available SDL render drivers:\n");
+	const int count = SDL_GetNumRenderDrivers();
+	for (int i = 0; i < count; i++) {
+		SDL_RendererInfo info;
+		if (SDL_GetRenderDriverInfo(i, &info) == 0) {
+			printf("\t%s\n", info.name);
+		}
+	}
+}
+
+static void
 usage()
 {
 	printf("\nCommander X16 Emulator r%s (%s)", VER, VER_NAME);
@@ -575,6 +589,8 @@ usage()
 	printf("\tScale output to an integer multiple of 640x480\n");
 	printf("-quality {nearest|linear|best}\n");
 	printf("\tScaling algorithm quality\n");
+	printf("-render <driver|list>\n");
+	printf("\tSelect the SDL render driver (e.g. direct3d12), or list available drivers.\n");
 	printf("-widescreen\n");
 	printf("\tStretch output to 16:9 resolution to mimic display of a widescreen monitor.\n");
 	printf("-fullscreen\n");
@@ -1277,6 +1293,15 @@ main(int argc, char **argv)
 			}
 			argc--;
 			argv++;
+		} else if (!strcmp(argv[0], "-render")) {
+			argc--;
+			argv++;
+			if (!argc || !argv[0][0] || argv[0][0] == '-') {
+				usage();
+			}
+			render_driver = argv[0];
+			argc--;
+			argv++;
 		} else if (!strcmp(argv[0], "-widescreen")) {
 			argc--;
 			argv++;
@@ -1439,6 +1464,14 @@ main(int argc, char **argv)
 		} else {
 			usage();
 		}
+	}
+
+	// SDL exposes its compiled-in renderer table before video initialization,
+	// so listing drivers does not require a ROM or a working display.
+	if (render_driver && !strcmp(render_driver, "list")) {
+		print_render_drivers();
+		SDL_free(base_path);
+		return 0;
 	}
 
 	// A breakpoint needs a front end that can resume the machine. Without one
@@ -1610,7 +1643,12 @@ main(int argc, char **argv)
 			exit(-1);
 		}
 		audio_init(audio_dev_name, audio_buffers);
-		video_init(window_scale, screen_x_scale, scale_quality, fullscreen, window_opacity);
+		if (!video_init(window_scale, screen_x_scale, scale_quality, render_driver,
+		                fullscreen, window_opacity)) {
+			audio_close();
+			SDL_Quit();
+			exit(1);
+		}
 	}
 
 	wav_recorder_set_path(wav_path);

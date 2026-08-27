@@ -396,10 +396,26 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 	return 1; // leave the event in the queue for normal handling
 }
 
+static bool
+render_driver_available(const char *name)
+{
+	const int count = SDL_GetNumRenderDrivers();
+	for (int i = 0; i < count; i++) {
+		SDL_RendererInfo info;
+		if (SDL_GetRenderDriverInfo(i, &info) == 0 &&
+		    SDL_strcasecmp(name, info.name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool
-video_init(int window_scale, float screen_x_scale, char *quality, bool fullscreen, float opacity)
+video_init(int window_scale, float screen_x_scale, const char *quality,
+           const char *render_driver, bool fullscreen, float opacity)
 {
 	uint32_t window_flags = SDL_WINDOW_ALLOW_HIGHDPI;
+	const char *requested_driver = render_driver;
 
 #ifdef __EMSCRIPTEN__
 	// Setting this flag would render the web canvas outside of its bounds on high dpi screens
@@ -408,9 +424,42 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 
 	video_reset();
 
+	if (requested_driver && !render_driver_available(requested_driver)) {
+		fprintf(stderr,
+		        "Warning: SDL render driver '%s' is not available; using SDL's default selection.\n",
+		        requested_driver);
+		requested_driver = NULL;
+	}
+	if (requested_driver &&
+	    !SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, requested_driver, SDL_HINT_OVERRIDE)) {
+		fprintf(stderr,
+		        "Warning: Could not select SDL render driver '%s'; using SDL's default selection.\n",
+		        requested_driver);
+		requested_driver = NULL;
+	}
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, quality);
 	SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1"); // Grabs keyboard shortcuts from the system during window grab
-	SDL_CreateWindowAndRenderer(SCREEN_WIDTH * window_scale * screen_x_scale, SCREEN_HEIGHT * window_scale, window_flags, &window, &renderer);
+	if (SDL_CreateWindowAndRenderer(SCREEN_WIDTH * window_scale * screen_x_scale,
+	                                SCREEN_HEIGHT * window_scale, window_flags,
+	                                &window, &renderer) < 0) {
+		fprintf(stderr, "Failed to create emulator window or renderer: %s\n", SDL_GetError());
+		if (window) {
+			SDL_DestroyWindow(window);
+			window = NULL;
+		}
+		renderer = NULL;
+		return false;
+	}
+
+	SDL_RendererInfo renderer_info;
+	if (SDL_GetRendererInfo(renderer, &renderer_info) == 0) {
+		if (requested_driver && SDL_strcasecmp(requested_driver, renderer_info.name) != 0) {
+			fprintf(stderr,
+			        "Warning: SDL render driver '%s' could not be initialized; using '%s'.\n",
+			        requested_driver, renderer_info.name);
+		}
+		fprintf(stderr, "SDL render driver: %s\n", renderer_info.name);
+	}
 #ifndef __MORPHOS__
 	SDL_SetWindowResizable(window, true);
 #endif
@@ -420,6 +469,14 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 									SDL_PIXELFORMAT_RGB888,
 									SDL_TEXTUREACCESS_STREAMING,
 									SCREEN_WIDTH, SCREEN_HEIGHT);
+	if (!sdlTexture) {
+		fprintf(stderr, "Failed to create emulator texture: %s\n", SDL_GetError());
+		SDL_DestroyRenderer(renderer);
+		SDL_DestroyWindow(window);
+		renderer = NULL;
+		window = NULL;
+		return false;
+	}
 
 	// Keep the window painted while the OS holds us in a modal move/resize loop.
 	SDL_AddEventWatch(video_move_resize_watch, NULL);

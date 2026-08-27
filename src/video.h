@@ -15,7 +15,8 @@
 extern "C" {
 #endif
 
-bool video_init(int window_scale, float screen_x_scale, char *quality, bool fullscreen, float opacity);
+bool video_init(int window_scale, float screen_x_scale, const char *quality,
+                const char *render_driver, bool fullscreen, float opacity);
 void video_reset(void);
 bool video_step(float mhz, float steps, bool midline);
 bool video_update(void);
