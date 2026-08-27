@@ -22,6 +22,32 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# Native DirectX 12 renderer for the emulator output. The checked-in DXBC
+# headers keep ordinary builds independent of fxc/D3DCompiler at runtime.
+set(ENABLE_DX12 "AUTO" CACHE STRING "Build the native DirectX 12 renderer (ON/OFF/AUTO)")
+set_property(CACHE ENABLE_DX12 PROPERTY STRINGS ON OFF AUTO)
+if(NOT ENABLE_DX12 STREQUAL "ON" AND NOT ENABLE_DX12 STREQUAL "OFF" AND
+   NOT ENABLE_DX12 STREQUAL "AUTO")
+    message(FATAL_ERROR "[x16] ENABLE_DX12 must be ON, OFF, or AUTO (got '${ENABLE_DX12}').")
+endif()
+
+set(USE_DX12 FALSE)
+if(ENABLE_DX12 STREQUAL "ON")
+    if(NOT WIN32 OR NOT MSVC)
+        message(FATAL_ERROR "[x16] ENABLE_DX12=ON requires Windows with MSVC.")
+    endif()
+    set(USE_DX12 TRUE)
+elseif(ENABLE_DX12 STREQUAL "AUTO")
+    if(WIN32 AND MSVC)
+        set(USE_DX12 TRUE)
+        message(STATUS "[x16] Native DirectX 12 renderer enabled (auto).")
+    else()
+        message(STATUS "[x16] Native DirectX 12 renderer disabled: requires Windows with MSVC.")
+    endif()
+else()
+    message(STATUS "[x16] Native DirectX 12 renderer explicitly disabled.")
+endif()
+
 if(ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
@@ -321,6 +347,10 @@ set(X16_SOURCES
     src/extern/ymfm/src/ymfm_opm.cpp
 )
 
+if(USE_DX12)
+    list(APPEND X16_SOURCES src/render_dx12.cpp)
+endif()
+
 if(USE_IMGUI)
     # Vendored Dear ImGui (docking branch) + the SDL2 / SDLRenderer2 backends,
     # kept in their own list so the project's strict warnings can be relaxed
@@ -414,6 +444,10 @@ if(USE_TRACE)
     target_compile_definitions(x16emu PRIVATE TRACE)
 endif()
 
+if(USE_DX12)
+    target_compile_definitions(x16emu PRIVATE HAS_DX12)
+endif()
+
 # Linking
 target_link_libraries(x16emu PRIVATE
     SDL2::SDL2
@@ -462,6 +496,9 @@ if(WIN32)
         target_link_options(x16emu PRIVATE /SUBSYSTEM:CONSOLE)
     endif()
     target_link_libraries(x16emu PRIVATE dwmapi)
+    if(USE_DX12)
+        target_link_libraries(x16emu PRIVATE d3d12 dxgi dxguid)
+    endif()
 endif()
 
 # macOS Specifics

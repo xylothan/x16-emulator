@@ -6,6 +6,7 @@
 typedef struct render_backend_ops {
 	void (*destroy)(render_backend_t *backend);
 	const char *(*name)(render_backend_t *backend);
+	bool (*is_healthy)(render_backend_t *backend);
 	bool (*resize)(render_backend_t *backend, int width, int height);
 	bool (*set_logical_size)(render_backend_t *backend, int width, int height);
 	render_texture_t *(*texture_create)(render_backend_t *backend,

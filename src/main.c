@@ -487,7 +487,11 @@ parse_breakpoint_arg(const char *arg, struct breakpoint *out)
 static void
 print_render_drivers(void)
 {
-	printf("Available SDL render drivers:\n");
+	printf("Available render drivers:\n");
+#ifdef HAS_DX12
+	printf("\tdx12 (native)\n");
+#endif
+	printf("SDL render drivers:\n");
 	const int count = SDL_GetNumRenderDrivers();
 	for (int i = 0; i < count; i++) {
 		SDL_RendererInfo info;

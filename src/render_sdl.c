@@ -70,6 +70,13 @@ sdl_name(render_backend_t *backend)
 }
 
 static bool
+sdl_is_healthy(render_backend_t *backend)
+{
+	(void)backend;
+	return true;
+}
+
+static bool
 sdl_resize(render_backend_t *backend, int width, int height)
 {
 	(void)backend;
@@ -201,6 +208,7 @@ sdl_present(render_backend_t *backend)
 static const render_backend_ops_t sdl_ops = {
 	sdl_destroy,
 	sdl_name,
+	sdl_is_healthy,
 	sdl_resize,
 	sdl_set_logical_size,
 	sdl_texture_create,

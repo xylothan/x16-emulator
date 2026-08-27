@@ -44,8 +44,12 @@ extern "C" {
 #endif
 
 render_backend_t *render_backend_create_sdl(SDL_Window *window);
+#ifdef HAS_DX12
+render_backend_t *render_backend_create_dx12(SDL_Window *window);
+#endif
 void render_backend_destroy(render_backend_t *backend);
 const char *render_backend_name(render_backend_t *backend);
+bool render_backend_is_healthy(render_backend_t *backend);
 
 bool render_backend_resize(render_backend_t *backend, int width, int height);
 bool render_backend_set_logical_size(render_backend_t *backend, int width, int height);

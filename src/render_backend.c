@@ -17,6 +17,12 @@ render_backend_name(render_backend_t *backend)
 }
 
 bool
+render_backend_is_healthy(render_backend_t *backend)
+{
+	return backend && backend->ops->is_healthy(backend);
+}
+
+bool
 render_backend_resize(render_backend_t *backend, int width, int height)
 {
 	return backend && backend->ops->resize(backend, width, height);

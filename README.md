@@ -258,7 +258,7 @@ the display backend.
 
 | Option | What it does |
 |---|---|
-| `-render <driver>` | Selects SDL's render driver. Use `-render list` to see the drivers compiled into the current build. Current Windows packages include `direct3d12`; if a requested driver cannot initialize, SDL falls back to another available driver and reports which one is active. |
+| `-render <driver>` | Selects a renderer. On MSVC Windows builds, `-render dx12` selects the native DirectX 12 main-output backend; if it cannot initialize, the emulator reports the reason and falls back to SDL. `-render direct3d12` remains SDL's built-in Direct3D 12 renderer. Use `-render list` to see the native and SDL drivers compiled into the current build. |
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics and the three audio sources. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
