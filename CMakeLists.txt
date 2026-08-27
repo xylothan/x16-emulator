@@ -305,6 +305,8 @@ set(X16_SOURCES
     src/cpu/irq_ctx.c
     src/javascript_interface.c
     src/joystick.c
+    src/render_backend.c
+    src/render_sdl.c
     src/rendertext.c
     src/keyboard.c
     src/icon.c

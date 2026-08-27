@@ -13,6 +13,7 @@
 #define _DEBUGGER_H
 
 #include <SDL.h>
+#include "render_backend.h"
 
 // struct breakpoint and the breakpoint table itself now live in debug_core,
 // which is the part a UI-less consumer (a debug server, another front end)
@@ -29,7 +30,7 @@ void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
 void DEBUGBreakOnWatchpoint(void);
 int  DEBUGGetCurrentStatus(void);
-void DEBUGInitUI(SDL_Renderer *pRenderer);
+void DEBUGInitUI(render_backend_t *pRenderer);
 void DEBUGFreeUI();
 
 // Execution control. These mirror the debug window's F5/F10/F11 handlers, and

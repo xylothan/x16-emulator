@@ -13,8 +13,7 @@ int xPos = 0;
 int yPos = 0;
 
 // font texture
-SDL_Texture *fontTexture;
-int textureInitialized = 0;
+static render_texture_t *fontTexture;
 
 // *******************************************************************************************
 // left trim string
@@ -136,12 +135,16 @@ static unsigned char fontdata[] = {
 //
 // *******************************************************************************************
 
-void DEBUGInitChars(SDL_Renderer *renderer) {
+void DEBUGInitChars(render_backend_t *renderer) {
 	uint16_t textureData[TEXTURE_WIDTH * TEXTURE_HEIGHT];
 	memset(textureData, 0, sizeof textureData);
 
-	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-	fontTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA4444, SDL_TEXTUREACCESS_STATIC, TEXTURE_WIDTH, TEXTURE_HEIGHT);
+	fontTexture = render_backend_texture_create(renderer, RENDER_PIXEL_FORMAT_RGBA4444,
+	                                            RENDER_TEXTURE_STATIC, RENDER_SCALE_NEAREST,
+	                                            TEXTURE_WIDTH, TEXTURE_HEIGHT);
+	if (!fontTexture) {
+		return;
+	}
 	for (int ch =0x00; ch<0x60; ch++){
 		int rcx = 0;
 		for (int x1 = 0; x1 < 5; x1++) {
@@ -155,8 +158,15 @@ void DEBUGInitChars(SDL_Renderer *renderer) {
 			rcx++;
 		}
 	}
-	SDL_UpdateTexture(fontTexture, NULL, &textureData, TEXTURE_WIDTH*2);
-	textureInitialized = 1;
+	if (!render_backend_texture_update(fontTexture, NULL, &textureData, TEXTURE_WIDTH*2)) {
+		render_backend_texture_destroy(fontTexture);
+		fontTexture = NULL;
+	}
+}
+
+void DEBUGFreeChars(void) {
+	render_backend_texture_destroy(fontTexture);
+	fontTexture = NULL;
 }
 
 // *******************************************************************************************
@@ -165,25 +175,30 @@ void DEBUGInitChars(SDL_Renderer *renderer) {
 //
 // *******************************************************************************************
 
-void DEBUGWrite(SDL_Renderer *renderer, int x, int y, int ch, SDL_Color colour) {
-	if (!textureInitialized) {
+void DEBUGWrite(render_backend_t *renderer, int x, int y, int ch, SDL_Color colour) {
+	if (!fontTexture) {
 		DEBUGInitChars(renderer);
 	}
-	SDL_SetTextureColorMod(fontTexture, colour.r, colour.g, colour.b);
+	if (!fontTexture) {
+		return;
+	}
+	render_backend_texture_set_color(fontTexture, (render_color_t){
+		colour.r, colour.g, colour.b, colour.a
+	});
 	ch-=0x20;
-	SDL_Rect srcRect = {
+	render_rect_t srcRect = {
 		ch* CHARACTER_WIDTH,
 		0,
 		CHARACTER_WIDTH,
 		CHARACTER_HEIGHT
 	};
-	SDL_Rect dstRect = {
+	render_rect_t dstRect = {
 		x*(CHARACTER_WIDTH+1) + xPos,
 		y*(CHARACTER_HEIGHT+1) + yPos,
 		CHARACTER_WIDTH,
 		CHARACTER_HEIGHT
 	};
-	SDL_RenderCopy(renderer, fontTexture, &srcRect, &dstRect);
+	render_backend_copy(renderer, fontTexture, &srcRect, &dstRect);
 }
 
 // *******************************************************************************************
@@ -192,7 +207,7 @@ void DEBUGWrite(SDL_Renderer *renderer, int x, int y, int ch, SDL_Color colour) 
 //
 // *******************************************************************************************
 
-void DEBUGString(SDL_Renderer *renderer, int x, int y, char *s, SDL_Color colour) {
+void DEBUGString(render_backend_t *renderer, int x, int y, char *s, SDL_Color colour) {
 	while (*s != '\0') {
 		DEBUGWrite(renderer, x++, y, *s++, colour);
 	}

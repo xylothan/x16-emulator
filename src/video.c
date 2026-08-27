@@ -29,6 +29,7 @@
 #include "sdcard.h"
 #include "i2c.h"
 #include "audio.h"
+#include "render_backend.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -98,8 +99,8 @@
 #define MAX(a,b) ((a) > (b) ? a : b)
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *sdlTexture;
+static render_backend_t *renderer;
+static render_texture_t *sdlTexture;
 static bool is_fullscreen = false;
 #ifdef HAS_IMGUI
 // ImGui debugger window (separate; created only when -imgui is passed).
@@ -382,13 +383,20 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 	    event->window.windowID == SDL_GetWindowID(window)) {
 		switch (event->window.event) {
 			case SDL_WINDOWEVENT_MOVED:
-			case SDL_WINDOWEVENT_RESIZED:
-			case SDL_WINDOWEVENT_SIZE_CHANGED:
 			case SDL_WINDOWEVENT_EXPOSED:
 				in_watch = true;
-				SDL_RenderClear(renderer);
-				SDL_RenderCopy(renderer, sdlTexture, NULL, NULL);
-				SDL_RenderPresent(renderer);
+				render_backend_clear(renderer);
+				render_backend_copy(renderer, sdlTexture, NULL, NULL);
+				render_backend_present(renderer);
+				in_watch = false;
+				break;
+			case SDL_WINDOWEVENT_RESIZED:
+			case SDL_WINDOWEVENT_SIZE_CHANGED:
+				in_watch = true;
+				render_backend_resize(renderer, event->window.data1, event->window.data2);
+				render_backend_clear(renderer);
+				render_backend_copy(renderer, sdlTexture, NULL, NULL);
+				render_backend_present(renderer);
 				in_watch = false;
 				break;
 		}
@@ -439,39 +447,47 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 	}
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, quality);
 	SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1"); // Grabs keyboard shortcuts from the system during window grab
-	if (SDL_CreateWindowAndRenderer(SCREEN_WIDTH * window_scale * screen_x_scale,
-	                                SCREEN_HEIGHT * window_scale, window_flags,
-	                                &window, &renderer) < 0) {
-		fprintf(stderr, "Failed to create emulator window or renderer: %s\n", SDL_GetError());
-		if (window) {
-			SDL_DestroyWindow(window);
-			window = NULL;
-		}
-		renderer = NULL;
+	window = SDL_CreateWindow(NULL, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	                          SCREEN_WIDTH * window_scale * screen_x_scale,
+	                          SCREEN_HEIGHT * window_scale, window_flags);
+	if (!window) {
+		fprintf(stderr, "Failed to create emulator window: %s\n", SDL_GetError());
+		return false;
+	}
+	renderer = render_backend_create_sdl(window);
+	if (!renderer) {
+		fprintf(stderr, "Failed to create emulator renderer: %s\n", SDL_GetError());
+		SDL_DestroyWindow(window);
+		window = NULL;
 		return false;
 	}
 
-	SDL_RendererInfo renderer_info;
-	if (SDL_GetRendererInfo(renderer, &renderer_info) == 0) {
-		if (requested_driver && SDL_strcasecmp(requested_driver, renderer_info.name) != 0) {
+	const char *renderer_name = render_backend_name(renderer);
+	if (renderer_name) {
+		if (requested_driver && SDL_strcasecmp(requested_driver, renderer_name) != 0) {
 			fprintf(stderr,
 			        "Warning: SDL render driver '%s' could not be initialized; using '%s'.\n",
-			        requested_driver, renderer_info.name);
+			        requested_driver, renderer_name);
 		}
-		fprintf(stderr, "SDL render driver: %s\n", renderer_info.name);
+		fprintf(stderr, "SDL render driver: %s\n", renderer_name);
 	}
 #ifndef __MORPHOS__
 	SDL_SetWindowResizable(window, true);
 #endif
-	SDL_RenderSetLogicalSize(renderer, SCREEN_WIDTH * screen_x_scale, SCREEN_HEIGHT);
+	render_backend_set_logical_size(renderer, SCREEN_WIDTH * screen_x_scale, SCREEN_HEIGHT);
 
-	sdlTexture = SDL_CreateTexture(renderer,
-									SDL_PIXELFORMAT_RGB888,
-									SDL_TEXTUREACCESS_STREAMING,
-									SCREEN_WIDTH, SCREEN_HEIGHT);
+	render_scale_quality_t render_quality = RENDER_SCALE_BEST;
+	if (!strcmp(quality, "nearest")) {
+		render_quality = RENDER_SCALE_NEAREST;
+	} else if (!strcmp(quality, "linear")) {
+		render_quality = RENDER_SCALE_LINEAR;
+	}
+	sdlTexture = render_backend_texture_create(renderer, RENDER_PIXEL_FORMAT_BGRA8888,
+	                                           RENDER_TEXTURE_STREAMING, render_quality,
+	                                           SCREEN_WIDTH, SCREEN_HEIGHT);
 	if (!sdlTexture) {
 		fprintf(stderr, "Failed to create emulator texture: %s\n", SDL_GetError());
-		SDL_DestroyRenderer(renderer);
+		render_backend_destroy(renderer);
 		SDL_DestroyWindow(window);
 		renderer = NULL;
 		window = NULL;
@@ -1629,7 +1645,7 @@ video_render_all_ex(bool new_frame)
 		}
 	}
 
-	SDL_UpdateTexture(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
+	render_backend_texture_update(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
 
 	// Skipped for a repaint that is not a new emulated frame. The throttle
 	// repaints between sleep slices to keep the window alive, and there can be
@@ -1647,14 +1663,14 @@ video_render_all_ex(bool new_frame)
 		}
 	}
 
-	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, sdlTexture, NULL, NULL);
+	render_backend_clear(renderer);
+	render_backend_copy(renderer, sdlTexture, NULL, NULL);
 
 	if (debugger_enabled && showDebugOnRender != 0) {
 		DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
 	}
 
-	SDL_RenderPresent(renderer);
+	render_backend_present(renderer);
 
 #ifdef HAS_IMGUI
 	// Rebuild the debugger window's frame. Deliberately decoupled from the
@@ -2281,8 +2297,12 @@ video_end()
 	extern void video_win32_remove_move_hook(SDL_Window *window);
 	video_win32_remove_move_hook(window);
 #endif
-	SDL_DestroyRenderer(renderer);
+	render_backend_texture_destroy(sdlTexture);
+	sdlTexture = NULL;
+	render_backend_destroy(renderer);
+	renderer = NULL;
 	SDL_DestroyWindow(window);
+	window = NULL;
 }
 
 
