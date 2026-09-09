@@ -528,14 +528,15 @@ debug_ui_draw_control_bar(void)
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        if (warp_mode) {
+        const bool warp_was_enabled = warp_mode;
+        if (warp_was_enabled) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.10f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.45f, 0.15f, 1.0f));
         }
         if (ImGui::SmallButton("Warp")) {
             machine_toggle_warp();
         }
-        if (warp_mode) {
+        if (warp_was_enabled) {
             ImGui::PopStyleColor(2);
         }
         if (ImGui::IsItemHovered()) {
