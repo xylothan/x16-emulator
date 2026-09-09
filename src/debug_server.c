@@ -10,6 +10,7 @@
 #include "code_map.h"
 #include "perf_budget.h"
 #include "vera_bandwidth.h"
+#include "sprite_trace.h"
 #include "glue.h"
 #include "memory.h"
 #include "source_view.h"
@@ -433,6 +434,10 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     // Non-standard, so that a client can tell this emulator's performance
     // budget surface from one that would reject the requests.
     cJSON_AddBoolToObject(caps, "supportsX16PerfStats", true);
+    // Non-standard: a full breakpoint/watchpoint listing regardless of who
+    // set each one, and per-frame sprite-multiplexing stats.
+    cJSON_AddBoolToObject(caps, "supportsX16ListBreakpoints", true);
+    cJSON_AddBoolToObject(caps, "supportsX16SpriteMuxStats", true);
     send_dap_response(seq, "initialize", true, caps);
 
     dap_session_active = true;
@@ -2453,6 +2458,222 @@ static void perf_poll_overruns(void) {
     send_dap_event("x16/perfBudgetOverrun", body);
 }
 
+// ─── x16/listBreakpoints: every armed breakpoint/watchpoint, any owner ──────
+//
+// setBreakpoints and its siblings only tell a client about breakpoints it
+// itself set. This is the read-back for the whole picture -- what -bp armed,
+// what the ImGui panel has, what a DAP request of its own already set -- in
+// one poll. A request/response poll rather than a "breakpoint" event: see the
+// KNOWN LIMITATION comment in debug_server.h (change events don't fit entries
+// the client did not itself set; VS Code ignores/misuses them).
+
+// Values are part of the debugger's external interface (debug_core.h); do not
+// renumber BPOPERAND_*/BPCMP_* without updating these to match.
+static const char *bp_operand_names[] = { "a", "x", "y", "sp", "p", "byte", "word" };
+static const char *bp_cmp_names[]     = { "eq", "ne", "lt", "le", "gt", "ge" };
+
+static const char *bp_operand_name(int operand) {
+    return (operand >= 0 && operand < (int)(sizeof bp_operand_names / sizeof bp_operand_names[0]))
+        ? bp_operand_names[operand] : "unknown";
+}
+
+static const char *bp_cmp_name(int op) {
+    return (op >= 0 && op < (int)(sizeof bp_cmp_names / sizeof bp_cmp_names[0]))
+        ? bp_cmp_names[op] : "unknown";
+}
+
+// Shared by breakpoints and watchpoints -- debug_owner_t bits mean the same
+// thing in both tables. debug_core.h says the owner list "can be extended
+// freely", so an unrecognised bit still gets an entry rather than being
+// silently dropped.
+static cJSON *owners_bitmask_to_json(uint16_t owners) {
+    static const char *names[] = {
+        "cli", "ui", "dapSource", "dapFunction", "dapInstruction", "dapConsole", "step"
+    };
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < DEBUG_OWNER_COUNT; i++) {
+        if (!(owners & (1u << i))) continue;
+        if (i < (int)(sizeof names / sizeof names[0])) {
+            cJSON_AddItemToArray(arr, cJSON_CreateString(names[i]));
+        } else {
+            char buf[16];
+            snprintf(buf, sizeof buf, "owner%d", i);
+            cJSON_AddItemToArray(arr, cJSON_CreateString(buf));
+        }
+    }
+    return arr;
+}
+
+static int handle_x16_list_breakpoints(int seq, cJSON *args) {
+    (void)args;
+    cJSON *body = cJSON_CreateObject();
+
+    cJSON *bps = cJSON_CreateArray();
+    const int nbp = debug_bp_count();
+    for (int i = 0; i < nbp; i++) {
+        const struct breakpoint *bp = debug_bp_at(i);
+        if (!bp) continue;
+
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "pc", bp->pc);
+        cJSON_AddNumberToObject(o, "bank", bp->bank);
+        cJSON_AddNumberToObject(o, "x16Bank", bp->x16Bank);
+        cJSON_AddBoolToObject(o, "enabled", bp->enabled);
+        cJSON_AddItemToObject(o, "owners", owners_bitmask_to_json(bp->owners));
+
+        int has_cond = 0, operand = 0, op = 0;
+        uint16_t operand_addr = 0;
+        uint32_t value = 0, ignore = 0;
+        debug_bp_get_condition(bp->pc, bp->bank, bp->x16Bank, &has_cond, &operand,
+                               &operand_addr, &op, &value, &ignore);
+        if (has_cond) {
+            cJSON *cond = cJSON_CreateObject();
+            cJSON_AddStringToObject(cond, "operand", bp_operand_name(operand));
+            cJSON_AddNumberToObject(cond, "operandAddr", operand_addr);
+            cJSON_AddStringToObject(cond, "op", bp_cmp_name(op));
+            cJSON_AddNumberToObject(cond, "value", value);
+            cJSON_AddItemToObject(o, "condition", cond);
+        } else {
+            cJSON_AddNullToObject(o, "condition");
+        }
+        cJSON_AddNumberToObject(o, "ignoreCount", ignore);
+        cJSON_AddNumberToObject(o, "hits", debug_bp_get_hits(bp->pc, bp->bank, bp->x16Bank));
+
+        // DAP-visible identity, when this address was set through
+        // setBreakpoints. Owner-gated first to disambiguate an address another
+        // owner also happens to hold; first match wins, since a live entry
+        // should never have more than one.
+        if (debug_bp_has_owner(bp->pc, bp->bank, bp->x16Bank, DEBUG_OWNER_DAP_SOURCE)) {
+            for (int j = 0; j < num_dap_bps; j++) {
+                if (dap_bps[j].addr == (uint16_t)bp->pc && dap_bps[j].bank == bp->bank
+                    && dap_bps[j].x16Bank == bp->x16Bank) {
+                    cJSON_AddNumberToObject(o, "dapId", dap_bps[j].dap_id);
+                    cJSON_AddStringToObject(o, "file", dap_bps[j].file);
+                    cJSON_AddNumberToObject(o, "line", dap_bps[j].line);
+                    break;
+                }
+            }
+        }
+
+        cJSON_AddItemToArray(bps, o);
+    }
+    cJSON_AddItemToObject(body, "breakpoints", bps);
+
+    cJSON *wps = cJSON_CreateArray();
+    const int nwp = debug_wp_count();
+    for (int i = 0; i < nwp; i++) {
+        const struct watchpoint *wp = debug_wp_at(i);
+        if (!wp) continue;
+
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "addr", wp->addr);
+        cJSON_AddNumberToObject(o, "len", wp->len);
+        cJSON_AddNumberToObject(o, "x16Bank", wp->x16Bank);
+        cJSON_AddBoolToObject(o, "active", wp->active);
+        cJSON_AddItemToObject(o, "owners", owners_bitmask_to_json(wp->owners));
+        if (wp->has_value) {
+            cJSON *filter = cJSON_CreateObject();
+            cJSON_AddStringToObject(filter, "op", bp_cmp_name(wp->op));
+            cJSON_AddNumberToObject(filter, "value", wp->value);
+            cJSON_AddItemToObject(o, "valueFilter", filter);
+        } else {
+            cJSON_AddNullToObject(o, "valueFilter");
+        }
+        cJSON_AddItemToArray(wps, o);
+    }
+    cJSON_AddItemToObject(body, "watchpoints", wps);
+
+    send_dap_response(seq, "x16/listBreakpoints", true, body);
+    return 0;
+}
+
+// ─── x16/spriteMuxStats, x16/spriteMuxConfig: per-frame sprite multiplexing ─
+//
+// Structural twin of x16/perfStats/x16/perfConfig above -- same self-arming
+// poll, same explicit config request -- so a client already speaking one pair
+// finds the other unsurprising.
+
+static cJSON *sprite_frame_summary_json(const sprite_frame_summary_t *s) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "frame", s->frame);
+    cJSON_AddNumberToObject(o, "cpuCycles", s->cpu_cycles);
+    cJSON_AddNumberToObject(o, "genCount", s->gen_count);
+    cJSON_AddNumberToObject(o, "effectiveSprites", s->effective_sprites);
+    cJSON_AddNumberToObject(o, "phantomWrites", s->phantom_writes);
+    cJSON_AddNumberToObject(o, "lateWrites", s->late_writes);
+    cJSON_AddNumberToObject(o, "slotsUsed", s->slots_used);
+    cJSON_AddNumberToObject(o, "slotsMultiplexed", s->slots_multiplexed);
+    cJSON_AddNumberToObject(o, "maxGensInSlot", s->max_gens_in_slot);
+    cJSON_AddNumberToObject(o, "mutations", s->mutations);
+    cJSON_AddNumberToObject(o, "mutationsOnscreen", s->mutations_onscreen);
+    cJSON_AddNumberToObject(o, "mutationBursts", s->mutation_bursts);
+    cJSON_AddNumberToObject(o, "mutationCycles", s->mutation_cycles);
+    cJSON_AddNumberToObject(o, "burstGap", s->burst_gap);
+    cJSON_AddNumberToObject(o, "linesExhausted", s->lines_exhausted);
+    cJSON_AddNumberToObject(o, "spritesDropped", s->sprites_dropped);
+    cJSON_AddNumberToObject(o, "budgetUsedTotal", s->budget_used_total);
+    cJSON_AddNumberToObject(o, "peakLine", s->peak_line);
+    cJSON_AddNumberToObject(o, "peakBudget", s->peak_budget);
+    cJSON_AddNumberToObject(o, "peakDemand", s->peak_demand);
+    cJSON_AddBoolToObject(o, "multiplexing", s->multiplexing);
+    return o;
+}
+
+static int handle_x16_sprite_mux_stats(int seq, cJSON *args) {
+    (void)args;
+    // Same rationale as handle_x16_perf_stats: asking for statistics is
+    // asking for them to be collected, so attach-poll-read just works.
+    if (!sprite_trace_owner_wants(SPRITE_TRACE_OWNER_DAP) && !sprite_trace_active) {
+        sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, true);
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "enabled", sprite_trace_active);
+    cJSON_AddNumberToObject(body, "burstGap", sprite_trace_get_burst_gap());
+    cJSON_AddNumberToObject(body, "memoryBytes", (double)sprite_trace_memory_usage());
+
+    // NULL until a frame completes after tracing was (re)enabled -- enabling
+    // resets the recording -- and it never becomes non-NULL while the machine
+    // is halted, since tracing only advances on a completed frame.
+    const sprite_trace_frame_t *f = sprite_trace_last_frame();
+    if (f) {
+        cJSON_AddItemToObject(body, "frame", sprite_frame_summary_json(&f->summary));
+    }
+
+    send_dap_response(seq, "x16/spriteMuxStats", true, body);
+    return 0;
+}
+
+static int handle_x16_sprite_mux_config(int seq, cJSON *args) {
+    if (!args) {
+        send_dap_error_response(seq, "x16/spriteMuxConfig", "missing arguments");
+        return 0;
+    }
+
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+    if (cJSON_IsBool(item)) {
+        if (!sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, cJSON_IsTrue(item))) {
+            send_dap_error_response(seq, "x16/spriteMuxConfig",
+                                    "could not allocate the trace buffers");
+            return 0;
+        }
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "burstGap");
+    if (cJSON_IsNumber(item) && item->valuedouble > 0)
+        sprite_trace_set_burst_gap((uint32_t)item->valuedouble);
+
+    item = cJSON_GetObjectItemCaseSensitive(args, "reset");
+    if (cJSON_IsTrue(item))
+        sprite_trace_reset();
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "enabled", sprite_trace_active);
+    cJSON_AddNumberToObject(body, "burstGap", sprite_trace_get_burst_gap());
+    send_dap_response(seq, "x16/spriteMuxConfig", true, body);
+    return 0;
+}
+
 static int handle_dap_disassemble(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "disassemble", "missing arguments");
@@ -2947,6 +3168,9 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
+    else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
+    else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
+    else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);
 
     else if (!strcmp(cmd, "disassemble"))   result = handle_dap_disassemble(seq, args);
     else if (!strcmp(cmd, "setVariable"))   result = handle_dap_set_variable(seq, args);
@@ -3004,6 +3228,16 @@ static void dap_release_session_state(void) {
 
     dap_stop_on_entry = false;
     dap_stop_announced = false;
+
+    // Let go of anything this session armed for polling, so a client that
+    // asked for statistics and then disconnected does not strand the
+    // accounting (or, for sprite_trace, its ~600KB of buffers) running for
+    // nobody. Symmetric with the owner-arm calls in handle_x16_perf_stats,
+    // handle_x16_perf_config, handle_x16_sprite_mux_stats and
+    // handle_x16_sprite_mux_config above.
+    perf_budget_arm(PERF_OWNER_DAP, false);
+    vera_bandwidth_arm(VERA_BW_OWNER_DAP, false);
+    sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, false);
 }
 
 static void disconnect_client(void) {

@@ -620,7 +620,6 @@ expect("but the guest's own data-port traffic is", guest_port_bytes > 0)
 # Leave the machine as we found it.
 perf(seq, {"enabled": False})
 
-
 #
 # The core records who wanted each breakpoint, so a client disconnecting clears
 # its own and leaves everything else armed. Reconstructing that from outside the
@@ -649,6 +648,125 @@ def bp_addrs(s):
     return [t for t in out.split() if t.startswith("$")]
 
 _eval_seq = 0
+
+# 15d. x16/listBreakpoints: every armed breakpoint/watchpoint, any owner.
+#
+# setBreakpoints and its siblings only tell a client about breakpoints IT
+# itself set. This is the read-back for the whole picture. setBreakpoints /
+# setFunctionBreakpoints resolve a source line (or label) to an address
+# through a loaded .dbg file, which this generic-ROM harness does not have,
+# so -- like those requests elsewhere in this file -- they are not exercised
+# here. What IS checked is the console-owned path this file already has a
+# hand on: does the shape, the owner decoding, and the hit/ignore-count
+# accounting come back right for an entry the harness can actually create.
+
+
+def list_breakpoints(seq):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/listBreakpoints"})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("command") == "x16/listBreakpoints":
+            return m
+    return None
+
+
+lb_bp_addr = 0x3E00
+lb_wp_addr = 0x3E80
+evaluate(sock, "bp_add %04X" % lb_bp_addr)
+evaluate(sock, "watch_add %04X" % lb_wp_addr)
+
+r = list_breakpoints(150)
+expect("x16/listBreakpoints responds", r is not None and r.get("success"))
+
+if r and r.get("success"):
+    body = r.get("body", {})
+    bps = body.get("breakpoints", [])
+    wps = body.get("watchpoints", [])
+
+    entry = next((b for b in bps if b.get("pc") == lb_bp_addr), None)
+    expect("the console-added breakpoint is listed", entry is not None)
+    if entry:
+        expect("it is owned by dapConsole", "dapConsole" in entry.get("owners", []))
+        expect("it is enabled", entry.get("enabled") is True)
+        expect("it has no condition", entry.get("condition") is None)
+        expect("it carries an ignore count and hit count",
+               "ignoreCount" in entry and "hits" in entry)
+        expect("it has no DAP-source identity (not set via setBreakpoints)",
+               "dapId" not in entry)
+
+    wentry = next((w for w in wps if w.get("addr") == lb_wp_addr), None)
+    expect("the console-added watchpoint is listed", wentry is not None)
+    if wentry:
+        expect("it is active", wentry.get("active") is True)
+        expect("it is owned by dapConsole", "dapConsole" in wentry.get("owners", []))
+        expect("it has no value filter", wentry.get("valueFilter") is None)
+
+# Leave the machine as we found it.
+evaluate(sock, "bp_remove %04X" % lb_bp_addr)
+evaluate(sock, "watch_remove %04X" % lb_wp_addr)
+
+# 15e. x16/spriteMuxStats and x16/spriteMuxConfig: sprite-multiplexing stats.
+#
+# Structural twin of x16/perfStats/x16/perfConfig above -- same self-arming
+# poll, same explicit config request. The machine has been running since
+# section 15b, which matters here: sprite_trace only advances on a completed
+# frame, so nothing below means anything against a paused CPU.
+
+
+def sprite_mux_config(seq, args=None):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/spriteMuxConfig",
+                    "arguments": args if args is not None else {}})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("command") == "x16/spriteMuxConfig":
+            return m
+    return None
+
+
+def sprite_mux_stats(seq, args=None):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/spriteMuxStats",
+                    "arguments": args if args is not None else {}})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("command") == "x16/spriteMuxStats":
+            return m
+    return None
+
+
+r = sprite_mux_config(160, {"enabled": True, "burstGap": 64, "reset": True})
+expect("x16/spriteMuxConfig arms tracing", r is not None and r.get("success"))
+expect("tracing reports itself enabled",
+       r is not None and r.get("body", {}).get("enabled") is True)
+expect("burstGap round-trips through config",
+       r is not None and r.get("body", {}).get("burstGap") == 64)
+
+# Frames only complete while the machine runs, and tracing was just reset, so
+# poll with retries rather than a single fixed sleep.
+frame = None
+stats_body = None
+for i in range(20):
+    r = sprite_mux_stats(161 + i)
+    if r and r.get("success"):
+        body = r.get("body", {})
+        if body.get("frame"):
+            stats_body = body
+            frame = body["frame"]
+            break
+    time.sleep(0.1)
+
+expect("x16/spriteMuxStats eventually reports a frame", frame is not None)
+if frame:
+    expect("burstGap round-trips through stats", stats_body.get("burstGap") == 64)
+    expect("effective sprites is a plausible count",
+           0 <= frame.get("effectiveSprites", -1) <= 128)
+    expect("peak line is within the visible frame", 0 <= frame.get("peakLine", -1) < 480)
+    expect("slots used does not exceed the sprite table",
+           0 <= frame.get("slotsUsed", -1) <= 128)
+
+# Leave the machine as we found it: tracing allocates ~600KB of buffers.
+r = sprite_mux_config(200, {"enabled": False})
+expect("sprite-mux tracing can be switched back off",
+       r is not None and r.get("body", {}).get("enabled") is False)
 
 baseline = bp_addrs(sock)
 print("       breakpoints before this session: %s" % (" ".join(baseline) or "(none)"))

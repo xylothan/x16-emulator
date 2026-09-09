@@ -201,6 +201,20 @@ extern bool sprite_trace_active;
 bool sprite_trace_set_enabled(bool on);
 void sprite_trace_reset(void);
 
+// Who has asked for tracing. It runs while ANY owner wants it, so a DAP
+// client polling stats is not switched off the moment somebody closes the
+// Sprite Multiplex panel, and closing the panel does not strand a client
+// with a dead feed. Mirrors perf_budget's PERF_OWNER_UI/PERF_OWNER_DAP.
+typedef enum {
+	SPRITE_TRACE_OWNER_UI = 0,  // the ImGui Sprite Multiplex tab
+	SPRITE_TRACE_OWNER_DAP,     // a debug adapter client
+	SPRITE_TRACE_OWNER_COUNT
+} sprite_trace_owner_t;
+
+// Returns false only if the buffers could not be allocated.
+bool sprite_trace_arm(sprite_trace_owner_t owner, bool want);
+bool sprite_trace_owner_wants(sprite_trace_owner_t owner);
+
 // Bytes currently held by the trace, for the panel to report.
 size_t sprite_trace_memory_usage(void);
 

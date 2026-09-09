@@ -567,7 +567,7 @@ void
 draw_sprite_multiplex_tab(const uint32_t pal[256])
 {
     if (ImGui::Checkbox("Record sprite raster activity", &s_enabled)) {
-        s_alloc_failed = !sprite_trace_set_enabled(s_enabled);
+        s_alloc_failed = !sprite_trace_arm(SPRITE_TRACE_OWNER_UI, s_enabled);
         if (s_alloc_failed)
             s_enabled = false;
         s_ghost_frame = 0xFFFFFFFFu;
