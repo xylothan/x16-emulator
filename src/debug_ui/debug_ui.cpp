@@ -14,9 +14,12 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 static SDL_Window   *s_window      = nullptr;
 static SDL_Renderer *s_renderer    = nullptr;
@@ -28,6 +31,78 @@ static bool          s_show_settings = false;        // System → Settings...
 
 static void debug_ui_latch_goto(void); // defined below; called from debug_ui_render
 static void debug_ui_follow_stop_location(void); // ditto
+
+// Found in the wild: this project's saved imgui.ini with a table's lone
+// WidthStretch column at `Weight=-nan(ind)` (the Breakpoints panel's
+// Execution table - "Condition" is its only stretch column among five fixed
+// ones). Exactly how a NaN gets written is still open - the obvious path,
+// ImGui's TableUpdateColumnsWeightFromWidth dividing a zero stretch width by
+// a zero total, is itself guarded by an assert on that total being positive
+// in any build with asserts live, so it must have been produced by an
+// asserts-disabled build taking some other route.
+//
+// Whatever wrote it, loading it back is what breaks things: the column
+// renders at ~zero width (hiding the "set condition" button behind it, which
+// looks like the feature went missing), and the first column-border drag
+// that makes ImGui recompute weights hits IM_ASSERT(column->StretchWeight >
+// 0.0f) in imgui_tables.cpp and aborts.
+//
+// Fixed as plain text, on disk, before ImGui ever parses the file (its ini
+// auto-load happens inside the first NewFrame(), which runs after
+// debug_ui_init() returns) - rather than by reaching into ImGui's internal
+// settings structures after the fact. Plain text keeps this independent of
+// how a given ImGui version happens to represent a loaded table's settings
+// in memory; it only has to agree with the on-disk format, which is public
+// and part of what SaveIniSettingsToDisk documents it writes.
+static void
+debug_ui_sanitize_ini_file(const char *path)
+{
+    if (!path || !path[0]) {
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return; // no ini yet (first run) - nothing to sanitize
+    }
+    std::string text;
+    char        buf[4096];
+    size_t      n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+        text.append(buf, n);
+    }
+    fclose(f);
+
+    // Every "Weight=" in an imgui.ini belongs to a [Table] column, and every
+    // one of those must be a finite, positive float - so any value that
+    // isn't gets reset to ImGui's own default (equal weighting, 1.0) with no
+    // need to parse out which table or column it belongs to.
+    bool         changed = false;
+    const char  *needle  = "Weight=";
+    const size_t nlen    = strlen(needle);
+    size_t       pos     = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        size_t value_start = pos + nlen;
+        size_t value_end   = value_start;
+        while (value_end < text.size() && text[value_end] != '\r' && text[value_end] != '\n') {
+            value_end++;
+        }
+        const double value = strtod(text.c_str() + value_start, nullptr);
+        if (!(value > 0.0) || !std::isfinite(value)) {
+            text.replace(value_start, value_end - value_start, "1.0000");
+            changed    = true;
+            value_end  = value_start + 6; // length of "1.0000"
+        }
+        pos = value_end;
+    }
+
+    if (!changed) {
+        return;
+    }
+    if (FILE *out = fopen(path, "wb")) {
+        fwrite(text.data(), 1, text.size(), out);
+        fclose(out);
+    }
+}
 
 // ── Font ladder for per-window zoom ─────────────────────────────────────────
 // ImGui's default font is rasterised once at a single size; scaling it (which
@@ -193,6 +268,10 @@ debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;      // dockable panels
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // keyboard nav
+
+    // Repair a corrupted saved table setting before ImGui's own auto-load
+    // (inside the first NewFrame(), further down) ever reads it.
+    debug_ui_sanitize_ini_file(io.IniFilename);
 
     // Our own imgui.ini section for user preferences. Must be installed before
     // ImGui loads the ini (i.e. before the first NewFrame) or the saved values
@@ -736,6 +815,7 @@ debug_ui_render(void)
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
     // Publish any cross-panel goto requested last frame so every panel sees it.
     debug_ui_latch_goto();
 
