@@ -297,22 +297,18 @@ draw_breakpoints()
 	ImGui::Separator();
 
 	// --- Breakpoint list ------------------------------------------------
+	// This view is rebuilt from the core's table (sync_tracked(), called by our
+	// caller) every single frame this panel is visible, so a breakpoint set by
+	// a DAP client, the CLI, or F9 elsewhere shows up here on its own - there
+	// is no separate list of ours to fall behind it. A "Resync" button used to
+	// sit here for that; it was removed because it could not do anything a
+	// click and a non-click did not already do the same frame: sync_tracked()
+	// unconditionally runs before this function is ever reached, so the button
+	// could only be clicked in the one state (this tab already visible) where
+	// it was already redundant.
 	ImGui::Text("Breakpoints: %d", (int)s_tracked.size());
-	ImGui::SameLine();
-	// This view is already rebuilt from the core's table every frame the
-	// panel is visible (see sync_tracked()'s caller), so a breakpoint a DAP
-	// client sets shows up here on its own the next time this tab is looked
-	// at - it never has its own list to fall out of step with. But nothing
-	// pushes a repaint while the tab sits in the background, which is
-	// normally where it is during a DAP session, so this button exists to
-	// force the same resync on demand rather than asking a user to trust
-	// that switching tabs did it.
-	if (ImGui::SmallButton("Resync")) {
-		sync_tracked();
-	}
-	ImGui::SetItemTooltip("Re-read every active breakpoint from the debugger core,\n"
-	                      "including ones set by a DAP client (VS Code, etc.) rather\n"
-	                      "than from this panel.");
+	ImGui::SetItemTooltip("Always current for whoever set it - UI, CLI, or a DAP client -\n"
+	                      "while this tab is in view.");
 	ImGui::SameLine();
 	ImGui::BeginDisabled(s_tracked.empty());
 	if (ImGui::SmallButton("Enable All")) {

@@ -566,6 +566,15 @@ draw_ghost(const sprite_trace_frame_t *f, const uint32_t pal[256])
 void
 draw_sprite_multiplex_tab(const uint32_t pal[256])
 {
+    // s_enabled means "the UI wants tracing", and nothing but the checkbox
+    // below ever sets that bit - but re-deriving it from the core each frame
+    // costs nothing and means it can never quietly drift from what actually
+    // armed it. sprite_trace_active is a different question ("is tracing on
+    // right now, for whatever reason") and must stay a live read below, not
+    // this flag: a DAP client can arm tracing on its own, and this checkbox
+    // would otherwise sit unchecked while data was already being recorded.
+    s_enabled = sprite_trace_owner_wants(SPRITE_TRACE_OWNER_UI);
+
     if (ImGui::Checkbox("Record sprite raster activity", &s_enabled)) {
         s_alloc_failed = !sprite_trace_arm(SPRITE_TRACE_OWNER_UI, s_enabled);
         if (s_alloc_failed)
@@ -578,9 +587,17 @@ draw_sprite_multiplex_tab(const uint32_t pal[256])
     if (ImGui::SliderInt("Burst gap", &s_burst_gap, 8, 2048, "%d cyc"))
         sprite_trace_set_burst_gap((uint32_t)s_burst_gap);
 
-    if (s_enabled) {
+    // Live, not s_enabled: tracing can be running because a DAP client armed
+    // it even while this checkbox reads unchecked, and the memory really is
+    // allocated either way.
+    if (sprite_trace_active) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(%zu KB)", sprite_trace_memory_usage() / 1024);
+        if (sprite_trace_owner_wants(SPRITE_TRACE_OWNER_DAP) && !s_enabled) {
+            ImGui::TextDisabled("(active - armed by a DAP client, %zu KB)",
+                                sprite_trace_memory_usage() / 1024);
+        } else {
+            ImGui::TextDisabled("(%zu KB)", sprite_trace_memory_usage() / 1024);
+        }
     }
     if (s_alloc_failed)
         ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Could not allocate the trace buffers.");
