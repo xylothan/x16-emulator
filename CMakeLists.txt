@@ -22,6 +22,32 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# Native DirectX 12 renderer for the emulator output. The checked-in DXBC
+# headers keep ordinary builds independent of fxc/D3DCompiler at runtime.
+set(ENABLE_DX12 "AUTO" CACHE STRING "Build the native DirectX 12 renderer (ON/OFF/AUTO)")
+set_property(CACHE ENABLE_DX12 PROPERTY STRINGS ON OFF AUTO)
+if(NOT ENABLE_DX12 STREQUAL "ON" AND NOT ENABLE_DX12 STREQUAL "OFF" AND
+   NOT ENABLE_DX12 STREQUAL "AUTO")
+    message(FATAL_ERROR "[x16] ENABLE_DX12 must be ON, OFF, or AUTO (got '${ENABLE_DX12}').")
+endif()
+
+set(USE_DX12 FALSE)
+if(ENABLE_DX12 STREQUAL "ON")
+    if(NOT WIN32 OR NOT MSVC)
+        message(FATAL_ERROR "[x16] ENABLE_DX12=ON requires Windows with MSVC.")
+    endif()
+    set(USE_DX12 TRUE)
+elseif(ENABLE_DX12 STREQUAL "AUTO")
+    if(WIN32 AND MSVC)
+        set(USE_DX12 TRUE)
+        message(STATUS "[x16] Native DirectX 12 renderer enabled (auto).")
+    else()
+        message(STATUS "[x16] Native DirectX 12 renderer disabled: requires Windows with MSVC.")
+    endif()
+else()
+    message(STATUS "[x16] Native DirectX 12 renderer explicitly disabled.")
+endif()
+
 if(ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
@@ -310,6 +336,8 @@ set(X16_SOURCES
     src/cpu/irq_ctx.c
     src/javascript_interface.c
     src/joystick.c
+    src/render_backend.c
+    src/render_sdl.c
     src/rendertext.c
     src/keyboard.c
     src/icon.c
@@ -323,6 +351,10 @@ set(X16_SOURCES
     src/midi.c
     src/extern/ymfm/src/ymfm_opm.cpp
 )
+
+if(USE_DX12)
+    list(APPEND X16_SOURCES src/render_dx12.cpp)
+endif()
 
 if(USE_IMGUI)
     # Vendored Dear ImGui (docking branch) + the SDL2 / SDLRenderer2 backends,
@@ -340,6 +372,15 @@ if(USE_IMGUI)
         src/extern/imgui/backends/imgui_impl_sdlrenderer2.cpp
     )
 
+    # The DirectX 12 renderer backend, for drawing the debugger window on the
+    # emulator's native DX12 device. Locally patched to use the checked-in
+    # DXBC in imgui_impl_dx12_{vs,ps}.h instead of calling D3DCompile(), so no
+    # build or run of this emulator needs a shader compiler. Still vendored, so
+    # it inherits the warning suppression below.
+    if(USE_DX12)
+        list(APPEND IMGUI_SOURCES src/extern/imgui/backends/imgui_impl_dx12.cpp)
+    endif()
+
     # The debug_ui module: a C-callable core plus self-registering panels.
     # Adding a panel means dropping a file under src/debug_ui/panels/ and
     # listing it here.
@@ -348,6 +389,7 @@ if(USE_IMGUI)
         src/debug_ui/debug_ui_panels.cpp
         src/debug_ui/debug_ui_settings.cpp
         src/debug_ui/io_reg_info.cpp
+        src/debug_ui/debug_ui_image.cpp
         src/debug_ui/panels/memory_panel.cpp
         src/debug_ui/panels/disasm_panel.cpp
         src/debug_ui/panels/cpu_panel.cpp
@@ -361,8 +403,12 @@ if(USE_IMGUI)
         src/debug_ui/panels/fm_panel.cpp
         src/debug_ui/panels/pcm_panel.cpp
         src/debug_ui/panels/io_panel.cpp
-    src/debug_ui/panels/perf_panel.cpp
+        src/debug_ui/panels/perf_panel.cpp
     )
+
+    if(USE_DX12)
+        list(APPEND DEBUG_UI_SOURCES src/debug_ui/debug_ui_dx12.cpp)
+    endif()
 
     list(APPEND X16_SOURCES ${IMGUI_SOURCES} ${DEBUG_UI_SOURCES})
 endif()
@@ -421,6 +467,10 @@ if(USE_TRACE)
     target_compile_definitions(x16emu PRIVATE TRACE)
 endif()
 
+if(USE_DX12)
+    target_compile_definitions(x16emu PRIVATE HAS_DX12)
+endif()
+
 # Linking
 target_link_libraries(x16emu PRIVATE
     SDL2::SDL2
@@ -469,6 +519,9 @@ if(WIN32)
         target_link_options(x16emu PRIVATE /SUBSYSTEM:CONSOLE)
     endif()
     target_link_libraries(x16emu PRIVATE dwmapi)
+    if(USE_DX12)
+        target_link_libraries(x16emu PRIVATE d3d12 dxgi dxguid)
+    endif()
 endif()
 
 # macOS Specifics
@@ -685,16 +738,21 @@ x16_add_test(vera_psg
 # The real video.c, which is VERA plus the SDL host in one file. The fixture
 # supplies the host half so the emulation half can be driven directly; the audio
 # modules are linked for real because video.c routes $9F3B-$9F3D into them and
-# they have no dependencies of their own.
+# they have no dependencies of their own. The renderer adapter is linked but
+# never initialized by these tests, which do not open a window.
+set(VERA_VIDEO_TEST_SOURCES
+    src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c
+    src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c)
+
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 # Sprite multiplexing end to end: attributes rewritten part-way down a frame,
 # measured through the real renderer rather than through the recorder's API.
 x16_add_test(sprite_multiplex NEEDS_SDL
     SOURCES tests/test_sprite_multiplex.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET sprite_multiplex_test)
     target_include_directories(sprite_multiplex_test PRIVATE src src/extern/include)
@@ -790,7 +848,7 @@ add_test(NAME vera_palette
 # Register banking: the same addresses carry different registers per DCSEL.
 x16_add_test(vera_regbank NEEDS_SDL
     SOURCES tests/test_vera_regbank.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_regbank_test)
     target_include_directories(vera_regbank_test PRIVATE src/extern/include)
@@ -807,7 +865,7 @@ endif()
 # check side effects; this links the real video.c.
 x16_add_test(vera_debug_read NEEDS_SDL
     SOURCES tests/test_vera_debug_read.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_debug_read_test)
     target_include_directories(vera_debug_read_test PRIVATE src/extern/include)
@@ -823,7 +881,7 @@ endif()
 # IEN bits a write can store.
 x16_add_test(vera_irq NEEDS_SDL
     SOURCES tests/test_vera_irq.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_irq_test)
     target_include_directories(vera_irq_test PRIVATE src/extern/include)
@@ -839,7 +897,7 @@ endif()
 # was derived from.
 x16_add_test(vera_reset NEEDS_SDL
     SOURCES tests/test_vera_reset.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_reset_test)
     target_include_directories(vera_reset_test PRIVATE src/extern/include)
@@ -854,7 +912,7 @@ endif()
 # The layer registers, and the map and tile base addresses derived from them.
 x16_add_test(vera_layer NEEDS_SDL
     SOURCES tests/test_vera_layer.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_layer_test)
     target_include_directories(vera_layer_test PRIVATE src/extern/include)
@@ -870,7 +928,7 @@ endif()
 # address path.
 x16_add_test(vera_layer_rows NEEDS_SDL
     SOURCES tests/test_vera_layer_rows.c tests/support/video_fixture.c tests/support/harness.c
-            src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c src/vera_psg.c src/vera_spi.c)
+            ${VERA_VIDEO_TEST_SOURCES})
 
 if(TARGET vera_layer_rows_test)
     target_include_directories(vera_layer_rows_test PRIVATE src/extern/include)

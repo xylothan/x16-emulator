@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <SDL.h>
 
+#include "render_backend.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -17,15 +19,26 @@ extern "C" {
 // Create the ImGui context + SDL2/SDLRenderer2 backends. `win`/`ren` are a
 // dedicated debugger SDL window + renderer (separate from the emulator display
 // window), created by the caller (see video.c). Enables docking. Idempotent.
-void debug_ui_init(SDL_Window *win, SDL_Renderer *ren);
+// Returns false if the backends could not be initialized.
+bool debug_ui_init(SDL_Window *win, SDL_Renderer *ren);
+
+// Create the ImGui context + SDL2/DirectX 12 backends, drawing the debugger
+// window with a second swap chain on `backend`'s shared D3D12 device, command
+// queue and shader-visible SRV heap. `backend` must be the emulator's native
+// DX12 main-window backend; anything else is refused. SDL still owns the window
+// and the event stream (ImGui_ImplSDL2_InitForD3D). Idempotent. Returns false --
+// leaving nothing initialized -- if the native path is unavailable, so the
+// caller can fall back to debug_ui_init with an SDL_Renderer.
+bool debug_ui_init_dx12(SDL_Window *win, render_backend_t *backend);
 
 // Feed one SDL event to ImGui. Call for every event pulled from the pump.
 void debug_ui_process_event(const SDL_Event *ev);
 
 // Build and present one debugger frame: NewFrame -> full-window DockSpace ->
 // iterate the panel registry -> Render + present on the debugger renderer.
-// Call once per emulator frame.
-void debug_ui_render(void);
+// Call once per emulator frame. Returns false when the native DX12 debugger
+// renderer has failed, so the caller can switch that window back to SDL.
+bool debug_ui_render(void);
 
 // Destroy backends + ImGui context. Safe to call even if never initialized.
 void debug_ui_shutdown(void);
@@ -36,7 +49,9 @@ void debug_ui_set_enabled(bool enabled);
 
 // The debugger's SDL_Renderer (the one passed to debug_ui_init). Panels that
 // need to create SDL_Texture objects for ImGui::Image (e.g. the VERA graphical
-// viewers) obtain it here. Returns nullptr before debug_ui_init runs.
+// viewers) obtain it here. Returns nullptr before debug_ui_init runs, and in
+// the native DX12 mode, where there is no SDL_Renderer at all -- panels should
+// use the DebugUiImage wrapper (debug_ui_image.h) rather than this.
 SDL_Renderer *debug_ui_get_renderer(void);
 
 // True when ImGui wants to consume keyboard input this frame (e.g. a text field

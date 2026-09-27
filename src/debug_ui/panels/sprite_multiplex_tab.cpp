@@ -13,12 +13,11 @@
 
 #include "imgui.h"
 #include "debug_ui_bridge.h"
-#include "debug_ui.h"
+#include "debug_ui_image.h"
 #include "sprite_multiplex_tab.h"
 
 #include "sprite_trace.h"
 
-#include <SDL.h>
 #include <float.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,37 +45,6 @@ gen_color(const sprite_gen_t &g, float alpha)
     return ImGui::GetColorU32(ImVec4(r, gg, b, alpha));
 }
 
-struct GfxTexture {
-    SDL_Texture *tex = nullptr;
-    int          w = 0, h = 0;
-
-    bool ensure(int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return false;
-        if (tex && w == width && h == height)
-            return true;
-        if (tex) {
-            SDL_DestroyTexture(tex);
-            tex = nullptr;
-        }
-        SDL_Renderer *ren = debug_ui_get_renderer();
-        if (!ren)
-            return false;
-        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
-                                width, height);
-        if (!tex)
-            return false;
-        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
-        w = width;
-        h = height;
-        return true;
-    }
-    void update(const uint32_t *px) { if (tex) SDL_UpdateTexture(tex, nullptr, px, w * 4); }
-    ImTextureID id() const { return (ImTextureID)(intptr_t)tex; }
-};
-
 // ---------------------------------------------------------------------------
 // Panel state
 // ---------------------------------------------------------------------------
@@ -89,7 +57,7 @@ bool  s_only_drawn    = true;
 bool  s_mark_overrun  = true;
 int   s_selected_gen  = -1;
 
-GfxTexture s_ghost_tex;
+DebugUiImage s_ghost_tex;
 uint32_t  *s_ghost_px    = nullptr;
 uint32_t   s_ghost_frame = 0xFFFFFFFFu;
 bool       s_ghost_valid = false;

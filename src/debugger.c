@@ -237,7 +237,7 @@ int    oldRegisterTicks = 0;                          // Last PC when change not
 //		This flag controls
 //
 
-SDL_Renderer *dbgRenderer;                            // Renderer passed in.
+render_backend_t *dbgRenderer;                        // Renderer passed in.
 
 // Unbanked, the RAM window, or the ROM window. A bank number selected for one
 // of these means nothing in the others.
@@ -565,7 +565,7 @@ DEBUGGetCurrentStatusNoPump(void)
 //								Setup fonts and co
 //
 // *******************************************************************************************
-void DEBUGInitUI(SDL_Renderer *pRenderer) {
+void DEBUGInitUI(render_backend_t *pRenderer) {
 		DEBUGInitChars(pRenderer);
 		dbgRenderer = pRenderer;				// Save renderer.
 }
@@ -576,6 +576,8 @@ void DEBUGInitUI(SDL_Renderer *pRenderer) {
 //
 // *******************************************************************************************
 void DEBUGFreeUI() {
+	DEBUGFreeChars();
+	dbgRenderer = NULL;
 }
 
 // *******************************************************************************************
@@ -1331,13 +1333,13 @@ static void DEBUGExecCmd() {
 void DEBUGRenderDisplay(int width, int height) {
 	if (showFullDisplay) return;								// Not rendering debug.
 
-	SDL_Rect rc;
+	render_rect_t rc;
 	rc.w = DBG_WIDTH * 6 * CHAR_SCALE;							// Erase background, set up rect
 	rc.h = height;
 	xPos = width-rc.w;yPos = 0; 								// Position screen
 	rc.x = xPos;rc.y = yPos; 									// Set rectangle and black out.
-	SDL_SetRenderDrawColor(dbgRenderer,0,0,0,SDL_ALPHA_OPAQUE);
-	SDL_RenderFillRect(dbgRenderer,&rc);
+	render_backend_set_draw_color(dbgRenderer, (render_color_t){ 0, 0, 0, SDL_ALPHA_OPAQUE });
+	render_backend_fill_rect(dbgRenderer, &rc);
 
 	int register_lines = DEBUGRenderRegisters();							// Draw register name and values.
 	DEBUGRenderCode(register_lines, currentPC);							// Render 6502 disassembly.
@@ -1362,8 +1364,9 @@ void DEBUGRenderDisplay(int width, int height) {
 static void DEBUGRenderCmdLine(int x, int width, int height) {
 	char buffer[sizeof(cmdLine)+1];
 
-	SDL_SetRenderDrawColor(dbgRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);
-	SDL_RenderDrawLine(dbgRenderer, x, height-12, x+width, height-12);
+	render_backend_set_draw_color(dbgRenderer,
+	                              (render_color_t){ 255, 255, 255, SDL_ALPHA_OPAQUE });
+	render_backend_draw_line(dbgRenderer, x, height-12, x+width, height-12);
 
 	sprintf(buffer, ">%s", cmdLine);
 	DEBUGString(dbgRenderer, 0, DBG_HEIGHT-1, buffer, col_cmdLine);
