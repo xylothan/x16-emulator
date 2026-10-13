@@ -309,6 +309,7 @@ set(X16_SOURCES
     src/memory.c
     src/io_trace.c
     src/perf_budget.c
+    src/perf_hist.c
     src/vera_bandwidth.c
     src/disasm.c
     src/video.c

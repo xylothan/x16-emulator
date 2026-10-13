@@ -40,6 +40,7 @@
 #include "source_view.h"
 #include "code_map.h"
 #include "perf_budget.h"
+#include "perf_hist.h"
 #include "vera_bandwidth.h"
 #include "cpu/irq_ctx.h"
 #include "utf8.h"
@@ -2245,6 +2246,13 @@ emulator_step_during_move(void)
 		instruction_counter += waiting ^ 0x1;
 		const uint16_t perf_pc    = regs.pc;
 		const uint8_t  perf_pbank = regs.k;
+		uint8_t ph_op = 0, ph_ram = 0, ph_rom = 0;
+		if (perf_hist_enabled) {
+			ph_ram = memory_get_ram_bank();
+			ph_rom = memory_get_rom_bank();
+			if (perf_hist_in_caller(perf_pc))
+				ph_op = debug_read6502(perf_pc, 0, USE_CURRENT_X16_BANK);
+		}
 		if ((debugger_enabled || imgui_debugger_enabled) && !waiting) {
 			code_map_record_current();
 		}
@@ -2253,6 +2261,8 @@ emulator_step_during_move(void)
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
 		perf_budget_record(clocks, perf_pc, perf_pbank);
+		if (perf_hist_enabled)
+			perf_hist_step_(clocks, perf_pc, ph_ram, ph_rom, ph_op, regs.pc, cpu_irq_depth() > 0);
 		via1_step(clocks);
 		vera_spi_step(MHZ, clocks);
 		if (has_serial) {
@@ -2289,6 +2299,7 @@ emulator_step_during_move(void)
 	if (new_frame) {
 		video_present_no_input();
 		perf_budget_close_frame();
+		perf_hist_close_frame();
 	}
 	if (ran_instruction) {
 		timing_update_no_sleep();
@@ -2464,10 +2475,19 @@ emulator_loop(void *param)
 		}
 		const uint16_t perf_pc    = regs.pc;
 		const uint8_t  perf_pbank = regs.k;
+		uint8_t ph_op = 0, ph_ram = 0, ph_rom = 0;
+		if (perf_hist_enabled) {
+			ph_ram = memory_get_ram_bank();
+			ph_rom = memory_get_rom_bank();
+			if (perf_hist_in_caller(perf_pc))
+				ph_op = debug_read6502(perf_pc, 0, USE_CURRENT_X16_BANK);
+		}
 		step6502();
 		uint32_t clocks = clockticks6502 - old_clockticks6502;
 		old_clockticks6502 = clockticks6502;
 		perf_budget_record(clocks, perf_pc, perf_pbank);
+		if (perf_hist_enabled)
+			perf_hist_step_(clocks, perf_pc, ph_ram, ph_rom, ph_op, regs.pc, cpu_irq_depth() > 0);
 		bool new_frame = false;
 		via1_step(clocks);
 		vera_spi_step(MHZ, clocks);
@@ -2509,6 +2529,7 @@ emulator_loop(void *param)
 			// Before timing_update(), which sleeps off whatever surplus the
 			// frame left: the budget wants the cost of the work, not the wait.
 			perf_budget_close_frame();
+			perf_hist_close_frame();
 
 			timing_update();
 #ifdef __EMSCRIPTEN__

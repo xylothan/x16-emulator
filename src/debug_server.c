@@ -9,6 +9,7 @@
 #include "disasm.h"
 #include "code_map.h"
 #include "perf_budget.h"
+#include "perf_hist.h"
 #include "vera_bandwidth.h"
 #include "sprite_trace.h"
 #include "glue.h"
@@ -2236,6 +2237,60 @@ static cJSON *vera_bandwidth_json(void) {
     return o;
 }
 
+// ─── Whole-program histogram (x16/perfHist) ─────────────────────────────────
+// Arguments, all optional, applied in this order:
+//   enabled: bool        arm/disarm (allocates ~21 MB on first arm)
+//   caller:  {start,end} the main-loop range whose JSRs open tasks
+//   reset:   bool        zero everything
+//   dump:    "path"      write the sparse histogram (see perf_hist.h)
+// The body always carries the totals and the task table.
+static int handle_x16_perf_hist(int seq, cJSON *args) {
+    cJSON *item = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
+    if (cJSON_IsBool(item) && !perf_hist_arm(cJSON_IsTrue(item))) {
+        send_dap_error_response(seq, "x16/perfHist", "could not allocate the histogram");
+        return 0;
+    }
+    item = args ? cJSON_GetObjectItemCaseSensitive(args, "caller") : NULL;
+    if (cJSON_IsObject(item)) {
+        cJSON *js = cJSON_GetObjectItemCaseSensitive(item, "start");
+        cJSON *je = cJSON_GetObjectItemCaseSensitive(item, "end");
+        if (cJSON_IsNumber(js) && cJSON_IsNumber(je))
+            perf_hist_set_caller((uint16_t)js->valuedouble, (uint16_t)je->valuedouble);
+    }
+    item = args ? cJSON_GetObjectItemCaseSensitive(args, "reset") : NULL;
+    if (cJSON_IsTrue(item))
+        perf_hist_reset();
+    long dumped = -2;
+    item = args ? cJSON_GetObjectItemCaseSensitive(args, "dump") : NULL;
+    if (cJSON_IsString(item) && item->valuestring)
+        dumped = perf_hist_dump(item->valuestring);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "enabled", perf_hist_enabled);
+    cJSON_AddNumberToObject(body, "frames", perf_hist_frames());
+    cJSON_AddNumberToObject(body, "cycles", (double)perf_hist_total_cycles());
+    cJSON_AddNumberToObject(body, "irqCycles", (double)perf_hist_irq_cycles());
+    cJSON_AddNumberToObject(body, "loopCycles", (double)perf_hist_loop_cycles());
+    if (dumped != -2)
+        cJSON_AddNumberToObject(body, "dumped", (double)dumped);
+    cJSON *tl = cJSON_CreateArray();
+    for (int i = 0; i < perf_hist_task_count(); i++) {
+        perf_hist_task_t t;
+        if (!perf_hist_task_get(i, &t)) continue;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "target", t.target);
+        cJSON_AddNumberToObject(o, "ramBank", t.ram_bank);
+        cJSON_AddNumberToObject(o, "calls", t.calls);
+        cJSON_AddNumberToObject(o, "cycles", (double)t.cycles);
+        cJSON_AddNumberToObject(o, "callMax", t.call_max);
+        cJSON_AddNumberToObject(o, "frameMax", t.frame_max);
+        cJSON_AddItemToArray(tl, o);
+    }
+    cJSON_AddItemToObject(body, "tasks", tl);
+    send_dap_response(seq, "x16/perfHist", true, body);
+    return 0;
+}
+
 static int handle_x16_perf_stats(int seq, cJSON *args) {
     // A client asking for statistics is a client that wants them collected.
     // Arming here rather than making it a separate round trip means the common
@@ -3168,6 +3223,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
+    else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);
