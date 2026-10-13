@@ -11,6 +11,7 @@ uint16_t perf_hist_caller_start = 0, perf_hist_caller_end = 0;
 
 static uint32_t *hist_main = NULL;
 static uint32_t *hist_irq  = NULL;
+static uint32_t *hist_cnt  = NULL; // instructions executed at the key
 
 static uint32_t frames;
 static uint64_t total, irq_total, loop_total;
@@ -38,10 +39,12 @@ perf_hist_arm(bool on)
 	if (on && !hist_main) {
 		hist_main = calloc(PH_KEYS, sizeof *hist_main);
 		hist_irq  = calloc(PH_KEYS, sizeof *hist_irq);
-		if (!hist_main || !hist_irq) {
+		hist_cnt  = calloc(PH_KEYS, sizeof *hist_cnt);
+		if (!hist_main || !hist_irq || !hist_cnt) {
 			free(hist_main);
 			free(hist_irq);
-			hist_main = hist_irq = NULL;
+			free(hist_cnt);
+			hist_main = hist_irq = hist_cnt = NULL;
 			perf_hist_enabled = false;
 			return false;
 		}
@@ -70,6 +73,7 @@ perf_hist_reset(void)
 	if (hist_main) {
 		memset(hist_main, 0, PH_KEYS * sizeof *hist_main);
 		memset(hist_irq, 0, PH_KEYS * sizeof *hist_irq);
+		memset(hist_cnt, 0, PH_KEYS * sizeof *hist_cnt);
 	}
 	frames = 0;
 	total = irq_total = loop_total = 0;
@@ -117,6 +121,7 @@ perf_hist_step_(uint32_t clocks, uint16_t pc, uint8_t ram_bank, uint8_t rom_bank
 {
 	const uint32_t k = key_of(pc, ram_bank, rom_bank);
 	total += clocks;
+	hist_cnt[k]++;
 	if (irq) {
 		hist_irq[k] += clocks;
 		irq_total += clocks;
@@ -185,13 +190,13 @@ perf_hist_dump(const char *path)
 	FILE *f = fopen(path, "wb");
 	if (!f)
 		return -1;
-	const uint32_t hdr[4] = {0x54534850u /* "PHST" */, 1u, PH_KEYS, frames};
+	const uint32_t hdr[4] = {0x54534850u /* "PHST" */, 2u, PH_KEYS, frames};
 	fwrite(hdr, sizeof hdr, 1, f);
 	long n = 0;
 	for (uint32_t k = 0; k < PH_KEYS; k++) {
 		if (!hist_main[k] && !hist_irq[k])
 			continue;
-		const uint32_t rec[3] = {k, hist_main[k], hist_irq[k]};
+		const uint32_t rec[4] = {k, hist_main[k], hist_irq[k], hist_cnt[k]};
 		fwrite(rec, sizeof rec, 1, f);
 		n++;
 	}

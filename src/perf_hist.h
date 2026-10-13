@@ -86,9 +86,9 @@ uint64_t perf_hist_loop_cycles(void);   // main-line cycles in the caller range
 int      perf_hist_task_count(void);
 bool     perf_hist_task_get(int i, perf_hist_task_t *out);
 
-// Sparse binary dump: "PHST", u32 version 1, u32 PH_KEYS, u32 frames, then
-// (u32 key, u32 main, u32 irq) for every key with cycles. Returns entry count
-// or -1.
+// Sparse binary dump: "PHST", u32 version 2, u32 PH_KEYS, u32 frames, then
+// (u32 key, u32 main cycles, u32 irq cycles, u32 instructions executed) for
+// every key that ran. Returns entry count or -1.
 long     perf_hist_dump(const char *path);
 
 #endif
