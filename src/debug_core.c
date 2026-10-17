@@ -4,6 +4,7 @@
 // unit-tested without standing up a machine: it reaches for only the CPU
 // register file, the two bank registers, and a non-intrusive memory read.
 
+#include <stdio.h>
 #include "debug_core.h"
 
 #include <stdlib.h>
@@ -344,7 +345,57 @@ struct bp_cond {
 	uint32_t value;
 	uint32_t ignore;
 	uint32_t hits;
+	struct bp_dump *dump;   // x16Dump: write memory and continue (NULL = stop)
 };
+
+// A DUMP breakpoint (x16Dump over DAP) does not stop: each firing -- after its
+// condition and ignore budget, exactly where a plain breakpoint would stop --
+// appends a little-endian uint32 firing index and then each region's bytes to
+// a file.  A stop-read-resume loop pays a debugger round trip per hit; this
+// pays a memory copy, so a capture of thousands of hits runs at full speed.
+#define BP_DUMP_MAX_REGIONS 16
+struct bp_dump {
+	FILE    *f;
+	uint32_t writes;
+	int      nreg;
+	struct { uint32_t addr, len; int x16Bank; } reg[BP_DUMP_MAX_REGIONS];
+};
+
+uint8_t (*debug_bp_dump_read)(uint32_t addr, int x16Bank) = NULL;
+
+static void
+dump_release(struct bp_cond *c)
+{
+	if (c->dump) {
+		if (c->dump->f)
+			fclose(c->dump->f);
+		free(c->dump);
+		c->dump = NULL;
+	}
+}
+
+static void
+dump_write(struct bp_dump *d)
+{
+	if (!d->f)
+		return;
+	uint8_t n[4] = {(uint8_t)d->writes, (uint8_t)(d->writes >> 8), (uint8_t)(d->writes >> 16),
+	                (uint8_t)(d->writes >> 24)};
+	fwrite(n, 1, 4, d->f);
+	uint8_t buf[1024];
+	for (int r = 0; r < d->nreg; r++) {
+		for (uint32_t done = 0; done < d->reg[r].len;) {
+			uint32_t k = d->reg[r].len - done;
+			if (k > sizeof buf)
+				k = sizeof buf;
+			for (uint32_t i = 0; i < k; i++)
+				buf[i] = debug_bp_dump_read ? debug_bp_dump_read(d->reg[r].addr + done + i, d->reg[r].x16Bank) : 0;
+			fwrite(buf, 1, k, d->f);
+			done += k;
+		}
+	}
+	d->writes++;
+}
 
 static struct bp_cond *bpConds     = NULL;
 static int             bpCondCount = 0;
@@ -354,6 +405,7 @@ static void
 cond_forget_all(void)
 {
 	for (int i = 0; i < bpCondCount; i++) {
+		dump_release(&bpConds[i]);
 		bpConds[i].used = false;
 	}
 }
@@ -379,6 +431,7 @@ cond_ensure(int pc, uint8_t bank, int x16Bank)
 	for (int i = 0; i < bpCondCount; i++) {
 		if (!bpConds[i].used) {
 			c = &bpConds[i];
+			dump_release(c);    // a reused slot may still own a dump file
 			break;
 		}
 	}
@@ -394,7 +447,7 @@ cond_ensure(int pc, uint8_t bank, int x16Bank)
 		}
 		c = &bpConds[bpCondCount++];
 	}
-	memset(c, 0, sizeof(*c));
+	memset(c, 0, sizeof(*c));   // a fresh slot is realloc'd garbage: no release
 	c->used    = true;
 	c->pc      = pc;
 	c->bank    = bank;
@@ -483,8 +536,13 @@ debug_bp_on_arrival(int pc, uint8_t bank)
 			continue; // condition false, so this breakpoint is not firing
 
 		c->hits++;
-		if (c->hits > c->ignore)
+		if (c->hits > c->ignore) {
+			if (c->dump) {
+				dump_write(c->dump);    // a dump breakpoint writes and runs on
+				continue;
+			}
 			return true;
+		}
 		// still inside the ignore count: counted, but keep running
 	}
 	return false;
@@ -516,8 +574,53 @@ void
 debug_bp_forget(int pc, uint8_t bank, int x16Bank)
 {
 	struct bp_cond *c = cond_find(pc, bank, x16Bank);
-	if (c)
+	if (c) {
+		dump_release(c);
 		c->used = false;
+	}
+}
+
+bool
+debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
+                  const uint32_t *addr, const uint32_t *len, const int *regBank)
+{
+	if (nreg < 0 || nreg > BP_DUMP_MAX_REGIONS)
+		return false;
+	struct bp_cond *c = cond_ensure(pc, bank, x16Bank);
+	if (!c)
+		return false;
+	dump_release(c);
+	struct bp_dump *d = (struct bp_dump *)calloc(1, sizeof(*d));
+	if (!d)
+		return false;
+	d->f = fopen(path, "wb");
+	if (!d->f) {
+		free(d);
+		return false;
+	}
+	d->nreg = nreg;
+	for (int i = 0; i < nreg; i++) {
+		d->reg[i].addr    = addr[i];
+		d->reg[i].len     = len[i];
+		d->reg[i].x16Bank = regBank[i];
+	}
+	c->dump = d;
+	return true;
+}
+
+void
+debug_bp_clear_dump(int pc, uint8_t bank, int x16Bank)
+{
+	struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	if (c)
+		dump_release(c);
+}
+
+uint32_t
+debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank)
+{
+	struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	return (c && c->dump) ? c->dump->writes : 0;
 }
 
 void
@@ -573,6 +676,8 @@ debug_core_free(void)
 	numBreakpoints = 0;
 	bpCapacity     = 0;
 
+	for (int i = 0; i < bpCondCount; i++)
+		dump_release(&bpConds[i]);
 	free(bpConds);
 	bpConds     = NULL;
 	bpCondCount = 0;

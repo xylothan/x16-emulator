@@ -2962,7 +2962,46 @@ static bool dap_parse_instruction_ref(const char *s, long offset, struct breakpo
     return debug_bp_from_ref((long)dap_parse_num(s), DEBUG_BANK_ANY, offset, out);
 }
 
+// x16Dump on an instruction breakpoint makes it a DUMP breakpoint: it does not
+// stop; each firing appends memory to a file (debug_core.c).
+//   "x16Dump": {"file": path, "regions": [{"addr": n, "len": n, "bank": n?}]}
+// addr is a 24-bit CPU address; bank pins an x16 RAM bank for $A000-$BFFF.
+static uint8_t dap_dump_read(uint32_t addr, int x16Bank) {
+    return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), x16Bank);
+}
+
+static bool dap_apply_dump(const struct breakpoint *bp, cJSON *dump) {
+    cJSON *file = cJSON_GetObjectItemCaseSensitive(dump, "file");
+    cJSON *regs = cJSON_GetObjectItemCaseSensitive(dump, "regions");
+    if (!file || !cJSON_IsString(file) || !regs || !cJSON_IsArray(regs))
+        return false;
+    uint32_t addr[16], len[16];
+    int      bank[16], n = 0;
+    cJSON   *r;
+    cJSON_ArrayForEach(r, regs) {
+        cJSON *a = cJSON_GetObjectItemCaseSensitive(r, "addr");
+        cJSON *l = cJSON_GetObjectItemCaseSensitive(r, "len");
+        cJSON *b = cJSON_GetObjectItemCaseSensitive(r, "bank");
+        if (n >= 16 || !a || !l || !cJSON_IsNumber(a) || !cJSON_IsNumber(l))
+            return false;
+        addr[n] = (uint32_t)a->valuedouble;
+        len[n]  = (uint32_t)l->valuedouble;
+        bank[n] = (b && cJSON_IsNumber(b)) ? (int)b->valuedouble : USE_CURRENT_X16_BANK;
+        n++;
+    }
+    debug_bp_dump_read = dap_dump_read;
+    return debug_bp_set_dump(bp->pc, bp->bank, bp->x16Bank, file->valuestring, n, addr, len, bank);
+}
+
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
+    // The request REPLACES the set.  Close the previous set's dump files first:
+    // clearing an owner leaves condition records behind, and a dump left on a
+    // record would ride along on the next plain breakpoint at that address.
+    for (int i = 0; i < debug_bp_count(); i++) {
+        const struct breakpoint *b = debug_bp_at(i);
+        if (b->owners & (1u << DEBUG_OWNER_DAP_INSTRUCTION))
+            debug_bp_clear_dump(b->pc, b->bank, b->x16Bank);
+    }
     debug_bp_clear_owner(DEBUG_OWNER_DAP_INSTRUCTION);
     num_instr_bps = 0;
 
@@ -2986,6 +3025,18 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
                 instr_bp_addrs[num_instr_bps++] = (uint16_t)bp.pc;
                 cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
                 verified = true;
+                cJSON *dump = cJSON_GetObjectItemCaseSensitive(ib, "x16Dump");
+                if (dump) {
+                    if (dap_apply_dump(&bp, dump))
+                        cJSON_AddBoolToObject(rb, "x16Dump", true);
+                    else {
+                        debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_DAP_INSTRUCTION);
+                        num_instr_bps--;
+                        verified = false;
+                    }
+                } else {
+                    debug_bp_clear_dump(bp.pc, bp.bank, bp.x16Bank);
+                }
             }
         }
         cJSON_AddBoolToObject(rb, "verified", verified);
