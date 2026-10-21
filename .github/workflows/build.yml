@@ -521,6 +521,73 @@ jobs:
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
+  # riscv64, built natively rather than under emulation. The runner label is
+  # NOT a GitHub-hosted one: ubuntu-24.04-riscv comes from the RISE project's
+  # free RISC-V runner service, which has to be installed as a GitHub App on
+  # the account that owns this repository ("RISE RISC-V Runners Personal" for a
+  # user account, "RISE RISC-V Runners" for an organisation). Without the app
+  # installed, nothing ever picks a job with this label up: it does not fail,
+  # it queues for the full day GitHub allows before timing it out, on every
+  # push and every pull request, forks included. timeout-minutes is no guard
+  # against that -- it only starts counting once a runner has taken the job.
+  # Hence the gate: the job runs only where the repository variable
+  # RISCV_RUNNERS is set to true, so installing the app and setting that
+  # variable are one deliberate step, and anywhere it is unset (a fork, or
+  # here before the app goes in) the job is simply skipped.
+  #
+  # Deliberately NOT a leg of the linux matrix and deliberately absent from
+  # publish's needs, for two reasons that both come down to the same thing:
+  # this is someone else's capacity. Queueing or an outage there must not be
+  # able to hold up a release. For the same reason the artifact is called
+  # riscv64-build rather than x16emu_*: publish downloads every x16emu_*
+  # artifact and deletes release assets it does not find, so an x16emu_-named
+  # riscv artifact that finished late would make its release asset flap in and
+  # out. Promote this to a linux matrix leg once it has proven reliable.
+  linux-riscv:
+    name: linux (riscv64)
+    if: vars.RISCV_RUNNERS == 'true'
+    needs: [version]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      # No setup-python here: it has no riscv64 builds to download. CMake only
+      # wants an interpreter to run buildtables.py, and apt's python3 is one.
+      #
+      # gh is needed by the fetch-rom action below. The riscv64 runner image is
+      # not GitHub's, so gh may or may not be on it, and GitHub's own apt
+      # repository may not carry riscv64 -- but noble's universe has gh 2.45,
+      # which is new enough for `gh run download -n`.
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential make cmake file git python3 \
+            libsdl2-dev libfluidsynth-dev libcjson-dev zlib1g-dev
+          command -v gh >/dev/null || sudo apt-get install -y gh
+          gh --version
+      - name: Fetch ROM
+        uses: ./.github/actions/fetch-rom
+        with:
+          release: ${{ github.ref_type == 'tag' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy ROM symbols
+        run: cp latest_rom/*.h src/.
+      - name: Build Emulator
+        run: |
+          cmake -B build -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
+          cmake --build build
+      - name: Package Emulator
+        run: |
+          mkdir emu_binaries
+          cp sdcard.img.zip emu_binaries/.
+          cp build/x16emu build/makecart emu_binaries/.
+          cp latest_rom/rom.bin latest_rom/*.sym emu_binaries/.
+          echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
+          file emu_binaries/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-build
+          path: emu_binaries/*
   macos:
     name: macos (${{ matrix.arch }})
     needs: [version, README]
