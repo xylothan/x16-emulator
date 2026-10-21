@@ -342,7 +342,7 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           update: true
-          install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake
+          install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake mingw-w64-${{ matrix.prefix }}-ntldd
           path-type: ${{ matrix.path_type }}
       - uses: actions/setup-python@v5
         with:
@@ -364,34 +364,49 @@ jobs:
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
           cmake --build .
       - name: Package Emulator
+        # The DLLs the binaries actually need, not a hardcoded list: that list
+        # broke the day fluidsynth stopped depending on glib2 and
+        # libglib-2.0-0.dll was no longer installed at all.
         run: |
+          set -euo pipefail
           mkdir emu_binaries
-          cp $(which SDL2.dll) emu_binaries/.
-          cp $(which zlib1.dll) emu_binaries/.
-          cp $(which libwinpthread-1.dll) emu_binaries/.
-          cp $(which libfluidsynth-3.dll) emu_binaries/.
-          cp $(which libgcc_s_seh-1.dll) emu_binaries/.
-          cp $(which libglib-2.0-0.dll) emu_binaries/.
-          cp $(which libgmodule-2.0-0.dll) emu_binaries/.
-          cp $(which libportaudio.dll) emu_binaries/.
-          cp $(which libintl-8.dll) emu_binaries/.
-          cp $(which libstdc++-6.dll) emu_binaries/.
-          cp $(which libgomp-1.dll) emu_binaries/.
-          cp $(which libreadline8.dll) emu_binaries/.
-          cp $(which libsndfile-1.dll) emu_binaries/.
-          cp $(which libpcre2-8-0.dll) emu_binaries/.
-          cp $(which libiconv-2.dll) emu_binaries/.
-          cp $(which libtermcap-0.dll) emu_binaries/.
-          cp $(which libFLAC.dll) emu_binaries/.
-          cp $(which libmp3lame-0.dll) emu_binaries/.
-          cp $(which libmpg123-0.dll) emu_binaries/.
-          cp $(which libogg-0.dll) emu_binaries/.
-          cp $(which libopus-0.dll) emu_binaries/.
-          cp $(which libvorbis-0.dll) emu_binaries/.
-          cp $(which libvorbisenc-2.dll) emu_binaries/.
           cp sdcard.img.zip emu_binaries/.
-          cp build/x16emu.exe emu_binaries/.
-          cp build/makecart.exe emu_binaries/.
+          cp build/x16emu.exe build/makecart.exe emu_binaries/.
+
+          # midi.c LoadLibrary()s fluidsynth instead of linking it, so it is
+          # in no import table: name it here, and walk its dependencies too --
+          # most of the old list was fluidsynth's, not the emulator's.
+          midi_dll=$MSYSTEM_PREFIX/bin/libfluidsynth-3.dll
+          cp "$midi_dll" emu_binaries/.
+
+          # ntldd -R walks the whole chain and prints Windows paths; keep only
+          # what resolves inside the MSYS2 prefix, since the rest ships with
+          # Windows. cygpath -m puts both sides in one comparable form.
+          prefix=$(cygpath -m "$MSYSTEM_PREFIX" | tr 'A-Z' 'a-z')
+          ntldd -R build/x16emu.exe build/makecart.exe "$midi_dll" | tr -d '\r' |
+            sed -n 's|^.* => \(.*\) (0x[0-9a-fA-F]*)$|\1|p' | sort -u > found.txt
+          : > dlls.txt
+          while read -r dll; do
+            win=$(cygpath -m "$dll" 2>/dev/null) || continue
+            case $(printf %s "$win" | tr 'A-Z' 'a-z') in
+              "$prefix"/*) printf '%s\n' "$win" >> dlls.txt ;;
+            esac
+          done < found.txt
+
+          # An empty list would package the exes with no DLLs and still pass.
+          if [ ! -s dlls.txt ]; then
+            echo "::error title=No DLLs found::ntldd resolved nothing under $MSYSTEM_PREFIX"
+            exit 1
+          fi
+          xargs -a dlls.txt -I{} cp {} emu_binaries/.
+          echo "::notice title=Bundled DLLs::$(cd emu_binaries && ls ./*.dll | sed 's|^\./||' | tr '\n' ' ')"
+          for want in SDL2.dll libfluidsynth-3.dll; do
+            if [ ! -f "emu_binaries/$want" ]; then
+              echo "::error title=Missing DLL::$want was not bundled"
+              exit 1
+            fi
+          done
+          rm -f found.txt dlls.txt
           file emu_binaries/*
       - name: Copy ROM
         run: |
@@ -485,7 +500,13 @@ jobs:
           cpu: ${{ matrix.cpu }}
           copy_artifact_path: emu_binaries
           commands: |
-            apt-get update
+            # Debian 11 went EOL on 2026-08-31 and its .debs have since left
+            # security.debian.org's pool: apt still resolves the deb11uN
+            # security versions from the index, then 404s downloading them
+            # (exit 100). archive.debian.org still serves them. A no-op on
+            # armhf, which takes everything from Raspbian's own mirrors.
+            grep -rlE 'security\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | xargs -r sed -i 's|security\.debian\.org/debian-security|archive.debian.org/debian-security|g' || true
+            apt-get -o Acquire::Check-Valid-Until=false update
             apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
