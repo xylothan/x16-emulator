@@ -364,7 +364,7 @@ jobs:
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
           cmake --build .
       - name: Package Emulator
-        # The DLLs the exes actually import, not a hardcoded list: that list
+        # The DLLs the binaries actually need, not a hardcoded list: that list
         # broke the day fluidsynth stopped depending on glib2 and
         # libglib-2.0-0.dll was no longer installed at all.
         run: |
@@ -373,11 +373,17 @@ jobs:
           cp sdcard.img.zip emu_binaries/.
           cp build/x16emu.exe build/makecart.exe emu_binaries/.
 
+          # midi.c LoadLibrary()s fluidsynth instead of linking it, so it is
+          # in no import table: name it here, and walk its dependencies too --
+          # most of the old list was fluidsynth's, not the emulator's.
+          midi_dll=$MSYSTEM_PREFIX/bin/libfluidsynth-3.dll
+          cp "$midi_dll" emu_binaries/.
+
           # ntldd -R walks the whole chain and prints Windows paths; keep only
           # what resolves inside the MSYS2 prefix, since the rest ships with
           # Windows. cygpath -m puts both sides in one comparable form.
           prefix=$(cygpath -m "$MSYSTEM_PREFIX" | tr 'A-Z' 'a-z')
-          ntldd -R build/x16emu.exe build/makecart.exe | tr -d '\r' |
+          ntldd -R build/x16emu.exe build/makecart.exe "$midi_dll" | tr -d '\r' |
             sed -n 's|^.* => \(.*\) (0x[0-9a-fA-F]*)$|\1|p' | sort -u > found.txt
           : > dlls.txt
           while read -r dll; do
@@ -387,7 +393,7 @@ jobs:
             esac
           done < found.txt
 
-          # An empty list would package two exes with no DLLs and still pass.
+          # An empty list would package the exes with no DLLs and still pass.
           if [ ! -s dlls.txt ]; then
             echo "::error title=No DLLs found::ntldd resolved nothing under $MSYSTEM_PREFIX"
             exit 1
