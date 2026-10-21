@@ -500,7 +500,13 @@ jobs:
           cpu: ${{ matrix.cpu }}
           copy_artifact_path: emu_binaries
           commands: |
-            apt-get update
+            # Debian 11 went EOL on 2026-08-31 and its .debs have since left
+            # security.debian.org's pool: apt still resolves the deb11uN
+            # security versions from the index, then 404s downloading them
+            # (exit 100). archive.debian.org still serves them. A no-op on
+            # armhf, which takes everything from Raspbian's own mirrors.
+            grep -rlE 'security\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | xargs -r sed -i 's|security\.debian\.org/debian-security|archive.debian.org/debian-security|g' || true
+            apt-get -o Acquire::Check-Valid-Until=false update
             apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
