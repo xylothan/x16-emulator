@@ -19,6 +19,7 @@
 #include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
 #include "debug_ui/debug_ui.h"
 #endif
+#include "host_prof.h"
 #include "keyboard.h"
 #include "gif.h"
 #include "joystick.h"
@@ -2111,8 +2112,20 @@ video_save(SDL_RWops *f)
 // once-per-frame effects -- the LED is blended into the framebuffer in place,
 // and the recorder builds its timeline from the frames it is handed -- so a
 // repaint must do neither.
+static void video_render_all_body(bool new_frame);
+
+// Everything below is the "present" host section; the debugger UI it ends with
+// nests inside as ui_build / ui_draw, so it is not double-counted.
 static void
 video_render_all_ex(bool new_frame)
+{
+	host_prof_begin(HP_PRESENT);
+	video_render_all_body(new_frame);
+	host_prof_end(HP_PRESENT);
+}
+
+static void
+video_render_all_body(bool new_frame)
 {
 	// for activity LED, overlay red 8x4 square into top right of framebuffer
 	// for progressive modes, draw LED only on even scanlines
@@ -2179,7 +2192,10 @@ video_render_all_ex(bool new_frame)
 		// Unsigned subtraction, so this stays correct across the 49-day wrap.
 		if (now - last_ui_ticks >= 16) {
 			last_ui_ticks = now;
-			if (!debug_ui_render() && imgui_native_dx12) {
+			host_prof_begin(HP_UI_BUILD);
+			const bool ui_ok = debug_ui_render();
+			host_prof_end(HP_UI_BUILD);
+			if (!ui_ok && imgui_native_dx12) {
 				// Only the debugger's own swap chain failed. The main DX12
 				// backend is still healthy, so leave it alone and move just
 				// this window back to SDL.

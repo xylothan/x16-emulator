@@ -31,6 +31,13 @@ bool debug_ui_init(SDL_Window *win, SDL_Renderer *ren);
 // caller can fall back to debug_ui_init with an SDL_Renderer.
 bool debug_ui_init_dx12(SDL_Window *win, render_backend_t *backend);
 
+// Benchmark setup, called before init. `panels` is a comma-separated list of
+// panel names to open ("all", or "" for none); NULL leaves the defaults.
+// `no_ini` neither loads nor saves imgui.ini, so the run is reproducible and
+// cannot overwrite the user's layout; it also resets settings to defaults,
+// with the I/O trace forced to `io_capture`.
+void debug_ui_bench_configure(const char *panels, bool io_capture, bool no_ini);
+
 // Feed one SDL event to ImGui. Call for every event pulled from the pump.
 void debug_ui_process_event(const SDL_Event *ev);
 

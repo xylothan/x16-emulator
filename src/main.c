@@ -41,6 +41,11 @@
 #include "code_map.h"
 #include "perf_budget.h"
 #include "perf_hist.h"
+#include "host_prof.h"
+#include "io_trace.h"
+#ifdef HAS_IMGUI
+#include "debug_ui/debug_ui.h"
+#endif
 #include "vera_bandwidth.h"
 #include "cpu/irq_ctx.h"
 #include "utf8.h"
@@ -125,6 +130,14 @@ bool dump_ram = true;
 bool dump_bank = true;
 bool dump_vram = false;
 bool warp_mode = false;
+
+// -bench: run `bench_frames` emulated frames after `bench_warmup` frames of
+// warm-up, print where the host's time went, and exit. See host_prof.h.
+static uint32_t    bench_frames = 0;
+static uint32_t    bench_warmup = 600;
+static const char *bench_ui_panels = NULL; // -uipanels
+static bool        bench_ui_iotrace = false; // -uiiotrace
+static uint32_t    host_prof_last_cycles;
 bool warp_pastes = false;
 bool grab_mouse = false;
 echo_mode_t echo_mode;
@@ -568,6 +581,19 @@ usage()
 	printf("\tStart the -prg/-bas program using RUN\n");
 	printf("-warp\n");
 	printf("\tEnable warp mode, run emulator as fast as possible.\n");
+	printf("-bench <frames> [<warmup frames>]\n");
+	printf("\tAfter the warm-up (default 600 frames), run <frames> emulated\n");
+	printf("\tframes, print where the host's time went, and exit. Combine with\n");
+	printf("\t-warp for throughput. With -uipanels, imgui.ini is neither read\n");
+	printf("\tnor written, so the run is reproducible; without it, the run\n");
+	printf("\tuses the imgui.ini in the working directory (your own layout).\n");
+#ifdef HAS_IMGUI
+	printf("-uipanels <name,name,...|all|none>\n");
+	printf("\tOpen exactly these debugger panels (with -imgui).\n");
+	printf("-uiiotrace\n");
+	printf("\tWith -bench -uipanels, turn on I/O event capture (the I/O panel's\n");
+	printf("\tlog) for VIA, YM2151, I2C, joysticks, SD and host files.\n");
+#endif
 	printf("-pastewarp\n");
 	printf("\tEnable warp mode during pastes and during loading via -bas.\n");
 	printf("-echo [{iso|raw}]\n");
@@ -956,6 +982,33 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			warp_mode = true;
+		} else if (!strcmp(argv[0], "-bench")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			bench_frames = (uint32_t)strtoul(argv[0], NULL, 10);
+			argc--;
+			argv++;
+			if (argc && argv[0][0] != '-') {
+				bench_warmup = (uint32_t)strtoul(argv[0], NULL, 10);
+				argc--;
+				argv++;
+			}
+		} else if (!strcmp(argv[0], "-uipanels")) {
+			argc--;
+			argv++;
+			if (!argc) {
+				usage();
+			}
+			bench_ui_panels = !strcmp(argv[0], "none") ? "" : argv[0];
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-uiiotrace")) {
+			argc--;
+			argv++;
+			bench_ui_iotrace = true;
 		} else if (!strcmp(argv[0], "-pastewarp")) {
 			argc--;
 			argv++;
@@ -1651,6 +1704,15 @@ main(int argc, char **argv)
 			exit(-1);
 		}
 		audio_init(audio_dev_name, audio_buffers);
+#ifdef HAS_IMGUI
+		// A benchmark that names its panels is a synthetic configuration and
+		// must not depend on (or overwrite) the user's imgui.ini. One that
+		// does not name them measures the user's own layout, so it loads the
+		// ini from the working directory like a normal run.
+		if (imgui_debugger_enabled && bench_ui_panels) {
+			debug_ui_bench_configure(bench_ui_panels, bench_ui_iotrace, bench_frames != 0);
+		}
+#endif
 		if (!video_init(window_scale, screen_x_scale, scale_quality, render_driver,
 		                fullscreen, window_opacity)) {
 			audio_close();
@@ -1670,6 +1732,15 @@ main(int argc, char **argv)
 	machine_reset();
 
 	timing_init();
+
+	if (bench_frames && headless) {
+		// Headless never closes a frame (no video_step), so the run would
+		// never end -- and it skips audio, so it would not compare anyway.
+		fprintf(stderr, "-bench needs a window; it cannot run with -headless.\n");
+		exit(1);
+	}
+	host_prof_init(SDL_GetPerformanceCounter, SDL_GetPerformanceFrequency());
+	host_prof_last_cycles = clockticks6502;
 
 	instruction_counter = 0;
 
@@ -2192,6 +2263,76 @@ perf_budget_close_frame(void)
 // we cap how much emulation one tick may do. Shares old_clockticks6502 and the
 // timing accumulators with emulator_loop(), so emulation resumes seamlessly
 // when the drag ends.
+// Close the host-time frame with the guest cycles it covered.
+static void
+host_prof_close_frame(void)
+{
+	const uint32_t now = clockticks6502;
+	host_prof_frame_end(now - host_prof_last_cycles);
+	host_prof_last_cycles = now;
+}
+
+static void
+bench_report(void)
+{
+	host_prof_summary_t s;
+	host_prof_summary(&s);
+
+	printf("\n=== host profile: %u frames, %.2f s wall%s%s ===\n", s.frames, s.wall_s,
+	       warp_mode ? ", warp" : "", imgui_debugger_enabled ? ", -imgui" : "");
+	printf("emulated %.2f MHz, %.1f frames/s, debugger UI %.1f Hz (%u UI frames)\n",
+	       s.emu_mhz, s.fps, s.ui_hz, s.ui_frames);
+	printf("busy per frame (wall - sleep): p50 %u us, p95 %u us, max %u us over %d frames\n",
+	       s.busy_p50_us, s.busy_p95_us, s.busy_max_us, s.busy_samples);
+	printf("%-10s %12s %14s\n", "section", "ms per s", "us per frame");
+	for (int i = 0; i < HP_SECTIONS; i++) {
+		printf("%-10s %12.2f %14.1f\n", host_prof_section_name((hp_section_t)i),
+		       s.ms_per_s[i], s.us_per_frame[i]);
+	}
+	const int np = host_prof_panel_count();
+	if (np > 0) {
+		printf("%-14s %8s %10s %10s %10s\n", "panel", "renders", "avg us", "max us", "ms per s");
+		for (int i = 0; i < np; i++) {
+			host_prof_panel_t p;
+			if (host_prof_panel_get(i, &p) && p.calls) {
+				printf("%-14s %8u %10.1f %10u %10.2f\n", p.name, p.calls, p.avg_us, p.max_us,
+				       p.ms_per_s);
+			}
+		}
+	}
+	printf("recorders: perf_budget %s (%d frames in ring), vera_bandwidth %s, "
+	       "io_trace %s (%d/%d events)\n",
+	       perf_budget_is_enabled() ? "on" : "off", perf_budget_frame_count(),
+	       vera_bandwidth_is_enabled() ? "on" : "off", io_trace_enabled ? "on" : "off",
+	       io_trace_count(), io_trace_capacity());
+	fflush(stdout);
+}
+
+// Called once per closed host frame. Returns false when -bench is finished.
+static bool
+bench_tick(void)
+{
+	static uint32_t n = 0;
+	static bool     measuring = false;
+	if (!bench_frames) {
+		return true;
+	}
+	n++;
+	if (!measuring) {
+		if (n >= bench_warmup) {
+			host_prof_reset();
+			measuring = true;
+			n = 0;
+		}
+		return true;
+	}
+	if (n >= bench_frames) {
+		bench_report();
+		return false;
+	}
+	return true;
+}
+
 void
 emulator_step_during_move(void)
 {
@@ -2303,6 +2444,9 @@ emulator_step_during_move(void)
 	}
 	if (ran_instruction) {
 		timing_update_no_sleep();
+	}
+	if (new_frame) {
+		host_prof_close_frame();
 	}
 
 	in_step = false;
@@ -2522,7 +2666,10 @@ emulator_loop(void *param)
 				nvram_dirty = false;
 			}
 
-			if (!video_update()) {
+			host_prof_begin(HP_EVENTS);
+			const bool keep_going = video_update();
+			host_prof_end(HP_EVENTS);
+			if (!keep_going) {
 				break;
 			}
 
@@ -2532,6 +2679,13 @@ emulator_loop(void *param)
 			perf_hist_close_frame();
 
 			timing_update();
+
+			// After it, unlike the guest budget: the host frame is the whole
+			// interval, sleep included, so its sections sum to wall time.
+			host_prof_close_frame();
+			if (!bench_tick()) {
+				break;
+			}
 #ifdef __EMSCRIPTEN__
 			// After completing a frame we yield back control to the browser to stay responsive
 			return 0;

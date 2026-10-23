@@ -310,6 +310,7 @@ set(X16_SOURCES
     src/io_trace.c
     src/perf_budget.c
     src/perf_hist.c
+    src/host_prof.c
     src/vera_bandwidth.c
     src/disasm.c
     src/video.c
@@ -683,7 +684,7 @@ x16_add_test(debug_core
 # The speed arithmetic in timing.c depends only on the machine's configured
 # clock, so the test supplies the few emulator globals it touches.
 x16_add_test(timing_speed NEEDS_SDL
-    SOURCES tests/test_timing_speed.c src/timing.c)
+    SOURCES tests/test_timing_speed.c src/timing.c src/host_prof.c)
 
 # irq_ctx.c is pure bookkeeping with no dependencies, so the test links it alone.
 x16_add_test(irq_ctx
@@ -718,6 +719,11 @@ x16_add_test(sprite_trace
 x16_add_test(perf_budget
     SOURCES tests/test_perf_budget.c tests/support/harness.c src/perf_budget.c)
 
+# host_prof.c takes its clock as a function pointer, so a hand-advanced fake
+# clock makes every expected number exact.
+x16_add_test(host_prof
+    SOURCES tests/test_host_prof.c tests/support/harness.c src/host_prof.c)
+
 # vera_bandwidth.c is the same shape as perf_budget.c and for the same reason:
 # it takes a layer's mode as five scalars rather than video.c's property struct,
 # so VERA's fetch arithmetic -- which is where every bandwidth figure comes from
@@ -743,7 +749,7 @@ x16_add_test(vera_psg
 # never initialized by these tests, which do not open a window.
 set(VERA_VIDEO_TEST_SOURCES
     src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c
-    src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c)
+    src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c src/host_prof.c)
 
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c

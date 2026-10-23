@@ -10,6 +10,7 @@
 #include "code_map.h"
 #include "perf_budget.h"
 #include "perf_hist.h"
+#include "host_prof.h"
 #include "vera_bandwidth.h"
 #include "sprite_trace.h"
 #include "glue.h"
@@ -2291,6 +2292,63 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Host time (x16/hostPerf) ───────────────────────────────────────────────
+// Where the HOST's time goes per emulated frame: emulation, input, present,
+// the debugger UI, sleep, DAP -- plus each debugger panel. Guest cycle numbers
+// (x16/perfStats, x16/perfHist) are unaffected by any of this; these are the
+// numbers that say whether the machine keeps real speed. See host_prof.h.
+// Arguments, optional:
+//   reset: bool   zero the totals first (then sample again later)
+static int handle_x16_host_perf(int seq, cJSON *args) {
+    cJSON *item = args ? cJSON_GetObjectItemCaseSensitive(args, "reset") : NULL;
+    if (cJSON_IsTrue(item))
+        host_prof_reset();
+
+    host_prof_summary_t s;
+    host_prof_summary(&s);
+    uint32_t last[HP_SECTIONS], last_wall = 0;
+    host_prof_last_frame(last, &last_wall);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "frames", s.frames);
+    cJSON_AddNumberToObject(body, "uiFrames", s.ui_frames);
+    cJSON_AddNumberToObject(body, "wallSeconds", s.wall_s);
+    cJSON_AddNumberToObject(body, "emulatedMHz", s.emu_mhz);
+    cJSON_AddNumberToObject(body, "fps", s.fps);
+    cJSON_AddNumberToObject(body, "uiHz", s.ui_hz);
+    cJSON_AddNumberToObject(body, "busyP50Us", s.busy_p50_us);
+    cJSON_AddNumberToObject(body, "busyP95Us", s.busy_p95_us);
+    cJSON_AddNumberToObject(body, "busyMaxUs", s.busy_max_us);
+    cJSON_AddNumberToObject(body, "lastFrameWallUs", last_wall);
+
+    cJSON *sections = cJSON_CreateObject();
+    for (int i = 0; i < HP_SECTIONS; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "msPerSecond", s.ms_per_s[i]);
+        cJSON_AddNumberToObject(o, "usPerFrame", s.us_per_frame[i]);
+        cJSON_AddNumberToObject(o, "lastFrameUs", last[i]);
+        cJSON_AddItemToObject(sections, host_prof_section_name((hp_section_t)i), o);
+    }
+    cJSON_AddItemToObject(body, "sections", sections);
+
+    cJSON *panels = cJSON_CreateArray();
+    for (int i = 0; i < host_prof_panel_count(); i++) {
+        host_prof_panel_t p;
+        if (!host_prof_panel_get(i, &p)) continue;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", p.name);
+        cJSON_AddNumberToObject(o, "renders", p.calls);
+        cJSON_AddNumberToObject(o, "avgUs", p.avg_us);
+        cJSON_AddNumberToObject(o, "recentUs", p.recent_us);
+        cJSON_AddNumberToObject(o, "maxUs", p.max_us);
+        cJSON_AddNumberToObject(o, "msPerSecond", p.ms_per_s);
+        cJSON_AddItemToArray(panels, o);
+    }
+    cJSON_AddItemToObject(body, "panels", panels);
+    send_dap_response(seq, "x16/hostPerf", true, body);
+    return 0;
+}
+
 static int handle_x16_perf_stats(int seq, cJSON *args) {
     // A client asking for statistics is a client that wants them collected.
     // Arming here rather than making it a separate round trip means the common
@@ -3275,6 +3333,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);
+    else if (!strcmp(cmd, "x16/hostPerf")) result = handle_x16_host_perf(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);

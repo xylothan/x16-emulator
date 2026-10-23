@@ -24,6 +24,7 @@
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "debug_server.h"
+#include "host_prof.h"
 #include "dbg_info.h"
 #include "rendertext.h"
 
@@ -539,7 +540,15 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 		static int poll_counter = 0;
 		if (++poll_counter >= 1000) {
 			poll_counter = 0;
-			if (debug_server_poll()) {
+			// Timed only with a client possible: the clock reads would
+			// otherwise be the most frequent thing here.
+			const bool timed = debug_server_is_enabled();
+			if (timed)
+				host_prof_begin(HP_DAP);
+			const bool stopped = debug_server_poll();
+			if (timed)
+				host_prof_end(HP_DAP);
+			if (stopped) {
 				return (currentMode == DMODE_STOP) ? 1 : 0;
 			}
 		}
