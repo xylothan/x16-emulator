@@ -117,6 +117,7 @@ static const char *k_dbg_banked =
 	"span\tid=1,seg=1,start=0,size=32,type=0\n"
 	"line\tid=0,file=0,line=7,span=0\n"
 	"line\tid=1,file=1,line=99,span=1\n"
+	"sym\tid=0,name=\"EntryB\",addrsize=absolute,val=0xA000,seg=1,type=lab\n"
 	"mod\tid=0,name=\"banked.o\",file=0\n";
 
 static char *
@@ -328,6 +329,17 @@ main(void)
 		check(dbg_info_addr_to_source_banked(0xA000, 5, &fu, &lu),
 		      "still reports the mapping for an unknown-bank segment");
 
+		// A breakpoint resolved now cannot be pinned to a bank: none is known.
+		{
+			dbg_addr_t a  = 0;
+			int        rb = 0;
+			check(dbg_info_source_to_addr_bank("b_bank6.s", 99, &a, &rb) && a == 0xA000 && rb == -1,
+			      "source line in an unknown-bank segment reports no bank");
+			rb = 0;
+			check(dbg_info_label_to_addr_bank("EntryB", &a, &rb) && a == 0xA000 && rb == -1,
+			      "label in an unknown-bank segment reports no bank");
+		}
+
 		// Learning one segment's bank must not make the other one confident:
 		// $A018 lies only inside the larger segment, whose bank is still unknown.
 		dbg_info_note_bank_load(0xA000, 0x10, 5);
@@ -337,6 +349,18 @@ main(void)
 		      "keeps a still-unknown segment flagged as a guess");
 
 		dbg_info_note_bank_load(0xA000, 0x20, 6);
+
+		// Once a LOAD has shown the banks, line and label lookups carry them.
+		{
+			dbg_addr_t a  = 0;
+			int        rb = -1;
+			check(dbg_info_source_to_addr_bank("a_bank5.s", 7, &a, &rb) && rb == 5,
+			      "source line reports the bank its segment was loaded into");
+			check(dbg_info_source_to_addr_bank("b_bank6.s", 99, &a, &rb) && rb == 6,
+			      "  ...and the other segment's bank for its own line");
+			check(dbg_info_label_to_addr_bank("EntryB", &a, &rb) && a == 0xA000 && rb == 6,
+			      "label reports the bank of the segment it is defined in");
+		}
 
 		const char *f5 = NULL, *f6 = NULL;
 		int         l5 = 0, l6 = 0;

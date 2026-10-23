@@ -24,6 +24,7 @@ static inline bool debug_server_is_enabled(void) { return false; }
 static inline void debug_server_output(const char *category, const char *text) { (void)category; (void)text; }
 static inline void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end) { (void)start; (void)end; }
 static inline void debug_server_retry_unverified_breakpoints(void) { }
+static inline void debug_server_rebank_breakpoints(void) { }
 static inline void debug_server_note_resumed(void) { }
 static inline void debug_server_shutdown(void) { }
 
@@ -54,6 +55,8 @@ void debug_server_output(const char *category, const char *text);
 // module is (re)loaded. No-ops when no DAP client is connected.
 void debug_server_invalidate_breakpoints_in_range(uint32_t start, uint32_t end);
 void debug_server_retry_unverified_breakpoints(void);
+// Re-pin source and function breakpoints to the RAM bank a LOAD just revealed.
+void debug_server_rebank_breakpoints(void);
 
 // Breakpoints are owned, not reconstructed. debug_core records which of -bp,
 // the SDL debugger's F9, and the four kinds this file can ask for wants each

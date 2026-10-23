@@ -419,6 +419,7 @@ dbg_load_poll(void)
 	// end belongs to a different segment.
 	if (ev.addr >= 0xA000 && ev.addr <= 0xBFFF && ev.size > 0) {
 		dbg_info_note_bank_load(ev.addr, ev.size, ev.bank);
+		debug_server_rebank_breakpoints();
 	}
 
 	// Both the .dbg's own directory and the loaded file's are host paths worth

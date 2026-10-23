@@ -643,9 +643,9 @@ def evaluate(s, expr, pause=0.3):
     return ""
 
 def bp_addrs(s):
-    # "N breakpoints: $1234 $5678" -> ["$1234", "$5678"]
+    # "N breakpoints: $1234 05:A000" -> ["$1234", "05:A000"]
     out = evaluate(s, "bp_list")
-    return [t for t in out.split() if t.startswith("$")]
+    return [t for t in out.split() if t.startswith("$") or ":" in t[1:]]
 
 _eval_seq = 0
 
@@ -868,6 +868,155 @@ try:
 except OSError as e:
     print("  FAIL server still usable after an oversized frame: %s" % e)
     failed += 1
+
+# 16. Bank-qualified breakpoints.
+#
+# A loop at $0400 maps RAM bank 1 and calls $A000, then bank 2 and calls $A000.
+# Each bank holds its own INC/RTS there. A breakpoint pinned to a bank must stop
+# only while that bank is mapped. This takes over the CPU, so it runs last.
+bk = socket.create_connection(('127.0.0.1', PORT))
+bk_buf = [b""]
+bk_seq = [0]
+bk_events = []
+
+def bk_read(timeout):
+    bk.settimeout(timeout)
+    while True:
+        b = bk_buf[0]
+        if b"\r\n\r\n" in b:
+            h, rest = b.split(b"\r\n\r\n", 1)
+            n = int([l for l in h.decode().split("\r\n")
+                     if l.startswith("Content-Length")][0].split(":")[1])
+            if len(rest) >= n:
+                bk_buf[0] = rest[n:]
+                return json.loads(rest[:n])
+        bk_buf[0] += bk.recv(65536)
+
+def bk_req(cmd, args=None):
+    bk_seq[0] += 1
+    send_dap(bk, {"seq": bk_seq[0], "type": "request", "command": cmd,
+                  "arguments": args or {}})
+    while True:
+        r = bk_read(5)
+        if r.get("type") == "event":
+            bk_events.append(r)
+        elif r.get("request_seq") == bk_seq[0]:
+            return r
+
+def bk_wait_stop(timeout):
+    end = time.time() + timeout
+    while True:
+        for i, e in enumerate(bk_events):
+            if e.get("event") == "stopped":
+                del bk_events[:i + 1]
+                return e
+        left = end - time.time()
+        if left <= 0:
+            return None
+        try:
+            r = bk_read(left)
+        except socket.timeout:
+            return None
+        if r.get("type") == "event":
+            bk_events.append(r)
+
+def bk_rd(addr, n=1):
+    r = bk_req("readMemory", {"memoryReference": "0x%04X" % addr, "count": n})
+    return base64.b64decode(r["body"]["data"])
+
+def bk_wr(addr, data):
+    bk_req("writeMemory", {"memoryReference": "0x%04X" % addr,
+                           "data": base64.b64encode(bytes(data)).decode()})
+
+def bk_stops(n, timeout=2.0):
+    """Continue n times; the RAM bank mapped at each stop, None if it ran on."""
+    banks = []
+    for _ in range(n):
+        del bk_events[:]
+        bk_req("continue", {"threadId": 1})
+        if not bk_wait_stop(timeout):
+            banks.append(None)
+            del bk_events[:]
+            bk_req("pause", {"threadId": 1})
+            bk_wait_stop(3)
+            break
+        banks.append(bk_rd(0x0000)[0])
+    return banks
+
+def bk_instr(ref):
+    r = bk_req("setInstructionBreakpoints",
+               {"breakpoints": [{"instructionReference": ref}]})
+    return r["body"]["breakpoints"][0]
+
+def bk_eval(expr):
+    return bk_req("evaluate", {"expression": expr}).get("body", {}).get("result", "")
+
+bk_req("initialize", {"adapterID": "test"})
+bk_req("attach", {})
+bk_req("configurationDone", {})
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+bk_eval("bp_clear")
+
+bk_wr(0x0400, [0x78,                          # SEI
+               0xA9, 0x01, 0x85, 0x00,        # LDA #1 / STA $00
+               0x20, 0x00, 0xA0,              # JSR $A000
+               0xA9, 0x02, 0x85, 0x00,        # LDA #2 / STA $00
+               0x20, 0x00, 0xA0,              # JSR $A000
+               0x4C, 0x01, 0x04])             # JMP $0401
+for bank, zp in ((1, 0x10), (2, 0x11), (3, 0x12)):
+    bk_wr(0x0000, [bank])
+    bk_wr(0xA000, [0xE6, zp, 0x60])           # INC zp / RTS
+bk_wr(0x0000, [1])
+bk_req("setVariable", {"variablesReference": 1, "name": "PC", "value": "$0400"})
+
+def bk_case(name, ok):
+    global passed, failed
+    if ok:
+        print("  PASS " + name)
+        passed += 1
+    else:
+        print("  FAIL " + name)
+        failed += 1
+
+bk_instr("2:A000")
+got = bk_stops(4)
+bk_case("instruction bp 2:A000 stops only in bank 2 (got %s)" % got, got == [2, 2, 2, 2])
+
+bk_instr("0x01A000")
+got = bk_stops(4)
+bk_case("instruction bp 0x01A000 stops only in bank 1 (got %s)" % got, got == [1, 1, 1, 1])
+
+bk_instr("3:A000")
+got = bk_stops(1)
+bk_case("instruction bp in a bank that never runs does not stop (got %s)" % got, got == [None])
+
+bk_instr("$A000")
+got = bk_stops(4)
+bk_case("instruction bp $A000 stops in every bank (got %s)" % got, sorted(set(got)) == [1, 2])
+
+r = bk_instr("A000")
+bk_case("bare hex instructionReference is hex: A000 arms $A000 (%s)" % bk_eval("bp_list"),
+        r.get("verified") and "$A000" in bk_eval("bp_list"))
+
+r = bk_instr("A0Z0")
+bk_case("malformed instructionReference is refused (%s)" % r, not r.get("verified"))
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+
+res = bk_eval("bp_add 2:A000")
+lst = bk_eval("bp_list")
+bk_case("bp_add 2:A000 pins bank 2 (%r, %r)" % (res, lst), "02:A000" in lst)
+got = bk_stops(3)
+bk_case("  ...and stops only in bank 2 (got %s)" % got, got == [2, 2, 2])
+res = bk_eval("bp_remove 2:A000")
+bk_case("bp_remove 2:A000 removes it (%r)" % res, "02:A000" not in bk_eval("bp_list"))
+
+res = bk_eval("bp_add 2:A0Z0")
+bk_case("bp_add refuses a malformed address (%r)" % res, res.startswith("not a breakpoint address"))
+
+bk_eval("bp_clear")
+bk_req("disconnect", {"terminateDebuggee": False})
+bk.close()
 
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(0 if failed == 0 else 1)
