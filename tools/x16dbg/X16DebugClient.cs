@@ -387,11 +387,12 @@ public class X16DebugClient : IDisposable
 
     // ─── Breakpoints (via evaluate) ─────────────────────────────────
 
-    public Task<JsonNode> AddBreakpointAsync(int address) =>
-        EvaluateAsync($"bp_add {address:X4}");
+    // "aaaa", "$aaaa", or "bb:aaaa" for bank bb; the emulator parses it.
+    public Task<JsonNode> AddBreakpointAsync(string address) =>
+        EvaluateAsync($"bp_add {address}");
 
-    public Task<JsonNode> RemoveBreakpointAsync(int address) =>
-        EvaluateAsync($"bp_remove {address:X4}");
+    public Task<JsonNode> RemoveBreakpointAsync(string address) =>
+        EvaluateAsync($"bp_remove {address}");
 
     public Task<JsonNode> ListBreakpointsAsync() =>
         EvaluateAsync("bp_list");

@@ -144,6 +144,7 @@ class Program
         Console.WriteLine("  x16dbg step                     Step one instruction");
         Console.WriteLine("  x16dbg mem 1030-1040            Dump memory $1030-$1040");
         Console.WriteLine("  x16dbg bp add 080D              Set breakpoint at $080D");
+        Console.WriteLine("  x16dbg bp add 33:A123           Set breakpoint at $A123 in bank $33 only");
         Console.WriteLine("  x16dbg -port 9010 status        Connect to port 9010");
         Console.WriteLine();
         Console.WriteLine("  VRAM -- VERA's video RAM, which is not in the CPU map. The CPU only");

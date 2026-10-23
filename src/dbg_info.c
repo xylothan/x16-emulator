@@ -96,6 +96,7 @@ static int              line_cap;
 typedef struct {
 	char    *name;
 	dbg_addr_t addr;
+	int      seg;     /* owning segment id, -1 if the record named none */
 } dbg_sym_t;
 
 static dbg_sym_t       *syms;
@@ -719,8 +720,10 @@ static bool parse_sym_record(const char *p)
 	}
 
 	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return true; }
+	long seg = parse_int_key(p, "seg");
 	syms[sym_count].name = name;
 	syms[sym_count].addr = (dbg_addr_t)val;
+	syms[sym_count].seg  = seg >= 0 ? (int)seg + id_base_seg : -1;
 	sym_count++;
 	return true;
 }
@@ -761,6 +764,19 @@ static bool parse_sym_record(const char *p)
 static const dbg_seg_t *find_seg(int id)
 {
 	DBG_FIND_BY_ID(segs, seg_count, id);
+}
+
+/* The RAM bank a banked segment was seen loaded into, or -1. A bank guessed
+ * from an equate does not count: pinning a breakpoint to a wrong guess would
+ * stop it firing at all. */
+static int seg_observed_bank(int seg_id, dbg_addr_t addr)
+{
+	if (addr < 0xA000 || addr > 0xBFFF)
+		return -1;
+	const dbg_seg_t *sg = find_seg(seg_id);
+	if (!sg || sg->bank < 0 || sg->bank_from_equ)
+		return -1;
+	return sg->bank;
 }
 
 static const dbg_span_t *find_span(int id)
@@ -1294,6 +1310,11 @@ bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr
 
 bool dbg_info_label_to_addr(const char *name, dbg_addr_t *addr)
 {
+	return dbg_info_label_to_addr_bank(name, addr, NULL);
+}
+
+bool dbg_info_label_to_addr_bank(const char *name, dbg_addr_t *addr, int *ram_bank)
+{
 	if (!loaded || !name || !name[0])
 		return false;
 
@@ -1301,6 +1322,8 @@ bool dbg_info_label_to_addr(const char *name, dbg_addr_t *addr)
 		if (strcasecmp(syms[i].name, name) == 0) {
 			if (addr)
 				*addr = syms[i].addr;
+			if (ram_bank)
+				*ram_bank = seg_observed_bank(syms[i].seg, syms[i].addr);
 			return true;
 		}
 	}
@@ -1704,6 +1727,12 @@ int dbg_info_scan_dbg_files(const char *dir, char out[][DBG_INFO_PATH_MAX], int 
 
 bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *addr)
 {
+	return dbg_info_source_to_addr_bank(file_path, line_num, addr, NULL);
+}
+
+bool dbg_info_source_to_addr_bank(const char *file_path, int line_num, dbg_addr_t *addr,
+                                  int *ram_bank)
+{
 	if (!loaded || !file_path)
 		return false;
 
@@ -1726,6 +1755,8 @@ bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *ad
 		if (strcasecmp(query_base, entry_base) == 0) {
 			if (addr)
 				*addr = addr_map[i].addr;
+			if (ram_bank)
+				*ram_bank = seg_observed_bank(addr_map[i].seg_id, addr_map[i].addr);
 			return true;
 		}
 	}
