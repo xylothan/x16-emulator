@@ -1013,6 +1013,55 @@ bk_case("bp_remove 2:A000 removes it (%r)" % res, "02:A000" not in bk_eval("bp_l
 
 res = bk_eval("bp_add 2:A0Z0")
 bk_case("bp_add refuses a malformed address (%r)" % res, res.startswith("not a breakpoint address"))
+bk_eval("bp_clear")
+
+# Conditions on instruction breakpoints. In the loop above A is 1 when bank 1's
+# $A000 runs and 2 when bank 2's does.
+def bk_instr_bp(bp):
+    r = bk_req("setInstructionBreakpoints", {"breakpoints": [bp]})
+    return r["body"]["breakpoints"][0]
+
+r = bk_instr_bp({"instructionReference": "$A000", "condition": "A == 2"})
+got = bk_stops(3)
+bk_case("instruction bp condition A == 2 stops only when A is 2 (got %s)" % got,
+        r.get("verified") and got == [2, 2, 2])
+
+r = bk_instr_bp({"instructionReference": "$A000", "condition": "bank == 1"})
+got = bk_stops(3)
+bk_case("instruction bp condition bank == 1 pins bank 1 (got %s)" % got,
+        r.get("verified") and got == [1, 1, 1])
+
+r = bk_instr_bp({"instructionReference": "$A000", "condition": "bank == 2 && A == 1"})
+got = bk_stops(1)
+bk_case("instruction bp bank == 2 && A == 1 never matches (got %s)" % got,
+        r.get("verified") and got == [None])
+
+r = bk_instr_bp({"instructionReference": "$A000", "x16Bank": 1})
+got = bk_stops(3)
+bk_case("instruction bp x16Bank field pins bank 1 (got %s)" % got,
+        r.get("verified") and got == [1, 1, 1])
+
+# Stopped on $A000 with its INC still to run. Resuming runs that INC without
+# counting it, so stopping on the 3rd arrival means 3 INCs since.
+before = bk_rd(0x10, 2)
+r = bk_instr_bp({"instructionReference": "$A000", "hitCondition": "3"})
+bk_stops(1)
+after = bk_rd(0x10, 2)
+incs = ((after[0] - before[0]) + (after[1] - before[1])) % 256
+bk_case("instruction bp hitCondition 3 stops on the 3rd arrival (%d INCs ran)" % incs,
+        r.get("verified") and incs == 3)
+
+for bp, why in (
+        ({"instructionReference": "$A000", "condition": "A == banana"}, "an unreadable condition"),
+        ({"instructionReference": "$A000", "condition": "A == 1 && X == 0"}, "two value tests"),
+        ({"instructionReference": "2:A000", "condition": "bank == 1"}, "two different banks"),
+        ({"instructionReference": "$A000", "x16Bank": 1, "condition": "bank == 2"}, "x16Bank vs condition bank"),
+        ({"instructionReference": "$0401", "condition": "bank == 2"}, "a bank on unbanked memory"),
+        ({"instructionReference": "$A000", "hitCondition": "% 2"}, "an unreadable hitCondition")):
+    r = bk_instr_bp(bp)
+    bk_case("instruction bp refuses %s (%s)" % (why, r.get("message")),
+            not r.get("verified") and r.get("message"))
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
 
 bk_eval("bp_clear")
 bk_req("disconnect", {"terminateDebuggee": False})
