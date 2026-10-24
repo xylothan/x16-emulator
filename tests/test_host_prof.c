@@ -136,5 +136,58 @@ main(void)
 		check_eq(s.frames, 0, "reset clears frames");
 	}
 
+	// ── Spikes: worst frames survive the ring, and are attributed ───────────
+	{
+		fake_now = 0;
+		host_prof_init(fake_clock, 1000000);
+		host_prof_set_spike_us(16800);
+
+		// One slow frame dominated by present, then far more ordinary frames
+		// than the ring holds.
+		advance(3000);                   // emu
+		host_prof_begin(HP_PRESENT);
+		advance(20000);                  // a 20 ms present
+		host_prof_end(HP_PRESENT);
+		host_prof_frame_end(134400);
+		for (int i = 0; i < HP_RING_FRAMES + 50; i++) {
+			advance(3000);
+			host_prof_begin(HP_SLEEP);
+			advance(13000);              // sleep is not busy
+			host_prof_end(HP_SLEEP);
+			host_prof_frame_end(134400);
+		}
+		// A second, smaller spike dominated by emulation.
+		advance(18000);
+		host_prof_frame_end(134400);
+
+		host_prof_frame_t w[HP_WORST_FRAMES];
+		const int n = host_prof_worst(w, HP_WORST_FRAMES);
+		check_eq((uint32_t)n, HP_WORST_FRAMES, "worst list fills");
+		check_eq(w[0].frame, 0, "the first spike is still the worst, long after the ring wrapped");
+		check_eq(w[0].busy_us, 23000, "with its busy time");
+		check_eq(w[0].us[HP_PRESENT], 20000, "and its section breakdown");
+		check_eq((uint32_t)host_prof_dominant(&w[0]), HP_PRESENT, "dominated by present");
+		check_eq(w[1].busy_us, 18000, "second worst");
+		check_eq((uint32_t)host_prof_dominant(&w[1]), HP_EMU, "dominated by emu");
+		check(w[2].busy_us == 3000, "then ordinary frames");
+
+		check_eq(host_prof_spikes(), 2, "two frames over the period");
+		check_eq(host_prof_spikes_by(HP_PRESENT), 1, "one blamed on present");
+		check_eq(host_prof_spikes_by(HP_EMU), 1, "one on emu");
+		check_eq(host_prof_spikes_by(HP_SLEEP), 0, "sleep is never blamed");
+
+		host_prof_frame_t r;
+		check(host_prof_recent(0, &r), "recent frame 0 exists");
+		check_eq(r.busy_us, 18000, "recent 0 is the newest");
+		check(host_prof_recent(1, &r) && r.busy_us == 3000 && r.us[HP_SLEEP] == 13000,
+		      "recent 1 is the frame before it");
+		check(!host_prof_recent(HP_RING_FRAMES, &r), "nothing past the ring");
+
+		host_prof_reset();
+		check_eq((uint32_t)host_prof_worst(w, HP_WORST_FRAMES), 0, "reset clears the worst list");
+		check_eq(host_prof_spikes(), 0, "and the spike count");
+		check_eq(host_prof_spike_us(), 16800, "but keeps the threshold");
+	}
+
 	return x16_test_summary("host_prof");
 }

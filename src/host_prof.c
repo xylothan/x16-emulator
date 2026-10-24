@@ -22,8 +22,18 @@ static uint32_t frames, ui_frames;
 static uint32_t last_us[HP_SECTIONS];
 static uint32_t last_wall_us;
 
-static uint32_t ring[HP_RING_FRAMES];     // busy microseconds per frame
-static int      ring_count, ring_head;
+static host_prof_frame_t ring[HP_RING_FRAMES]; // recent frames, oldest overwritten
+static int               ring_count, ring_head;
+
+// The worst frames since reset, by busy time, worst first.
+static host_prof_frame_t worst[HP_WORST_FRAMES];
+static int               nworst;
+
+static uint32_t spike_us;                     // 0: not counting
+static uint32_t spikes;
+static uint32_t spikes_by[HP_SECTIONS];
+
+static uint32_t ui_frames_at_frame_start;
 
 typedef struct {
 	const char *name;
@@ -37,7 +47,7 @@ static panel_t panels[HP_MAX_PANELS];
 static int     npanels;
 
 static const char *const names[HP_SECTIONS] = {
-	"emu", "events", "present", "ui_build", "ui_draw", "sleep", "dap",
+	"emu", "events", "present", "ui_build", "ui_draw", "sleep", "dap", "hostfs", "dbginfo",
 };
 
 static uint64_t
@@ -88,6 +98,10 @@ host_prof_reset(void)
 	total_cycles = 0;
 	frames = ui_frames = 0;
 	ring_count = ring_head = 0;
+	nworst = 0;
+	spikes = 0;
+	memset(spikes_by, 0, sizeof spikes_by);
+	ui_frames_at_frame_start = 0;
 	for (int i = 0; i < npanels; i++) {
 		panels[i].calls     = 0;
 		panels[i].ticks     = 0;
@@ -165,14 +179,95 @@ host_prof_frame_end(uint32_t cycles)
 	}
 	last_wall_us = to_us(wall);
 
-	ring[ring_head] = to_us(wall - frame_ticks[HP_SLEEP]);
+	host_prof_frame_t f;
+	f.frame     = frames;
+	f.wall_us   = last_wall_us;
+	f.busy_us   = to_us(wall - frame_ticks[HP_SLEEP]);
+	f.cycles    = cycles;
+	f.ui_frames = ui_frames - ui_frames_at_frame_start;
+	memcpy(f.us, last_us, sizeof f.us);
+
+	ring[ring_head] = f;
 	ring_head       = (ring_head + 1) % HP_RING_FRAMES;
 	if (ring_count < HP_RING_FRAMES)
 		ring_count++;
 
+	// Insert into the worst-frames list, kept sorted worst first. Ties keep
+	// the earlier frame, so a run of equal frames reports where it began.
+	if (nworst < HP_WORST_FRAMES || f.busy_us > worst[nworst - 1].busy_us) {
+		int at = nworst < HP_WORST_FRAMES ? nworst++ : HP_WORST_FRAMES - 1;
+		while (at > 0 && worst[at - 1].busy_us < f.busy_us) {
+			worst[at] = worst[at - 1];
+			at--;
+		}
+		worst[at] = f;
+	}
+
+	if (spike_us && f.busy_us > spike_us) {
+		spikes++;
+		spikes_by[host_prof_dominant(&f)]++;
+	}
+
 	memset(frame_ticks, 0, sizeof frame_ticks);
 	total_cycles += cycles;
 	frames++;
+	ui_frames_at_frame_start = ui_frames;
+}
+
+bool
+host_prof_recent(int newest_index, host_prof_frame_t *out)
+{
+	if (newest_index < 0 || newest_index >= ring_count || !out)
+		return false;
+	const int i = (ring_head - 1 - newest_index + HP_RING_FRAMES * 2) % HP_RING_FRAMES;
+	*out = ring[i];
+	return true;
+}
+
+int
+host_prof_worst(host_prof_frame_t *out, int max)
+{
+	const int n = max < nworst ? max : nworst;
+	for (int i = 0; out && i < n; i++)
+		out[i] = worst[i];
+	return n;
+}
+
+hp_section_t
+host_prof_dominant(const host_prof_frame_t *f)
+{
+	hp_section_t best = HP_EMU;
+	for (int i = 0; i < HP_SECTIONS; i++) {
+		if (i == HP_SLEEP)
+			continue;
+		if (f->us[i] > f->us[best])
+			best = (hp_section_t)i;
+	}
+	return best;
+}
+
+void
+host_prof_set_spike_us(uint32_t us)
+{
+	spike_us = us;
+}
+
+uint32_t
+host_prof_spike_us(void)
+{
+	return spike_us;
+}
+
+uint32_t
+host_prof_spikes(void)
+{
+	return spikes;
+}
+
+uint32_t
+host_prof_spikes_by(hp_section_t s)
+{
+	return ((int)s >= 0 && (int)s < HP_SECTIONS) ? spikes_by[s] : 0;
 }
 
 const char *
@@ -217,7 +312,8 @@ host_prof_summary(host_prof_summary_t *out)
 	static uint32_t scratch[HP_RING_FRAMES];
 	const int       n = ring_count;
 	if (n > 0) {
-		memcpy(scratch, ring, sizeof(uint32_t) * (size_t)n);
+		for (int i = 0; i < n; i++)
+			scratch[i] = ring[i].busy_us;
 		qsort(scratch, (size_t)n, sizeof scratch[0], cmp_u32);
 		out->busy_p50_us  = scratch[(n - 1) * 50 / 100];
 		out->busy_p95_us  = scratch[(n - 1) * 95 / 100];

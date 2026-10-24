@@ -336,6 +336,78 @@ Each is small, and each is checked against the Phase 0 numbers.
   and have `-bench` and `x16/hostPerf` report the worst frames by section. That
   answers whether the 17–28 ms frames come from the emulator, the UI, present,
   or the OS.
+
+  **Done.** `host_prof` keeps every recent frame's section breakdown in its
+  ring, and the 8 worst frames since reset outside it. A frame whose busy time
+  exceeds its own real-time budget (guest cycles ÷ MHz, 16.8 ms for VGA at
+  8 MHz) counts as a spike, and each spike is attributed to the section that
+  dominated it. `-bench` prints both, and `x16/hostPerf` returns `spikes` and
+  `worstFrames`.
+
+  First capture: Gauntlet 2 attract mode, 3,600 frames, `-hidden`:
+
+  - **No spikes.** No frame exceeded 16.8 ms, either with no debugger or with
+    the user's layout.
+  - **The worst frames are present stalls.** Busy time was 8.7–11.7 ms, with
+    6–8 ms of it spent presenting the main window (normally 0.3–0.5 ms).
+  - **Next come emulation peaks:** up to 6.1 ms against a typical 3–4 ms,
+    which is the game's own work.
+  - **The debugger UI was never the worst part**, at about 1.5 ms at most.
+
+  Caveat: with the windows hidden, nothing is composited on screen, so present
+  can behave differently from a visible run. The 17–28 ms frames seen earlier
+  came from visible runs. Capturing them visibly is the open question.
+
+  **Visible capture**, same workload and the same build (`profiler-spikes`,
+  which does not include #94's panel fixes):
+
+  | Config | Spikes over 16.8 ms | Worst frames |
+  | --- | --- | --- |
+  | no debugger | 15 of 3,600: emu 12, events 2, present 1 | 20–44 ms, nearly all `emu` |
+  | user layout | 0 of 3,600 | ≤ 11.3 ms; `present`, then `emu` |
+
+  - **The spikes are on the emulator thread, outside every UI section.** The
+    long frames are almost entirely `emu`, which is time no other section
+    claimed. They cluster in frames 145–189, about one second of attract mode,
+    plus one at frame 1821.
+  - **Working hypothesis: host file I/O.** Gauntlet 2 loads files through the
+    host filesystem during attract mode, and that I/O runs on the emulator
+    thread, so it is charged to `emu`. The no-debugger run went first, and the
+    layout run that followed, with any OS file cache warm, had none. That
+    fits, but does not prove it.
+  - **One frame stalled for 17 ms in the SDL event pump** (`events`), with the
+    window visible.
+  - **Next step:** add a host-filesystem section around the hostfs/IEEE file
+    calls, so this shows up by name instead of inside `emu`.
+
+  **Hypothesis tested and ruled out.** Two new sections: `hostfs` (KERNAL file
+  calls served from `-fsroot`) and `dbginfo` (`dbg_load_poll`). The game files
+  were copied with `robocopy /J` (unbuffered, so not left in the file cache),
+  then run visibly twice, cold then warm, with no debugger:
+
+  | Run | Spikes over 16.8 ms | Long frames |
+  | --- | --- | --- |
+  | cold | 4 of 3,610, plus 6 just under | all `events`: 15–25 ms each, ten consecutive frames (1873–1882) |
+  | warm | 0 of 3,600 | worst 7.7 ms |
+
+  - **File I/O is not the cause.** `hostfs` averaged 0.2 µs per frame and
+    `dbginfo` zero, and neither appears in any long frame.
+  - **The stalls move around.** This run caught them in the SDL event pump
+    (`events`); the earlier one caught them inside `emu`. The same cold files
+    a minute later produced none.
+  - **Reading:** these are intermittent host-side stalls of the emulator
+    thread, landing in whatever section the thread happened to be in. The
+    debugger plays no part: every spike so far was in a run with no debugger
+    attached.
+  - **Remaining candidates:**
+    - the OS descheduling the thread;
+    - the Windows message pump blocking inside `SDL_PollEvent` (window or
+      compositor messages);
+    - SDL's audio device lock, which sits inside `emu` because audio is
+      rendered there.
+
+    An `audio` section, and timestamps on each spike for matching against
+    system events, would separate them.
 - **Optional:** a "UI refresh rate" setting (60 / 30 / 10 Hz) for panels that
   show live data.
 

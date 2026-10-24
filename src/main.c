@@ -1897,6 +1897,9 @@ handle_ieee_intercept()
 	}
 
 	uint64_t base_ticks = SDL_GetPerformanceCounter();
+	// Past the cheap PC checks, so this is reached only for a KERNAL call
+	// the emulator may serve itself -- not once per instruction.
+	host_prof_begin(HP_HOSTFS);
 
 	static int count_unlistn = 0;
 	bool handled = true;
@@ -2053,6 +2056,7 @@ handle_ieee_intercept()
 		increment_wrap_at_page_boundary(&regs.sp);
 		regs.pc = ((debug_read6502(regs.sp, 0, USE_CURRENT_X16_BANK) << 8) | low) + 1;
 	}
+	host_prof_end(HP_HOSTFS);
 	return handled;
 }
 
@@ -2302,8 +2306,13 @@ debug_gate_refresh(void)
 static void
 host_prof_close_frame(void)
 {
-	const uint32_t now = clockticks6502;
-	host_prof_frame_end(now - host_prof_last_cycles);
+	const uint32_t now    = clockticks6502;
+	const uint32_t cycles = now - host_prof_last_cycles;
+	// A spike is a frame that took longer to emulate than it takes to show:
+	// its own guest cycles at the machine's clock, 16.8 ms for a VGA frame at
+	// 8 MHz. Set per frame, so a non-VGA mode or another clock needs no case.
+	host_prof_set_spike_us(MHZ ? cycles / MHZ : 0);
+	host_prof_frame_end(cycles);
 	host_prof_last_cycles = now;
 }
 
@@ -2340,6 +2349,36 @@ bench_report(void)
 	       perf_budget_is_enabled() ? "on" : "off", perf_budget_frame_count(),
 	       vera_bandwidth_is_enabled() ? "on" : "off", io_trace_enabled ? "on" : "off",
 	       io_trace_count(), io_trace_capacity());
+
+	// Spikes: frames that could not have kept real speed, and where their
+	// time went.
+	printf("spikes (busy > frame period, %u us): %u of %u frames", host_prof_spike_us(),
+	       host_prof_spikes(), s.frames);
+	if (host_prof_spikes()) {
+		printf("; dominated by");
+		for (int i = 0; i < HP_SECTIONS; i++) {
+			const uint32_t n = host_prof_spikes_by((hp_section_t)i);
+			if (n)
+				printf(" %s %u", host_prof_section_name((hp_section_t)i), n);
+		}
+	}
+	printf("\n");
+
+	host_prof_frame_t w[HP_WORST_FRAMES];
+	const int nw = host_prof_worst(w, HP_WORST_FRAMES);
+	if (nw > 0) {
+		printf("worst frames by busy time (us):\n%-7s %7s %7s", "frame", "busy", "wall");
+		for (int i = 0; i < HP_SECTIONS; i++)
+			printf(" %8s", host_prof_section_name((hp_section_t)i));
+		printf(" %3s  %s\n", "ui", "dominant");
+		for (int k = 0; k < nw; k++) {
+			printf("%-7u %7u %7u", w[k].frame, w[k].busy_us, w[k].wall_us);
+			for (int i = 0; i < HP_SECTIONS; i++)
+				printf(" %8u", w[k].us[i]);
+			printf(" %3u  %s\n", w[k].ui_frames,
+			       host_prof_section_name(host_prof_dominant(&w[k])));
+		}
+	}
 	fflush(stdout);
 }
 
@@ -2415,7 +2454,9 @@ emulator_step_during_move(void)
 			// returning to the main loop, and only one completed load is held
 			// at a time, so a second would overwrite the first. Reachable only
 			// via -dbgauto; the status check repeats before the next instruction.
+			host_prof_begin(HP_DBGINFO);
 			dbg_load_poll();
+			host_prof_end(HP_DBGINFO);
 			continue;
 		}
 		instruction_counter += waiting ^ 0x1;
@@ -2644,7 +2685,9 @@ emulator_loop(void *param)
 			// makes the single pending slot self-evidently safe: an intercept
 			// finishes at most one channel, and it is drained before the next
 			// one can run.
+			host_prof_begin(HP_DBGINFO);
 			dbg_load_poll();
+			host_prof_end(HP_DBGINFO);
 			continue;
 		}
 
