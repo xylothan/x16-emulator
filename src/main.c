@@ -692,7 +692,9 @@ usage()
 	printf("\tto name ROM routines in profiles. Default: the folder of rom.bin.\n");
 	printf("-profilerec <name,name,...>\n");
 	printf("\tRecorders for -profile: hist (always), tree (default: who called\n");
-	printf("\twhat), budget (work vs. waiting), vram (VRAM traffic).\n");
+	printf("\twhat), budget (work vs. waiting), vram (VRAM traffic), waterfall\n");
+	printf("\t(every device write, per frame; with -profileout, a .trace.json\n");
+	printf("\tfor ui.perfetto.dev).\n");
 	printf("-inputscript <file>\n");
 	printf("\tReplay joypad and keyboard input at set frames, one command per\n");
 	printf("\tline: <frame> <command>, where <frame> is a frame number (1 is\n");
@@ -1192,7 +1194,7 @@ main(int argc, char **argv)
 			for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
 				const uint32_t bit = profile_session_recorder_bit(tok);
 				if (!bit) {
-					fprintf(stderr, "-profilerec: unknown recorder '%s' (hist, tree, budget, vram)\n", tok);
+					fprintf(stderr, "-profilerec: unknown recorder '%s' (hist, tree, budget, vram, waterfall)\n", tok);
 					exit(1);
 				}
 				capture_cli_recorders |= bit;
@@ -2691,6 +2693,11 @@ capture_cli_tick(void)
 			snprintf(path, sizeof path, "%s.json", profile_out);
 			const int json = profile_session_export_json(path);
 			printf("%s: %d records\n", path, json);
+			if (profile_session_has_waterfall()) {
+				snprintf(path, sizeof path, "%s.trace.json", profile_out);
+				const int trace = profile_session_export_trace(path);
+				printf("%s: %d trace events\n", path, trace);
+			}
 		}
 		bench_report(); // the host's side of the same frames
 		return false;

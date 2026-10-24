@@ -2,6 +2,7 @@
 
 #include "perf_hist.h"
 #include "profile_cct.h"
+#include "waterfall.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,9 +112,13 @@ perf_hist_step_(uint32_t clocks, uint16_t pc, uint8_t ram_bank, uint8_t rom_bank
                 uint8_t opcode, uint16_t next_pc, bool irq)
 {
 	const uint32_t k = key_of(pc, ram_bank, rom_bank);
+	// Order matters: writes this instruction made are stamped with its key
+	// and its START time; then its cycles count; then a call or return it made
+	// takes effect, at its end.
+	wf_flush(k, irq, total);
+	total += clocks;
 	if (perf_hist_tree)
 		cct_step(clocks);
-	total += clocks;
 	hist_cnt[k]++;
 	if (irq) {
 		hist_irq[k] += clocks;

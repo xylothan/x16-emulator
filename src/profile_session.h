@@ -59,6 +59,26 @@ const prof_budget_summary_t *profile_session_budget_summary(void);
 //   json:   totals, every row, and the call tree, for scripts.
 int profile_session_export_folded(const char *path);
 int profile_session_export_json(const char *path);
+//   trace:  the waterfall's detailed frames (the last few and the worst) as
+//           Chrome trace-event JSON, for ui.perfetto.dev or chrome://tracing:
+//           routine spans on CPU / IRQ tracks, every device write as an
+//           instant event with its routine and source line. Needs the
+//           waterfall recorder.
+int profile_session_export_trace(const char *path);
+
+// Whether the last capture recorded the waterfall.
+bool profile_session_has_waterfall(void);
+
+// The waterfall's write counts rolled up by routine: one entry per (report
+// row, lane), heaviest first. `row` is -1 for writes from code no row covers.
+// Valid until the next call; NULL with *count 0 when there is none.
+typedef struct {
+	int      row;
+	int      lane;
+	uint32_t key;    // one of the writing instructions, for naming a row of -1
+	uint32_t writes;
+} prof_writes_t;
+const prof_writes_t *profile_session_writes_by_routine(int *count);
 
 // Whether the tree's self cycles matched the histogram's totals exactly, for
 // the last report (true when there was no tree).

@@ -1672,6 +1672,52 @@ note_port_traffic(bool write, uint8_t vram_bytes)
 	vera_bandwidth_note_port(write, vram_bytes, sprite_trace_current_line());
 }
 
+video_vram_tap_fn video_vram_write_tap = NULL;
+
+static bool
+in_area(uint32_t a, uint32_t base, uint32_t size)
+{
+	return a >= base && a < base + size;
+}
+
+// Which region a VRAM write lands in, from the live layer registers.
+static video_vram_region_t
+vram_region(uint32_t a)
+{
+	a &= 0x1FFFF;
+	if (a >= ADDR_SPRDATA_START)
+		return VIDEO_VRAM_SPRITES;
+	if (a >= ADDR_PALETTE_START)
+		return VIDEO_VRAM_PALETTE;
+	if (a >= ADDR_PSG_START)
+		return VIDEO_VRAM_PSG;
+	for (int l = NUM_LAYERS - 1; l >= 0; l--) {
+		const struct video_layer_properties *p = &layer_properties[l];
+		const uint32_t bpp = 1u << p->color_depth;
+		uint32_t map = 0, tiles;
+		if (p->bitmap_mode) {
+			tiles = (uint32_t)p->tilew * p->tileh * bpp / 8;
+		} else {
+			map = 2u << (p->mapw_log2 + p->maph_log2);
+			// 256 characters in text modes, 1024 tiles otherwise.
+			tiles = (uint32_t)p->tilew * p->tileh * bpp / 8 * (p->text_mode ? 256 : 1024);
+		}
+		if (map && in_area(a, p->map_base, map))
+			return l ? VIDEO_VRAM_L1_MAP : VIDEO_VRAM_L0_MAP;
+		if (in_area(a, p->tile_base, tiles))
+			return l ? VIDEO_VRAM_L1_TILES : VIDEO_VRAM_L0_TILES;
+	}
+	return VIDEO_VRAM_OTHER;
+}
+
+static void
+note_vram_write(uint32_t address, uint8_t value, bool fx4)
+{
+	if (!video_vram_write_tap || debug_port_write)
+		return;
+	video_vram_write_tap(address, value, vram_region(address), fx4);
+}
+
 static void
 note_port_fx_cache_write(void)
 {
@@ -3502,6 +3548,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				// and the bus moved four times as much as an ordinary one.
 				note_port_traffic(true, 4);
 				note_port_fx_cache_write();
+				note_vram_write(address, ram_wrdata[0], true);
 				if (fx_trans_writes) {
 					if (fx_4bit_mode) {
 						nibble_mask[0] = (((ram_wrdata[0] & 0xf0) == 0) << 1) | ((ram_wrdata[0] & 0x0f) == 0);
@@ -3527,6 +3574,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				fx_vram_cache_write(address+3, ram_wrdata[3], nibble_mask[3]);
 			} else {
 				note_port_traffic(true, 1);
+				note_vram_write(address, wrdata_to_use, false);
 				fx_video_space_write(address, nibble, wrdata_to_use); // Normal write
 			}
 

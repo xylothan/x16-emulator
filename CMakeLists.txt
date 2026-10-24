@@ -316,6 +316,7 @@ set(X16_SOURCES
     src/profile_session.c
     src/profile_cct.c
     src/rom_syms.c
+    src/waterfall.c
     src/input_script.c
     src/vera_bandwidth.c
     src/disasm.c
@@ -738,7 +739,7 @@ x16_add_test(profile_capture
     SOURCES tests/test_profile_capture.c tests/support/harness.c src/profile_capture.c)
 x16_add_test(profile_report
     SOURCES tests/test_profile_report.c tests/support/harness.c src/profile_report.c
-            src/perf_hist.c src/profile_cct.c)
+            src/perf_hist.c src/profile_cct.c src/waterfall.c)
 
 # Scripted input resolves key names and delivers events through callbacks, so
 # the parser and scheduler run with no SDL and no machine.
@@ -749,6 +750,10 @@ x16_add_test(profile_cct
 # ROM .sym parsing: which labels are kept, as which bank.
 x16_add_test(rom_syms
     SOURCES tests/test_rom_syms.c tests/support/harness.c src/rom_syms.c)
+
+# The waterfall's frames, worst list, aggregates and export walk, by hand.
+x16_add_test(waterfall
+    SOURCES tests/test_waterfall.c tests/support/harness.c src/waterfall.c)
 
 x16_add_test(input_script
     SOURCES tests/test_input_script.c tests/support/harness.c src/input_script.c)

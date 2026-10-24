@@ -927,6 +927,81 @@ source in the emulator.
   export need only Phase 2 and the compact record. They can be built first,
   and they already answer "which code is hammering VERA or the YM".
 
+### Phase 5 split
+
+Phase 5 lands in three PRs:
+
+- **5a:** the recorder, aggregates and Perfetto export (below);
+- **5b:** the ImGui waterfall view, with hover and jump-to-source;
+- **5c:** the Source panel heat map.
+
+### Phase 5a: what was built (2026-10-24)
+
+- **`src/waterfall.c`**, pure and unit-tested in `tests/test_waterfall.c`:
+  - 12-byte records;
+  - a ring of the last 30 frames, plus the 8 worst kept after they leave it.
+    Frames are ranked by work cycles when the `budget` recorder runs, else by
+    event count;
+  - frames that overflow their 32k-event buffer are flagged truncated;
+  - whole-capture aggregates per (instruction key, lane);
+  - the begin/end walk the export uses.
+- **Lanes:** CPU, VERA registers, PSG, palette, sprites, layer 0 and 1 maps
+  and tiles, other VRAM, PCM, SPI/SD, YM2151 (by selected register), VIA1,
+  VIA2, and the rest of the I/O page.
+  - VRAM writes are classed by where they land, using the layer registers as
+    they stand at the moment of the write.
+  - VERA FX cache writes are flagged as four bytes.
+- **Hooks:** both are NULL when off.
+  - `io_write_tap` lives in `io_trace.c`, which every link of `memory.c`
+    already includes, so no test stubs were needed.
+  - `video_vram_write_tap` lives in `video.c`, at the data-port write.
+  - Data-port bytes come only from the VRAM tap, so nothing is counted twice.
+- **Timing:**
+  - Writes are queued during the instruction. `perf_hist_step_` stamps them
+    with the instruction's own key and start time, then counts its cycles, then
+    applies its calls and returns.
+  - The CPU lane is the call tree's innermost node, reported once per instant
+    through `cct_switch_hook`. It inherits Phase 3's stack-pointer pairing
+    rather than keeping a second call stack.
+- **Report:** writes rolled up by (routine, lane) appear in `-profile` output
+  and in `x16/capture` as `deviceWrites`.
+- **Export:** Chrome trace-event JSON for ui.perfetto.dev and
+  `chrome://tracing`:
+  - routine spans on CPU and IRQ tracks, nested and balanced;
+  - one track per device lane, each write an instant event with value,
+    routine, `bank:PC` and source line;
+  - a Frames track marking which frames are among the worst.
+
+  Write it with `-profileout` (as `<prefix>.trace.json`), `x16/capture`
+  `export.trace`, or the panel's Save trace button.
+- **Recorder:** `waterfall`, off by default: `-profilerec tree,waterfall`, or
+  the panel checkbox.
+
+**On the Phase 0 workload** (600 frames):
+- the top writers were pad scanning on VIA1 (38 per frame), a VRAM copy, map
+  writes through VERA's address registers, FX multiplier setup, and palette
+  pushes;
+- 99% of the exported writes carried a source line.
+
+**Cost:** none measurable. Three interleaved pairs of 1,800 frames gave a
+median of 3.47 ms per frame with the waterfall and 3.52 ms with the tree
+alone, at about 170 device writes per frame.
+
+**Determinism:** on the scripted BASIC loop, histogram-only runs and
+tree-plus-waterfall runs matched in every row and in instruction count.
+
+**Not yet:**
+- the PCM FIFO fill-level line;
+- reads (joystick polling, SPI reads); only writes are recorded;
+- frames marked by hotkey, guest marker or breakpoint;
+- the ImGui view (5b) and the Source heat map (5c).
+
+Tested:
+- unit tests;
+- the DAP testbench, 150/150, including a waterfall capture whose exported
+  trace must nest and balance on every track and carry device and IRQ events;
+- Linux GCC (WSL, `-O2 -Wall -Werror`) on every touched file.
+
 ## Constraints every phase has to respect
 
 - **Two per-instruction loops.** `emulator_loop` and

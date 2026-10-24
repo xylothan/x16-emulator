@@ -86,6 +86,11 @@ void cct_close_frame(void);
 // from the roots again.
 void cct_finish(void);
 
+// Called with the new innermost node whenever it changes: once per event
+// batch (a return that pops several frames, or an interrupt), never for the
+// intermediate steps. NULL by default.
+extern void (*cct_switch_hook)(int node);
+
 // ---- Queries ---------------------------------------------------------------
 int  cct_node_count(void);           // nodes are numbered from 0; parents first
 bool cct_node_get(int i, cct_node_t *out);
