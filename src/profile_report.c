@@ -8,8 +8,8 @@
 #include <string.h>
 
 // Symbols split by where they can apply: below $A000 (any bank), the banked
-// window (by bank, -1 last), and nothing above $C000 -- program debug info
-// does not describe the ROM, so ROM time is grouped by page.
+// window (by bank, -1 last), the ROM (by ROM bank), and the KERNAL's low-RAM
+// code (a fallback where the program's debug info is silent).
 typedef struct {
 	const char *name;
 	uint16_t    addr;
@@ -20,18 +20,22 @@ typedef struct {
 // Kept with the report after it is built, so a key seen later (a call
 // target from the tree) is charged by exactly the same rule.
 typedef struct {
-	sym_t          *low, *ram;
-	int             nlow, nram;
+	sym_t          *low, *ram, *rom, *kram;
+	int             nlow, nram, nrom, nkram;
 	int             unk_lo, unk_hi;
 	int            *page_row;  // key >> 8 -> row, for time no label claims
 	prof_covered_fn covered;
 } lookup_t;
 
+// Ties on address break by name, so which of several labels at one address
+// names it does not depend on the order they arrived in.
 static int
 cmp_low(const void *a, const void *b)
 {
 	const sym_t *x = a, *y = b;
-	return (x->addr > y->addr) - (x->addr < y->addr);
+	if (x->addr != y->addr)
+		return (x->addr > y->addr) - (x->addr < y->addr);
+	return strcmp(y->name, x->name); // floor takes the last: the first by name
 }
 
 // Banked symbols by (bank, addr), so one bank's labels are a contiguous run.
@@ -41,7 +45,7 @@ cmp_ram(const void *a, const void *b)
 	const sym_t *x = a, *y = b;
 	if (x->bank != y->bank)
 		return (x->bank > y->bank) - (x->bank < y->bank);
-	return (x->addr > y->addr) - (x->addr < y->addr);
+	return cmp_low(a, b);
 }
 
 // The last symbol in [lo, hi) whose addr <= pc, or -1. [lo, hi) is sorted by
@@ -90,8 +94,21 @@ label_of(const lookup_t *L, uint32_t k, bool *ambiguous)
 	*ambiguous = false;
 	if (region == PH_REGION_LOW) {
 		const int cov = L->covered ? L->covered(pc, -1) : 0;
-		const int i   = cov ? floor_in(L->low, 0, L->nlow, pc) : -1;
-		return i >= 0 ? &L->low[i] : NULL;
+		if (cov) {
+			const int i = floor_in(L->low, 0, L->nlow, pc);
+			return i >= 0 ? &L->low[i] : NULL;
+		}
+		if (pc >= PROF_KRAM_START && pc < PROF_KRAM_END) {
+			const int i = floor_in(L->kram, 0, L->nkram, pc);
+			return i >= 0 ? &L->kram[i] : NULL;
+		}
+		return NULL;
+	}
+	if (region == PH_REGION_ROM) {
+		int lo, hi;
+		bank_run(L->rom, L->nrom, (int16_t)bank, &lo, &hi);
+		const int i = floor_in(L->rom, lo, hi, pc);
+		return i >= 0 ? &L->rom[i] : NULL;
 	}
 	if (region == PH_REGION_RAM) {
 		const int cov = L->covered ? L->covered(pc, bank) : 0;
@@ -139,6 +156,8 @@ lookup_free(lookup_t *L)
 		return;
 	free(L->low);
 	free(L->ram);
+	free(L->rom);
+	free(L->kram);
 	free(L->page_row);
 	free(L);
 }
@@ -155,12 +174,15 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 	int       cap = 256;
 	prof_row_t *rows = malloc(sizeof *rows * (size_t)cap);
 	if (L) {
-		L->low      = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *L->low);
-		L->ram      = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *L->ram);
+		const size_t ns = (size_t)(nsyms > 0 ? nsyms : 1);
+		L->low      = calloc(ns, sizeof *L->low);
+		L->ram      = calloc(ns, sizeof *L->ram);
+		L->rom      = calloc(ns, sizeof *L->rom);
+		L->kram     = calloc(ns, sizeof *L->kram);
 		L->page_row = malloc(sizeof(int) * ((PH_KEYS >> 8) + 1));
 		L->covered  = covered;
 	}
-	if (!L || !L->low || !L->ram || !L->page_row || !rows) {
+	if (!L || !L->low || !L->ram || !L->rom || !L->kram || !L->page_row || !rows) {
 		lookup_free(L);
 		free(rows);
 		return false;
@@ -169,13 +191,22 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 		const prof_sym_t *s = &syms[i];
 		if (!s->name)
 			continue;
-		if (s->addr < 0xA000)
+		if (s->addr >= 0xC000) {
+			if (s->bank >= 0)
+				L->rom[L->nrom++] = (sym_t){s->name, s->addr, s->bank, -1};
+		} else if (s->rom) {
+			if (s->addr >= PROF_KRAM_START && s->addr < PROF_KRAM_END)
+				L->kram[L->nkram++] = (sym_t){s->name, s->addr, -1, -1};
+		} else if (s->addr < 0xA000) {
 			L->low[L->nlow++] = (sym_t){s->name, s->addr, -1, -1};
-		else if (s->addr < 0xC000)
+		} else {
 			L->ram[L->nram++] = (sym_t){s->name, s->addr, s->bank, -1};
+		}
 	}
 	qsort(L->low, (size_t)L->nlow, sizeof *L->low, cmp_low);
 	qsort(L->ram, (size_t)L->nram, sizeof *L->ram, cmp_ram);
+	qsort(L->rom, (size_t)L->nrom, sizeof *L->rom, cmp_ram);
+	qsort(L->kram, (size_t)L->nkram, sizeof *L->kram, cmp_low);
 	for (uint32_t p = 0; p <= (PH_KEYS >> 8); p++)
 		L->page_row[p] = -1;
 
@@ -265,6 +296,12 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 	for (int i = 0; i < L->nram; i++)
 		if (L->ram[i].row >= 0)
 			L->ram[i].row = where[L->ram[i].row];
+	for (int i = 0; i < L->nrom; i++)
+		if (L->rom[i].row >= 0)
+			L->rom[i].row = where[L->rom[i].row];
+	for (int i = 0; i < L->nkram; i++)
+		if (L->kram[i].row >= 0)
+			L->kram[i].row = where[L->kram[i].row];
 	for (uint32_t p = 0; p <= (PH_KEYS >> 8); p++)
 		if (L->page_row[p] >= 0)
 			L->page_row[p] = where[L->page_row[p]];

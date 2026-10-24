@@ -12,9 +12,14 @@
 // a key is named from its own bank's labels first, and only falls back to a
 // label whose bank is unknown -- in which case the row says so (ambiguous).
 //
-// UNNAMED TIME IS STILL TIME. An address the debug info does not cover (the
-// KERNAL, BASIC, anything without a .dbg) is grouped by 256-byte page and
-// named by where it is, so the rows always add up to the histogram's total.
+// THE ROM HAS ITS OWN LABELS. Symbols marked `rom` come from the ROM's .sym
+// files (rom_syms.h): above $C000 they name each ROM bank's code; below, they
+// name the KERNAL's code in low RAM ($0200-$03FF), and only where the
+// program's debug info does not cover the address.
+//
+// UNNAMED TIME IS STILL TIME. An address no label covers is grouped by
+// 256-byte page and named by where it is, so the rows always add up to the
+// histogram's total.
 //
 // INCLUSIVE TIME comes from the calling-context tree (profile_cct.h), added
 // with prof_report_add_tree(): each tree node is matched to the row its call
@@ -35,13 +40,19 @@
 extern "C" {
 #endif
 
-// One label. `bank` is its RAM bank for $A000-$BFFF, or -1 when unknown or
-// not banked.
+// One label. `bank` is its RAM bank for $A000-$BFFF, its ROM bank for
+// $C000-$FFFF, or -1 when unknown or not banked. `rom` marks a label from the
+// ROM's own symbols rather than the program's debug info.
 typedef struct {
 	const char *name;
 	uint16_t    addr;
 	int16_t     bank;
+	bool        rom;
 } prof_sym_t;
+
+// Where ROM labels may name low memory: the KERNAL's RAM-resident code.
+#define PROF_KRAM_START 0x0200u
+#define PROF_KRAM_END   0x0400u
 
 // Does debug info cover `pc` (in `ram_bank` for the banked window, -1
 // otherwise)? 0 = no, 1 = yes, 2 = yes but which bank is not established.

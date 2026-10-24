@@ -30,8 +30,8 @@ bool  g_rec_budget = false;
 bool  g_rec_vram   = false;
 bool  g_rec_tree   = true;
 char  g_filter[64] = "";
+char  g_export[260] = "profile";
 
-const ImVec4 COL_DIM(0.60f, 0.60f, 0.60f, 1.0f);
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
 
@@ -116,6 +116,7 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 	static char              seen_filter[64] = "\x01";
 	static int              *view = nullptr;
 	static int               view_n = 0, view_cap = 0;
+	bool                     rebuilt = false;
 	if (seen_rows != r->rows || seen_count != r->count || seen_total != total + r->instructions ||
 	    strcmp(seen_filter, g_filter) != 0) {
 		seen_rows  = r->rows;
@@ -131,23 +132,60 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 		for (int i = 0; i < r->count; i++)
 			if (!g_filter[0] || strstr(r->rows[i].name, g_filter))
 				view[view_n++] = i;
+		rebuilt = true;
 	}
 
 	if (!ImGui::BeginTable("profrows", 8,
-	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable |
 	                           ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE))
 		return;
+	const ImGuiTableColumnFlags num = ImGuiTableColumnFlags_WidthFixed |
+	                                  ImGuiTableColumnFlags_PreferSortDescending;
 	ImGui::TableSetupScrollFreeze(0, 1);
-	ImGui::TableSetupColumn("Self %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Self %", "99.99"));
-	ImGui::TableSetupColumn("Incl %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Incl %", "100.00"));
-	ImGui::TableSetupColumn("IRQ %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("IRQ %", "99.99"));
-	ImGui::TableSetupColumn("Cycles/frame", ImGuiTableColumnFlags_WidthFixed,
+	ImGui::TableSetupColumn("Self %", num | ImGuiTableColumnFlags_DefaultSort,
+	                        dbgui_col_width("Self %", "99.99"));
+	ImGui::TableSetupColumn("Incl %", num, dbgui_col_width("Incl %", "100.00"));
+	ImGui::TableSetupColumn("IRQ %", num, dbgui_col_width("IRQ %", "99.99"));
+	ImGui::TableSetupColumn("Cycles/frame", num | ImGuiTableColumnFlags_NoSort,
 	                        dbgui_col_width("Cycles/frame", "9999999"));
-	ImGui::TableSetupColumn("Calls", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Calls", "99999999"));
-	ImGui::TableSetupColumn("Cyc/ins", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Cyc/ins", "9.99"));
+	ImGui::TableSetupColumn("Calls", num, dbgui_col_width("Calls", "99999999"));
+	ImGui::TableSetupColumn("Cyc/ins", num, dbgui_col_width("Cyc/ins", "9.99"));
 	ImGui::TableSetupColumn("Routine", ImGuiTableColumnFlags_WidthStretch);
 	ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthFixed,
 	                        dbgui_col_width("Where", "RAM 255:$BFFF"));
+
+	// Sort the view when the user picks a column, or when it was rebuilt.
+	if (ImGuiTableSortSpecs *sp = ImGui::TableGetSortSpecs()) {
+		if ((sp->SpecsDirty || rebuilt) && sp->SpecsCount > 0) {
+			const int  col  = sp->Specs[0].ColumnIndex;
+			const bool desc = sp->Specs[0].SortDirection == ImGuiSortDirection_Descending;
+			std::stable_sort(view, view + view_n, [r, col, desc](int a, int b) {
+				const prof_row_t &x = r->rows[a], &y = r->rows[b];
+				int c = 0;
+				auto cmp = [](double p, double q) { return p < q ? -1 : p > q ? 1 : 0; };
+				switch (col) {
+					case 0: c = cmp((double)(x.main_cycles + x.irq_cycles),
+					                (double)(y.main_cycles + y.irq_cycles)); break;
+					case 1: c = cmp((double)x.incl_cycles, (double)y.incl_cycles); break;
+					case 2: c = cmp((double)x.irq_cycles, (double)y.irq_cycles); break;
+					case 4: c = cmp((double)x.calls, (double)y.calls); break;
+					case 5: c = cmp(x.instructions ? (double)(x.main_cycles + x.irq_cycles) / (double)x.instructions : 0.0,
+					                y.instructions ? (double)(y.main_cycles + y.irq_cycles) / (double)y.instructions : 0.0);
+					        break;
+					case 6: c = strcmp(x.name, y.name); break;
+					case 7: c = x.region != y.region ? x.region - y.region
+					          : x.bank != y.bank     ? x.bank - y.bank
+					                                 : x.addr - y.addr;
+					        break;
+					default: c = a - b; break;
+				}
+				if (c == 0)
+					return a < b; // the report's own order (heaviest first)
+				return desc ? c > 0 : c < 0;
+			});
+			sp->SpecsDirty = false;
+		}
+	}
 	ImGui::TableHeadersRow();
 
 	ImGuiListClipper clipper;
@@ -349,6 +387,41 @@ draw_report(void)
 	if (r->ambiguous_rows)
 		ImGui::TextColored(COL_AMBIG, "%d rows marked * name code whose RAM bank the debug info "
 		                              "did not establish.", r->ambiguous_rows);
+	const prof_budget_summary_t *bs = profile_session_budget_summary();
+	if (bs->have)
+		ImGui::TextDisabled("Work %.1f%%, waiting %.1f%%; worst frame %u of %u cycles, %u over "
+		                    "budget.",
+		                    bs->total ? 100.0 * (double)(bs->total - bs->idle) / (double)bs->total
+		                              : 0.0,
+		                    bs->total ? 100.0 * (double)bs->idle / (double)bs->total : 0.0,
+		                    bs->work_max, bs->budget, bs->overruns);
+
+	// Export, beside the working directory unless a path is given.
+	static char export_msg[sizeof g_export + 48] = "";
+	ImGui::SetNextItemWidth(dbgui_col_width("", "wwwwwwwwwwwwwwwwwwww"));
+	ImGui::InputText("##profexport", g_export, sizeof g_export);
+	ImGui::SameLine();
+	if (r->node_count > 2 && ImGui::Button("Save .folded")) {
+		char path[sizeof g_export + 16];
+		snprintf(path, sizeof path, "%s.folded", g_export);
+		const int n = profile_session_export_folded(path);
+		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Collapsed stacks with self cycles: open in speedscope.app\n"
+		                  "or feed to flamegraph.pl.");
+	ImGui::SameLine();
+	if (ImGui::Button("Save .json")) {
+		char path[sizeof g_export + 16];
+		snprintf(path, sizeof path, "%s.json", g_export);
+		const int n = profile_session_export_json(path);
+		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+	}
+	if (export_msg[0]) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", export_msg);
+	}
+
 	if (r->node_count <= 2) {
 		draw_rows(r, total, frames);
 		return;

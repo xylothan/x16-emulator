@@ -2541,6 +2541,19 @@ static int handle_x16_capture(int seq, cJSON *args) {
             cJSON_AddBoolToObject(rep, "treeConsistent", profile_session_tree_consistent());
         }
         cJSON_AddItemToObject(body, "report", rep);
+
+        // export: {folded: path, json: path} -- files written by the emulator.
+        cJSON *ex = args ? cJSON_GetObjectItemCaseSensitive(args, "export") : NULL;
+        if (cJSON_IsObject(ex)) {
+            cJSON *done = cJSON_CreateObject();
+            cJSON *fp = cJSON_GetObjectItemCaseSensitive(ex, "folded");
+            cJSON *jp = cJSON_GetObjectItemCaseSensitive(ex, "json");
+            if (cJSON_IsString(fp))
+                cJSON_AddNumberToObject(done, "folded", profile_session_export_folded(fp->valuestring));
+            if (cJSON_IsString(jp))
+                cJSON_AddNumberToObject(done, "json", profile_session_export_json(jp->valuestring));
+            cJSON_AddItemToObject(body, "exported", done);
+        }
     }
     send_dap_response(seq, "x16/capture", true, body);
     return 0;

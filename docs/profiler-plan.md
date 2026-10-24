@@ -750,6 +750,57 @@ Tested:
   sub-commands instead of adding a parallel command. `tools/x16dbg` gets a
   `profile` verb that starts a capture, waits, and prints the top routines.
 
+### Phase 4: what was built (2026-10-24)
+
+- **ROM symbols (`src/rom_syms.c`).** The x16-rom release ships one VICE
+  label file per bank beside `rom.bin`. They load at startup from that folder,
+  or from `-romsyms <dir>`.
+  - **Bank mapping:** the same as the ROM's own build (its `rom_labels.h`
+    rule): kernal 0, keymap 1, dos 2, fat32 3, basic 4, monitor 5, charset 6,
+    diag 7, graph 8, demo 9, audio 10, util 11, bannex 12. It was checked
+    against the R49 listing (`rom_lst.h`).
+  - **What is kept:** labels in each bank's `$C000-$FFFF`, plus the KERNAL's
+    RAM-resident code at `$0200-$03FF` (the IRQ entry `__irq`, `jsrfar`'s RAM
+    half). The RAM labels name that range only where the program's debug info
+    does not cover it.
+  - **What is dropped:** ld65 segment symbols (`__X_RUN__` and similar) and
+    data addresses.
+  - Ties at one address break by name, so naming does not depend on load
+    order.
+- **The effect,** on a BASIC `PRINT` loop: rows like `ROM 0:$CCxx` and
+  `ROM 4:$EA08` now read `screen_copy_line` and `bjsrfar`. The tree shows
+  `gone3 → outdo → bsout → bjsrfar → nbsout → nxln → scro0 →
+  screen_copy_line`: 82% of that loop is screen scrolling.
+- **Exports:**
+  - `.folded`: collapsed stacks with self cycles, `[main];a;b 1234`, for
+    speedscope or `flamegraph.pl`. The counts sum to every captured cycle.
+  - `.json`: totals, every row and the whole tree.
+  - **How to write them:** `-profileout <prefix>` with `-profile`;
+    `export: {folded, json}` on `x16/capture` (the emulator writes the files);
+    or the Profile panel's Save buttons.
+- **Summary:** when the capture ran the `budget` recorder, it reports work
+  against waiting from `perf_budget`'s classifier, the worst frame's work, and
+  frames over budget. This appears in the printed report, the panel and the
+  JSON.
+- **Panel:** the Routines table sorts by any column.
+- **`x16dbg profile <frames> [top n] [folded path] [json path] [rec list]`**
+  starts a capture, waits for it, and prints the top routines and heaviest call
+  paths. It also works in interactive mode.
+- **Not done here:** the plan suggested extending `x16/perfHist` with capture
+  sub-commands. `x16/capture` already covers that, so `x16/perfHist` stays the
+  raw histogram dump.
+
+Tested:
+- unit tests: `rom_syms`, and ROM and KERNAL-RAM naming in `profile_report`;
+- the DAP testbench, 143/143, including the export checks;
+- `-profileout` and `x16dbg profile` against a live BASIC loop;
+- the panel, drawn in a Debug build for two reports in a row.
+
+**Next, with the ROM source** (`x16-rom`): its Makefile links each bank with
+`ld65 -Ln` only. Adding `--dbgfile` would give `.dbg` files with source lines
+for ROM code, which the Phase 5 source heat map could use for the KERNAL and
+BASIC as well as the program.
+
 ## Phase 5: the frame waterfall, linked to source
 
 A timeline of one frame, like a GPU frame capture: time runs left to right

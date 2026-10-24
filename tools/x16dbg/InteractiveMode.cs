@@ -116,6 +116,9 @@ public static class InteractiveMode
                 case "bp":
                     await Commands.RunOneShotAsync(client, "bp", args);
                     break;
+                case "profile":
+                    await Commands.RunOneShotAsync(client, "profile", args);
+                    break;
                 case "quit":
                 case "q":
                     return;
@@ -295,6 +298,7 @@ public static class InteractiveMode
         Console.WriteLine("  setvram <addr> <hex> Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  j, joy <port> [btns] Drive a SNES controller port 1-4");
         Console.WriteLine("  p, setreg <r> <val>  Set register (e.g., setreg a FF)");
+        Console.WriteLine("  profile <frames> ... Capture, then print routines and call paths");
         Console.WriteLine("  bp add <addr>        Add breakpoint");
         Console.WriteLine("  bp remove <addr>     Remove breakpoint");
         Console.WriteLine("  l, bp list           List breakpoints");
