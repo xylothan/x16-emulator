@@ -1,12 +1,14 @@
 // Commander X16 Emulator — whole-program cycle histogram. See perf_hist.h.
 
 #include "perf_hist.h"
+#include "profile_cct.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 bool     perf_hist_enabled = false;
+bool     perf_hist_tree    = false;
 uint16_t perf_hist_caller_start = 0, perf_hist_caller_end = 0;
 
 static uint32_t *hist_main = NULL;
@@ -22,15 +24,7 @@ static int              ntasks;
 static int              cur_task = -1;            // -1: none open
 static uint32_t         cur_call;                 // cycles of the open call
 
-static uint32_t
-key_of(uint16_t pc, uint8_t ram_bank, uint8_t rom_bank)
-{
-	if (pc < 0xA000)
-		return pc;
-	if (pc < 0xC000)
-		return PH_RAM_BASE + (uint32_t)ram_bank * PH_RAM_SIZE + (pc - 0xA000u);
-	return PH_ROM_BASE + (uint32_t)(rom_bank & (PH_ROM_BANKS - 1)) * PH_ROM_SIZE + (pc - 0xC000u);
-}
+#define key_of perf_hist_key
 
 bool
 perf_hist_arm(bool on)
@@ -117,6 +111,8 @@ perf_hist_step_(uint32_t clocks, uint16_t pc, uint8_t ram_bank, uint8_t rom_bank
                 uint8_t opcode, uint16_t next_pc, bool irq)
 {
 	const uint32_t k = key_of(pc, ram_bank, rom_bank);
+	if (perf_hist_tree)
+		cct_step(clocks);
 	total += clocks;
 	hist_cnt[k]++;
 	if (irq) {
@@ -156,6 +152,8 @@ void
 perf_hist_close_frame_(void)
 {
 	frames++;
+	if (perf_hist_tree)
+		cct_close_frame();
 	for (int i = 0; i < ntasks; i++) {
 		if (task_frame[i] > tasks[i].frame_max)
 			tasks[i].frame_max = task_frame[i];

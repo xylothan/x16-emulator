@@ -103,6 +103,40 @@ main(void)
 	check_eq((uint32_t)m, (uint32_t)r.main_cycles, "the report's own totals agree");
 	check_eq((uint32_t)c, 18, "every instruction is counted once");
 
+	// ── The call tree: rows by call target; recursion counted once ──────────
+	{
+		const int init_row = (int)(row_named(&r, "init") - r.rows);
+		check_eq((uint32_t)prof_report_row_of_key(&r, 0x0810), (uint32_t)init_row,
+		         "a key maps to the row its cycles went to");
+		check_eq((uint32_t)prof_report_row_of_key(&r, perf_hist_key(0xA000, 65, 0)),
+		         (uint32_t)(row_named(&r, "draw65") - r.rows), "banked keys use their own bank");
+		check(prof_report_row_of_key(&r, 0x3000) < 0, "a key that never ran has no row");
+
+		const prof_node_t tree[] = {
+			// parent row  key                          self incl calls max fmax
+			{-1, 0, 0xFFFFFFF0u,                      0, 160, 0, 0, 0},   // [main]
+			{-1, 0, 0xFFFFFFF1u,                      0, 0,   0, 0, 0},   // [IRQ]
+			{0,  0, 0x0810,                          60, 100, 2, 70, 90}, // init
+			{2,  0, 0x0900,                          20, 30,  4, 12, 25}, // init/update
+			{3,  0, 0x0810,                          10, 10,  1, 10, 10}, // .../init again
+			{0,  0, perf_hist_key(0xA000, 64, 0),    14, 14,  1, 14, 14}, // draw64
+			{0,  0, 0x3000,                          16, 16,  1, 16, 16}, // never ran
+		};
+		check(prof_report_add_tree(&r, tree, 7), "tree attaches");
+		check_eq((uint32_t)r.node_count, 7, "all nodes kept");
+		const prof_row_t *init = row_named(&r, "init");
+		check_eq((uint32_t)init->incl_cycles, 100, "init incl: the inner recursive call is inside");
+		check_eq(init->calls, 3, "but its calls all count");
+		check_eq(init->call_max, 70, "worst call over its nodes");
+		check_eq(init->frame_max, 90, "worst frame over its nodes");
+		check_eq((uint32_t)row_named(&r, "update")->incl_cycles, 30, "update incl");
+		check_eq((uint32_t)row_named(&r, "draw64")->incl_cycles, 14, "banked target");
+		check_eq((uint32_t)row_named(&r, "draw65")->incl_cycles, 0, "never called: no incl");
+		check(r.nodes[6].row < 0 && r.nodes[0].row < 0, "roots and unknown targets have no row");
+		check_eq((uint32_t)r.nodes[3].row, (uint32_t)(row_named(&r, "update") - r.rows),
+		         "nodes carry their row");
+	}
+
 	prof_report_free(&r);
 	check(r.rows == NULL && r.count == 0, "free empties it");
 	return x16_test_summary("profile_report");

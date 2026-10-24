@@ -370,15 +370,19 @@ static void jmp() {
 }
 
 static void jsr() {
-    push16(regs.pc - 1);
+    const uint16_t sp0 = regs.sp, ret = regs.pc - 1;
+    push16(ret);
     regs.pc = ea;
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL, regs.pc | ((uint32_t)regs.k << 16), sp0, ret);
 }
 
 static void jsl() {
+    const uint16_t sp0 = regs.sp, ret = regs.pc - 1;
     push8_long(regs.k);
-    push16_long(regs.pc - 1);
+    push16_long(ret);
     regs.pc = ea & 0xFFFF;
     regs.k = ea >> 16;
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL, ea, sp0, ret);
 }
 
 static void lda() {
@@ -609,17 +613,20 @@ static void rti() {
     // every pull, so regs.sp is back to what it was when the interrupt was
     // taken. See cpu/irq_ctx.h.
     cpu_irq_ctx_leave(regs.sp);
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_IRQ_LEAVE, regs.pc | ((uint32_t)regs.k << 16), regs.sp, 0);
 }
 
 static void rtl() {
     value = pull16_long();
     regs.pc = value + 1;
     regs.k = pull8_long();
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_RETURN, regs.pc | ((uint32_t)regs.k << 16), regs.sp, 0);
 }
 
 static void rts() {
     value = pull16();
     regs.pc = value + 1;
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_RETURN, regs.pc | ((uint32_t)regs.k << 16), regs.sp, 0);
 }
 
 static void sbc() {

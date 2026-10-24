@@ -314,6 +314,7 @@ set(X16_SOURCES
     src/profile_capture.c
     src/profile_report.c
     src/profile_session.c
+    src/profile_cct.c
     src/input_script.c
     src/vera_bandwidth.c
     src/disasm.c
@@ -736,10 +737,14 @@ x16_add_test(profile_capture
     SOURCES tests/test_profile_capture.c tests/support/harness.c src/profile_capture.c)
 x16_add_test(profile_report
     SOURCES tests/test_profile_report.c tests/support/harness.c src/profile_report.c
-            src/perf_hist.c)
+            src/perf_hist.c src/profile_cct.c)
 
 # Scripted input resolves key names and delivers events through callbacks, so
 # the parser and scheduler run with no SDL and no machine.
+# The call tree is fed synthetic call/return/interrupt streams by a toy CPU.
+x16_add_test(profile_cct
+    SOURCES tests/test_profile_cct.c tests/support/harness.c src/profile_cct.c)
+
 x16_add_test(input_script
     SOURCES tests/test_input_script.c tests/support/harness.c src/input_script.c)
 

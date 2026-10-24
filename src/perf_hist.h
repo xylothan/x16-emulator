@@ -53,6 +53,22 @@ typedef struct {
 
 extern bool perf_hist_enabled;
 
+// When set, every step also feeds the calling-context tree (profile_cct.h):
+// its cycles go to the innermost call, then queued calls and returns apply.
+// Set by capture mode alongside cpu_flow_hook.
+extern bool perf_hist_tree;
+
+// The effective-address key for `pc` with these banks.
+static inline uint32_t
+perf_hist_key(uint16_t pc, uint8_t ram_bank, uint8_t rom_bank)
+{
+	if (pc < 0xA000)
+		return pc;
+	if (pc < 0xC000)
+		return PH_RAM_BASE + (uint32_t)ram_bank * PH_RAM_SIZE + (pc - 0xA000u);
+	return PH_ROM_BASE + (uint32_t)(rom_bank & (PH_ROM_BANKS - 1)) * PH_ROM_SIZE + (pc - 0xC000u);
+}
+
 bool perf_hist_arm(bool on);
 void perf_hist_reset(void);
 void perf_hist_set_caller(uint16_t start, uint16_t end); // end exclusive; 0,0 = off

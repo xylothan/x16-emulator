@@ -2432,13 +2432,13 @@ static int handle_x16_capture(int seq, cJSON *args) {
                 const uint32_t bit = cJSON_IsString(r) ? profile_session_recorder_bit(r->valuestring) : 0;
                 if (!bit) {
                     send_dap_error_response(seq, "x16/capture",
-                                            "unknown recorder (expected hist, budget or vram)");
+                                            "unknown recorder (expected hist, tree, budget or vram)");
                     return 0;
                 }
                 c.recorders |= bit;
             }
         } else {
-            c.recorders = CAP_REC_HIST;
+            c.recorders = CAP_REC_HIST | CAP_REC_TREE;
         }
         if (cap_state() == CAP_RUNNING || cap_state() == CAP_ARMED) {
             send_dap_error_response(seq, "x16/capture", "a capture is already running or armed");
@@ -2465,7 +2465,7 @@ static int handle_x16_capture(int seq, cJSON *args) {
     if (cap_state() == CAP_DONE)
         cJSON_AddStringToObject(body, "ended", cap_end_name(cap_end_reason()));
     cJSON *recs = cJSON_CreateArray();
-    for (uint32_t bit = 1; bit <= CAP_REC_VRAM; bit <<= 1)
+    for (uint32_t bit = 1; bit <= CAP_REC_LAST; bit <<= 1)
         if (cap_recorders() & bit)
             cJSON_AddItemToArray(recs, cJSON_CreateString(profile_session_recorder_name(bit)));
     cJSON_AddItemToObject(body, "recorders", recs);
@@ -2499,9 +2499,47 @@ static int handle_x16_capture(int seq, cJSON *args) {
             cJSON_AddNumberToObject(o, "instructions", (double)row->instructions);
             cJSON_AddNumberToObject(o, "percent", total ? 100.0 * (double)tc / (double)total : 0.0);
             cJSON_AddNumberToObject(o, "perFrame", frames ? (double)tc / frames : 0.0);
+            if (r->node_count > 2) {
+                cJSON_AddNumberToObject(o, "inclCycles", (double)row->incl_cycles);
+                cJSON_AddNumberToObject(o, "inclPercent",
+                                        total ? 100.0 * (double)row->incl_cycles / (double)total : 0.0);
+                cJSON_AddNumberToObject(o, "calls", row->calls);
+                cJSON_AddNumberToObject(o, "callMax", row->call_max);
+                cJSON_AddNumberToObject(o, "frameMax", row->frame_max);
+            }
             cJSON_AddItemToArray(rows, o);
         }
         cJSON_AddItemToObject(rep, "rows", rows);
+        if (r->node_count > 2) {
+            // The call tree, flat: parents before children, so a client can
+            // rebuild it from `parent`. Nodes under 0.1% inclusive are left
+            // out (with their subtrees), which keeps the reply small.
+            cJSON *tree = cJSON_CreateArray();
+            int   *out_index = malloc(sizeof *out_index * (size_t)r->node_count);
+            int    kept = 0;
+            for (int i = 0; out_index && i < r->node_count; i++) {
+                const prof_node_t *n = &r->nodes[i];
+                out_index[i] = -1;
+                const bool root = n->parent < 0;
+                if (!root && (out_index[n->parent] < 0 || n->incl * 1000 < total))
+                    continue;
+                char name[PROF_NAME_MAX + 16];
+                profile_session_node_name(r, i, name, sizeof name);
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddStringToObject(o, "name", name);
+                cJSON_AddNumberToObject(o, "parent", root ? -1 : out_index[n->parent]);
+                cJSON_AddNumberToObject(o, "self", (double)n->self);
+                cJSON_AddNumberToObject(o, "incl", (double)n->incl);
+                cJSON_AddNumberToObject(o, "calls", n->calls);
+                cJSON_AddNumberToObject(o, "callMax", n->call_max);
+                cJSON_AddNumberToObject(o, "frameMax", n->frame_max);
+                cJSON_AddItemToArray(tree, o);
+                out_index[i] = kept++;
+            }
+            free(out_index);
+            cJSON_AddItemToObject(rep, "tree", tree);
+            cJSON_AddBoolToObject(rep, "treeConsistent", profile_session_tree_consistent());
+        }
         cJSON_AddItemToObject(body, "report", rep);
     }
     send_dap_response(seq, "x16/capture", true, body);

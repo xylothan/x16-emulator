@@ -263,6 +263,8 @@ void interrupt6502(enum InterruptType vector) {
     // hardware interrupt is not dispatched through the table and is charged
     // here instead. Recorded before the BRK vector is rewritten to IRQ below.
     const bool from_opcode = (vector == INT_BRK || vector == INT_COP);
+    const uint16_t sp0 = regs.sp;
+    const int entered_vector = (int)vector;
 
     // Tell the debugger an interrupt is being taken, before anything is pushed:
     // regs.pc is still the interrupted address and regs.sp is what the matching
@@ -301,6 +303,7 @@ void interrupt6502(enum InterruptType vector) {
     if (!from_opcode) {
         clockticks6502 += 7; // consumed by CPU to process interrupt
     }
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_IRQ_ENTER, regs.pc, sp0, (uint16_t)entered_vector);
 }
 
 static uint32_t addr_with_db(uint16_t addr) {

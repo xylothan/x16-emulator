@@ -769,6 +769,52 @@ r = sprite_mux_config(200, {"enabled": False})
 expect("sprite-mux tracing can be switched back off",
        r is not None and r.get("body", {}).get("enabled") is False)
 
+# 15f. x16/capture: a short capture with the default recorders (histogram and
+# call tree). The arithmetic is pinned by tests/test_profile_cct.c and
+# tests/test_profile_report.c; what only a live machine shows is that the CPU
+# core's call and interrupt hooks feed the tree the same cycles the histogram
+# counts -- the KERNAL's interrupt handler runs every frame, so [IRQ] cannot be
+# empty -- and that the recorders are released afterwards.
+
+
+def capture(seq, args):
+    send_dap(sock, {"seq": seq, "type": "request", "command": "x16/capture", "arguments": args})
+    time.sleep(0.3)
+    for m in recv_dap(sock, 1):
+        if m.get("command") == "x16/capture":
+            return m
+    return None
+
+
+r = capture(300, {"start": {"frames": 30}})
+expect("x16/capture starts", r is not None and r.get("success"))
+expect("with the histogram and the call tree by default",
+       r is not None and set(r.get("body", {}).get("recorders", [])) == {"hist", "tree"})
+rep = None
+for i in range(40):
+    r = capture(301 + i, {"top": 5})
+    body = r.get("body", {}) if r and r.get("success") else {}
+    if body.get("state") == "done":
+        rep = body.get("report")
+        break
+    time.sleep(0.1)
+expect("the capture finishes with a report", rep is not None)
+if rep:
+    tree = rep.get("tree", [])
+    expect("the report carries a call tree", len(tree) >= 2)
+    expect("its self totals match the histogram's", rep.get("treeConsistent") is True)
+    roots = {n.get("name"): i for i, n in enumerate(tree) if n.get("parent") == -1}
+    expect("rooted at [main] and [IRQ]", set(roots) == {"[main]", "[IRQ]"})
+    if set(roots) == {"[main]", "[IRQ]"}:
+        total = rep.get("mainCycles", 0) + rep.get("irqCycles", 0)
+        expect("the roots' inclusive time is every cycle",
+               tree[roots["[main]"]]["incl"] + tree[roots["[IRQ]"]]["incl"] == total)
+        handlers = [n for n in tree if n.get("parent") == roots["[IRQ]"]]
+        expect("the KERNAL's interrupt handler is under [IRQ]",
+               bool(handlers) and handlers[0].get("calls", 0) >= 30)
+    expect("rows carry inclusive time and calls",
+           all("inclCycles" in row and "calls" in row for row in rep.get("rows", [])))
+
 baseline = bp_addrs(sock)
 print("       breakpoints before this session: %s" % (" ".join(baseline) or "(none)"))
 
