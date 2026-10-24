@@ -263,13 +263,53 @@ Each is small, and each is checked against the Phase 0 numbers.
     the panel does what the setting says.
   - Arm VERA bandwidth separately from cycle accounting.
 - **The per-instruction status check:** measured in Phase 0 as the largest
-  cost, at about 0.85 ms per frame. `code_map` measured close to free, so
-  leave it. Find what `DEBUGGetCurrentStatus` does on every instruction while
-  running (breakpoint and watchpoint tests are the likely part). Make the
-  common case, running with no breakpoint that could fire here, cost a single
-  test.
+  cost, at about 0.85 ms per frame (~22 ns per instruction). `code_map`
+  measured close to free, so leave it.
+
+  With no breakpoints set, `debug_bp_on_arrival` is an empty loop. The cost
+  is overhead paid on every instruction while running:
+  - the out-of-line call to `DEBUGGetCurrentStatusEx`;
+  - `cpu_irq_take_entered_flag`, `hitBreakpoint` on the step target, and
+    `video_debug_ui_available`;
+  - **`SDL_GetKeyboardState`, a call into the SDL DLL, made only to check the
+    Break key.**
+
+  The fix is a fast path the loops test inline before calling in:
+  - **One flag says "nothing can stop here".** It is true while running, with
+    no step target, no pending watchpoint stop, no "break on interrupt", and
+    no interrupt-entry flag waiting to be consumed.
+  - **One bit says "a breakpoint may sit at this PC"**: a 64K-bit map (8 KB)
+    over the CPU address, kept in step with every add and remove. Bank,
+    condition, hit count and ignore budget are still decided by the slow path,
+    so their semantics do not change.
+  - **The Break key and the DAP socket are checked on the existing
+    1-in-1000-instruction throttle**, not on every instruction. That is about
+    0.1 ms of latency.
+  - Both `emulator_loop` and `emulator_step_during_move` use it.
+
+  Risk: breakpoint semantics. The resume guard, the WAI guard, hit and ignore
+  counts, dump breakpoints and interrupt following all depend on exactly when
+  the slow path runs. The DAP testbench (126 checks) and the `debug_core` unit
+  tests must stay green, with new tests for "a breakpoint added while running
+  fires on its next arrival".
+
+  Target: emulation under `-imgui` with no panels within 5% of the no-debugger
+  2.93 ms per frame.
+- **Attribute spikes:** keep a per-frame ring of section times in `host_prof`,
+  and have `-bench` and `x16/hostPerf` report the worst frames by section. That
+  answers whether the 17–28 ms frames come from the emulator, the UI, present,
+  or the OS.
 - **Optional:** a "UI refresh rate" setting (60 / 30 / 10 Hz) for panels that
   show live data.
+
+Targets for the panels:
+- I/O Activity with a full ring: under 0.1 ms per render (from 1.6).
+- Performance panel: under 0.15 ms per render (from 0.55). Its two recorders
+  cost 0.5 ms of emulation between them; measure `perf_budget` and
+  `vera_bandwidth` separately once they can be armed apart.
+
+Done when the Phase 0 benchmark set, rerun, meets these targets, and CI
+(including `wasm`) is green.
 
 These do not depend on anything below and could ship first.
 
