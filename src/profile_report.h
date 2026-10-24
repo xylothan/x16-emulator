@@ -16,6 +16,12 @@
 // KERNAL, BASIC, anything without a .dbg) is grouped by 256-byte page and
 // named by where it is, so the rows always add up to the histogram's total.
 //
+// INCLUSIVE TIME comes from the calling-context tree (profile_cct.h), added
+// with prof_report_add_tree(): each tree node is matched to the row its call
+// target falls in, and a row's inclusive time is the sum over its nodes --
+// skipping a node that sits under another node of the same row, so recursion
+// is not counted twice.
+//
 // Built only when a capture ends, never while recording. The symbol table and
 // the coverage test are passed in, so this needs no debug-info module and is
 // unit-tested on its own (tests/test_profile_report.c).
@@ -55,13 +61,30 @@ typedef struct {
 	uint64_t main_cycles; // self time outside interrupt handlers
 	uint64_t irq_cycles;  // self time inside them
 	uint64_t instructions;
+	// From the tree; zero without one.
+	uint64_t incl_cycles; // from entry to return, callees included
+	uint32_t calls;
+	uint32_t call_max;    // worst single call
+	uint32_t frame_max;   // worst frame, over its call sites
 } prof_row_t;
 
+// One calling-context tree node, as profile_cct.h records it.
 typedef struct {
-	prof_row_t *rows;     // worst first, by main + irq cycles
-	int         count;
-	uint64_t    main_cycles, irq_cycles, instructions; // the histogram's totals
-	int         named_rows, ambiguous_rows;
+	int32_t  parent;      // index of the parent node; -1 for a root
+	int32_t  row;         // rows[] index of the routine it calls; -1 if none
+	uint32_t key;         // perf_hist key of the call target, or a CCT_KEY_*
+	uint64_t self, incl;
+	uint32_t calls, call_max, frame_max;
+} prof_node_t;
+
+typedef struct {
+	prof_row_t  *rows;    // worst first, by main + irq cycles
+	int          count;
+	uint64_t     main_cycles, irq_cycles, instructions; // the histogram's totals
+	int          named_rows, ambiguous_rows;
+	prof_node_t *nodes;   // the call tree, parents before children; or NULL
+	int          node_count;
+	void        *lookup;  // private: the symbol tables, kept for add_tree
 } prof_report_t;
 
 // Build from the armed perf_hist histogram. `syms` need not be sorted.
@@ -69,6 +92,14 @@ typedef struct {
 bool prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms,
                        prof_covered_fn covered);
 void prof_report_free(prof_report_t *r);
+
+// Attach a call tree: copies `nodes` (row is filled in here; parents must
+// precede children), and fills each row's incl_cycles, calls, call_max and
+// frame_max. False if out of memory.
+bool prof_report_add_tree(prof_report_t *r, const prof_node_t *nodes, int count);
+
+// The row a perf_hist key is charged to, or -1 if that key never ran.
+int prof_report_row_of_key(const prof_report_t *r, uint32_t key);
 
 #ifdef __cplusplus
 }

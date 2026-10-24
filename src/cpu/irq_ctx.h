@@ -79,6 +79,26 @@ uint32_t cpu_irq_return_pc(void);  // where the innermost handler returns to (24
 // work out whether it changed.
 bool cpu_irq_take_entered_flag(void);
 
+// ---- Control flow, for a profiler ------------------------------------------
+// When set, the core reports every call, return, interrupt entry and RTI.
+// NULL (the default) costs one load and branch at each of those, and nothing
+// on any other instruction. `sp` follows the conventions above: before the
+// push for a call or interrupt, after the pull for a return or RTI.
+//   CALL:       pc = the target (24-bit), ret = the return address pushed
+//               (the call's last byte, so inline operands start at ret + 1)
+//   RETURN:     pc = where it returned to
+//   IRQ_ENTER:  pc = the handler's first instruction, ret = the vector
+//   IRQ_LEAVE:  pc = where RTI returned to
+// Kept here because every build of the core links this file.
+enum {
+	CPU_FLOW_CALL = 0,
+	CPU_FLOW_RETURN,
+	CPU_FLOW_IRQ_ENTER,
+	CPU_FLOW_IRQ_LEAVE,
+};
+typedef void (*cpu_flow_hook_fn)(int kind, uint32_t pc, uint16_t sp, uint16_t ret);
+extern cpu_flow_hook_fn cpu_flow_hook;
+
 // The same flag, read without clearing it. The emulator loop tests it on every
 // instruction to decide whether the debugger's status check has anything to do;
 // only cpu_irq_take_entered_flag() may consume it.

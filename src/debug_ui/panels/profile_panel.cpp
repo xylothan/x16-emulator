@@ -18,6 +18,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace {
 
 int   g_frames     = 600;
@@ -25,6 +28,7 @@ float g_seconds    = 0.0f;
 bool  g_on_marker  = false;
 bool  g_rec_budget = false;
 bool  g_rec_vram   = false;
+bool  g_rec_tree   = true;
 char  g_filter[64] = "";
 
 const ImVec4 COL_DIM(0.60f, 0.60f, 0.60f, 1.0f);
@@ -66,6 +70,12 @@ draw_controls(void)
 		ImGui::SetTooltip("Arm, and start only when the program writes $F8 to $9FBC;\n"
 		                  "$F9 stops it. Brackets exactly the code you want measured.");
 	ImGui::SameLine();
+	ImGui::Checkbox("Call tree", &g_rec_tree);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Also record who called what: inclusive time, calls and worst\n"
+		                  "call per routine, and the call tree. Costs a little at each\n"
+		                  "JSR, RTS and interrupt.");
+	ImGui::SameLine();
 	ImGui::Checkbox("Cycle budget", &g_rec_budget);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Also record work vs. waiting per frame (perf_budget).\n"
@@ -80,8 +90,8 @@ draw_controls(void)
 		c.frames    = (uint32_t)g_frames;
 		c.seconds   = g_seconds;
 		c.on_marker = g_on_marker;
-		c.recorders = CAP_REC_HIST | (g_rec_budget ? CAP_REC_BUDGET : 0) |
-		              (g_rec_vram ? CAP_REC_VRAM : 0);
+		c.recorders = CAP_REC_HIST | (g_rec_tree ? CAP_REC_TREE : 0) |
+		              (g_rec_budget ? CAP_REC_BUDGET : 0) | (g_rec_vram ? CAP_REC_VRAM : 0);
 		cap_start(&c);
 	}
 	ImGui::SameLine();
@@ -91,26 +101,9 @@ draw_controls(void)
 }
 
 void
-draw_report(void)
+draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 {
-	const prof_report_t *r = profile_session_report();
-	if (!r) {
-		ImGui::TextDisabled("No report yet. Start a capture; the report appears when it ends.");
-		return;
-	}
-	const uint64_t total  = r->main_cycles + r->irq_cycles;
-	const uint32_t frames = profile_session_report_frames() ? profile_session_report_frames() : 1;
-	ImGui::Text("Last capture: %s, %u frames, %.1f s.", cap_end_name(cap_end_reason()), frames,
-	            cap_elapsed_s());
-	ImGui::TextDisabled("%llu cycles per frame (%.1f%% in interrupts), %d routines/pages, "
-	                    "%d named.",
-	                    (unsigned long long)(total / frames),
-	                    total ? 100.0 * (double)r->irq_cycles / (double)total : 0.0, r->count,
-	                    r->named_rows);
-	if (r->ambiguous_rows)
-		ImGui::TextColored(COL_AMBIG, "%d rows marked * name code whose RAM bank the debug info "
-		                              "did not establish.", r->ambiguous_rows);
-
+	const bool tree = r->node_count > 2;
 	ImGui::SetNextItemWidth(dbgui_col_width("", "wwwwwwwwwwwwwwww"));
 	ImGui::InputTextWithHint("##proffilter", "filter", g_filter, sizeof g_filter);
 
@@ -140,15 +133,17 @@ draw_report(void)
 				view[view_n++] = i;
 	}
 
-	if (!ImGui::BeginTable("profrows", 6,
+	if (!ImGui::BeginTable("profrows", 8,
 	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
 	                           ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE))
 		return;
 	ImGui::TableSetupScrollFreeze(0, 1);
 	ImGui::TableSetupColumn("Self %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Self %", "99.99"));
+	ImGui::TableSetupColumn("Incl %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Incl %", "100.00"));
 	ImGui::TableSetupColumn("IRQ %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("IRQ %", "99.99"));
 	ImGui::TableSetupColumn("Cycles/frame", ImGuiTableColumnFlags_WidthFixed,
 	                        dbgui_col_width("Cycles/frame", "9999999"));
+	ImGui::TableSetupColumn("Calls", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Calls", "99999999"));
 	ImGui::TableSetupColumn("Cyc/ins", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Cyc/ins", "9.99"));
 	ImGui::TableSetupColumn("Routine", ImGuiTableColumnFlags_WidthStretch);
 	ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthFixed,
@@ -167,13 +162,27 @@ draw_report(void)
 			ImGui::TableSetColumnIndex(0);
 			ImGui::Text("%.2f", total ? 100.0 * (double)t / (double)total : 0.0);
 			ImGui::TableSetColumnIndex(1);
+			if (tree && row.calls)
+				ImGui::Text("%.2f", total ? 100.0 * (double)row.incl_cycles / (double)total : 0.0);
+			else
+				ImGui::TextDisabled("-");
+			if (tree && row.calls && ImGui::IsItemHovered())
+				ImGui::SetTooltip("From each call's entry to its return, callees included.\n"
+				                  "Worst call %u cycles, worst frame %u.",
+				                  row.call_max, row.frame_max);
+			ImGui::TableSetColumnIndex(2);
 			if (row.irq_cycles)
 				ImGui::Text("%.2f", total ? 100.0 * (double)row.irq_cycles / (double)total : 0.0);
 			else
 				ImGui::TextDisabled("-");
-			ImGui::TableSetColumnIndex(2);
-			ImGui::Text("%llu", (unsigned long long)(t / frames));
 			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%llu", (unsigned long long)(t / frames));
+			ImGui::TableSetColumnIndex(4);
+			if (tree && row.calls)
+				ImGui::Text("%u", row.calls);
+			else
+				ImGui::TextDisabled("-");
+			ImGui::TableSetColumnIndex(5);
 			// No 6502 instruction is shorter than 2 cycles: near 1 means WAI.
 			if (cpi > 0.0 && cpi < 1.5)
 				ImGui::TextColored(COL_WAIT, "%.2f", cpi);
@@ -182,7 +191,7 @@ draw_report(void)
 			if (cpi > 0.0 && cpi < 1.5 && ImGui::IsItemHovered())
 				ImGui::SetTooltip("Under 2 cycles per instruction: the CPU sat in WAI here,\n"
 				                  "ticking one cycle per step. Waiting, not working.");
-			ImGui::TableSetColumnIndex(4);
+			ImGui::TableSetColumnIndex(6);
 			char label[PROF_NAME_MAX + 4];
 			snprintf(label, sizeof label, "%s%s", row.name, row.ambiguous ? " *" : "");
 			if (ImGui::Selectable(label, false,
@@ -206,7 +215,7 @@ draw_report(void)
 				                                                : "");
 				ImGui::EndTooltip();
 			}
-			ImGui::TableSetColumnIndex(5);
+			ImGui::TableSetColumnIndex(7);
 			if (row.region == PH_REGION_RAM)
 				ImGui::TextDisabled("RAM %u:$%04X", (unsigned)row.bank, (unsigned)row.addr);
 			else if (row.region == PH_REGION_ROM)
@@ -217,6 +226,142 @@ draw_report(void)
 		}
 	}
 	ImGui::EndTable();
+}
+
+// ─── Call tree ──────────────────────────────────────────────────────────────
+
+// Children of each node, heaviest first, rebuilt when the report changes.
+std::vector<std::vector<int>> g_kids;
+const prof_node_t            *g_kids_for = nullptr;
+int                           g_kids_n   = -1;
+
+void
+draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t frames)
+{
+	const prof_node_t &n = r->nodes[i];
+	char name[PROF_NAME_MAX + 16];
+	profile_session_node_name(r, i, name, sizeof name);
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_OpenOnArrow |
+	                        ImGuiTreeNodeFlags_OpenOnDoubleClick;
+	if (g_kids[i].empty())
+		fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+	// Open the heavy paths by default, so the hot spot is visible at once.
+	if (depth < 8 && total && n.incl * 5 >= total)
+		fl |= ImGuiTreeNodeFlags_DefaultOpen;
+	ImGui::PushID(i);
+	const bool open = ImGui::TreeNodeEx("node", fl, "%s", name);
+	if (ImGui::IsItemHovered()) {
+		ImGui::BeginTooltip();
+		ImGui::Text("%s: %llu cycles inclusive, %llu self", name, (unsigned long long)n.incl,
+		            (unsigned long long)n.self);
+		ImGui::Text("%u calls, worst call %u cycles, worst frame %u", n.calls, n.call_max,
+		            n.frame_max);
+		if (n.row >= 0)
+			ImGui::TextDisabled("Click to open in Disassembly.");
+		ImGui::EndTooltip();
+	}
+	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() && n.row >= 0) {
+		uint8_t  region, bank;
+		uint16_t pc;
+		perf_hist_key_decode(n.key, &region, &bank, &pc);
+		debug_ui_request_goto(pc, 0);
+	}
+	ImGui::TableSetColumnIndex(1);
+	ImGui::Text("%.2f", total ? 100.0 * (double)n.incl / (double)total : 0.0);
+	ImGui::TableSetColumnIndex(2);
+	ImGui::Text("%.2f", total ? 100.0 * (double)n.self / (double)total : 0.0);
+	ImGui::TableSetColumnIndex(3);
+	ImGui::Text("%llu", (unsigned long long)(n.incl / frames));
+	ImGui::TableSetColumnIndex(4);
+	if (n.parent >= 0)
+		ImGui::Text("%u", n.calls);
+	else
+		ImGui::TextDisabled("-");
+	ImGui::TableSetColumnIndex(5);
+	if (n.parent >= 0)
+		ImGui::Text("%u", n.call_max);
+	else
+		ImGui::TextDisabled("-");
+	ImGui::PopID();
+	if (open && !g_kids[i].empty()) {
+		for (int c : g_kids[i])
+			draw_node(r, c, depth + 1, total, frames);
+		ImGui::TreePop();
+	}
+}
+
+void
+draw_tree(const prof_report_t *r, uint64_t total, uint32_t frames)
+{
+	if (g_kids_for != r->nodes || g_kids_n != r->node_count) {
+		g_kids_for = r->nodes;
+		g_kids_n   = r->node_count;
+		g_kids.assign((size_t)r->node_count, {});
+		for (int i = 0; i < r->node_count; i++)
+			if (r->nodes[i].parent >= 0)
+				g_kids[(size_t)r->nodes[i].parent].push_back(i);
+		for (auto &k : g_kids)
+			std::sort(k.begin(), k.end(),
+			          [r](int a, int b) { return r->nodes[a].incl > r->nodes[b].incl; });
+	}
+	if (!profile_session_tree_consistent())
+		ImGui::TextColored(COL_AMBIG, "The tree's totals do not match the histogram's.");
+	if (!ImGui::BeginTable("proftree", 6,
+	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+	                           ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE))
+		return;
+	ImGui::TableSetupScrollFreeze(0, 1);
+	ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
+	ImGui::TableSetupColumn("Incl %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Incl %", "100.00"));
+	ImGui::TableSetupColumn("Self %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Self %", "99.99"));
+	ImGui::TableSetupColumn("Cycles/frame", ImGuiTableColumnFlags_WidthFixed,
+	                        dbgui_col_width("Cycles/frame", "9999999"));
+	ImGui::TableSetupColumn("Calls", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Calls", "99999999"));
+	ImGui::TableSetupColumn("Worst call", ImGuiTableColumnFlags_WidthFixed,
+	                        dbgui_col_width("Worst call", "99999999"));
+	ImGui::TableHeadersRow();
+	draw_node(r, 0, 0, total, frames); // [main]
+	draw_node(r, 1, 0, total, frames); // [IRQ]
+	ImGui::EndTable();
+}
+
+void
+draw_report(void)
+{
+	const prof_report_t *r = profile_session_report();
+	if (!r) {
+		ImGui::TextDisabled("No report yet. Start a capture; the report appears when it ends.");
+		return;
+	}
+	const uint64_t total  = r->main_cycles + r->irq_cycles;
+	const uint32_t frames = profile_session_report_frames() ? profile_session_report_frames() : 1;
+	ImGui::Text("Last capture: %s, %u frames, %.1f s.", cap_end_name(cap_end_reason()), frames,
+	            cap_elapsed_s());
+	ImGui::TextDisabled("%llu cycles per frame (%.1f%% in interrupts), %d routines/pages, "
+	                    "%d named.",
+	                    (unsigned long long)(total / frames),
+	                    total ? 100.0 * (double)r->irq_cycles / (double)total : 0.0, r->count,
+	                    r->named_rows);
+	if (r->ambiguous_rows)
+		ImGui::TextColored(COL_AMBIG, "%d rows marked * name code whose RAM bank the debug info "
+		                              "did not establish.", r->ambiguous_rows);
+	if (r->node_count <= 2) {
+		draw_rows(r, total, frames);
+		return;
+	}
+	if (ImGui::BeginTabBar("proftabs")) {
+		if (ImGui::BeginTabItem("Routines")) {
+			draw_rows(r, total, frames);
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Call tree")) {
+			draw_tree(r, total, frames);
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
+	}
 }
 
 void

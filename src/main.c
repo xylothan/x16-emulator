@@ -142,6 +142,7 @@ static uint32_t    bench_warmup = 600;
 // frames, print the report and exit. See profile_capture.h.
 static uint32_t    capture_cli_frames = 0;
 static uint32_t    capture_cli_warmup = 600;
+static uint32_t    capture_cli_recorders = CAP_REC_HIST | CAP_REC_TREE; // -profilerec
 // -input / -inputscript / -autostart: joypad and keyboard events replayed at
 // set frames. See input_script.h.
 static bool        input_script_loaded = false;
@@ -680,6 +681,9 @@ usage()
 	printf("\tAfter the warm-up (default 600 frames), capture <frames> emulated\n");
 	printf("\tframes, print where the guest's time went by routine, and exit.\n");
 	printf("\tRoutines are named from the loaded debug info (-dbgfile).\n");
+	printf("-profilerec <name,name,...>\n");
+	printf("\tRecorders for -profile: hist (always), tree (default: who called\n");
+	printf("\twhat), budget (work vs. waiting), vram (VRAM traffic).\n");
 	printf("-inputscript <file>\n");
 	printf("\tReplay joypad and keyboard input at set frames, one command per\n");
 	printf("\tline: <frame> <command>, where <frame> is a frame number (1 is\n");
@@ -1149,6 +1153,25 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-profilerec")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			capture_cli_recorders = CAP_REC_HIST;
+			char list[128];
+			snprintf(list, sizeof list, "%s", argv[0]);
+			for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+				const uint32_t bit = profile_session_recorder_bit(tok);
+				if (!bit) {
+					fprintf(stderr, "-profilerec: unknown recorder '%s' (hist, tree, budget, vram)\n", tok);
+					exit(1);
+				}
+				capture_cli_recorders |= bit;
+			}
+			argc--;
+			argv++;
 		} else if (!strcmp(argv[0], "-uipanels") || !strcmp(argv[0], "-uiiotrace")) {
 #ifdef HAS_IMGUI
 			const bool panels = !strcmp(argv[0], "-uipanels");
@@ -2600,7 +2623,7 @@ capture_cli_tick(void)
 		if (++n >= capture_cli_warmup) {
 			cap_config_t c = {0};
 			c.frames       = capture_cli_frames;
-			c.recorders    = CAP_REC_HIST;
+			c.recorders    = capture_cli_recorders;
 			if (!cap_start(&c)) {
 				fprintf(stderr, "-profile: the recorders could not be armed.\n");
 				return false;

@@ -656,6 +656,69 @@ debugging the builder itself, can be added later.
   nodes by routine for a flat view, and keeps the tree for caller→callee
   edges.
 
+### Phase 3: what was built (2026-10-24)
+
+- **`src/profile_cct.c`**, the tree builder. It is pure and is unit-tested in
+  `tests/test_profile_cct.c`, which covers:
+  - nesting, repeated calls, worst call and worst frame;
+  - PLA/PLA early exits, RTS jump tables and TXS resets;
+  - an IRQ landing mid-routine, a call inside a handler, and BRK;
+  - recursion, a return with nothing open, and a call that never returns;
+  - the pool filling up, so new paths fold into `[other]`.
+- **CPU hooks:** `cpu_flow_hook` lives in `cpu/irq_ctx.c`, which every build of
+  the core already links. It fires on JSR, JSL, RTS, RTL, interrupt entry and
+  RTI, and is NULL when off: one load and branch per call or return, nothing on
+  other instructions.
+- **Cycle ordering matches `perf_hist` exactly.**
+  - Calls and returns are queued, then applied after the instruction's cycles
+    are counted in `perf_hist_step_`. A JSR's cycles go to the caller and an
+    RTS's to the callee.
+  - Interrupt entry and RTI apply at once, so BRK's cycles land in the handler
+    and RTI's in the code it returns to.
+  - The result: tree self time equals the histogram's main and IRQ totals to
+    the cycle, and every report checks this ("self totals match the
+    histogram").
+- **Pairing:** calls and returns are matched by stack pointer on one shadow
+  stack. Before each event, frames the stack has risen past are popped. A
+  return below the innermost frame is a computed jump and pops nothing.
+- **Trampolines, handled generally.** A JSR whose target is a `JMP abs` or
+  `JMP (abs)` stub is keyed by where the JMP goes, read at call time, which is
+  exact. This covers:
+  - jump tables;
+  - the KERNAL's `jmpfr` (`$02DF`), through which `jsrfar` from every ROM bank
+    reaches its target;
+  - a program's own far-call stubs.
+
+  Matching only on `$FF6E` would have missed most far calls: the ROM banks
+  carry their own `jsrfar` copies, and BASIC's is at bank 4 `$EA08`.
+- **Report additions:**
+  - per routine: inclusive cycles, calls, worst call and worst frame. A node
+    inside an outer call of the same routine is not counted twice;
+  - the tree itself, printed top-down by `-profile`;
+  - a Call tree tab in the Profile panel;
+  - `tree` and `treeConsistent` fields in `x16/capture`.
+- **Recorders:** `tree` is a capture recorder, on by default. Use
+  `-profilerec` to choose recorders from the command line.
+
+**Cost** (Phase 0 workload past its start menu, `-hidden`, 1,800 frames,
+interleaved, six runs each, medians):
+
+| Recorders | Emulation per frame | Busy p50 |
+| --- | --- | --- |
+| histogram | 3.37 ms | 3.65 ms |
+| histogram + tree | 3.42 ms | 3.69 ms |
+
+- **The tree costs about 0.05 ms per frame (~1.5%).** That run has a tree of
+  1,084 nodes and about 13k calls per frame.
+- **Guest-side determinism:** cycle totals with and without the tree agree to
+  within 4 cycles over 242M, the same spread as between two histogram-only
+  runs.
+
+Tested:
+- the DAP testbench, 138/138, including a live capture whose tree totals must
+  equal the histogram's and whose `[IRQ]` root must hold the KERNAL handler;
+- a BASIC loop, which exercises `jsrfar` across ROM banks.
+
 ## Phase 4: the report
 
 - **Names:** symbolise keys with `dbg_info_addr_to_label_nearest` and the
@@ -853,8 +916,6 @@ source in the emulator.
 
 - Should capture mode pause `code_map` by default? It breaks nothing while
   running, but the Disassembly view would have to tolerate gaps afterwards.
-- Phase 3 depends on `perf_hist`, which is not on `origin/main` yet. Should it
-  land as its own PR first?
 - Do we want per-frame call-tree snapshots, for questions like "why was frame
   812 slow"? Or are session totals plus worst call and worst frame enough?
 - Is 65C816 native-mode code (JSL/RTL, 24-bit PCs) in scope now, or only

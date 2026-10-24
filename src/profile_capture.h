@@ -46,6 +46,8 @@ typedef enum {
 #define CAP_REC_HIST   (1u << 0)
 #define CAP_REC_BUDGET (1u << 1) // perf_budget: work vs. waiting per frame
 #define CAP_REC_VRAM   (1u << 2) // vera_bandwidth: VRAM traffic per scanline
+#define CAP_REC_TREE   (1u << 3) // profile_cct: who called what (needs HIST)
+#define CAP_REC_LAST   CAP_REC_TREE
 
 // $9FBC values the guest writes to start and stop a capture. Outside the
 // perf_budget marker protocol, which uses $00-$3F, $80-$BF, $F0, $F1 and $FE.

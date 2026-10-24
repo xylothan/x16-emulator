@@ -17,6 +17,16 @@ typedef struct {
 	int         row;   // row index once charged, else -1
 } sym_t;
 
+// Kept with the report after it is built, so a key seen later (a call
+// target from the tree) is charged by exactly the same rule.
+typedef struct {
+	sym_t          *low, *ram;
+	int             nlow, nram;
+	int             unk_lo, unk_hi;
+	int            *page_row;  // key >> 8 -> row, for time no label claims
+	prof_covered_fn covered;
+} lookup_t;
+
 static int
 cmp_low(const void *a, const void *b)
 {
@@ -70,6 +80,40 @@ bank_run(const sym_t *s, int n, int16_t bank, int *lo, int *hi)
 	*hi = a;
 }
 
+// The label a key is charged to, or NULL for page-grouped time.
+static sym_t *
+label_of(const lookup_t *L, uint32_t k, bool *ambiguous)
+{
+	uint8_t  region, bank;
+	uint16_t pc;
+	perf_hist_key_decode(k, &region, &bank, &pc);
+	*ambiguous = false;
+	if (region == PH_REGION_LOW) {
+		const int cov = L->covered ? L->covered(pc, -1) : 0;
+		const int i   = cov ? floor_in(L->low, 0, L->nlow, pc) : -1;
+		return i >= 0 ? &L->low[i] : NULL;
+	}
+	if (region == PH_REGION_RAM) {
+		const int cov = L->covered ? L->covered(pc, bank) : 0;
+		if (!cov)
+			return NULL;
+		int lo, hi;
+		bank_run(L->ram, L->nram, (int16_t)bank, &lo, &hi);
+		int i = floor_in(L->ram, lo, hi, pc);
+		if (i < 0) {
+			// No label known to be in this bank: one whose bank was never
+			// established, and say so.
+			i          = floor_in(L->ram, L->unk_lo, L->unk_hi, pc);
+			*ambiguous = i >= 0;
+		}
+		if (i < 0)
+			return NULL;
+		*ambiguous = *ambiguous || cov == 2;
+		return &L->ram[i];
+	}
+	return NULL;
+}
+
 static int
 cmp_rows(const void *a, const void *b)
 {
@@ -88,6 +132,17 @@ region_name(uint8_t region)
 	return region == PH_REGION_RAM ? "RAM" : region == PH_REGION_ROM ? "ROM" : "";
 }
 
+static void
+lookup_free(lookup_t *L)
+{
+	if (!L)
+		return;
+	free(L->low);
+	free(L->ram);
+	free(L->page_row);
+	free(L);
+}
+
 bool
 prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_covered_fn covered)
 {
@@ -96,14 +151,18 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 		return false;
 
 	// Split and sort the symbol table.
-	sym_t *low = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *low);
-	sym_t *ram = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *ram);
-	// One row per page, for time no label claims: page index = key >> 8.
-	int   *page_row = malloc(sizeof(int) * ((PH_KEYS >> 8) + 1));
-	int    nlow = 0, nram = 0, cap = 256;
+	lookup_t *L = calloc(1, sizeof *L);
+	int       cap = 256;
 	prof_row_t *rows = malloc(sizeof *rows * (size_t)cap);
-	if (!low || !ram || !page_row || !rows) {
-		free(low); free(ram); free(page_row); free(rows);
+	if (L) {
+		L->low      = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *L->low);
+		L->ram      = calloc((size_t)(nsyms > 0 ? nsyms : 1), sizeof *L->ram);
+		L->page_row = malloc(sizeof(int) * ((PH_KEYS >> 8) + 1));
+		L->covered  = covered;
+	}
+	if (!L || !L->low || !L->ram || !L->page_row || !rows) {
+		lookup_free(L);
+		free(rows);
 		return false;
 	}
 	for (int i = 0; i < nsyms; i++) {
@@ -111,18 +170,17 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 		if (!s->name)
 			continue;
 		if (s->addr < 0xA000)
-			low[nlow++] = (sym_t){s->name, s->addr, -1, -1};
+			L->low[L->nlow++] = (sym_t){s->name, s->addr, -1, -1};
 		else if (s->addr < 0xC000)
-			ram[nram++] = (sym_t){s->name, s->addr, s->bank, -1};
+			L->ram[L->nram++] = (sym_t){s->name, s->addr, s->bank, -1};
 	}
-	qsort(low, (size_t)nlow, sizeof *low, cmp_low);
-	qsort(ram, (size_t)nram, sizeof *ram, cmp_ram);
+	qsort(L->low, (size_t)L->nlow, sizeof *L->low, cmp_low);
+	qsort(L->ram, (size_t)L->nram, sizeof *L->ram, cmp_ram);
 	for (uint32_t p = 0; p <= (PH_KEYS >> 8); p++)
-		page_row[p] = -1;
+		L->page_row[p] = -1;
 
 	// Where the unknown-bank labels live, found once.
-	int unk_lo, unk_hi;
-	bank_run(ram, nram, -1, &unk_lo, &unk_hi);
+	bank_run(L->ram, L->nram, -1, &L->unk_lo, &L->unk_hi);
 
 	int n = 0;
 	for (uint32_t k = 0; k < PH_KEYS; k++) {
@@ -134,50 +192,26 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 		out->irq_cycles   += q;
 		out->instructions += c;
 
-		uint8_t  region, bank;
-		uint16_t pc;
-		perf_hist_key_decode(k, &region, &bank, &pc);
-
-		// Which label, if any.
-		sym_t *hit       = NULL;
-		bool   ambiguous = false;
-		if (region == PH_REGION_LOW) {
-			const int cov = covered ? covered(pc, -1) : 0;
-			const int i   = cov ? floor_in(low, 0, nlow, pc) : -1;
-			if (i >= 0)
-				hit = &low[i];
-		} else if (region == PH_REGION_RAM) {
-			const int cov = covered ? covered(pc, bank) : 0;
-			if (cov) {
-				int lo, hi;
-				bank_run(ram, nram, (int16_t)bank, &lo, &hi);
-				int i = floor_in(ram, lo, hi, pc);
-				if (i < 0) {
-					// No label known to be in this bank: one whose bank was
-					// never established, and say so.
-					i         = floor_in(ram, unk_lo, unk_hi, pc);
-					ambiguous = i >= 0;
-				}
-				if (i >= 0) {
-					hit       = &ram[i];
-					ambiguous = ambiguous || cov == 2;
-				}
-			}
-		}
+		bool   ambiguous;
+		sym_t *hit = label_of(L, k, &ambiguous);
 
 		// Which row.
-		int r = hit ? hit->row : page_row[k >> 8];
+		int r = hit ? hit->row : L->page_row[k >> 8];
 		if (r < 0) {
 			if (n == cap) {
 				cap *= 2;
 				prof_row_t *grown = realloc(rows, sizeof *rows * (size_t)cap);
 				if (!grown) {
-					free(low); free(ram); free(page_row); free(rows);
+					lookup_free(L);
+					free(rows);
 					memset(out, 0, sizeof *out);
 					return false;
 				}
 				rows = grown;
 			}
+			uint8_t  region, bank;
+			uint16_t pc;
+			perf_hist_key_decode(k, &region, &bank, &pc);
 			r = n++;
 			prof_row_t *row = &rows[r];
 			memset(row, 0, sizeof *row);
@@ -196,7 +230,7 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 				else
 					snprintf(row->name, sizeof row->name, "%s %u:$%02Xxx", region_name(region),
 					         (unsigned)bank, row->addr >> 8);
-				page_row[k >> 8] = r;
+				L->page_row[k >> 8] = r;
 			}
 		}
 		rows[r].main_cycles  += m;
@@ -208,17 +242,105 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 			rows[r].ambiguous = true;
 	}
 
-	free(low);
-	free(ram);
-	free(page_row);
-
+	// Sort, then point the lookup at the sorted positions. Each row carries
+	// its old index through the sort in `calls`, which stays zero until
+	// prof_report_add_tree() fills it.
+	int *where = malloc(sizeof *where * (size_t)(n > 0 ? n : 1));
+	if (!where) {
+		lookup_free(L);
+		free(rows);
+		memset(out, 0, sizeof *out);
+		return false;
+	}
+	for (int i = 0; i < n; i++)
+		rows[i].calls = (uint32_t)i;
 	qsort(rows, (size_t)n, sizeof *rows, cmp_rows);
+	for (int i = 0; i < n; i++) {
+		where[rows[i].calls] = i;
+		rows[i].calls        = 0;
+	}
+	for (int i = 0; i < L->nlow; i++)
+		if (L->low[i].row >= 0)
+			L->low[i].row = where[L->low[i].row];
+	for (int i = 0; i < L->nram; i++)
+		if (L->ram[i].row >= 0)
+			L->ram[i].row = where[L->ram[i].row];
+	for (uint32_t p = 0; p <= (PH_KEYS >> 8); p++)
+		if (L->page_row[p] >= 0)
+			L->page_row[p] = where[L->page_row[p]];
+	free(where);
+
 	for (int i = 0; i < n; i++) {
 		out->named_rows     += rows[i].named;
 		out->ambiguous_rows += rows[i].ambiguous;
 	}
-	out->rows  = rows;
-	out->count = n;
+	out->rows   = rows;
+	out->count  = n;
+	out->lookup = L;
+	return true;
+}
+
+int
+prof_report_row_of_key(const prof_report_t *r, uint32_t key)
+{
+	if (!r || !r->lookup || key >= PH_KEYS)
+		return -1;
+	const lookup_t *L = r->lookup;
+	bool            ambiguous;
+	const sym_t    *hit = label_of(L, key, &ambiguous);
+	return hit ? hit->row : L->page_row[key >> 8];
+}
+
+bool
+prof_report_add_tree(prof_report_t *r, const prof_node_t *in, int count)
+{
+	if (!r)
+		return false;
+	free(r->nodes);
+	r->nodes      = NULL;
+	r->node_count = 0;
+	for (int i = 0; i < r->count; i++) {
+		r->rows[i].incl_cycles = 0;
+		r->rows[i].calls = r->rows[i].call_max = r->rows[i].frame_max = 0;
+	}
+	if (count <= 0)
+		return true;
+	prof_node_t *nodes = malloc(sizeof *nodes * (size_t)count);
+	// Nearest ancestor (or self) charged to each row: -1 none. Used to skip a
+	// node already counted inside an outer call of the same routine.
+	int *outer = malloc(sizeof *outer * (size_t)count);
+	if (!nodes || !outer) {
+		free(nodes);
+		free(outer);
+		return false;
+	}
+	memcpy(nodes, in, sizeof *nodes * (size_t)count);
+	for (int i = 0; i < count; i++) {
+		prof_node_t *nd = &nodes[i];
+		nd->row = prof_report_row_of_key(r, nd->key);
+		// Does any ancestor already charge this row? Walk up; trees are
+		// shallow (bounded by the 6502 stack), so this stays cheap.
+		bool nested = false;
+		for (int p = nd->parent; p >= 0 && nd->row >= 0; p = nodes[p].parent)
+			if (nodes[p].row == nd->row) {
+				nested = true;
+				break;
+			}
+		outer[i] = nested;
+		if (nd->row < 0)
+			continue;
+		prof_row_t *row = &r->rows[nd->row];
+		row->calls += nd->calls;
+		if (nd->call_max > row->call_max)
+			row->call_max = nd->call_max;
+		if (nd->frame_max > row->frame_max)
+			row->frame_max = nd->frame_max;
+		if (!nested)
+			row->incl_cycles += nd->incl;
+	}
+	free(outer);
+	r->nodes      = nodes;
+	r->node_count = count;
 	return true;
 }
 
@@ -228,5 +350,7 @@ prof_report_free(prof_report_t *r)
 	if (!r)
 		return;
 	free(r->rows);
+	free(r->nodes);
+	lookup_free(r->lookup);
 	memset(r, 0, sizeof *r);
 }

@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+cpu_flow_hook_fn cpu_flow_hook = NULL;
+
 // Past CPU_IRQ_CTX_MAX (see irq_ctx.h) the depth still counts, but there is no
 // room to record which stack pointer each of those entries had. A return can
 // therefore only take them off one at a time, since it has nothing to match

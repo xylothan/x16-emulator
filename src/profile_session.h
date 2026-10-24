@@ -31,7 +31,16 @@ uint32_t             profile_session_report_frames(void); // frames it covered
 // Write the report as a table: totals, then the top `top` rows.
 void profile_session_print(FILE *f, int top);
 
-// Recorder names for DAP and the command line ("hist", "budget", "vram").
+// A call-tree node's display name: its routine, or [main] / [IRQ] / [other],
+// or the bare address when nothing names it.
+void profile_session_node_name(const prof_report_t *r, int node, char *buf, int size);
+
+// Whether the tree's self cycles matched the histogram's totals exactly, for
+// the last report (true when there was no tree).
+bool profile_session_tree_consistent(void);
+
+// Recorder names for DAP and the command line ("hist", "budget", "vram",
+// "tree").
 uint32_t    profile_session_recorder_bit(const char *name);
 const char *profile_session_recorder_name(uint32_t bit);
 
