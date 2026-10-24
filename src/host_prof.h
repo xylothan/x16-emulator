@@ -54,7 +54,7 @@ typedef enum {
 } hp_section_t;
 
 #define HP_MAX_PANELS   32
-#define HP_RING_FRAMES  1024   // for busy-time percentiles at native speed
+#define HP_RING_FRAMES  1024   // recent frames, for percentiles and spike detail
 #define HP_STACK_DEPTH  8
 
 typedef uint64_t (*host_prof_clock_fn)(void);
@@ -118,6 +118,41 @@ typedef struct {
 
 int  host_prof_panel_count(void);
 bool host_prof_panel_get(int i, host_prof_panel_t *out);
+
+// ─── Spikes ─────────────────────────────────────────────────────────────────
+// A mean says nothing about the one frame that missed its vsync. So every
+// frame is kept in a ring with its full section breakdown, and the worst
+// HP_WORST_FRAMES since reset are kept apart from the ring, so a spike is not
+// lost just because a thousand ordinary frames came after it.
+#define HP_WORST_FRAMES 8
+
+typedef struct {
+	uint32_t frame;              // ordinal since reset, from 0
+	uint32_t wall_us;            // the whole frame, sleep included
+	uint32_t busy_us;            // wall minus sleep: what has to fit the period
+	uint32_t cycles;             // guest cycles the frame covered
+	uint32_t ui_frames;          // debugger UI frames drawn during it
+	uint32_t us[HP_SECTIONS];    // per section; sums to wall_us
+} host_prof_frame_t;
+
+// One frame from the ring, 0 = the most recent. False when out of range.
+bool host_prof_recent(int newest_index, host_prof_frame_t *out);
+
+// The worst frames since reset by busy time, worst first. Returns how many.
+int  host_prof_worst(host_prof_frame_t *out, int max);
+
+// The section that took the most time in a frame, sleep excluded: the first
+// place to look when that frame was slow.
+hp_section_t host_prof_dominant(const host_prof_frame_t *f);
+
+// A frame whose busy time exceeds `us` is a spike: it could not have kept real
+// speed. The emulator sets this to the machine's frame period; 0 turns
+// counting off. Counts are since reset.
+void     host_prof_set_spike_us(uint32_t us);
+uint32_t host_prof_spike_us(void);
+uint32_t host_prof_spikes(void);
+// How many spikes each section dominated (see host_prof_dominant()).
+uint32_t host_prof_spikes_by(hp_section_t s);
 
 #ifdef __cplusplus
 }

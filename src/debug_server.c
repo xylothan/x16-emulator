@@ -2458,6 +2458,37 @@ static int handle_x16_host_perf(int seq, cJSON *args) {
         cJSON_AddItemToArray(panels, o);
     }
     cJSON_AddItemToObject(body, "panels", panels);
+
+    // Spikes: frames whose busy time exceeded their real-time budget, with
+    // the section that dominated each, and the worst frames in full.
+    cJSON *sp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(sp, "thresholdUs", host_prof_spike_us());
+    cJSON_AddNumberToObject(sp, "count", host_prof_spikes());
+    cJSON *by = cJSON_CreateObject();
+    for (int i = 0; i < HP_SECTIONS; i++)
+        cJSON_AddNumberToObject(by, host_prof_section_name((hp_section_t)i),
+                                host_prof_spikes_by((hp_section_t)i));
+    cJSON_AddItemToObject(sp, "dominatedBy", by);
+    cJSON_AddItemToObject(body, "spikes", sp);
+
+    host_prof_frame_t w[HP_WORST_FRAMES];
+    const int nw = host_prof_worst(w, HP_WORST_FRAMES);
+    cJSON *worst = cJSON_CreateArray();
+    for (int k = 0; k < nw; k++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "frame", w[k].frame);
+        cJSON_AddNumberToObject(o, "busyUs", w[k].busy_us);
+        cJSON_AddNumberToObject(o, "wallUs", w[k].wall_us);
+        cJSON_AddNumberToObject(o, "cycles", w[k].cycles);
+        cJSON_AddNumberToObject(o, "uiFrames", w[k].ui_frames);
+        cJSON_AddStringToObject(o, "dominant", host_prof_section_name(host_prof_dominant(&w[k])));
+        cJSON *us = cJSON_CreateObject();
+        for (int i = 0; i < HP_SECTIONS; i++)
+            cJSON_AddNumberToObject(us, host_prof_section_name((hp_section_t)i), w[k].us[i]);
+        cJSON_AddItemToObject(o, "sectionsUs", us);
+        cJSON_AddItemToArray(worst, o);
+    }
+    cJSON_AddItemToObject(body, "worstFrames", worst);
     send_dap_response(seq, "x16/hostPerf", true, body);
     return 0;
 }

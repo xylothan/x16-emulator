@@ -336,6 +336,27 @@ Each is small, and each is checked against the Phase 0 numbers.
   and have `-bench` and `x16/hostPerf` report the worst frames by section. That
   answers whether the 17–28 ms frames come from the emulator, the UI, present,
   or the OS.
+
+  **Done.** `host_prof` keeps every recent frame's section breakdown in its
+  ring, and the 8 worst frames since reset outside it. A frame whose busy time
+  exceeds its own real-time budget (guest cycles ÷ MHz, 16.8 ms for VGA at
+  8 MHz) counts as a spike, and each spike is attributed to the section that
+  dominated it. `-bench` prints both, and `x16/hostPerf` returns `spikes` and
+  `worstFrames`.
+
+  First capture: Gauntlet 2 attract mode, 3,600 frames, `-hidden`:
+
+  - **No spikes.** No frame exceeded 16.8 ms, either with no debugger or with
+    the user's layout.
+  - **The worst frames are present stalls.** Busy time was 8.7–11.7 ms, with
+    6–8 ms of it spent presenting the main window (normally 0.3–0.5 ms).
+  - **Next come emulation peaks:** up to 6.1 ms against a typical 3–4 ms,
+    which is the game's own work.
+  - **The debugger UI was never the worst part**, at about 1.5 ms at most.
+
+  Caveat: with the windows hidden, nothing is composited on screen, so present
+  can behave differently from a visible run. The 17–28 ms frames seen earlier
+  came from visible runs. Capturing them visibly is the open question.
 - **Optional:** a "UI refresh rate" setting (60 / 30 / 10 Hz) for panels that
   show live data.
 
