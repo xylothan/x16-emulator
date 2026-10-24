@@ -10,11 +10,10 @@
 //           fpga/source/audio/pcm.v
 //           fpga/source/top.v                          (register decode)
 //
-// v47.0.2 because that is what this emulator reports itself to be, from
-// VERA_VERSION_MAJOR/MINOR/PATCH in video.c. Guest software reads those bytes
-// back and adapts to them, so the version the emulator claims is the version it
-// has to behave like, whatever revision any particular physical board carries.
-// tests/check_vera_version.py fails if the two are changed apart.
+// v47.0.2 because it is the newest revision these citations were checked
+// against. The emulator now claims 49.0.6 (VERA_VERSION_* in video.c), which has
+// no public RTL; tests/check_vera_version.py records both and fails if either
+// moves alone.
 //
 // The audio RTL happens to be byte-identical in v48.0.1, so nothing here turns
 // on the choice; the two differ only in the version registers and a bus
