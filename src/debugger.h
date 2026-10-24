@@ -19,6 +19,7 @@
 // which is the part a UI-less consumer (a debug server, another front end)
 // needs and which can be tested without standing up an SDL window.
 #include "debug_core.h"
+#include "cpu/irq_ctx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,6 +122,57 @@ const char *DEBUGGetStopReason(void);
 // whichever front end is attached -- the SDL debugger, the ImGui debugger, or
 // the DAP server when a client is stepping.
 extern int currentMode;
+
+// ── The per-instruction fast path ───────────────────────────────────────────
+// DEBUGGetCurrentStatus() runs before every instruction whenever a debugger is
+// attached. While the machine is running freely it almost always has nothing
+// to do, and calling it anyway cost about 0.9 ms of host time per frame -- more
+// than every other debugger feature put together (docs/profiler-plan.md).
+//
+// So the loops call DEBUGPollStatus() instead, which runs the full check only
+// when something could actually stop the machine at this instruction, and
+// otherwise every DEBUG_POLL_INTERVAL instructions, so the DAP socket and the
+// Break key are still serviced. Everything it reads is the real state, not a
+// copy, so a front end that changes the state directly -- the DAP server sets
+// currentMode itself -- is seen on the very next instruction.
+//
+// A clear bit in debug_bp_pc_map is the only thing that can skip a breakpoint
+// test, and it is clear only when no entry at all has that PC. Banks,
+// conditions, hit counts and ignore budgets are still decided in full by the
+// slow path, so their semantics are unchanged.
+#define DEBUG_POLL_INTERVAL 1000
+
+extern struct breakpoint stepBreakPoint;
+extern int               resumeSkipPC;
+extern bool              watchpointStopPending;
+extern int               debug_poll_tick;
+
+static inline bool
+DEBUGNothingToDo(uint16_t pc)
+{
+	return currentMode == DMODE_RUN
+	    && stepBreakPoint.pc < 0
+	    && resumeSkipPC < 0
+	    && !watchpointStopPending
+	    && !cpu_irq_entered_pending()
+	    && !debug_bp_maybe_at(pc);
+}
+
+static inline int
+DEBUGPollStatus(uint16_t pc)
+{
+	if (DEBUGNothingToDo(pc) && ++debug_poll_tick < DEBUG_POLL_INTERVAL)
+		return 0;
+	return DEBUGGetCurrentStatus();
+}
+
+static inline int
+DEBUGPollStatusNoPump(uint16_t pc)
+{
+	if (DEBUGNothingToDo(pc) && ++debug_poll_tick < DEBUG_POLL_INTERVAL)
+		return 0;
+	return DEBUGGetCurrentStatusNoPump();
+}
 #ifdef __cplusplus
 }
 #endif

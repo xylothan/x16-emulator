@@ -221,6 +221,17 @@ const struct breakpoint *debug_bp_at(int index);
 // stands still. Use debug_bp_is_set() for the read-only question.
 bool debug_bp_on_arrival(int pc, uint8_t bank);
 
+// One bit per 16-bit PC: set when ANY breakpoint entry has that PC, whatever its
+// bank, owner, enabled state or condition. A clear bit means no entry can match
+// here, so the per-instruction status check can be skipped; a set bit only
+// means the full test has to run. Kept in step with every change to the table.
+extern uint8_t debug_bp_pc_map[0x10000 / 8];
+static inline bool
+debug_bp_maybe_at(uint16_t pc)
+{
+	return (debug_bp_pc_map[pc >> 3] >> (pc & 7)) & 1;
+}
+
 // Whether any *enabled* breakpoint covers (pc, bank), asking nothing and
 // changing nothing. This is the one to use for "would the machine stop here?".
 // A disabled breakpoint is still in the table -- see debug_bp_at() for a view

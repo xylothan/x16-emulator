@@ -164,6 +164,7 @@ char *scale_quality = "best";
 char *render_driver = NULL;
 bool test_init_complete=false;
 bool headless = false;
+bool hidden_windows = false;
 bool fullscreen = false;
 bool testbench = false;
 bool enable_midline = false;
@@ -585,6 +586,11 @@ usage()
 	printf("\tStart the -prg/-bas program using RUN\n");
 	printf("-warp\n");
 	printf("\tEnable warp mode, run emulator as fast as possible.\n");
+	printf("-hidden\n");
+	printf("\tCreate the emulator (and -imgui debugger) windows hidden.\n");
+	printf("\tEverything still runs and renders; nothing appears on screen.\n");
+	printf("\tFor scripted runs and benchmarks. Unlike -headless, video,\n");
+	printf("\taudio and the debugger all stay on.\n");
 	printf("-bench <frames> [<warmup frames>]\n");
 	printf("\tAfter the warm-up (default 600 frames), run <frames> emulated\n");
 	printf("\tframes, print where the host's time went, and exit. Combine with\n");
@@ -986,6 +992,10 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			warp_mode = true;
+		} else if (!strcmp(argv[0], "-hidden")) {
+			argc--;
+			argv++;
+			hidden_windows = true;
 		} else if (!strcmp(argv[0], "-bench")) {
 			argc--;
 			argv++;
@@ -2274,6 +2284,20 @@ perf_budget_close_frame(void)
 // we cap how much emulation one tick may do. Shares old_clockticks6502 and the
 // timing accumulators with emulator_loop(), so emulation resumes seamlessly
 // when the drag ends.
+// Whether the graphical debugger or a DAP server needs the status check. Both
+// were out-of-line calls in the per-instruction gate; neither changes faster
+// than a frame (the debugger window opening or failing, the server starting),
+// so they are read once per emulated frame instead.
+static bool debug_gate_ui;
+static bool debug_gate_dap;
+
+static void
+debug_gate_refresh(void)
+{
+	debug_gate_ui  = imgui_debugger_enabled && video_debug_ui_available();
+	debug_gate_dap = debug_server_is_enabled();
+}
+
 // Close the host-time frame with the guest cycles it covered.
 static void
 host_prof_close_frame(void)
@@ -2382,9 +2406,8 @@ emulator_step_during_move(void)
 		// transitions without entering a debugger SDL event pump from this
 		// nested window procedure. Check before the first instruction and every
 		// one after it, so a breakpointed instruction is never executed.
-		if ((debugger_enabled
-		     || (imgui_debugger_enabled && video_debug_ui_available()))
-		    && DEBUGGetCurrentStatusNoPump() != 0) {
+		if ((debugger_enabled || debug_gate_ui)
+		    && DEBUGPollStatusNoPump(regs.pc) != 0) {
 			break;
 		}
 		if (handle_ieee_intercept()) {
@@ -2458,6 +2481,7 @@ emulator_step_during_move(void)
 	}
 	if (new_frame) {
 		host_prof_close_frame();
+		debug_gate_refresh();
 	}
 
 	in_step = false;
@@ -2467,6 +2491,7 @@ void *
 emulator_loop(void *param)
 {
 	old_clockticks6502 = clockticks6502;
+	debug_gate_refresh();
 	for (;;) {
 		// A drag may have run the guest to $ffff while the OS held us in its
 		// modal loop; finish unwinding now that we are back in control.
@@ -2491,10 +2516,14 @@ emulator_loop(void *param)
 		// rather than polling separately also keeps the socket work behind the
 		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
 		// syscall per emulated instruction.
-		if (debugger_enabled
-		    || (imgui_debugger_enabled && video_debug_ui_available())
-		    || debug_server_is_enabled()) {
-			int dbgCmd = DEBUGGetCurrentStatus();
+		//
+		// The gate reads cached answers (debug_gate_refresh()), and
+		// DEBUGPollStatus() skips the full check while nothing can stop the
+		// machine: both used to be out-of-line calls on every instruction,
+		// which was the largest single host cost of having a debugger
+		// attached at all.
+		if (debugger_enabled || debug_gate_ui || debug_gate_dap) {
+			int dbgCmd = DEBUGPollStatus(regs.pc);
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
 		}
@@ -2694,6 +2723,7 @@ emulator_loop(void *param)
 			// After it, unlike the guest budget: the host frame is the whole
 			// interval, sleep included, so its sections sum to wall time.
 			host_prof_close_frame();
+			debug_gate_refresh();
 			if (!bench_tick()) {
 				break;
 			}

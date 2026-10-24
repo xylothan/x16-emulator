@@ -30,14 +30,14 @@ static struct irq_frame frames[CPU_IRQ_CTX_MAX];
 static int              depth;
 static uint32_t         taken;
 static uint8_t          last_vector;
-static bool             just_entered;
+bool                    cpu_irq_just_entered;
 
 void
 cpu_irq_ctx_enter(int vector, uint32_t from_pc, uint16_t sp)
 {
 	taken++;
 	last_vector  = (uint8_t)vector;
-	just_entered = true;
+	cpu_irq_just_entered = true;
 
 	// Retire frames the stack has already passed. Nesting drives the pointer
 	// DOWN, so open frames must be strictly decreasing in sp; one recorded at or
@@ -128,7 +128,7 @@ cpu_irq_ctx_reset(void)
 	depth        = 0;
 	taken        = 0;
 	last_vector  = 0;
-	just_entered = false;
+	cpu_irq_just_entered = false;
 	memset(frames, 0, sizeof(frames));
 }
 
@@ -168,7 +168,7 @@ cpu_irq_return_pc(void)
 bool
 cpu_irq_take_entered_flag(void)
 {
-	const bool v = just_entered;
-	just_entered = false;
+	const bool v = cpu_irq_just_entered;
+	cpu_irq_just_entered = false;
 	return v;
 }

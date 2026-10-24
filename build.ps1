@@ -250,6 +250,71 @@ function Stop-RunningEmulator {
     Start-Sleep -Milliseconds 500
 }
 
+# Launch a scripted emulator that does not take the keyboard focus. A test run
+# otherwise pops a window over whatever the user is doing, every run.
+#
+# STARTF_USESHOWWINDOW with SW_SHOWMINNOACTIVE (7) in STARTUPINFO: SDL's first
+# ShowWindow obeys the show command the process was started with, so the window
+# comes up minimized and inactive. The run itself is unchanged -- a minimized
+# window still runs at 60 frames/s, and warp at full speed. Start-Process cannot
+# ask for this: its -WindowStyle has no "do not activate" choice, hence the
+# CreateProcess call. Pass -Show 4 (SW_SHOWNOACTIVATE) for a window that is
+# visible but still never takes the focus -- needed when timing debugger
+# panels, because a minimized debugger window draws nothing.
+function Start-QuietProcess {
+    param([string]$FilePath, [string[]]$ArgumentList, [int]$Show = 7)
+    if (-not ('X16Build.QuietLaunch' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace X16Build {
+    public static class QuietLaunch {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct STARTUPINFO {
+            public int cb; public string lpReserved, lpDesktop, lpTitle;
+            public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+            public short wShowWindow, cbReserved2;
+            public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern bool CreateProcess(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit,
+            uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        public static int Start(string app, string cmdLine, short show) {
+            var si = new STARTUPINFO();
+            si.cb = Marshal.SizeOf(si);
+            si.dwFlags = 1;               // STARTF_USESHOWWINDOW
+            si.wShowWindow = show;
+            PROCESS_INFORMATION pi;
+            if (!CreateProcess(app, cmdLine, IntPtr.Zero, IntPtr.Zero, false, 0, IntPtr.Zero, null, ref si, out pi))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return pi.dwProcessId;
+        }
+    }
+}
+'@
+    }
+    # Windows command-line quoting, enough for paths and plain arguments.
+    $quoted = @($FilePath) + @($ArgumentList) | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }
+    # STARTUPINFO only governs the first ShowWindow. The -imgui debugger window
+    # is a second one, so also set SDL's own hint, which covers every window it
+    # shows. The child inherits this environment.
+    $prevHint = $env:SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN
+    $env:SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN = '1'
+    try {
+        $processId = [X16Build.QuietLaunch]::Start($FilePath, ($quoted -join ' '), [int16]$Show)
+    } finally {
+        $env:SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN = $prevHint
+    }
+    return Get-Process -Id $processId
+}
+
 function Get-FreePort {
     if ($Port -ne 0) { return $Port }
     $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -409,11 +474,13 @@ if ($DapTest) {
         Fail "-DapTest needs python on PATH."
     }
     $dapPort = Get-FreePort
-    $runArgs = @('-rom', $romPath, '-debugport', "$dapPort", '-warp')
+    # -hidden: nothing appears on screen at all. The quiet launch below is
+    # kept as well, for an older emulator that does not know -hidden.
+    $runArgs = @('-rom', $romPath, '-debugport', "$dapPort", '-warp', '-hidden')
     if ($EmuArgs) { $runArgs += $EmuArgs }
 
-    Write-Step "Booting the emulator on DAP port $dapPort"
-    $proc = Start-Process -FilePath $exePath -ArgumentList $runArgs -PassThru
+    Write-Step "Booting the emulator on DAP port $dapPort (minimized, no focus)"
+    $proc = Start-QuietProcess -FilePath $exePath -ArgumentList $runArgs
 
     try {
         if (-not (Wait-ForPort -P $dapPort)) { Fail "DAP server never came up on port $dapPort." }
