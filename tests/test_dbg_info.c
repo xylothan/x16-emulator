@@ -1828,6 +1828,101 @@ main(void)
 		}
 	}
 
+	// ld65's bank= on a segment record: the bank is known from the debug info
+	// itself, with no LOAD observed -- a launcher that loads the banks before
+	// the .dbg is in play never shows us one. Outside the banked window it
+	// means nothing and is ignored.
+	{
+		dbg_info_free();
+		static const char *k_dbg_seg_bank =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"a.s\",size=100,mtime=0x00000000,mod=0\n"
+			"file\tid=1,name=\"b.s\",size=100,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"B_ONE\",start=0x00a000,size=0x0010,addrsize=absolute,type=rw,"
+			"oname=\"x.prg.47\",ooffs=0,bank=47\n"
+			"seg\tid=1,name=\"B_TWO\",start=0x00a000,size=0x0020,addrsize=absolute,type=rw,"
+			"oname=\"x.prg.66\",ooffs=0,bank=66\n"
+			"seg\tid=2,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro,bank=3\n"
+			"span\tid=0,seg=0,start=0,size=16,type=0\n"
+			"span\tid=1,seg=1,start=0,size=32,type=0\n"
+			"line\tid=0,file=0,line=7,span=0\n"
+			"line\tid=1,file=1,line=99,span=1\n"
+			"sym\tid=0,name=\"EntryOne\",addrsize=absolute,val=0xA000,seg=0,type=lab\n"
+			"sym\tid=1,name=\"EntryTwo\",addrsize=absolute,val=0xA000,seg=1,type=lab\n"
+			"sym\tid=2,name=\"Low\",addrsize=absolute,val=0x0801,seg=2,type=lab\n"
+			"mod\tid=0,name=\"banked.o\",file=0\n";
+		char *path = write_temp(k_dbg_seg_bank, "x16_dbg_info_seg_bank.dbg"); // static; do not free
+		check(path && dbg_info_load(path) == 0, "loads a .dbg whose segments carry bank=");
+
+		const char *f = NULL;
+		int         l = 0;
+		check(dbg_info_addr_to_source_banked_ex(0xA000, 47, &f, &l) == DBG_BANK_RESOLVED &&
+		          f && strcmp(f, "a.s") == 0,
+		      "bank= resolves a banked address with no LOAD seen");
+		f = NULL;
+		check(dbg_info_addr_to_source_banked_ex(0xA000, 66, &f, &l) == DBG_BANK_RESOLVED &&
+		          f && strcmp(f, "b.s") == 0,
+		      "  ...and the other bank's segment at the same address");
+
+		dbg_addr_t a  = 0;
+		int        rb = -1;
+		check(dbg_info_label_to_addr_bank("EntryTwo", &a, &rb) && rb == 66,
+		      "a label in a bank= segment reports that bank");
+		int one = -2, two = -2, low = -2;
+		for (int i = 0; i < dbg_info_symbol_count(); i++) {
+			const char *nm;
+			if (!dbg_info_symbol_at(i, &nm, &a))
+				continue;
+			if (!strcmp(nm, "EntryOne")) one = dbg_info_symbol_bank_at(i);
+			if (!strcmp(nm, "EntryTwo")) two = dbg_info_symbol_bank_at(i);
+			if (!strcmp(nm, "Low"))      low = dbg_info_symbol_bank_at(i);
+		}
+		check(one == 47 && two == 66, "symbol_bank_at gives each label its own segment's bank");
+		check(low == -1, "bank= outside $A000-$BFFF is ignored");
+
+		if (path)
+			remove(path);
+		dbg_info_free();
+	}
+
+	// Scope heads: the label that a type=scope record names opens a routine;
+	// the others are locals. The scope records come AFTER the symbols here,
+	// which nothing forbids, so marking has to wait for the end of the file.
+	{
+		dbg_info_free();
+		static const char *k_dbg_scopes =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"s.s\",size=100,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0040,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=64,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"sym\tid=0,name=\"loop\",addrsize=absolute,scope=1,val=0x0805,seg=0,type=lab\n"
+			"sym\tid=1,name=\"ClearRam\",addrsize=absolute,scope=0,val=0x0801,seg=0,type=lab\n"
+			"sym\tid=2,name=\"Draw\",addrsize=absolute,scope=0,val=0x0820,seg=0,type=lab\n"
+			"scope\tid=0,name=\"\",mod=0,size=64\n"
+			"scope\tid=1,name=\"ClearRam\",mod=0,type=scope,size=31,parent=0,sym=1,span=0\n"
+			"scope\tid=2,name=\"Draw\",mod=0,type=scope,size=32,parent=0,sym=2,span=0\n"
+			"scope\tid=3,name=\"POINT\",mod=0,type=struct,size=4,parent=0\n"
+			"mod\tid=0,name=\"s.o\",file=0\n";
+		char *path = write_temp(k_dbg_scopes, "x16_dbg_info_scopes.dbg"); // static; do not free
+		check(path && dbg_info_load(path) == 0, "loads a .dbg with scope records");
+		int clr = -1, drw = -1, lp = -1;
+		for (int i = 0; i < dbg_info_symbol_count(); i++) {
+			const char *nm;
+			dbg_addr_t  a;
+			if (!dbg_info_symbol_at(i, &nm, &a))
+				continue;
+			if (!strcmp(nm, "ClearRam")) clr = dbg_info_symbol_is_scope_at(i);
+			if (!strcmp(nm, "Draw"))     drw = dbg_info_symbol_is_scope_at(i);
+			if (!strcmp(nm, "loop"))     lp  = dbg_info_symbol_is_scope_at(i);
+		}
+		check(clr == 1 && drw == 1, "labels named by type=scope records are scope heads");
+		check(lp == 0, "a local label is not");
+		if (path)
+			remove(path);
+		dbg_info_free();
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

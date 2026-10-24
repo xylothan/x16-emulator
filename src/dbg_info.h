@@ -169,6 +169,14 @@ bool dbg_info_name_to_value(const char *name, dbg_addr_t *val, int *kind);
 // `name` (internal storage) and `addr` for 0 <= index < dbg_info_symbol_count().
 int  dbg_info_symbol_count(void);
 bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr);
+// The RAM bank of label `index`, on the same terms as
+// dbg_info_source_to_addr_bank(): -1 when outside $A000-$BFFF or not yet seen
+// loaded. By index rather than by name, because local labels ("loop", "done")
+// repeat across modules and a by-name lookup returns the first one.
+int  dbg_info_symbol_bank_at(int index);
+// True when label `index` opens a .proc or .scope (a cc65 `scope` record of
+// type=scope names it): a routine, rather than a local label inside one.
+bool dbg_info_symbol_is_scope_at(int index);
 
 // ---- Source-file enumeration (for the debugger's file picker) ---------------
 // Maximum path length used by dbg_info_scan_dbg_files().

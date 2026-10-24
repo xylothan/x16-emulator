@@ -309,6 +309,7 @@ void vera_bandwidth_frame_end(uint32_t frame);
 typedef enum {
 	VERA_BW_OWNER_UI = 0,
 	VERA_BW_OWNER_DAP,
+	VERA_BW_OWNER_CAPTURE, // a capture that opted in (profile_capture.h)
 	VERA_BW_OWNER_COUNT
 } vera_bw_owner_t;
 

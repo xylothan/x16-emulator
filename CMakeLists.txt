@@ -311,6 +311,9 @@ set(X16_SOURCES
     src/perf_budget.c
     src/perf_hist.c
     src/host_prof.c
+    src/profile_capture.c
+    src/profile_report.c
+    src/profile_session.c
     src/vera_bandwidth.c
     src/disasm.c
     src/video.c
@@ -406,6 +409,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/pcm_panel.cpp
         src/debug_ui/panels/io_panel.cpp
         src/debug_ui/panels/perf_panel.cpp
+        src/debug_ui/panels/profile_panel.cpp
     )
 
     if(USE_DX12)
@@ -723,6 +727,15 @@ x16_add_test(perf_budget
 # clock makes every expected number exact.
 x16_add_test(host_prof
     SOURCES tests/test_host_prof.c tests/support/harness.c src/host_prof.c)
+
+# Capture mode's state machine takes its recorders and clock as callbacks, and
+# the report takes its symbols and coverage test as arguments, so both are
+# driven directly: the report against the real perf_hist, fed by hand.
+x16_add_test(profile_capture
+    SOURCES tests/test_profile_capture.c tests/support/harness.c src/profile_capture.c)
+x16_add_test(profile_report
+    SOURCES tests/test_profile_report.c tests/support/harness.c src/profile_report.c
+            src/perf_hist.c)
 
 # vera_bandwidth.c is the same shape as perf_budget.c and for the same reason:
 # it takes a layer's mode as five scalars rather than video.c's property struct,

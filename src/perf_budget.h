@@ -232,6 +232,7 @@ void perf_budget_frame_end(uint32_t host_us);
 typedef enum {
 	PERF_OWNER_UI = 0,  // the ImGui Performance panel
 	PERF_OWNER_DAP,     // a debug adapter client
+	PERF_OWNER_CAPTURE, // a capture that opted in (profile_capture.h)
 	PERF_OWNER_COUNT
 } perf_owner_t;
 
@@ -287,6 +288,13 @@ void perf_budget_reset(void); // forget all history; keep the configuration
 // open is ignored, and any region still open when the frame ends is closed by
 // the frame boundary. A guest that forgets a leave therefore mis-attributes one
 // frame, not every frame after it.
+//
+// Before any of that, a write is offered to perf_budget_marker_hook, if one is
+// installed. Capture mode installs it to take $F8/$F9 (capture start/stop): a
+// value the hook consumes never reaches the protocol above, so it does not
+// switch this module into marker mode. Installed by the emulator rather than
+// called directly, so memory.c and the tests that link it gain no dependency.
+extern bool (*perf_budget_marker_hook)(uint8_t value);
 void    perf_budget_marker_write(uint8_t value);
 uint8_t perf_budget_marker_read(void);
 

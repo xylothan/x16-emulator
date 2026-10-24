@@ -145,6 +145,24 @@ The config flags are:
 
 ### Phase 0: baseline (2026-10-23)
 
+> **Correction (2026-10-24): the workload was not attract mode.** Gauntlet 2's
+> launcher (`Gauntlet2.prg`, `$0801-$13F6`) stops at a Start/Options menu and
+> waits for fire in a `WAI` loop. The runs below, and every Gauntlet 2 run up
+> to the Phase 2 work, never pressed it. Most of them therefore measured the
+> launcher's wait loop: about 1 cycle per emulator step, against about 2.9 for
+> real game code.
+>
+> - **Comparisons still hold.** Before and after were always measured on the
+>   same workload, so they remain valid as comparisons.
+> - **Per-step costs were overstated.** That includes the debugger check: a
+>   wait loop runs about three times as many emulator steps per frame as game
+>   code does.
+>
+> Runs now pass `-autostart` (tap START until the game is running), and the
+> benchmark output names the guest PC at the end, so a run stuck in the
+> launcher is caught. The fast-path result was re-measured on running code;
+> see Phase 1.
+
 Setup:
 
 - **Machine and build:** Windows, this developer's machine, Release build of
@@ -305,6 +323,21 @@ Each is small, and each is checked against the Phase 0 numbers.
 
   Target: emulation under `-imgui` with no panels within 5% of the no-debugger
   2.93 ms per frame.
+
+  **Re-measured on running game code (2026-10-24).** The table below this one
+  was taken on the launcher's wait loop (see the correction under Phase 0).
+  This is the same interleaved method, three runs each, with `-autostart`.
+  All 18 runs ended in game code:
+
+  | Build | no debugger | `-debugport` | `-imgui`, no panels |
+  | --- | --- | --- | --- |
+  | before | 3.26 ms | 3.93 ms | 3.89 ms |
+  | fast path | 3.21 ms | 3.37 ms | 3.35 ms |
+
+  `-imgui` is 4.4% over no debugger, within the 5% target. The saving is
+  0.54 ms per frame, not 0.96. Game code averages about 2.9 cycles per
+  instruction, so it takes about a third as many emulator steps per frame as
+  the wait loop, and a per-step cost shrinks accordingly.
 
   **Done (`67ff70f`, `307712f`).** Measured interleaved: the same source with
   the fast path switched off ("before": the inline check always takes the slow
@@ -481,6 +514,63 @@ different targets.
 - **UI overhead:** a capture under `-imgui` compared with the same capture
   windowed without it. The target is about zero; this is what "the UI goes quiet"
   promises.
+
+### Phase 2: what was built (2026-10-24)
+
+- **`profile_capture.c`**, the state machine:
+  - states idle → armed → running → done;
+  - ends on a frame limit, a time limit, a requested stop, or the guest's
+    `$9FBC` markers (`$F8` starts, `$F9` stops);
+  - a marker only starts a capture the user armed;
+  - recorders and the clock are callbacks, and the module is unit-tested.
+- **`profile_report.c`**, the report:
+  - `perf_hist`'s per-(bank, address) cycles rolled up to routines, by the
+    nearest routine label in the same RAM bank;
+  - time no label covers is grouped by 256-byte page, so the rows always sum
+    to the histogram's totals, main-line and IRQ separately;
+  - a "cycles per instruction" column, where a figure near 1 means `WAI`
+    (waiting);
+  - unit-tested against the real `perf_hist`.
+- **`dbg_info`** now reads two things it ignored:
+  - ld65's `bank=` on segments, so banked code is named correctly without
+    watching the LOADs;
+  - scope records, so local labels (`loop`, `next`) roll up into their
+    routine.
+
+  On Gauntlet 2 this took the report from 3,017 of 3,291 rows "bank not
+  established" to 0 of 325, all named by routine.
+- **`perf_budget`'s marker hook** runs ahead of its marker-mode latch, so
+  starting a capture from the guest does not change how work and waiting are
+  classified.
+- **The UI goes quiet while capturing:** only the menu bar (status and Stop),
+  at most 4 times a second. The new **Profile** panel holds the controls and
+  the report table.
+- **Commands:** DAP `x16/capture`, and on the command line
+  `-profile <frames> [<warmup>]`. (`-capture` already means "grab the mouse".)
+- **`-autostart <frames>`** taps START so scripted runs get past a start menu.
+  `-bench` now prints the guest PC at the end.
+
+`perf_hist` costs 0.24 ms per frame on the launcher's wait loop. On game code,
+which takes fewer emulator steps per frame, the cost is within noise.
+
+**Exit criteria, met** (Gauntlet 2 running, `-hidden`, 1,800 frames, two
+runs each; all six ended in game code):
+
+| Config | Emulation | Busy p50 | UI build |
+| --- | --- | --- | --- |
+| no debugger, no capture | 3.37 / 3.16 ms | 3.50 / 3.45 ms | – |
+| no debugger, capture | 3.31 / 3.22 ms | 3.55 / 3.49 ms | – |
+| `-imgui`, all panels, capture | 3.48 / 3.44 ms | 3.77 / 3.73 ms | 4 µs |
+
+- **Recorder overhead:** within noise.
+- **UI overhead:** drawing is effectively zero during a capture, 4 µs per
+  frame against 640 µs normally with every panel open. The remaining ~0.2 ms
+  under `-imgui` is having a debugger attached at all: the fast-path check,
+  plus `code_map` recording every instruction. Pausing `code_map` during a
+  capture would remove most of it, at the cost of the Disassembly views having
+  a gap for that stretch. That is still the open question below.
+- **Determinism:** the guest's cycle count in `MainLoop` matched to within 6
+  cycles across all four captures, with and without the debugger.
 
 ## Phase 3: inclusive time and the call tree
 

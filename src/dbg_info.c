@@ -97,7 +97,16 @@ typedef struct {
 	char    *name;
 	dbg_addr_t addr;
 	int      seg;     /* owning segment id, -1 if the record named none */
+	long     raw_id;  /* the record's id within its own file, for marking scopes */
+	bool     is_scope; /* this label opens a .proc/.scope: a routine, not a local */
 } dbg_sym_t;
+
+/* The `sym=` of every type=scope record in the file being loaded: the labels
+ * that open a routine. Marked onto the load's symbols once the whole file is in,
+ * because nothing promises scope records come before or after the symbols. */
+static long *scope_heads;
+static int   scope_head_count;
+static int   scope_head_cap;
 
 static dbg_sym_t       *syms;
 static int              sym_count;
@@ -494,7 +503,15 @@ static void parse_seg_record(const char *p)
 	segs[seg_count].start = (uint32_t)start;
 	segs[seg_count].size  = (uint32_t)size;
 	segs[seg_count].name  = parse_str_key(p, "name"); /* may be NULL */
-	segs[seg_count].bank  = -1;                       /* learned later */
+	/* ld65 writes bank=N on a segment whose memory area declares one. That is
+	 * where the linker put it, so it is as good as watching the LOAD -- and
+	 * better than waiting for one, which a launcher that loads the banks
+	 * before the debug info is in play never shows us. Only meaningful in the
+	 * banked window; elsewhere a bank says nothing about which code is mapped.
+	 * Otherwise the bank is learned later, from a LOAD or an equate. */
+	long bank = parse_int_key(p, "bank");
+	segs[seg_count].bank  = (bank >= 0 && bank <= 255 && start >= 0xA000 && start <= 0xBFFF)
+	                            ? (int)bank : -1;
 	segs[seg_count].owner = cur_owner;
 	segs[seg_count].bank_from_equ = false;
 	seg_count++;
@@ -721,11 +738,49 @@ static bool parse_sym_record(const char *p)
 
 	if (!GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) { free(name); return true; }
 	long seg = parse_int_key(p, "seg");
-	syms[sym_count].name = name;
-	syms[sym_count].addr = (dbg_addr_t)val;
-	syms[sym_count].seg  = seg >= 0 ? (int)seg + id_base_seg : -1;
+	syms[sym_count].name     = name;
+	syms[sym_count].addr     = (dbg_addr_t)val;
+	syms[sym_count].seg      = seg >= 0 ? (int)seg + id_base_seg : -1;
+	syms[sym_count].raw_id   = parse_int_key(p, "id");
+	syms[sym_count].is_scope = false;
 	sym_count++;
 	return true;
+}
+
+/* A `scope` record of type=scope names, in `sym=`, the label that opens it. */
+static void parse_scope_record(const char *p)
+{
+	const char *tv;
+	const int   tlen = find_value(p, "type", &tv);
+	if (tlen != 5 || strncmp(tv, "scope", 5) != 0)
+		return;
+	const long head = parse_int_key(p, "sym");
+	if (head < 0)
+		return;
+	if (!GROW_ARRAY(scope_heads, scope_head_count, scope_head_cap, long))
+		return;
+	scope_heads[scope_head_count++] = head;
+}
+
+static int cmp_long(const void *a, const void *b)
+{
+	const long x = *(const long *)a, y = *(const long *)b;
+	return (x > y) - (x < y);
+}
+
+/* Mark the symbols this load added (from index `first`) that open a scope. */
+static void mark_scope_heads(int first)
+{
+	if (scope_head_count > 0) {
+		qsort(scope_heads, (size_t)scope_head_count, sizeof *scope_heads, cmp_long);
+		for (int i = first; i < sym_count; i++) {
+			if (syms[i].raw_id >= 0 &&
+			    bsearch(&syms[i].raw_id, scope_heads, (size_t)scope_head_count,
+			            sizeof *scope_heads, cmp_long))
+				syms[i].is_scope = true;
+		}
+	}
+	scope_head_count = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1139,6 +1194,11 @@ int dbg_info_load(const char *path)
 	// Clear addr_map — it is rebuilt below from all accumulated records.
 	addr_map_count = 0;
 
+	// This load's symbols start here; mark_scope_heads() marks them once the
+	// whole file is in.
+	const int sym_first = sym_count;
+	scope_head_count    = 0;
+
 	while (read_line(f, &buf, &cap)) {
 		/* Strip trailing newline / carriage-return */
 		size_t len = strlen(buf);
@@ -1169,12 +1229,15 @@ int dbg_info_load(const char *path)
 			/* ld65 states its own record counts up front. `sym=N` is what makes
 			 * a complete file distinguishable from one still being written. */
 			expect_syms = parse_int_key(p + 4, "sym");
+		} else if (strncmp(p, "scope", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+			parse_scope_record(p + 5);
 		}
-		/* Other record types (version, info, scope, …) are silently skipped. */
+		/* Other record types (version, csym, type, …) are silently skipped. */
 	}
 
 	fclose(f);
 	free(buf);
+	mark_scope_heads(sym_first);
 
 	// Decide what the file's own record counts say about it. ld65 states them
 	// in the `info` line, so a file that promised N symbols and delivered N
@@ -1374,6 +1437,20 @@ bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr)
 	if (addr)
 		*addr = syms[index].addr;
 	return true;
+}
+
+int dbg_info_symbol_bank_at(int index)
+{
+	if (!loaded || index < 0 || index >= sym_count)
+		return -1;
+	return seg_observed_bank(syms[index].seg, syms[index].addr);
+}
+
+bool dbg_info_symbol_is_scope_at(int index)
+{
+	if (!loaded || index < 0 || index >= sym_count)
+		return false;
+	return syms[index].is_scope;
 }
 
 /* How much a line record's own type recommends it for DISPLAY. cc65 records the
@@ -2236,6 +2313,11 @@ void dbg_info_free(void)
 	file_alias       = NULL;
 	file_alias_count = 0;
 	file_alias_cap   = 0;
+
+	free(scope_heads);
+	scope_heads      = NULL;
+	scope_head_count = 0;
+	scope_head_cap   = 0;
 
 	for (int i = 0; i < file_count; i++)
 		free(files[i].name);

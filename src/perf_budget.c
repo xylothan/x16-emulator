@@ -563,9 +563,15 @@ marker_zone(uint8_t id)
 	return free_slot;
 }
 
+bool (*perf_budget_marker_hook)(uint8_t value) = NULL;
+
 void
 perf_budget_marker_write(uint8_t value)
 {
+	// First, and before the latch below: see perf_budget_marker_hook.
+	if (perf_budget_marker_hook && perf_budget_marker_hook(value))
+		return;
+
 	marker_mode = true;
 
 	if (value == 0xFE) {

@@ -179,6 +179,21 @@ perf_hist_task_get(int i, perf_hist_task_t *out)
 	return true;
 }
 
+bool
+perf_hist_key_counts(uint32_t key, uint32_t *main_cycles, uint32_t *irq_cycles,
+                     uint32_t *instructions)
+{
+	if (!hist_main || key >= PH_KEYS)
+		return false;
+	if (main_cycles)
+		*main_cycles = hist_main[key];
+	if (irq_cycles)
+		*irq_cycles = hist_irq[key];
+	if (instructions)
+		*instructions = hist_cnt[key];
+	return true;
+}
+
 long
 perf_hist_dump(const char *path)
 {
