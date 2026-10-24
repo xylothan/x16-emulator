@@ -43,6 +43,8 @@
 #include "perf_hist.h"
 #include "host_prof.h"
 #include "profile_session.h"
+#include "input_script.h"
+#include "keyboard.h"
 #include "io_trace.h"
 #ifdef HAS_IMGUI
 #include "debug_ui/debug_ui.h"
@@ -140,9 +142,9 @@ static uint32_t    bench_warmup = 600;
 // frames, print the report and exit. See profile_capture.h.
 static uint32_t    capture_cli_frames = 0;
 static uint32_t    capture_cli_warmup = 600;
-// -autostart: tap START on pad 1 for the first `autostart_frames` frames, so a
-// scripted run gets past a program's start menu without anyone at the keys.
-static uint32_t    autostart_frames = 0;
+// -input / -inputscript / -autostart: joypad and keyboard events replayed at
+// set frames. See input_script.h.
+static bool        input_script_loaded = false;
 #ifdef HAS_IMGUI
 // Only an ImGui build reads these, so only an ImGui build has them: a build
 // without the debugger would otherwise set them and never read them.
@@ -531,6 +533,75 @@ print_render_drivers(void)
 	}
 }
 
+static int
+input_key_lookup(const char *name)
+{
+	const SDL_Scancode sc = SDL_GetScancodeFromName(name);
+	return sc == SDL_SCANCODE_UNKNOWN ? -1 : (int)sc;
+}
+
+static void
+input_add_text(const char *text, const char *source)
+{
+	char err[160];
+	if (!input_script_append(text, input_key_lookup, err, sizeof err)) {
+		fprintf(stderr, "%s: %s\n", source, err);
+		exit(1);
+	}
+	input_script_loaded = true;
+}
+
+static void
+input_add_file(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		fprintf(stderr, "-inputscript: cannot open %s\n", path);
+		exit(1);
+	}
+	fseek(f, 0, SEEK_END);
+	const long len = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	char *text = malloc(len > 0 ? (size_t)len + 1 : 1);
+	if (!text) {
+		fclose(f);
+		fprintf(stderr, "-inputscript: out of memory\n");
+		exit(1);
+	}
+	const size_t got = len > 0 ? fread(text, 1, (size_t)len, f) : 0;
+	fclose(f);
+	text[got] = 0;
+	input_add_text(text, path);
+	free(text);
+}
+
+// -autostart: tap START on pad 1 -- down 6 frames of every 30 -- for `frames`
+// frames, then hand the pad back. A tap rather than a hold: a menu that waits
+// for a NEW press (pressed now, up before) never sees a button held from the
+// start.
+static void
+input_add_autostart(uint32_t frames)
+{
+	if (!frames) {
+		return;
+	}
+	const size_t cap  = ((size_t)frames / 30 + 2) * 64;
+	char        *text = malloc(cap);
+	if (!text) {
+		return;
+	}
+	size_t at = 0;
+	for (uint32_t f = 1; f <= frames; f += 30) {
+		at += (size_t)snprintf(text + at, cap - at, "%u joy1 start\n", (unsigned)f);
+		if (f + 6 <= frames) {
+			at += (size_t)snprintf(text + at, cap - at, "%u joy1 none\n", (unsigned)(f + 6));
+		}
+	}
+	snprintf(text + at, cap - at, "%u joy1 off\n", (unsigned)(frames + 1));
+	input_add_text(text, "-autostart");
+	free(text);
+}
+
 static void
 usage()
 {
@@ -609,10 +680,21 @@ usage()
 	printf("\tAfter the warm-up (default 600 frames), capture <frames> emulated\n");
 	printf("\tframes, print where the guest's time went by routine, and exit.\n");
 	printf("\tRoutines are named from the loaded debug info (-dbgfile).\n");
+	printf("-inputscript <file>\n");
+	printf("\tReplay joypad and keyboard input at set frames, one command per\n");
+	printf("\tline: <frame> <command>, where <frame> is a frame number (1 is\n");
+	printf("\tthe first) or +N (N frames after the previous line):\n");
+	printf("\t  joy1..joy4 <button+button...>|none|off\n");
+	printf("\t  key <name>    keydown <name>    keyup <name>\n");
+	printf("\tButtons: up down left right a b x y start select l r. Keys take\n");
+	printf("\tSDL names (Return, Space, Left Shift, F1). # starts a comment.\n");
+	printf("\tA pad holds what it was last given; off returns it to the host.\n");
+	printf("-input \"<frame> <command>; <frame> <command>; ...\"\n");
+	printf("\tThe same, inline: ';' separates commands. -input, -inputscript\n");
+	printf("\tand -autostart may be combined and repeated; events merge by frame.\n");
 	printf("-autostart <frames>\n");
 	printf("\tTap START on joystick 1 (held 6 frames, every 30) for the first\n");
-	printf("\t<frames> frames, then let go: gets a scripted -bench or -profile\n");
-	printf("\trun past a program's start menu.\n");
+	printf("\t<frames> frames, then let go. Shorthand for an input script.\n");
 #ifdef HAS_IMGUI
 	printf("-uipanels <name,name,...|all|none>\n");
 	printf("\tOpen exactly these debugger panels (with -imgui).\n");
@@ -1032,7 +1114,25 @@ main(int argc, char **argv)
 			if (!argc || argv[0][0] == '-') {
 				usage();
 			}
-			autostart_frames = (uint32_t)strtoul(argv[0], NULL, 10);
+			input_add_autostart((uint32_t)strtoul(argv[0], NULL, 10));
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-inputscript")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			input_add_file(argv[0]);
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-input")) {
+			argc--;
+			argv++;
+			if (!argc) {
+				usage();
+			}
+			input_add_text(argv[0], "-input");
 			argc--;
 			argv++;
 		} else if (!strcmp(argv[0], "-profile")) {
@@ -2456,24 +2556,34 @@ bench_tick(void)
 	return true;
 }
 
-// Called once per closed frame. Taps START on pad 1 -- held for 6 frames out of
-// every 30 -- until `autostart_frames` frames have passed, then hands the pad
-// back. A tap rather than a hold: a menu that waits for a NEW press (pressed
-// now, up before) never sees a button held from the start.
 static void
-autostart_tick(void)
+is_joy_set(int slot, uint16_t mask)
 {
-	static uint32_t n = 0;
-	if (!autostart_frames || n > autostart_frames) {
-		return;
+	joystick_set_virtual(slot, mask);
+}
+
+static void
+is_joy_off(int slot)
+{
+	joystick_clear_virtual(slot);
+}
+
+static void
+is_key(int sc, bool down)
+{
+	handle_keyboard(down, SDL_GetKeyFromScancode((SDL_Scancode)sc), (SDL_Scancode)sc);
+}
+
+// Called once per closed frame: delivers the input script's events for the
+// frame just completed (frame 1 is the first).
+static void
+input_tick(void)
+{
+	static uint32_t         frame = 0;
+	static const is_hooks_t hooks = {is_joy_set, is_joy_off, is_key};
+	if (input_script_loaded) {
+		input_script_frame(++frame, &hooks);
 	}
-	if (n == autostart_frames) {
-		joystick_clear_virtual(0);
-	} else {
-		const bool down = (n % 30) < 6;
-		joystick_set_virtual(0, down ? (uint16_t)~JOY_BIT_START : 0xFFFF);
-	}
-	n++;
 }
 
 // Called once per closed frame, after profile_session_frame_end(). Returns
@@ -2624,7 +2734,7 @@ emulator_step_during_move(void)
 		host_prof_close_frame();
 		profile_session_frame_end();
 		debug_gate_refresh();
-		autostart_tick();
+		input_tick();
 	}
 
 	in_step = false;
@@ -2870,7 +2980,7 @@ emulator_loop(void *param)
 			host_prof_close_frame();
 			profile_session_frame_end();
 			debug_gate_refresh();
-			autostart_tick();
+			input_tick();
 			if (!bench_tick() || !capture_cli_tick()) {
 				break;
 			}

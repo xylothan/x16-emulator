@@ -314,6 +314,7 @@ set(X16_SOURCES
     src/profile_capture.c
     src/profile_report.c
     src/profile_session.c
+    src/input_script.c
     src/vera_bandwidth.c
     src/disasm.c
     src/video.c
@@ -736,6 +737,11 @@ x16_add_test(profile_capture
 x16_add_test(profile_report
     SOURCES tests/test_profile_report.c tests/support/harness.c src/profile_report.c
             src/perf_hist.c)
+
+# Scripted input resolves key names and delivers events through callbacks, so
+# the parser and scheduler run with no SDL and no machine.
+x16_add_test(input_script
+    SOURCES tests/test_input_script.c tests/support/harness.c src/input_script.c)
 
 # vera_bandwidth.c is the same shape as perf_budget.c and for the same reason:
 # it takes a layer's mode as five scalars rather than video.c's property struct,
