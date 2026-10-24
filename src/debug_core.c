@@ -25,6 +25,24 @@ uint8_t memory_get_rom_bank(void);
 struct breakpoint *breakPoints    = NULL;
 int                numBreakpoints = 0;
 static int         bpCapacity     = 0;
+uint8_t            debug_bp_pc_map[0x10000 / 8];
+
+static void
+bp_map_set(int pc)
+{
+	const uint16_t p = (uint16_t)pc;
+	debug_bp_pc_map[p >> 3] |= (uint8_t)(1u << (p & 7));
+}
+
+// Rebuilt from the table rather than cleared bit by bit: two entries can share
+// a PC under different banks, so removing one says nothing about the other.
+static void
+bp_map_rebuild(void)
+{
+	memset(debug_bp_pc_map, 0, sizeof debug_bp_pc_map);
+	for (int i = 0; i < numBreakpoints; i++)
+		bp_map_set(breakPoints[i].pc);
+}
 
 // Is `addr` inside a window whose contents depend on a bank register?
 //
@@ -190,6 +208,7 @@ bp_erase(int idx)
 		breakPoints[i] = breakPoints[i + 1];
 	}
 	numBreakpoints--;
+	bp_map_rebuild();
 }
 
 debug_add_result_t
@@ -223,6 +242,7 @@ debug_bp_add_for(struct breakpoint bp, debug_owner_t owner)
 	bp.enabled = true;
 
 	breakPoints[numBreakpoints++] = bp;
+	bp_map_set(bp.pc);
 	return DEBUG_ADD_CREATED;
 }
 
@@ -313,6 +333,7 @@ debug_bp_clear_all(void)
 	// silently inherit an old condition or ignore count on a breakpoint the
 	// user thinks they just created.
 	numBreakpoints = 0;
+	bp_map_rebuild();
 	cond_forget_all();
 }
 
@@ -675,6 +696,7 @@ debug_core_free(void)
 	breakPoints    = NULL;
 	numBreakpoints = 0;
 	bpCapacity     = 0;
+	bp_map_rebuild();
 
 	for (int i = 0; i < bpCondCount; i++)
 		dump_release(&bpConds[i]);

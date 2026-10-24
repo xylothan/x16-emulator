@@ -1559,6 +1559,47 @@ main(void)
 		is_gen2 = true;
 	}
 
+	// ── The PC map the per-instruction fast path trusts ─────────────────────
+	// A clear bit lets the emulator skip the breakpoint test entirely, so a bit
+	// that is clear while an entry exists at that PC is a breakpoint that never
+	// fires. Every way the table changes is checked against it.
+	{
+		reset_all();
+		check(!debug_bp_maybe_at(0x8000), "map: empty table, empty map");
+
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_CLI);
+		check(debug_bp_maybe_at(0x8000), "map: an add sets its PC");
+		check(!debug_bp_maybe_at(0x8001), "map: and only its PC");
+
+		// Two entries at one PC under different banks: removing one must not
+		// clear the bit the other still needs.
+		debug_bp_add_for(bp_at(0xA000, 0, 3), DEBUG_OWNER_CLI);
+		debug_bp_add_for(bp_at(0xA000, 0, 4), DEBUG_OWNER_CLI);
+		debug_bp_remove_for(0xA000, 0, 3, DEBUG_OWNER_CLI);
+		check(debug_bp_maybe_at(0xA000), "map: a PC shared by two banks survives removing one");
+		debug_bp_remove_for(0xA000, 0, 4, DEBUG_OWNER_CLI);
+		check(!debug_bp_maybe_at(0xA000), "map: and clears with the last");
+
+		debug_bp_add_for(bp_at(0x9000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_maybe_at(0x9000), "map: owner-scoped add");
+		check(debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE) == 1, "map: owner clear removes it");
+		check(!debug_bp_maybe_at(0x9000), "map: and its bit");
+		check(debug_bp_maybe_at(0x8000), "map: other owners' bits are untouched");
+
+		// Growing the table past its first allocation keeps every bit.
+		for (int i = 0; i < 40; i++)
+			debug_bp_add_for(bp_at(0x1000 + i * 3, 0, -1), DEBUG_OWNER_CLI);
+		bool all = true;
+		for (int i = 0; i < 40; i++)
+			all = all && debug_bp_maybe_at((uint16_t)(0x1000 + i * 3));
+		check(all, "map: every entry is mapped after the table grows");
+
+		debug_bp_clear_all();
+		check(!debug_bp_maybe_at(0x8000) && !debug_bp_maybe_at(0x1000),
+		      "map: clear-all empties it");
+		reset_all();
+	}
+
 	debug_core_free();
 
 	if (failures) {

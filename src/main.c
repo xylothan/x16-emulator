@@ -2274,10 +2274,25 @@ perf_budget_close_frame(void)
 // we cap how much emulation one tick may do. Shares old_clockticks6502 and the
 // timing accumulators with emulator_loop(), so emulation resumes seamlessly
 // when the drag ends.
+// Whether the graphical debugger or a DAP server needs the status check. Both
+// were out-of-line calls in the per-instruction gate; neither changes faster
+// than a frame (the debugger window opening or failing, the server starting),
+// so they are read once per emulated frame instead.
+static bool debug_gate_ui;
+static bool debug_gate_dap;
+
+static void
+debug_gate_refresh(void)
+{
+	debug_gate_ui  = imgui_debugger_enabled && video_debug_ui_available();
+	debug_gate_dap = debug_server_is_enabled();
+}
+
 // Close the host-time frame with the guest cycles it covered.
 static void
 host_prof_close_frame(void)
 {
+	debug_gate_refresh();
 	const uint32_t now = clockticks6502;
 	host_prof_frame_end(now - host_prof_last_cycles);
 	host_prof_last_cycles = now;
@@ -2382,9 +2397,8 @@ emulator_step_during_move(void)
 		// transitions without entering a debugger SDL event pump from this
 		// nested window procedure. Check before the first instruction and every
 		// one after it, so a breakpointed instruction is never executed.
-		if ((debugger_enabled
-		     || (imgui_debugger_enabled && video_debug_ui_available()))
-		    && DEBUGGetCurrentStatusNoPump() != 0) {
+		if ((debugger_enabled || debug_gate_ui)
+		    && DEBUGPollStatusNoPump(regs.pc) != 0) {
 			break;
 		}
 		if (handle_ieee_intercept()) {
@@ -2467,6 +2481,7 @@ void *
 emulator_loop(void *param)
 {
 	old_clockticks6502 = clockticks6502;
+	debug_gate_refresh();
 	for (;;) {
 		// A drag may have run the guest to $ffff while the OS held us in its
 		// modal loop; finish unwinding now that we are back in control.
@@ -2491,10 +2506,14 @@ emulator_loop(void *param)
 		// rather than polling separately also keeps the socket work behind the
 		// 1-in-1000 throttle inside it -- a bare poll in this loop is one
 		// syscall per emulated instruction.
-		if (debugger_enabled
-		    || (imgui_debugger_enabled && video_debug_ui_available())
-		    || debug_server_is_enabled()) {
-			int dbgCmd = DEBUGGetCurrentStatus();
+		//
+		// The gate reads cached answers (debug_gate_refresh()), and
+		// DEBUGPollStatus() skips the full check while nothing can stop the
+		// machine: both used to be out-of-line calls on every instruction,
+		// which was the largest single host cost of having a debugger
+		// attached at all.
+		if (debugger_enabled || debug_gate_ui || debug_gate_dap) {
+			int dbgCmd = DEBUGPollStatus(regs.pc);
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
 		}

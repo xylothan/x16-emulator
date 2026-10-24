@@ -79,6 +79,16 @@ uint32_t cpu_irq_return_pc(void);  // where the innermost handler returns to (24
 // work out whether it changed.
 bool cpu_irq_take_entered_flag(void);
 
+// The same flag, read without clearing it. The emulator loop tests it on every
+// instruction to decide whether the debugger's status check has anything to do;
+// only cpu_irq_take_entered_flag() may consume it.
+extern bool cpu_irq_just_entered;
+static inline bool
+cpu_irq_entered_pending(void)
+{
+	return cpu_irq_just_entered;
+}
+
 #ifdef __cplusplus
 }
 #endif

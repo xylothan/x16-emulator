@@ -1052,6 +1052,51 @@ incs = ((after[0] - before[0]) + (after[1] - before[1])) % 256
 bk_case("instruction bp hitCondition 3 stops on the 3rd arrival (%d INCs ran)" % incs,
         r.get("verified") and incs == 3)
 
+# State changed while the machine runs freely. The emulator skips the full
+# status check on instructions where nothing can stop it (DEBUGPollStatus in
+# debugger.h), so these are the cases that skip could get wrong: a request
+# arriving mid-run, and a breakpoint table that changes under a running CPU.
+import os, tempfile
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+
+def bk_run_free():
+    del bk_events[:]
+    bk_req("continue", {"threadId": 1})
+    time.sleep(0.3)
+
+bk_run_free()
+t0 = time.time()
+bk_req("pause", {"threadId": 1})
+e = bk_wait_stop(2)
+dt = time.time() - t0
+bk_case("pause while running stops promptly (%.2fs)" % dt, e is not None and dt < 1.0)
+
+bk_run_free()
+r = bk_instr("2:A000")
+e = bk_wait_stop(2)
+bank = bk_rd(0x0000)[0] if e else None
+bk_case("instruction bp armed while running stops on its next arrival (bank %s)" % bank,
+        r.get("verified") and e is not None and bank == 2)
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+
+dump_path = os.path.join(tempfile.gettempdir(), "x16_dap_fastpath_dump.bin")
+if os.path.exists(dump_path):
+    os.remove(dump_path)
+bk_run_free()
+r = bk_instr_bp({"instructionReference": "$A000",
+                 "x16Dump": {"file": dump_path, "regions": [{"addr": 0x10, "len": 2}]}})
+time.sleep(0.5)
+ran_on = bk_wait_stop(0.2) is None
+bk_req("setInstructionBreakpoints", {"breakpoints": []})   # closes, so flushes, the file
+time.sleep(0.2)
+size = os.path.getsize(dump_path) if os.path.exists(dump_path) else 0
+bk_case("x16Dump armed while running writes and keeps running (%d bytes)" % size,
+        r.get("x16Dump") is True and ran_on and size > 0)
+if os.path.exists(dump_path):
+    os.remove(dump_path)
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+
 for bp, why in (
         ({"instructionReference": "$A000", "condition": "A == banana"}, "an unreadable condition"),
         ({"instructionReference": "$A000", "condition": "A == 1 && X == 0"}, "two value tests"),

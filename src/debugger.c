@@ -150,14 +150,22 @@ int dumpmode          = DDUMP_RAM;
 // immediately while the CPU is parked in WAI. A breakpoint on the instruction
 // after a WAI, which is the idiomatic frame-sync placement, would otherwise
 // clear the guard every poll and buy one emulated cycle per resume.
-static int      resumeSkipPC    = -1;
+// Not static: the inline fast path in debugger.h reads resumeSkipPC and
+// watchpointStopPending directly (see DEBUGPollStatus()).
+int             resumeSkipPC    = -1;
 static uint8_t  resumeSkipBank  = 0;
 static uint32_t resumeSkipClock = 0;
 
 // A watchpoint fired mid-instruction and the reported location still has to be
 // taken, once the instruction that did the write has finished. See
 // DEBUGBreakOnWatchpoint().
-static bool watchpointStopPending = false;
+bool watchpointStopPending = false;
+
+// Instructions since the DAP socket and the Break key were last looked at.
+// Shared with the inline fast path, which skips the full status check while
+// nothing can stop the machine and counts here instead; when it reaches
+// DEBUG_POLL_INTERVAL the full check runs and does the polling.
+int debug_poll_tick = 0;
 
 static void DEBUGClearStepBreakPoint(void);
 
@@ -537,9 +545,11 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 	// cost more than the emulation; once every few thousand is still well
 	// inside a frame.
 	{
-		static int poll_counter = 0;
-		if (++poll_counter >= 1000) {
-			poll_counter = 0;
+		// The fast path enters with the tick already at the interval; any
+		// other entry counts itself, so the socket is polled once per
+		// DEBUG_POLL_INTERVAL instructions whichever path ran them.
+		if (debug_poll_tick >= DEBUG_POLL_INTERVAL || ++debug_poll_tick >= DEBUG_POLL_INTERVAL) {
+			debug_poll_tick = 0;
 			// Timed only with a client possible: the clock reads would
 			// otherwise be the most frequent thing here.
 			const bool timed = debug_server_is_enabled();
