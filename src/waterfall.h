@@ -145,6 +145,16 @@ typedef int (*wf_parent_fn)(void *ctx, int node);
 void wf_walk_frame(const wf_frame_t *f, wf_parent_fn parent_of, int root_irq, wf_emit_fn emit,
                    void *ctx);
 
+// ---- A range of one frame ------------------------------------------------
+// What happened in cycles [c0, c1) of a frame: for each call-tree node that
+// was innermost there, the cycles it was innermost for (in time order, one
+// call per contiguous stretch); and every device write in the range. Either
+// callback may be NULL.
+typedef void (*wf_range_node_fn)(void *ctx, int node, uint32_t cycles);
+typedef void (*wf_range_write_fn)(void *ctx, const wf_event_t *ev);
+void wf_frame_range(const wf_frame_t *f, uint32_t c0, uint32_t c1, wf_range_node_fn on_node,
+                    wf_range_write_fn on_write, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

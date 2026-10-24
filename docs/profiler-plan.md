@@ -1002,6 +1002,44 @@ Tested:
   trace must nest and balance on every track and carry device and IRQ events;
 - Linux GCC (WSL, `-O2 -Wall -Werror`) on every touched file.
 
+### Phase 5b: what was built (2026-10-24)
+
+- **A Waterfall tab in the Profile panel** (`src/debug_ui/panels/waterfall_view.cpp`).
+  It appears when the capture recorded the waterfall. It is never drawn while
+  a capture runs.
+  - **Frame picker** over the detailed frames: the recent ring and the worst
+    list. It opens on the worst frame and flags truncated frames.
+  - **Rows:** nested routine spans on CPU rows (one per call depth) and IRQ
+    rows, then one row per device lane that was written, with a tick per
+    write, merged per pixel column. The roots `[main]` and `[IRQ]` are not
+    drawn.
+  - **Axis:** scanlines, with tick spacing that adapts to the zoom, and a
+    marker at the end of the 480 visible lines.
+  - **Hover** a span or a tick for its routine, `bank:PC`, source line,
+    cycles and scanline. Writes also show register or VRAM address and value.
+  - **Click** to open the routine or the writing instruction, through
+    `debug_ui_request_goto`. The Source panel follows it when there is debug
+    info, the Disassembly panel otherwise.
+  - **Navigation:** mouse wheel zooms about the cursor, right-drag pans, and
+    Fit resets.
+  - **Drag** to select a range. A table then lists routines by cycles
+    innermost in that range, and the writes per lane. It can zoom to the range.
+- **`wf_frame_range()`** in `waterfall.c` does the range arithmetic: cycles per
+  innermost node in `[c0, c1)` and the writes there. It is pure, and
+  unit-tested with stretches cut at both ends of a range.
+- **Session helpers** for the UI: the detailed frame list, plus a key's name,
+  `bank:PC` and source line.
+
+Tested:
+- unit tests;
+- the DAP testbench, 150/150;
+- the tab drawn in a Debug build (ImGui asserts on) for two waterfall
+  captures, with a selection range forced on so the range table draws too;
+- GCC on every touched file.
+
+Hover and click were not exercised by a script: a hidden window takes no
+mouse input.
+
 ## Constraints every phase has to respect
 
 - **Two per-instruction loops.** `emulator_loop` and

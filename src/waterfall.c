@@ -303,6 +303,37 @@ wf_aggregates(int *count)
 	return agg_sorted;
 }
 
+// ─── Ranges ─────────────────────────────────────────────────────────────────
+
+void
+wf_frame_range(const wf_frame_t *f, uint32_t c0, uint32_t c1, wf_range_node_fn on_node,
+               wf_range_write_fn on_write, void *ctx)
+{
+	if (!f || c1 <= c0)
+		return;
+	// The innermost node is a step function: start_node from 0, then each
+	// CPU event switches it. Each stretch is credited for its overlap.
+	int      node = f->start_node;
+	uint32_t from = 0;
+	for (int i = 0; i <= f->count; i++) {
+		const bool       last = i == f->count;
+		const wf_event_t *e   = last ? NULL : &f->events[i];
+		if (!last && wf_event_lane(e) != WF_LANE_CPU) {
+			if (on_write && e->cycle >= c0 && e->cycle < c1)
+				on_write(ctx, e);
+			continue;
+		}
+		const uint32_t to = last ? (f->length > from ? f->length : from) : e->cycle;
+		const uint32_t a = from > c0 ? from : c0, b = to < c1 ? to : c1;
+		if (on_node && b > a)
+			on_node(ctx, node, b - a);
+		if (last)
+			break;
+		node = e->target;
+		from = e->cycle;
+	}
+}
+
 // ─── Export walk ────────────────────────────────────────────────────────────
 
 typedef struct {

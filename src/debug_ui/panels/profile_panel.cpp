@@ -13,6 +13,7 @@
 
 #include "../perf_hist.h"
 #include "../profile_session.h"
+#include "waterfall_view.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -442,7 +443,7 @@ draw_report(void)
 		ImGui::TextDisabled("%s", export_msg);
 	}
 
-	if (r->node_count <= 2) {
+	if (r->node_count <= 2 && !profile_session_has_waterfall()) {
 		draw_rows(r, total, frames);
 		return;
 	}
@@ -451,8 +452,12 @@ draw_report(void)
 			draw_rows(r, total, frames);
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Call tree")) {
+		if (r->node_count > 2 && ImGui::BeginTabItem("Call tree")) {
 			draw_tree(r, total, frames);
+			ImGui::EndTabItem();
+		}
+		if (profile_session_has_waterfall() && ImGui::BeginTabItem("Waterfall")) {
+			profile_waterfall_draw(r);
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

@@ -414,6 +414,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/io_panel.cpp
         src/debug_ui/panels/perf_panel.cpp
         src/debug_ui/panels/profile_panel.cpp
+        src/debug_ui/panels/waterfall_view.cpp
     )
 
     if(USE_DX12)
