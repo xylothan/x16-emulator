@@ -441,10 +441,73 @@ stat_cell(uint32_t v, uint32_t budget)
 	}
 }
 
+// The statistics are percentiles over up to PERF_DEFAULT_CAPACITY frames, and
+// each one is a sort. Recomputing them on every debugger frame was most of this
+// panel's 0.55 ms (docs/profiler-plan.md), for numbers that cannot visibly
+// change faster than a few times a second. So they are cached, and refreshed at
+// most every STATS_REFRESH_S -- and only when something they depend on moved:
+// a frame completed, the budget changed, or the zone table did. A paused
+// machine recomputes nothing.
+const double STATS_REFRESH_S = 0.25;
+
+struct StatsCache {
+	double   at      = -1.0;
+	uint32_t frames  = 0;
+	uint32_t budget  = 0;
+	uint32_t zones   = 0;
+};
+
+// A cheap fingerprint of the zone table, so replacing one zone with another at
+// the same index -- which leaves the count alone -- still refreshes.
+uint32_t
+zones_signature(void)
+{
+	uint32_t h = 2166136261u;
+	const int n = perf_budget_zone_count();
+	for (int i = 0; i < n; i++) {
+		perf_zone_t z;
+		const bool  used = perf_budget_zone_get(i, &z);
+		const uint32_t v = used ? ((uint32_t)z.start << 16 ^ z.end ^ (uint32_t)(z.bank + 1) << 8 ^
+		                           (uint32_t)z.is_idle << 31 ^ (uint32_t)z.marker_id << 24)
+		                        : 0xFFFFFFFFu;
+		h = (h ^ v ^ (uint32_t)i) * 16777619u;
+	}
+	return h ^ (uint32_t)n;
+}
+
+bool
+stats_due(StatsCache &c)
+{
+	const uint32_t frames = perf_budget_total_frames();
+	const uint32_t budget = perf_budget_budget_cycles();
+	const uint32_t zones  = zones_signature();
+	const double   now    = ImGui::GetTime();
+	if (c.at >= 0.0) {
+		// The zone table is the user's own edit, so it refreshes at once; the
+		// rest waits out the interval.
+		if (zones == c.zones &&
+		    ((frames == c.frames && budget == c.budget) || now - c.at < STATS_REFRESH_S))
+			return false;
+	}
+	c.at     = now;
+	c.frames = frames;
+	c.budget = budget;
+	c.zones  = zones;
+	return true;
+}
+
 void
 draw_statistics(void)
 {
 	const uint32_t budget = perf_budget_budget_cycles();
+
+	static StatsCache    cache;
+	static perf_window_t win[k_window_count];
+	static bool          win_ok[k_window_count];
+	if (stats_due(cache)) {
+		for (int i = 0; i < k_window_count; i++)
+			win_ok[i] = perf_budget_window(k_windows[i].seconds, &win[i]);
+	}
 
 	if (!ImGui::BeginTable("perfstats", 9,
 	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
@@ -466,9 +529,9 @@ draw_statistics(void)
 	ImGui::TableHeadersRow();
 
 	for (int i = 0; i < k_window_count; i++) {
-		perf_window_t w;
-		if (!perf_budget_window(k_windows[i].seconds, &w))
+		if (!win_ok[i])
 			continue;
+		const perf_window_t &w = win[i];
 
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
@@ -527,6 +590,16 @@ draw_breakdown(void)
 	perf_frame_t last;
 	const bool   have_last = perf_budget_last_frame(&last);
 
+	// 30-second zone statistics are a sort per zone; cached like the
+	// Statistics table (see stats_due()).
+	static StatsCache  cache;
+	static perf_stat_t zone_st[PERF_MAX_ZONES];
+	static bool        zone_ok[PERF_MAX_ZONES];
+	if (stats_due(cache)) {
+		for (int i = 0; i < PERF_MAX_ZONES; i++)
+			zone_ok[i] = i < nzones && perf_budget_zone_window(i, 30.0f, &zone_st[i]);
+	}
+
 	for (int i = 0; i < nzones; i++) {
 		perf_zone_t z;
 		if (!perf_budget_zone_get(i, &z))
@@ -555,8 +628,8 @@ draw_breakdown(void)
 		else
 			ImGui::TextDisabled("-");
 
-		perf_stat_t st;
-		const bool  have_stat = perf_budget_zone_window(i, 30.0f, &st);
+		const perf_stat_t &st        = zone_st[i];
+		const bool         have_stat = zone_ok[i];
 		ImGui::TableSetColumnIndex(3);
 		if (have_stat)
 			stat_cell(st.mean, budget);

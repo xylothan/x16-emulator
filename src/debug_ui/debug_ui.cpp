@@ -1060,6 +1060,9 @@ debug_ui_render(void)
     // each panel added a file-static DebugPanelRegistration (see
     // debug_ui_panels.h). Panels missing from imgui.ini get docked into their
     // intended slot first, so a newly added panel never turns up floating.
+    // Recorder settings follow the preference, not whichever panel is drawn.
+    debug_ui_apply_io_capture();
+
     for (DebugPanel &panel : debug_ui_panels()) {
         if (panel.open && panel.render) {
             debug_ui_place_new_panel(panel.name);
