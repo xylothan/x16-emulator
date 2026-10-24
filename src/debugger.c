@@ -24,6 +24,7 @@
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "debug_server.h"
+#include "host_prof.h"
 #include "dbg_info.h"
 #include "rendertext.h"
 
@@ -237,7 +238,7 @@ int    oldRegisterTicks = 0;                          // Last PC when change not
 //		This flag controls
 //
 
-SDL_Renderer *dbgRenderer;                            // Renderer passed in.
+render_backend_t *dbgRenderer;                        // Renderer passed in.
 
 // Unbanked, the RAM window, or the ROM window. A bank number selected for one
 // of these means nothing in the others.
@@ -270,14 +271,15 @@ static inline bool hitBreakpoint(int pc, uint8_t bank, struct breakpoint bp) {
 
 // *******************************************************************************************
 //
-//			This is used to determine who is in control. If it returns zero then
-//			everything runs normally till the next call.
-//			If it returns +ve, then it will update the video, and loop round.
-//			If it returns -ve, then exit.
+//			This determines who is in control. The public normal wrapper owns
+//			the paused UI; the no-pump wrapper stops before entering it.
+//			Zero means execute, positive means remain paused, negative means exit.
 //
 // *******************************************************************************************
 
-int  DEBUGGetCurrentStatus(void) {
+static int
+DEBUGGetCurrentStatusEx(bool allow_ui_pump)
+{
 
 	SDL_Event event;
 	if (currentPC < 0) currentPC = regs.pc;                                      // Initialise current PC displayed.
@@ -436,6 +438,14 @@ int  DEBUGGetCurrentStatus(void) {
 	// before: -bp does ask for it.)
 	const bool imguiOwnsUI = (!debug_window_enabled && video_debug_ui_available());
 
+	// A Windows move/resize callback runs inside the OS's nested window
+	// procedure. It still needs every stop-state transition above, but must
+	// return before any paused frontend work below. A pending single-step is
+	// executable; a stopped machine remains stopped.
+	if (!allow_ui_pump && currentMode != DMODE_RUN) {
+		return (currentMode == DMODE_STOP) ? 1 : 0;
+	}
+
 	// A DAP client can drive the run state while we are halted, so give it a
 	// turn before any front end blocks: continue/step arriving over the socket
 	// has to be able to get us moving again, whichever UI is up.
@@ -530,7 +540,15 @@ int  DEBUGGetCurrentStatus(void) {
 		static int poll_counter = 0;
 		if (++poll_counter >= 1000) {
 			poll_counter = 0;
-			if (debug_server_poll()) {
+			// Timed only with a client possible: the clock reads would
+			// otherwise be the most frequent thing here.
+			const bool timed = debug_server_is_enabled();
+			if (timed)
+				host_prof_begin(HP_DAP);
+			const bool stopped = debug_server_poll();
+			if (timed)
+				host_prof_end(HP_DAP);
+			if (stopped) {
 				return (currentMode == DMODE_STOP) ? 1 : 0;
 			}
 		}
@@ -539,12 +557,24 @@ int  DEBUGGetCurrentStatus(void) {
 	return 0;                                                               // Run wild, run free.
 }
 
+int
+DEBUGGetCurrentStatus(void)
+{
+	return DEBUGGetCurrentStatusEx(true);
+}
+
+int
+DEBUGGetCurrentStatusNoPump(void)
+{
+	return DEBUGGetCurrentStatusEx(false);
+}
+
 // *******************************************************************************************
 //
 //								Setup fonts and co
 //
 // *******************************************************************************************
-void DEBUGInitUI(SDL_Renderer *pRenderer) {
+void DEBUGInitUI(render_backend_t *pRenderer) {
 		DEBUGInitChars(pRenderer);
 		dbgRenderer = pRenderer;				// Save renderer.
 }
@@ -555,6 +585,8 @@ void DEBUGInitUI(SDL_Renderer *pRenderer) {
 //
 // *******************************************************************************************
 void DEBUGFreeUI() {
+	DEBUGFreeChars();
+	dbgRenderer = NULL;
 }
 
 // *******************************************************************************************
@@ -1310,13 +1342,13 @@ static void DEBUGExecCmd() {
 void DEBUGRenderDisplay(int width, int height) {
 	if (showFullDisplay) return;								// Not rendering debug.
 
-	SDL_Rect rc;
+	render_rect_t rc;
 	rc.w = DBG_WIDTH * 6 * CHAR_SCALE;							// Erase background, set up rect
 	rc.h = height;
 	xPos = width-rc.w;yPos = 0; 								// Position screen
 	rc.x = xPos;rc.y = yPos; 									// Set rectangle and black out.
-	SDL_SetRenderDrawColor(dbgRenderer,0,0,0,SDL_ALPHA_OPAQUE);
-	SDL_RenderFillRect(dbgRenderer,&rc);
+	render_backend_set_draw_color(dbgRenderer, (render_color_t){ 0, 0, 0, SDL_ALPHA_OPAQUE });
+	render_backend_fill_rect(dbgRenderer, &rc);
 
 	int register_lines = DEBUGRenderRegisters();							// Draw register name and values.
 	DEBUGRenderCode(register_lines, currentPC);							// Render 6502 disassembly.
@@ -1341,8 +1373,9 @@ void DEBUGRenderDisplay(int width, int height) {
 static void DEBUGRenderCmdLine(int x, int width, int height) {
 	char buffer[sizeof(cmdLine)+1];
 
-	SDL_SetRenderDrawColor(dbgRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);
-	SDL_RenderDrawLine(dbgRenderer, x, height-12, x+width, height-12);
+	render_backend_set_draw_color(dbgRenderer,
+	                              (render_color_t){ 255, 255, 255, SDL_ALPHA_OPAQUE });
+	render_backend_draw_line(dbgRenderer, x, height-12, x+width, height-12);
 
 	sprintf(buffer, ">%s", cmdLine);
 	DEBUGString(dbgRenderer, 0, DBG_HEIGHT-1, buffer, col_cmdLine);

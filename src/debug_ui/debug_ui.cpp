@@ -8,26 +8,119 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h" // regs + execution-control (DEBUGContinue/…/DEBUGIsRunning)
 #include "debug_ui_settings.h" // user preferences (System → Settings...)
+#include "debug_ui_image.h"  // panel image textures (SDL_Texture or shared DX12)
+#include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
+#include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* for the first-run default layout
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+#ifdef HAS_DX12
+#include "backends/imgui_impl_dx12.h"
+#endif
 
+#include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 static SDL_Window   *s_window      = nullptr;
 static SDL_Renderer *s_renderer    = nullptr;
 static bool          s_initialized = false;
+static bool          s_native_dx12 = false; // renderer backend is imgui_impl_dx12
 static bool          s_enabled     = false;
 static bool          s_build_default_layout = false; // install a dock layout on first run
+
+// Benchmark configuration (-bench, -uipanels, -uiiotrace). A benchmark has to
+// be reproducible, and the user's imgui.ini decides which panels are open and
+// which docked tab is in front; it must also never be overwritten by a bench
+// run. So a configured run neither loads nor saves the ini, and opens exactly
+// the panels it names.
+static bool        s_bench_no_ini      = false;
+static std::string s_bench_panels;
+static bool        s_bench_have_panels = false;
+static bool        s_bench_io_capture  = false;
 static bool          s_show_demo    = false;         // Help → ImGui Demo (vendored imgui_demo.cpp)
 static bool          s_show_settings = false;        // System → Settings...
 
 static void debug_ui_latch_goto(void); // defined below; called from debug_ui_render
 static void debug_ui_follow_stop_location(void); // ditto
+
+// Found in the wild: this project's saved imgui.ini with a table's lone
+// WidthStretch column at `Weight=-nan(ind)` (the Breakpoints panel's
+// Execution table - "Condition" is its only stretch column among five fixed
+// ones). Exactly how a NaN gets written is still open - the obvious path,
+// ImGui's TableUpdateColumnsWeightFromWidth dividing a zero stretch width by
+// a zero total, is itself guarded by an assert on that total being positive
+// in any build with asserts live, so it must have been produced by an
+// asserts-disabled build taking some other route.
+//
+// Whatever wrote it, loading it back is what breaks things: the column
+// renders at ~zero width (hiding the "set condition" button behind it, which
+// looks like the feature went missing), and the first column-border drag
+// that makes ImGui recompute weights hits IM_ASSERT(column->StretchWeight >
+// 0.0f) in imgui_tables.cpp and aborts.
+//
+// Fixed as plain text, on disk, before ImGui ever parses the file (its ini
+// auto-load happens inside the first NewFrame(), which runs after
+// debug_ui_init() returns) - rather than by reaching into ImGui's internal
+// settings structures after the fact. Plain text keeps this independent of
+// how a given ImGui version happens to represent a loaded table's settings
+// in memory; it only has to agree with the on-disk format, which is public
+// and part of what SaveIniSettingsToDisk documents it writes.
+static void
+debug_ui_sanitize_ini_file(const char *path)
+{
+    if (!path || !path[0]) {
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return; // no ini yet (first run) - nothing to sanitize
+    }
+    std::string text;
+    char        buf[4096];
+    size_t      n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+        text.append(buf, n);
+    }
+    fclose(f);
+
+    // Every "Weight=" in an imgui.ini belongs to a [Table] column, and every
+    // one of those must be a finite, positive float - so any value that
+    // isn't gets reset to ImGui's own default (equal weighting, 1.0) with no
+    // need to parse out which table or column it belongs to.
+    bool         changed = false;
+    const char  *needle  = "Weight=";
+    const size_t nlen    = strlen(needle);
+    size_t       pos     = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        size_t value_start = pos + nlen;
+        size_t value_end   = value_start;
+        while (value_end < text.size() && text[value_end] != '\r' && text[value_end] != '\n') {
+            value_end++;
+        }
+        const double value = strtod(text.c_str() + value_start, nullptr);
+        if (!(value > 0.0) || !std::isfinite(value)) {
+            text.replace(value_start, value_end - value_start, "1.0000");
+            changed    = true;
+            value_end  = value_start + 6; // length of "1.0000"
+        }
+        pos = value_end;
+    }
+
+    if (!changed) {
+        return;
+    }
+    if (FILE *out = fopen(path, "wb")) {
+        fwrite(text.data(), 1, text.size(), out);
+        fclose(out);
+    }
+}
 
 // ── Font ladder for per-window zoom ─────────────────────────────────────────
 // ImGui's default font is rasterised once at a single size; scaling it (which
@@ -86,6 +179,7 @@ debug_ui_find_mono_font(void)
 static void
 debug_ui_build_fonts(ImGuiIO &io)
 {
+    memset(s_fonts, 0, sizeof(s_fonts));
     const char *path = debug_ui_find_mono_font();
     s_scalable_font  = (path != nullptr);
 
@@ -178,14 +272,75 @@ debug_ui_apply_ui_scale(void)
     ImGui::GetIO().FontDefault = debug_ui_font_for_size(s_font_sizes[0] * want, nullptr);
 }
 
-extern "C" void
-debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
+// Everything that is independent of which renderer backend draws the debugger:
+// the ImGui context, settings, fonts, style and the first-run layout decision.
+// Both debug_ui_init and debug_ui_init_dx12 run this before attaching their
+// platform/renderer backends.
+// Case-insensitive match of `name` against a comma-separated list.
+static bool
+bench_list_has(const std::string &list, const char *name)
 {
-    if (s_initialized) {
-        return;
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(',', start);
+        if (end == std::string::npos) {
+            end = list.size();
+        }
+        const std::string item = list.substr(start, end - start);
+        if (!item.empty() && item.size() == strlen(name)) {
+            bool same = true;
+            for (size_t i = 0; i < item.size() && same; i++) {
+                same = tolower((unsigned char)item[i]) == tolower((unsigned char)name[i]);
+            }
+            if (same) {
+                return true;
+            }
+        }
+        start = end + 1;
     }
-    s_window   = win;
-    s_renderer = ren;
+    return false;
+}
+
+static void
+debug_ui_apply_bench_config(void)
+{
+    if (s_bench_have_panels) {
+        const bool all = bench_list_has(s_bench_panels, "all");
+        for (DebugPanel &panel : debug_ui_panels()) {
+            panel.open = all || bench_list_has(s_bench_panels, panel.name);
+        }
+    }
+    if (s_bench_no_ini) {
+        // No ini means default settings; force the ones a benchmark depends on.
+        DebugUiSettings &s = debug_ui_settings();
+        s.io_trace_capture = s_bench_io_capture;
+        s.perf_always_on   = false;
+        // Every device defaults off, which would leave the Activity log empty
+        // and measure nothing. These are the steady-rate ones; VERA is left
+        // out, as the panel itself advises, because it would be the only
+        // thing in the ring.
+        s.io_cap_via   = s_bench_io_capture;
+        s.io_cap_ym    = s_bench_io_capture;
+        s.io_cap_i2c   = s_bench_io_capture;
+        s.io_cap_joy   = s_bench_io_capture;
+        s.io_cap_sd    = s_bench_io_capture;
+        s.io_cap_files = s_bench_io_capture;
+    }
+}
+
+extern "C" void
+debug_ui_bench_configure(const char *panels, bool io_capture, bool no_ini)
+{
+    s_bench_have_panels = panels != nullptr;
+    s_bench_panels      = panels ? panels : "";
+    s_bench_io_capture  = io_capture;
+    s_bench_no_ini      = no_ini;
+}
+
+static void
+debug_ui_create_context(SDL_Window *win)
+{
+    s_window = win;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -193,6 +348,14 @@ debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;      // dockable panels
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // keyboard nav
+
+    if (s_bench_no_ini) {
+        io.IniFilename = nullptr;
+    }
+
+    // Repair a corrupted saved table setting before ImGui's own auto-load
+    // (inside the first NewFrame(), further down) ever reads it.
+    debug_ui_sanitize_ini_file(io.IniFilename);
 
     // Our own imgui.ini section for user preferences. Must be installed before
     // ImGui loads the ini (i.e. before the first NewFrame) or the saved values
@@ -253,11 +416,89 @@ debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
         }
     }
 
-    ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
-    ImGui_ImplSDLRenderer2_Init(ren);
+    debug_ui_apply_bench_config();
+}
 
+extern "C" bool
+debug_ui_init(SDL_Window *win, SDL_Renderer *ren)
+{
+    if (s_initialized) {
+        return true;
+    }
+    if (win == nullptr || ren == nullptr) {
+        return false;
+    }
+
+    debug_ui_create_context(win);
+    s_renderer = ren;
+
+    if (!ImGui_ImplSDL2_InitForSDLRenderer(win, ren)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDL2_InitForSDLRenderer failed.\n");
+        ImGui::DestroyContext();
+        s_window   = nullptr;
+        s_renderer = nullptr;
+        return false;
+    }
+    if (!ImGui_ImplSDLRenderer2_Init(ren)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDLRenderer2_Init failed.\n");
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        s_window   = nullptr;
+        s_renderer = nullptr;
+        return false;
+    }
+
+    // Panel images become SDL_Textures on this renderer.
+    debug_ui_image_use_sdl(ren);
+
+    s_native_dx12 = false;
     s_initialized = true;
     s_enabled     = true;
+    return true;
+}
+
+extern "C" bool
+debug_ui_init_dx12(SDL_Window *win, render_backend_t *backend)
+{
+#ifdef HAS_DX12
+    if (s_initialized) {
+        return true;
+    }
+    if (win == nullptr || backend == nullptr) {
+        return false;
+    }
+
+    debug_ui_create_context(win);
+
+    // SDL still owns the window and the event stream; only the drawing moves to
+    // D3D12, so this is the plain "some D3D renderer" platform init.
+    if (!ImGui_ImplSDL2_InitForD3D(win)) {
+        fprintf(stderr, "Warning: ImGui_ImplSDL2_InitForD3D failed.\n");
+        ImGui::DestroyContext();
+        s_window = nullptr;
+        return false;
+    }
+    if (!debug_ui_dx12_init(win, backend)) {
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        s_window = nullptr;
+        return false;
+    }
+
+    // Panel images become RGBA8888 textures on the shared backend, so their
+    // SRVs land in the same shader-visible heap the debugger binds.
+    debug_ui_image_use_dx12(backend);
+
+    s_renderer    = nullptr;
+    s_native_dx12 = true;
+    s_initialized = true;
+    s_enabled     = true;
+    return true;
+#else
+    (void)win;
+    (void)backend;
+    return false;
+#endif
 }
 
 extern "C" void
@@ -324,6 +565,54 @@ ctrl_button(const char *label, bool enabled, const char *tip)
         ImGui::SetTooltip("%s", tip);
     }
     return clicked;
+}
+
+// Host time per emulated frame, smoothed, with the breakdown on hover. This is
+// the "is the debugger slowing the machine down" number: once busy time passes
+// the frame period, the machine cannot keep real speed. Reads only the last
+// closed frame and the panel table, so it costs nothing worth timing.
+static void
+draw_host_time(void)
+{
+    static float s_busy_ms = 0.0f;
+    uint32_t     last[HP_SECTIONS], wall_us = 0;
+    host_prof_last_frame(last, &wall_us);
+    const float busy_ms = (float)(wall_us - last[HP_SLEEP]) / 1000.0f;
+    s_busy_ms = s_busy_ms == 0.0f ? busy_ms : s_busy_ms * 0.9f + busy_ms * 0.1f;
+
+    // One VGA frame at native speed, as the emulator models it:
+    // 800 * 525 pixels at 25 MHz.
+    const float frame_ms = 16.8f;
+    const ImVec4 col     = s_busy_ms > frame_ms        ? ImVec4(1.00f, 0.45f, 0.45f, 1.0f)
+                         : s_busy_ms > frame_ms * 0.75f ? ImVec4(0.95f, 0.70f, 0.30f, 1.0f)
+                                                        : ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+    char text[32];
+    snprintf(text, sizeof text, "host %.1f ms", (double)s_busy_ms);
+    menubar_fixed_colored("host 888.8 ms", col, text);
+    if (!ImGui::IsItemHovered()) {
+        return;
+    }
+
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted("Host time per emulated frame (smoothed), excluding sleep.");
+    ImGui::TextDisabled("Above %.1f ms the machine cannot hold real speed. Guest cycle\n"
+                        "counts are never affected; only host speed is.",
+                        (double)frame_ms);
+    ImGui::Separator();
+    ImGui::TextUnformatted("Last frame:");
+    for (int i = 0; i < HP_SECTIONS; i++) {
+        ImGui::Text("  %-9s %8.2f ms", host_prof_section_name((hp_section_t)i),
+                    (double)last[i] / 1000.0);
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Panels (recent mean per render):");
+    for (int i = 0; i < host_prof_panel_count(); i++) {
+        host_prof_panel_t p;
+        if (host_prof_panel_get(i, &p) && p.calls) {
+            ImGui::Text("  %-12s %8.2f ms", p.name, p.recent_us / 1000.0);
+        }
+    }
+    ImGui::EndTooltip();
 }
 
 // Top main menu bar: View/Layout/Help menus plus the execution-control toolbar
@@ -528,14 +817,15 @@ debug_ui_draw_control_bar(void)
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        if (warp_mode) {
+        const bool warp_was_enabled = warp_mode;
+        if (warp_was_enabled) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.10f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.45f, 0.15f, 1.0f));
         }
         if (ImGui::SmallButton("Warp")) {
             machine_toggle_warp();
         }
-        if (warp_mode) {
+        if (warp_was_enabled) {
             ImGui::PopStyleColor(2);
         }
         if (ImGui::IsItemHovered()) {
@@ -582,6 +872,9 @@ debug_ui_draw_control_bar(void)
     menubar_fixed_value("cyc 8888888888", "cyc %u", (unsigned)clockticks6502);
     ImGui::SameLine();
     menubar_fixed_value("ins 8888888888", "ins %d", instruction_counter);
+
+    ImGui::Separator();
+    draw_host_time();
 
     ImGui::EndMainMenuBar();
 }
@@ -721,20 +1014,28 @@ debug_ui_build_default_layout(ImGuiID dockspace_id)
     }
 }
 
-extern "C" void
+extern "C" bool
 debug_ui_render(void)
 {
     if (!s_initialized) {
-        return;
+        return false;
     }
 
     // Interface scale is read from settings and applied to the style + default
     // font. Must happen before NewFrame, which latches the current font.
     debug_ui_apply_ui_scale();
 
-    ImGui_ImplSDLRenderer2_NewFrame();
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        ImGui_ImplDX12_NewFrame();
+    } else
+#endif
+    {
+        ImGui_ImplSDLRenderer2_NewFrame();
+    }
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
     // Publish any cross-panel goto requested last frame so every panel sees it.
     debug_ui_latch_goto();
 
@@ -762,7 +1063,9 @@ debug_ui_render(void)
     for (DebugPanel &panel : debug_ui_panels()) {
         if (panel.open && panel.render) {
             debug_ui_place_new_panel(panel.name);
+            const uint64_t t0 = host_prof_now();
             panel.render(&panel.open);
+            host_prof_panel(panel.name, host_prof_now() - t0);
         }
     }
 
@@ -776,12 +1079,29 @@ debug_ui_render(void)
 
     ImGui::Render();
 
+    // From here on it is turning the frame into GPU work and presenting it.
+    // The caller has ui_build open; this nests inside it.
+    host_prof_ui_frame();
+    host_prof_begin(HP_UI_DRAW);
+
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        // A failure here is the secondary swap chain's, not the emulator's:
+        // the caller drops this window back to the SDLRenderer2 path.
+        const bool ok = debug_ui_dx12_render();
+        host_prof_end(HP_UI_DRAW);
+        return ok;
+    }
+#endif
+
     ImGuiIO &io = ImGui::GetIO();
     SDL_RenderSetScale(s_renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
     SDL_SetRenderDrawColor(s_renderer, 24, 24, 24, 255);
     SDL_RenderClear(s_renderer);
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), s_renderer);
     SDL_RenderPresent(s_renderer);
+    host_prof_end(HP_UI_DRAW);
+    return true;
 }
 
 extern "C" void
@@ -790,12 +1110,24 @@ debug_ui_shutdown(void)
     if (!s_initialized) {
         return;
     }
-    ImGui_ImplSDLRenderer2_Shutdown();
+    // Panel textures first: in the native mode they live on the shared DX12
+    // backend, and their descriptors have to go back before anything that
+    // shares that heap is torn down.
+    debug_ui_image_release_all();
+#ifdef HAS_DX12
+    if (s_native_dx12) {
+        debug_ui_dx12_shutdown();
+    } else
+#endif
+    {
+        ImGui_ImplSDLRenderer2_Shutdown();
+    }
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
 
     s_window      = nullptr;
     s_renderer    = nullptr;
+    s_native_dx12 = false;
     s_initialized = false;
     s_enabled     = false;
 }
@@ -1016,4 +1348,3 @@ debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len)
     s_watch_req_pending = false;
     return true;
 }
-

@@ -286,10 +286,12 @@ the [official emulator's README][upstream-readme]. Two caveats, both from the pa
 from ADD itself: the MSVC builds have no `-trace`, and the non-`-midi` packages have no MIDI
 options at all. `x16emu -h` is the authoritative list for the build you actually have.
 
-The options below are the ones ADD adds on top. They all concern debugging.
+The options below are the ones ADD adds on top. Most concern debugging; `-render` controls
+the display backend.
 
 | Option | What it does |
 |---|---|
+| `-render <driver>` | Selects a renderer. On MSVC Windows builds, `-render dx12` selects the native DirectX 12 main-output backend; if it cannot initialize, the emulator reports the reason and falls back to SDL. With `-imgui`, the debugger window is then drawn natively too, sharing that backend's D3D12 device, command queue and descriptor heap — and falling back to SDL on its own if that fails, without disturbing the main output. `-render direct3d12` remains SDL's built-in Direct3D 12 renderer. Use `-render list` to see the native and SDL drivers compiled into the current build. |
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, I/O ports and file access, and the performance budget. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
@@ -300,7 +302,7 @@ The options below are the ones ADD adds on top. They all concern debugging.
 Upstream's `-debug [<address>]` still works. ADD does not extend it; see the
 [official README][upstream-readme] for what it does.
 
-All of these are covered properly under [Advanced Debugging](#advanced-debugging).
+The debugging options are covered properly under [Advanced Debugging](#advanced-debugging).
 
 Using the emulated machine
 --------------------------

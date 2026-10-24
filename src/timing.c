@@ -8,6 +8,7 @@
 #include "video.h"
 #include "timing.h"
 #include "cpu/fake6502.h"
+#include "host_prof.h"
 #include <SDL.h>
 #include <stdio.h>
 #include "compat.h"
@@ -266,18 +267,24 @@ timing_update_ex(bool may_sleep)
 				if (left <= 0)
 					break;
 
+				host_prof_begin(HP_SLEEP);
 				usleep(left > THROTTLE_SLICE_US ? THROTTLE_SLICE_US : left);
+				host_prof_end(HP_SLEEP);
 
+				host_prof_begin(HP_EVENTS);
 				SDL_PumpEvents();
+				host_prof_end(HP_EVENTS);
 				video_repaint_only();
 			}
 			diff_time = 0;
 		} else {
+			host_prof_begin(HP_SLEEP);
 			if (diff_time >= 1000000) {
 				sleep(diff_time / 1000000);
 				diff_time %= 1000000;
 			}
 			usleep(diff_time);
+			host_prof_end(HP_SLEEP);
 		}
 	}
 

@@ -13,12 +13,11 @@
 
 #include "imgui.h"
 #include "debug_ui_bridge.h"
-#include "debug_ui.h"
+#include "debug_ui_image.h"
 #include "sprite_multiplex_tab.h"
 
 #include "sprite_trace.h"
 
-#include <SDL.h>
 #include <float.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,37 +45,6 @@ gen_color(const sprite_gen_t &g, float alpha)
     return ImGui::GetColorU32(ImVec4(r, gg, b, alpha));
 }
 
-struct GfxTexture {
-    SDL_Texture *tex = nullptr;
-    int          w = 0, h = 0;
-
-    bool ensure(int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return false;
-        if (tex && w == width && h == height)
-            return true;
-        if (tex) {
-            SDL_DestroyTexture(tex);
-            tex = nullptr;
-        }
-        SDL_Renderer *ren = debug_ui_get_renderer();
-        if (!ren)
-            return false;
-        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
-                                width, height);
-        if (!tex)
-            return false;
-        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
-        w = width;
-        h = height;
-        return true;
-    }
-    void update(const uint32_t *px) { if (tex) SDL_UpdateTexture(tex, nullptr, px, w * 4); }
-    ImTextureID id() const { return (ImTextureID)(intptr_t)tex; }
-};
-
 // ---------------------------------------------------------------------------
 // Panel state
 // ---------------------------------------------------------------------------
@@ -89,7 +57,7 @@ bool  s_only_drawn    = true;
 bool  s_mark_overrun  = true;
 int   s_selected_gen  = -1;
 
-GfxTexture s_ghost_tex;
+DebugUiImage s_ghost_tex;
 uint32_t  *s_ghost_px    = nullptr;
 uint32_t   s_ghost_frame = 0xFFFFFFFFu;
 bool       s_ghost_valid = false;
@@ -566,8 +534,17 @@ draw_ghost(const sprite_trace_frame_t *f, const uint32_t pal[256])
 void
 draw_sprite_multiplex_tab(const uint32_t pal[256])
 {
+    // s_enabled means "the UI wants tracing", and nothing but the checkbox
+    // below ever sets that bit - but re-deriving it from the core each frame
+    // costs nothing and means it can never quietly drift from what actually
+    // armed it. sprite_trace_active is a different question ("is tracing on
+    // right now, for whatever reason") and must stay a live read below, not
+    // this flag: a DAP client can arm tracing on its own, and this checkbox
+    // would otherwise sit unchecked while data was already being recorded.
+    s_enabled = sprite_trace_owner_wants(SPRITE_TRACE_OWNER_UI);
+
     if (ImGui::Checkbox("Record sprite raster activity", &s_enabled)) {
-        s_alloc_failed = !sprite_trace_set_enabled(s_enabled);
+        s_alloc_failed = !sprite_trace_arm(SPRITE_TRACE_OWNER_UI, s_enabled);
         if (s_alloc_failed)
             s_enabled = false;
         s_ghost_frame = 0xFFFFFFFFu;
@@ -578,9 +555,17 @@ draw_sprite_multiplex_tab(const uint32_t pal[256])
     if (ImGui::SliderInt("Burst gap", &s_burst_gap, 8, 2048, "%d cyc"))
         sprite_trace_set_burst_gap((uint32_t)s_burst_gap);
 
-    if (s_enabled) {
+    // Live, not s_enabled: tracing can be running because a DAP client armed
+    // it even while this checkbox reads unchecked, and the memory really is
+    // allocated either way.
+    if (sprite_trace_active) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(%zu KB)", sprite_trace_memory_usage() / 1024);
+        if (sprite_trace_owner_wants(SPRITE_TRACE_OWNER_DAP) && !s_enabled) {
+            ImGui::TextDisabled("(active - armed by a DAP client, %zu KB)",
+                                sprite_trace_memory_usage() / 1024);
+        } else {
+            ImGui::TextDisabled("(%zu KB)", sprite_trace_memory_usage() / 1024);
+        }
     }
     if (s_alloc_failed)
         ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Could not allocate the trace buffers.");

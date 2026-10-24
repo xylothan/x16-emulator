@@ -179,6 +179,39 @@ sprite_trace_set_enabled(bool on)
 	return true;
 }
 
+static bool arm_want[SPRITE_TRACE_OWNER_COUNT];
+
+bool
+sprite_trace_arm(sprite_trace_owner_t owner, bool want)
+{
+	if ((int)owner < 0 || (int)owner >= SPRITE_TRACE_OWNER_COUNT) {
+		return false;
+	}
+	arm_want[owner] = want;
+
+	bool any = false;
+	for (int i = 0; i < SPRITE_TRACE_OWNER_COUNT; i++) {
+		any = any || arm_want[i];
+	}
+
+	// Only act on a real change: sprite_trace_set_enabled(true) resets the
+	// recording, so calling it every frame from a panel that is merely still
+	// open would keep discarding the frame in progress.
+	if (any == sprite_trace_active) {
+		return true;
+	}
+	return sprite_trace_set_enabled(any);
+}
+
+bool
+sprite_trace_owner_wants(sprite_trace_owner_t owner)
+{
+	if ((int)owner < 0 || (int)owner >= SPRITE_TRACE_OWNER_COUNT) {
+		return false;
+	}
+	return arm_want[owner];
+}
+
 void
 sprite_trace_set_burst_gap(uint32_t cycles)
 {

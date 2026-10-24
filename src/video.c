@@ -19,6 +19,7 @@
 #include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
 #include "debug_ui/debug_ui.h"
 #endif
+#include "host_prof.h"
 #include "keyboard.h"
 #include "gif.h"
 #include "joystick.h"
@@ -31,6 +32,7 @@
 #include "sdcard.h"
 #include "i2c.h"
 #include "audio.h"
+#include "render_backend.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -111,13 +113,20 @@
 #define MAX(a,b) ((a) > (b) ? a : b)
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *sdlTexture;
+static render_backend_t *renderer;
+static render_texture_t *sdlTexture;
+static float renderer_screen_x_scale = 1.0f;
+static const char *renderer_quality = "best";
 static bool is_fullscreen = false;
+static bool legacy_debug_ui_initialized = false;
 #ifdef HAS_IMGUI
 // ImGui debugger window (separate; created only when -imgui is passed).
 static SDL_Window *imgui_window = NULL;
 static SDL_Renderer *imgui_renderer = NULL;
+// True while the debugger window is drawn with the native DirectX 12 renderer,
+// sharing the main backend's device/queue/SRV heap. Mutually exclusive with
+// imgui_renderer, which stays NULL in that mode.
+static bool imgui_native_dx12 = false;
 static Uint32 imgui_window_id = 0;
 #endif
 bool mouse_grabbed = false;
@@ -272,6 +281,8 @@ static uint8_t png_buffer[SCREEN_WIDTH * SCREEN_HEIGHT * 3];
 
 static GifWriter gif_writer;
 
+static bool video_fallback_to_sdl(void);
+
 static const uint16_t default_palette[] = {
 0x000,0xfff,0x800,0xafe,0xc4c,0x0c5,0x00a,0xee7,0xd85,0x640,0xf77,0x333,0x777,0xaf6,0x08f,0xbbb,0x000,0x111,0x222,0x333,0x444,0x555,0x666,0x777,0x888,0x999,0xaaa,0xbbb,0xccc,0xddd,0xeee,0xfff,0x211,0x433,0x644,0x866,0xa88,0xc99,0xfbb,0x211,0x422,0x633,0x844,0xa55,0xc66,0xf77,0x200,0x411,0x611,0x822,0xa22,0xc33,0xf33,0x200,0x400,0x600,0x800,0xa00,0xc00,0xf00,0x221,0x443,0x664,0x886,0xaa8,0xcc9,0xfeb,0x211,0x432,0x653,0x874,0xa95,0xcb6,0xfd7,0x210,0x431,0x651,0x862,0xa82,0xca3,0xfc3,0x210,0x430,0x640,0x860,0xa80,0xc90,0xfb0,0x121,0x343,0x564,0x786,0x9a8,0xbc9,0xdfb,0x121,0x342,0x463,0x684,0x8a5,0x9c6,0xbf7,0x120,0x241,0x461,0x582,0x6a2,0x8c3,0x9f3,0x120,0x240,0x360,0x480,0x5a0,0x6c0,0x7f0,0x121,0x343,0x465,0x686,0x8a8,0x9ca,0xbfc,0x121,0x242,0x364,0x485,0x5a6,0x6c8,0x7f9,0x020,0x141,0x162,0x283,0x2a4,0x3c5,0x3f6,0x020,0x041,0x061,0x082,0x0a2,0x0c3,0x0f3,0x122,0x344,0x466,0x688,0x8aa,0x9cc,0xbff,0x122,0x244,0x366,0x488,0x5aa,0x6cc,0x7ff,0x022,0x144,0x166,0x288,0x2aa,0x3cc,0x3ff,0x022,0x044,0x066,0x088,0x0aa,0x0cc,0x0ff,0x112,0x334,0x456,0x668,0x88a,0x9ac,0xbcf,0x112,0x224,0x346,0x458,0x56a,0x68c,0x79f,0x002,0x114,0x126,0x238,0x24a,0x35c,0x36f,0x002,0x014,0x016,0x028,0x02a,0x03c,0x03f,0x112,0x334,0x546,0x768,0x98a,0xb9c,0xdbf,0x112,0x324,0x436,0x648,0x85a,0x96c,0xb7f,0x102,0x214,0x416,0x528,0x62a,0x83c,0x93f,0x102,0x204,0x306,0x408,0x50a,0x60c,0x70f,0x212,0x434,0x646,0x868,0xa8a,0xc9c,0xfbe,0x211,0x423,0x635,0x847,0xa59,0xc6b,0xf7d,0x201,0x413,0x615,0x826,0xa28,0xc3a,0xf3c,0x201,0x403,0x604,0x806,0xa08,0xc09,0xf0b
 };
@@ -409,6 +420,15 @@ video_reset()
 // watch, this fires synchronously from inside that modal loop and keeps the
 // last good frame on screen. (The matching timing re-base in timing.c stops
 // the post-drag fast-forward.)
+static void
+video_clear_output(void)
+{
+	// The legacy debugger leaves its final line color active. Reset it so that
+	// letterbox bars stay black instead of inheriting the overlay's white.
+	render_backend_set_draw_color(renderer, (render_color_t){ 0, 0, 0, SDL_ALPHA_OPAQUE });
+	render_backend_clear(renderer);
+}
+
 static int SDLCALL
 video_move_resize_watch(void *userdata, SDL_Event *event)
 {
@@ -421,13 +441,26 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 	    event->window.windowID == SDL_GetWindowID(window)) {
 		switch (event->window.event) {
 			case SDL_WINDOWEVENT_MOVED:
-			case SDL_WINDOWEVENT_RESIZED:
-			case SDL_WINDOWEVENT_SIZE_CHANGED:
 			case SDL_WINDOWEVENT_EXPOSED:
 				in_watch = true;
-				SDL_RenderClear(renderer);
-				SDL_RenderCopy(renderer, sdlTexture, NULL, NULL);
-				SDL_RenderPresent(renderer);
+				video_clear_output();
+				render_backend_copy(renderer, sdlTexture, NULL, NULL);
+				if (debugger_enabled && showDebugOnRender != 0) {
+					DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
+				}
+				render_backend_present(renderer);
+				in_watch = false;
+				break;
+			case SDL_WINDOWEVENT_RESIZED:
+			case SDL_WINDOWEVENT_SIZE_CHANGED:
+				in_watch = true;
+				render_backend_resize(renderer, event->window.data1, event->window.data2);
+				video_clear_output();
+				render_backend_copy(renderer, sdlTexture, NULL, NULL);
+				if (debugger_enabled && showDebugOnRender != 0) {
+					DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
+				}
+				render_backend_present(renderer);
 				in_watch = false;
 				break;
 		}
@@ -435,10 +468,30 @@ video_move_resize_watch(void *userdata, SDL_Event *event)
 	return 1; // leave the event in the queue for normal handling
 }
 
+static bool
+render_driver_available(const char *name)
+{
+	const int count = SDL_GetNumRenderDrivers();
+	for (int i = 0; i < count; i++) {
+		SDL_RendererInfo info;
+		if (SDL_GetRenderDriverInfo(i, &info) == 0 &&
+		    SDL_strcasecmp(name, info.name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool
-video_init(int window_scale, float screen_x_scale, char *quality, bool fullscreen, float opacity)
+video_init(int window_scale, float screen_x_scale, const char *quality,
+           const char *render_driver, bool fullscreen, float opacity)
 {
 	uint32_t window_flags = SDL_WINDOW_ALLOW_HIGHDPI;
+	const char *requested_driver = render_driver;
+	const bool request_dx12 = requested_driver &&
+	                          SDL_strcasecmp(requested_driver, "dx12") == 0;
+	renderer_screen_x_scale = screen_x_scale;
+	renderer_quality = quality;
 
 #ifdef __EMSCRIPTEN__
 	// Setting this flag would render the web canvas outside of its bounds on high dpi screens
@@ -447,18 +500,89 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 
 	video_reset();
 
+	if (requested_driver && !request_dx12 && !render_driver_available(requested_driver)) {
+		fprintf(stderr,
+		        "Warning: SDL render driver '%s' is not available; using SDL's default selection.\n",
+		        requested_driver);
+		requested_driver = NULL;
+	}
+	if (requested_driver && !request_dx12 &&
+	    !SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, requested_driver, SDL_HINT_OVERRIDE)) {
+		fprintf(stderr,
+		        "Warning: Could not select SDL render driver '%s'; using SDL's default selection.\n",
+		        requested_driver);
+		requested_driver = NULL;
+	}
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, quality);
 	SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1"); // Grabs keyboard shortcuts from the system during window grab
-	SDL_CreateWindowAndRenderer(SCREEN_WIDTH * window_scale * screen_x_scale, SCREEN_HEIGHT * window_scale, window_flags, &window, &renderer);
+	window = SDL_CreateWindow(NULL, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	                          SCREEN_WIDTH * window_scale * screen_x_scale,
+	                          SCREEN_HEIGHT * window_scale, window_flags);
+	if (!window) {
+		fprintf(stderr, "Failed to create emulator window: %s\n", SDL_GetError());
+		return false;
+	}
+	renderer = NULL;
+#ifdef HAS_DX12
+	if (request_dx12) {
+		renderer = render_backend_create_dx12(window);
+		if (!renderer) {
+			fprintf(stderr,
+			        "Warning: Native DX12 renderer could not be initialized; falling back to SDL.\n");
+		}
+	}
+#else
+	if (request_dx12) {
+		fprintf(stderr,
+		        "Warning: Native DX12 renderer is not compiled into this build; falling back to SDL.\n");
+	}
+#endif
+	if (!renderer) {
+		renderer = render_backend_create_sdl(window);
+	}
+	if (!renderer) {
+		fprintf(stderr, "Failed to create emulator renderer: %s\n", SDL_GetError());
+		SDL_DestroyWindow(window);
+		window = NULL;
+		return false;
+	}
+
+	const char *renderer_name = render_backend_name(renderer);
+	if (renderer_name) {
+		if (!request_dx12 && requested_driver &&
+		    SDL_strcasecmp(requested_driver, renderer_name) != 0) {
+			fprintf(stderr,
+			        "Warning: SDL render driver '%s' could not be initialized; using '%s'.\n",
+			        requested_driver, renderer_name);
+		}
+		if (request_dx12 && SDL_strcasecmp(renderer_name, "dx12") == 0) {
+			fprintf(stderr, "Native render backend: %s\n", renderer_name);
+		} else {
+			fprintf(stderr, "SDL render driver: %s\n", renderer_name);
+		}
+	}
 #ifndef __MORPHOS__
 	SDL_SetWindowResizable(window, true);
 #endif
-	SDL_RenderSetLogicalSize(renderer, SCREEN_WIDTH * screen_x_scale, SCREEN_HEIGHT);
+	render_backend_set_logical_size(renderer, SCREEN_WIDTH * screen_x_scale, SCREEN_HEIGHT);
 
-	sdlTexture = SDL_CreateTexture(renderer,
-									SDL_PIXELFORMAT_RGB888,
-									SDL_TEXTUREACCESS_STREAMING,
-									SCREEN_WIDTH, SCREEN_HEIGHT);
+	render_scale_quality_t render_quality = RENDER_SCALE_BEST;
+	if (!strcmp(quality, "nearest")) {
+		render_quality = RENDER_SCALE_NEAREST;
+	} else if (!strcmp(quality, "linear")) {
+		render_quality = RENDER_SCALE_LINEAR;
+	}
+	sdlTexture = render_backend_texture_create(renderer, RENDER_PIXEL_FORMAT_BGRA8888,
+	                                           RENDER_TEXTURE_STREAMING, render_quality,
+	                                           SCREEN_WIDTH, SCREEN_HEIGHT);
+	if (!sdlTexture) {
+		fprintf(stderr, "Failed to create emulator texture: %s\n", SDL_GetError());
+		render_backend_destroy(renderer);
+		SDL_DestroyWindow(window);
+		renderer = NULL;
+		window = NULL;
+		return false;
+	}
 
 	// Keep the window painted while the OS holds us in a modal move/resize loop.
 	SDL_AddEventWatch(video_move_resize_watch, NULL);
@@ -506,6 +630,7 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 
 	if (debugger_enabled) {
 		DEBUGInitUI(renderer);
+		legacy_debug_ui_initialized = true;
 	}
 
 #ifdef HAS_IMGUI
@@ -520,18 +645,35 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 			960, 720,
 			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 		if (imgui_window) {
-			// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
-			// presented from the emulator thread, so a vsync'd present would
-			// block it for up to a refresh interval every frame -- capping the
-			// machine at the monitor's rate and defeating warp mode entirely.
-			// The main window does not vsync either; timing.c does the
-			// throttling. debug_ui_render() is rate-limited instead (see
-			// video_render_all_ex).
-			imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+#ifdef HAS_DX12
+			// With a native DX12 main output, draw the debugger natively too,
+			// on the very same device, command queue and shader-visible SRV
+			// heap. No second SDL_Renderer is created in that case.
+			if (renderer_name && SDL_strcasecmp(renderer_name, "dx12") == 0) {
+				imgui_native_dx12 = debug_ui_init_dx12(imgui_window, renderer);
+				if (!imgui_native_dx12) {
+					printf("Warning: The native DX12 debugger renderer could not be "
+					       "initialized; falling back to SDL.\n");
+				}
+			}
+#endif
+			if (!imgui_native_dx12) {
+				// Deliberately NOT SDL_RENDERER_PRESENTVSYNC. This renderer is
+				// presented from the emulator thread, so a vsync'd present would
+				// block it for up to a refresh interval every frame -- capping the
+				// machine at the monitor's rate and defeating warp mode entirely.
+				// The main window does not vsync either; timing.c does the
+				// throttling. debug_ui_render() is rate-limited instead (see
+				// video_render_all_ex).
+				imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+				if (imgui_renderer && !debug_ui_init(imgui_window, imgui_renderer)) {
+					SDL_DestroyRenderer(imgui_renderer);
+					imgui_renderer = NULL;
+				}
+			}
 		}
-		if (imgui_window && imgui_renderer) {
+		if (imgui_window && (imgui_renderer || imgui_native_dx12)) {
 			imgui_window_id = SDL_GetWindowID(imgui_window);
-			debug_ui_init(imgui_window, imgui_renderer);
 #ifdef _WIN32
 			// Keep both windows painted while the OS holds us in a modal
 			// move/resize loop dragging the debugger window. Emulation does
@@ -561,6 +703,104 @@ video_init(int window_scale, float screen_x_scale, char *quality, bool fullscree
 	if (grab_mouse && !mouse_grabbed)
 		mousegrab_toggle();
 
+	return true;
+}
+
+#ifdef HAS_IMGUI
+// Put the debugger window back on an ordinary SDL_Renderer with the ImGui
+// SDLRenderer2 backend. Used both when the native debugger swap chain fails on
+// its own -- the healthy main DX12 backend is left completely alone in that
+// case -- and after a main-window device loss has already torn it down.
+// Everything the ImGui side owned is gone by the time this runs, so it only has
+// to build the SDL renderer and re-init. On failure the debugger is retired for
+// the session, exactly as a failed window would have been at start-up.
+static void
+video_debug_ui_use_sdl_renderer(void)
+{
+	if (!imgui_window) {
+		return;
+	}
+	if (!imgui_renderer) {
+		imgui_renderer = SDL_CreateRenderer(imgui_window, -1, SDL_RENDERER_ACCELERATED);
+	}
+	if (imgui_renderer && debug_ui_init(imgui_window, imgui_renderer)) {
+		return;
+	}
+	fprintf(stderr, "Warning: The debugger window could not be recovered: %s\n", SDL_GetError());
+	if (imgui_renderer) {
+		SDL_DestroyRenderer(imgui_renderer);
+		imgui_renderer = NULL;
+	}
+#ifdef _WIN32
+	extern void video_win32_remove_move_hook(SDL_Window *window);
+	video_win32_remove_move_hook(imgui_window);
+#endif
+	SDL_DestroyWindow(imgui_window);
+	imgui_window = NULL;
+	imgui_window_id = 0;
+	imgui_debugger_enabled = false;
+	printf("The graphical debugger is disabled for the rest of this session.\n");
+}
+#endif
+
+// Device removal is terminal for this compact backend instance. Recreate the
+// legacy renderer and its debugger font texture rather than retaining COM
+// objects whose device has been lost.
+static bool
+video_fallback_to_sdl(void)
+{
+	if (!renderer || render_backend_is_healthy(renderer)) {
+		return true;
+	}
+	fprintf(stderr, "Warning: Native render backend failed; switching to SDL renderer.\n");
+	const bool restore_debug_ui = legacy_debug_ui_initialized;
+	if (restore_debug_ui) {
+		DEBUGFreeUI();
+		legacy_debug_ui_initialized = false;
+	}
+#ifdef HAS_IMGUI
+	// The ImGui debugger borrowed this backend's device, queue and SRV heap, so
+	// it has to be torn down before the backend is -- and brought back up on an
+	// SDL renderer afterwards.
+	const bool restore_imgui_ui = imgui_native_dx12;
+	if (restore_imgui_ui) {
+		debug_ui_shutdown();
+		imgui_native_dx12 = false;
+	}
+#endif
+	render_backend_texture_destroy(sdlTexture);
+	sdlTexture = NULL;
+	render_backend_destroy(renderer);
+	renderer = render_backend_create_sdl(window);
+	if (!renderer) {
+		fprintf(stderr, "Failed to recover SDL renderer: %s\n", SDL_GetError());
+		return false;
+	}
+	render_backend_set_logical_size(renderer, SCREEN_WIDTH * renderer_screen_x_scale, SCREEN_HEIGHT);
+	render_scale_quality_t quality = RENDER_SCALE_BEST;
+	if (!strcmp(renderer_quality, "nearest")) {
+		quality = RENDER_SCALE_NEAREST;
+	} else if (!strcmp(renderer_quality, "linear")) {
+		quality = RENDER_SCALE_LINEAR;
+	}
+	sdlTexture = render_backend_texture_create(renderer, RENDER_PIXEL_FORMAT_BGRA8888,
+	                                           RENDER_TEXTURE_STREAMING, quality,
+	                                           SCREEN_WIDTH, SCREEN_HEIGHT);
+	if (!sdlTexture) {
+		fprintf(stderr, "Failed to recover SDL texture: %s\n", SDL_GetError());
+		render_backend_destroy(renderer);
+		renderer = NULL;
+		return false;
+	}
+	if (restore_debug_ui) {
+		DEBUGInitUI(renderer);
+		legacy_debug_ui_initialized = true;
+	}
+#ifdef HAS_IMGUI
+	if (restore_imgui_ui) {
+		video_debug_ui_use_sdl_renderer();
+	}
+#endif
 	return true;
 }
 
@@ -1872,8 +2112,20 @@ video_save(SDL_RWops *f)
 // once-per-frame effects -- the LED is blended into the framebuffer in place,
 // and the recorder builds its timeline from the frames it is handed -- so a
 // repaint must do neither.
+static void video_render_all_body(bool new_frame);
+
+// Everything below is the "present" host section; the debugger UI it ends with
+// nests inside as ui_build / ui_draw, so it is not double-counted.
 static void
 video_render_all_ex(bool new_frame)
+{
+	host_prof_begin(HP_PRESENT);
+	video_render_all_body(new_frame);
+	host_prof_end(HP_PRESENT);
+}
+
+static void
+video_render_all_body(bool new_frame)
 {
 	// for activity LED, overlay red 8x4 square into top right of framebuffer
 	// for progressive modes, draw LED only on even scanlines
@@ -1897,7 +2149,7 @@ video_render_all_ex(bool new_frame)
 		}
 	}
 
-	SDL_UpdateTexture(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
+	render_backend_texture_update(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
 
 	// Skipped for a repaint that is not a new emulated frame. The throttle
 	// repaints between sleep slices to keep the window alive, and there can be
@@ -1915,14 +2167,15 @@ video_render_all_ex(bool new_frame)
 		}
 	}
 
-	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, sdlTexture, NULL, NULL);
+	video_clear_output();
+	render_backend_copy(renderer, sdlTexture, NULL, NULL);
 
 	if (debugger_enabled && showDebugOnRender != 0) {
 		DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
 	}
 
-	SDL_RenderPresent(renderer);
+	render_backend_present(renderer);
+	video_fallback_to_sdl();
 
 #ifdef HAS_IMGUI
 	// Rebuild the debugger window's frame. Deliberately decoupled from the
@@ -1933,13 +2186,26 @@ video_render_all_ex(bool new_frame)
 	// the debugger unresponsive. Wall-clock 60Hz is right at both ends. The
 	// throttle's repaint path (new_frame == false) calls in too, which is what
 	// keeps the UI live while the machine is running slowly.
-	if (imgui_renderer != NULL) {
+	if (imgui_window != NULL && (imgui_renderer != NULL || imgui_native_dx12)) {
 		static Uint32 last_ui_ticks = 0;
 		const Uint32 now = SDL_GetTicks();
 		// Unsigned subtraction, so this stays correct across the 49-day wrap.
 		if (now - last_ui_ticks >= 16) {
 			last_ui_ticks = now;
-			debug_ui_render();
+			host_prof_begin(HP_UI_BUILD);
+			const bool ui_ok = debug_ui_render();
+			host_prof_end(HP_UI_BUILD);
+			if (!ui_ok && imgui_native_dx12) {
+				// Only the debugger's own swap chain failed. The main DX12
+				// backend is still healthy, so leave it alone and move just
+				// this window back to SDL.
+				fprintf(stderr,
+				        "Warning: The native DX12 debugger renderer failed; switching that "
+				        "window to SDL.\n");
+				debug_ui_shutdown();
+				imgui_native_dx12 = false;
+				video_debug_ui_use_sdl_renderer();
+			}
 		}
 	}
 #endif
@@ -1988,7 +2254,7 @@ video_render_all(void)
 bool
 video_debug_ui_available(void)
 {
-	return imgui_window != NULL && imgui_renderer != NULL;
+	return imgui_window != NULL && (imgui_renderer != NULL || imgui_native_dx12);
 }
 
 static void video_imgui_debug_key(SDL_Keysym ks);
@@ -2529,16 +2795,20 @@ video_get_irq_state(uint8_t *out_ien, uint8_t *out_isr, uint16_t *out_irq_line)
 void
 video_end()
 {
-	if (debugger_enabled) {
+	if (legacy_debug_ui_initialized) {
 		DEBUGFreeUI();
+		legacy_debug_ui_initialized = false;
 	}
 
 #ifdef HAS_IMGUI
 	// Tear the UI down before its renderer and window: the ImGui SDL backends
-	// hold both and free renderer-owned textures on shutdown. Safe no-ops if
-	// -imgui was never passed or the window failed to open.
-	if (imgui_window && imgui_renderer) {
+	// hold both and free renderer-owned textures on shutdown, and the native
+	// DX12 path holds descriptors in the main backend's shared heap, which is
+	// destroyed further down. Safe no-ops if -imgui was never passed or the
+	// window failed to open.
+	if (imgui_window && (imgui_renderer || imgui_native_dx12)) {
 		debug_ui_shutdown();
+		imgui_native_dx12 = false;
 	}
 	if (imgui_renderer) {
 		SDL_DestroyRenderer(imgui_renderer);
@@ -2566,8 +2836,12 @@ video_end()
 	extern void video_win32_remove_move_hook(SDL_Window *window);
 	video_win32_remove_move_hook(window);
 #endif
-	SDL_DestroyRenderer(renderer);
+	render_backend_texture_destroy(sdlTexture);
+	sdlTexture = NULL;
+	render_backend_destroy(renderer);
+	renderer = NULL;
 	SDL_DestroyWindow(window);
+	window = NULL;
 }
 
 

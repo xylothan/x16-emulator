@@ -253,6 +253,16 @@ void     debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand,
                                 uint16_t operand_addr, int op, uint32_t value);
 void     debug_bp_clear_condition(int pc, uint8_t bank, int x16Bank);
 void     debug_bp_forget(int pc, uint8_t bank, int x16Bank);
+
+// DUMP breakpoints (x16Dump over DAP): a firing appends memory to a file and
+// does not stop.  Regions are 24-bit addresses with an x16 bank pin each
+// (USE_CURRENT_X16_BANK = -1 for the live mapping).  The reader is installed
+// by the emulator proper; debug_core.c itself touches no memory.
+bool     debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
+                           const uint32_t *addr, const uint32_t *len, const int *regBank);
+void     debug_bp_clear_dump(int pc, uint8_t bank, int x16Bank);
+uint32_t debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank);
+extern uint8_t (*debug_bp_dump_read)(uint32_t addr, int x16Bank);
 void     debug_bp_set_ignore(int pc, uint8_t bank, int x16Bank, uint32_t ignore);
 uint32_t debug_bp_get_hits(int pc, uint8_t bank, int x16Bank);
 void     debug_bp_reset_hits(int pc, uint8_t bank, int x16Bank);

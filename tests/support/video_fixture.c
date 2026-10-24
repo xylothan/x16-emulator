@@ -23,6 +23,7 @@
 
 #include "cpu/registers.h"
 #include "glue.h"
+#include "render_backend.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -88,14 +89,14 @@ SDL_Surface *CommanderX16Icon(void) { return NULL; }
 #ifdef _WIN32
 void video_win32_set_rounded_corners(SDL_Window *window) { (void)window; }
 void video_win32_install_move_hook(SDL_Window *window) { (void)window; }
-void video_win32_remove_move_hook(void) { }
+void video_win32_remove_move_hook(SDL_Window *window) { (void)window; }
 #endif
 
 // ─── Debugger overlay ───────────────────────────────────────────────────────
 
 void DEBUGBreakToDebugger(void) { }
 void DEBUGFreeUI(void) { }
-void DEBUGInitUI(SDL_Renderer *r) { (void)r; }
+void DEBUGInitUI(render_backend_t *r) { (void)r; }
 void DEBUGRenderDisplay(int width, int height) { (void)width; (void)height; }
 void DEBUGSetStopReason(const char *reason) { (void)reason; }
 
@@ -107,4 +108,3 @@ void DEBUGSetStopReason(const char *reason) { (void)reason; }
 // render into.
 
 void audio_render(void) { }
-

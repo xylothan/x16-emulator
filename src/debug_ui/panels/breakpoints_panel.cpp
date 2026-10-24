@@ -297,7 +297,18 @@ draw_breakpoints()
 	ImGui::Separator();
 
 	// --- Breakpoint list ------------------------------------------------
+	// This view is rebuilt from the core's table (sync_tracked(), called by our
+	// caller) every single frame this panel is visible, so a breakpoint set by
+	// a DAP client, the CLI, or F9 elsewhere shows up here on its own - there
+	// is no separate list of ours to fall behind it. A "Resync" button used to
+	// sit here for that; it was removed because it could not do anything a
+	// click and a non-click did not already do the same frame: sync_tracked()
+	// unconditionally runs before this function is ever reached, so the button
+	// could only be clicked in the one state (this tab already visible) where
+	// it was already redundant.
 	ImGui::Text("Breakpoints: %d", (int)s_tracked.size());
+	ImGui::SetItemTooltip("Always current for whoever set it - UI, CLI, or a DAP client -\n"
+	                      "while this tab is in view.");
 	ImGui::SameLine();
 	ImGui::BeginDisabled(s_tracked.empty());
 	if (ImGui::SmallButton("Enable All")) {
