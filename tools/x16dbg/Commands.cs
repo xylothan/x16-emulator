@@ -452,15 +452,15 @@ public static class Commands
         {
             case "add":
             case "a":
-                if (args.Length < 2) { Console.Error.WriteLine("Usage: bp add <addr>"); return 1; }
-                var ra = await client.AddBreakpointAsync((int)Convert.ToUInt32(args[1], 16));
+                if (args.Length < 2) { Console.Error.WriteLine("Usage: bp add <addr|bank:addr>"); return 1; }
+                var ra = await client.AddBreakpointAsync(args[1]);
                 PrintDapResult(ra);
                 return DapSuccess(ra) ? 0 : 1;
 
             case "remove":
             case "r":
                 if (args.Length < 2) { Console.Error.WriteLine("Usage: bp remove <addr>"); return 1; }
-                var rr = await client.RemoveBreakpointAsync((int)Convert.ToUInt32(args[1], 16));
+                var rr = await client.RemoveBreakpointAsync(args[1]);
                 PrintDapResult(rr);
                 return DapSuccess(rr) ? 0 : 1;
 

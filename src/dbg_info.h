@@ -49,6 +49,11 @@ bool dbg_info_has_high_level(void);
 // Returns true if found, fills in addr.
 bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *addr);
 
+// As above, and also the X16 RAM bank that code was seen loaded into, or -1
+// when the address is not in $A000-$BFFF or no LOAD has shown which bank.
+bool dbg_info_source_to_addr_bank(const char *file_path, int line_num, dbg_addr_t *addr,
+                                  int *ram_bank);
+
 // Check if debug info is loaded
 bool dbg_info_is_loaded(void);
 
@@ -141,6 +146,9 @@ bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr
 // Address of a label by name (case-insensitive, exact match). Returns false if
 // no such label.
 bool dbg_info_label_to_addr(const char *name, dbg_addr_t *addr);
+// As above, plus the label's RAM bank on the same terms as
+// dbg_info_source_to_addr_bank().
+bool dbg_info_label_to_addr_bank(const char *name, dbg_addr_t *addr, int *ram_bank);
 
 // Value of a cc65 `equ` record by name (case-insensitive). Equates are the
 // KERNAL entry points, hardware register names, zero-page variable addresses
