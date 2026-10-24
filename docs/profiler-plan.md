@@ -345,6 +345,31 @@ Targets for the panels:
   cost 0.5 ms of emulation between them; measure `perf_budget` and
   `vera_bandwidth` separately once they can be armed apart.
 
+**Panels done.** Measured before and after on one session, with `-hidden`,
+render time per panel:
+
+| Panel | before | after |
+| --- | --- | --- |
+| I/O, Activity tab, capture on, full 4096-event ring | 1,703 µs | 36 µs |
+| Performance | 561 µs | 80 µs |
+| user layout, UI build time per frame | 0.66 ms | 0.21 ms |
+
+- **I/O:** only the visible rows are drawn (`ImGuiListClipper`), and only
+  events that arrived since the last frame are filtered. Capture settings are
+  now applied every debugger frame, so changing them in System > Settings
+  works with the panel closed.
+- **Performance:** the Statistics and zone percentiles are cached, and
+  refreshed at most every 0.25 s, only when a frame completed or the budget or
+  zones changed.
+- **The Performance panel's recorders now run only while it is drawn.**
+  With the panel visible, emulation is about 0.3–0.45 ms per frame above the
+  no-recorder figure; that is `perf_budget` plus `vera_bandwidth`. They used to
+  be armed whenever the panel was open, which by default meant every `-imgui`
+  session, even with Performance behind another tab, and they stayed armed
+  after the panel was closed with its [x]. They are now armed while the panel
+  is drawn, or while "Keep profiling when hidden" is on, and disarmed half a
+  second after it stops being drawn. Disarming discards the history.
+
 Done when the Phase 0 benchmark set, rerun, meets these targets, and CI
 (including `wasm`) is green.
 

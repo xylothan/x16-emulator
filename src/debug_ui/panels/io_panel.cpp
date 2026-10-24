@@ -30,6 +30,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <cstddef>
+#include <vector>
+
 namespace {
 
 const ImVec4 COL_READ    = ImVec4(0.55f, 0.78f, 1.00f, 1.0f);
@@ -215,6 +218,71 @@ event_matches(const io_event_t &ev)
            (ev.has_addr && strstr(io_reg_name(ev.addr), s_filter) != nullptr);
 }
 
+// The rows the Activity table shows, as event sequence numbers, oldest first.
+// Sequence numbers rather than ring positions: every new event shifts every
+// position by one once the ring is full, but a sequence number names the same
+// event for as long as it is held.
+std::vector<uint32_t> s_rows;
+uint32_t              s_rows_last_seq = 0;      // newest event already considered
+char                  s_rows_filter[64] = "";   // the filter s_rows was built with
+bool                  s_rows_reads  = true;
+bool                  s_rows_writes = true;
+bool                  s_rows_valid  = false;
+
+// Bring s_rows up to date: drop what the ring no longer holds, and filter only
+// the events that arrived since the last call. A changed filter, or a ring that
+// no longer contains the newest event already seen (a clear, a resize), means a
+// full rebuild -- the only case that walks the whole ring.
+void
+refresh_rows()
+{
+    const int         count  = io_trace_count();
+    const io_event_t *oldest = count > 0 ? io_trace_at(0) : nullptr;
+    const io_event_t *newest = count > 0 ? io_trace_at(count - 1) : nullptr;
+
+    const bool same_filter = s_rows_valid && strcmp(s_rows_filter, s_filter) == 0 &&
+                             s_rows_reads == s_show_reads && s_rows_writes == s_show_writes;
+    // Still contiguous with what was seen: the ring holds the event after the
+    // last one considered (or nothing new has arrived at all).
+    const bool contiguous = s_rows_valid && newest && oldest &&
+                            oldest->seq <= s_rows_last_seq + 1 &&
+                            newest->seq >= s_rows_last_seq;
+
+    if (!same_filter || !contiguous) {
+        s_rows.clear();
+        for (int i = 0; i < count; i++) {
+            const io_event_t *ev = io_trace_at(i);
+            if (ev && event_matches(*ev)) {
+                s_rows.push_back(ev->seq);
+            }
+        }
+    } else {
+        // Drop rows the ring has overwritten...
+        size_t keep_from = 0;
+        while (keep_from < s_rows.size() && s_rows[keep_from] < oldest->seq) {
+            keep_from++;
+        }
+        if (keep_from) {
+            s_rows.erase(s_rows.begin(), s_rows.begin() + (std::ptrdiff_t)keep_from);
+        }
+        // ...and filter only the new ones.
+        for (int i = (int)(s_rows_last_seq + 1 - oldest->seq); i < count; i++) {
+            const io_event_t *ev = io_trace_at(i);
+            if (ev && event_matches(*ev)) {
+                s_rows.push_back(ev->seq);
+            }
+        }
+    }
+
+    s_rows_last_seq = newest ? newest->seq : 0;
+    snprintf(s_rows_filter, sizeof s_rows_filter, "%s", s_filter);
+    s_rows_reads  = s_show_reads;
+    s_rows_writes = s_show_writes;
+    // An empty ring has no newest event to stay contiguous with, so the next
+    // event starts a fresh build.
+    s_rows_valid  = newest != nullptr;
+}
+
 struct DeviceToggle {
     const char *label;
     bool DebugUiSettings::*field;
@@ -395,17 +463,28 @@ draw_activity_tab()
         ImGui::TableHeadersRow();
 
         // Oldest first, so the log reads downward like any other log and
-        // auto-scroll means "follow the newest".
-        const int total = io_trace_count();
-        for (int i = 0; i < total; i++) {
+        // auto-scroll means "follow the newest". Only the rows on screen are
+        // drawn (the clipper), and only events that arrived since last frame
+        // are filtered (refresh_rows()): with a full 4096-event ring, drawing
+        // and filtering every row every frame cost 1.6 ms of the emulator's
+        // own thread (docs/profiler-plan.md).
+        refresh_rows();
+        const int count = io_trace_count();
+        const io_event_t *oldest = count > 0 ? io_trace_at(0) : nullptr;
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)s_rows.size());
+        while (clipper.Step()) {
+        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; r++) {
+            const int i = oldest ? (int)(s_rows[(size_t)r] - oldest->seq) : -1;
             const io_event_t *evp = io_trace_at(i);
             if (evp == nullptr) {
+                // Cannot happen after refresh_rows(); keep the row so the
+                // clipper's row count still matches what was drawn.
+                ImGui::TableNextRow();
                 continue;
             }
             const io_event_t &ev = *evp;
-            if (!event_matches(ev)) {
-                continue;
-            }
             const bool decoded = (ev.kind == IO_EVENT_DECODED);
 
             ImGui::TableNextRow();
@@ -453,6 +532,7 @@ draw_activity_tab()
                 ImGui::Text("$%02X", ev.value);
                 dbgui_hover_value_tooltip(io_reg_name(ev.addr), ev.value, 1);
             }
+        }
         }
 
         if (s_autoscroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
@@ -1675,7 +1755,10 @@ io_panel_render(bool *p_open)
     }
     dbgui_window_zoom("io");
 
-    apply_capture_settings();
+    // Capture settings are applied every debugger frame by
+    // debug_ui_apply_io_capture(), not here: this only runs while the window
+    // is drawn, so a change made in System > Settings with the panel closed or
+    // behind another tab used to be ignored until the panel was looked at.
 
     ImGui::TextDisabled("Hover any label or value for what it means.");
 
@@ -1717,3 +1800,9 @@ io_panel_render(bool *p_open)
 DebugPanelRegistration s_reg("I/O", io_panel_render, true);
 
 } // namespace
+
+void
+debug_ui_apply_io_capture(void)
+{
+    apply_capture_settings();
+}

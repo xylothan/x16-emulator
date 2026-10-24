@@ -441,10 +441,119 @@ stat_cell(uint32_t v, uint32_t budget)
 	}
 }
 
+// The statistics are percentiles over up to PERF_DEFAULT_CAPACITY frames, and
+// each one is a sort. Recomputing them on every debugger frame was most of this
+// panel's 0.55 ms (docs/profiler-plan.md), for numbers that cannot visibly
+// change faster than a few times a second. So they are cached, and refreshed at
+// most every STATS_REFRESH_S -- and only when something they depend on moved:
+// a frame completed, the budget changed, or the zone table did. A paused
+// machine recomputes nothing.
+const double STATS_REFRESH_S = 0.25;
+
+// ─── When the recorders run ─────────────────────────────────────────────────
+// perf_budget and vera_bandwidth cost the running machine about 0.4 ms per
+// frame between them (docs/profiler-plan.md). They used to run whenever this
+// panel was open -- and every panel opens by default, so that was every -imgui
+// session, even with Performance behind another tab. Now they run while the
+// panel is actually drawn, or while "Keep profiling when hidden" is on.
+// Disarming discards the history.
+//
+// The panel reports that it was drawn; debug_ui_render() calls the tick once
+// per debugger frame whether or not the panel rendered, which is what lets a
+// closed panel disarm at all (a closed panel's render is never called).
+//
+// Disarming waits PERF_HIDDEN_GRACE_FRAMES: ImGui can report a window as not
+// drawn for a frame or two (its first frame, a dock drag), and each disarm
+// throws the history away.
+const int PERF_HIDDEN_GRACE_FRAMES = 30; // about half a second at 60 Hz
+
+bool g_armed           = false;
+bool g_drawn_this_frame = false;
+int  g_hidden_frames   = 0;
+
+void
+perf_recorders_set(bool want)
+{
+	DebugUiSettings &s = debug_ui_settings();
+	perf_budget_arm(PERF_OWNER_UI, want);
+	vera_bandwidth_arm(VERA_BW_OWNER_UI, want);
+	if (want) {
+		perf_budget_set_capacity(s.perf_capacity);
+		perf_budget_set_target_fps(s.perf_target_fps);
+		perf_budget_set_idle_mode((perf_idle_mode_t)s.perf_idle_mode);
+	}
+	g_armed = want;
+}
+
+// Called by the panel once Begin() says it is being drawn. Arms at once, so the
+// first visible frame already has data rather than "Profiling is off."
+void
+perf_recorders_mark_visible(void)
+{
+	g_drawn_this_frame = true;
+	g_hidden_frames    = 0;
+	if (!g_armed)
+		perf_recorders_set(true);
+}
+
+struct StatsCache {
+	double   at      = -1.0;
+	uint32_t frames  = 0;
+	uint32_t budget  = 0;
+	uint32_t zones   = 0;
+};
+
+// A cheap fingerprint of the zone table, so replacing one zone with another at
+// the same index -- which leaves the count alone -- still refreshes.
+uint32_t
+zones_signature(void)
+{
+	uint32_t h = 2166136261u;
+	const int n = perf_budget_zone_count();
+	for (int i = 0; i < n; i++) {
+		perf_zone_t z;
+		const bool  used = perf_budget_zone_get(i, &z);
+		const uint32_t v = used ? ((uint32_t)z.start << 16 ^ z.end ^ (uint32_t)(z.bank + 1) << 8 ^
+		                           (uint32_t)z.is_idle << 31 ^ (uint32_t)z.marker_id << 24)
+		                        : 0xFFFFFFFFu;
+		h = (h ^ v ^ (uint32_t)i) * 16777619u;
+	}
+	return h ^ (uint32_t)n;
+}
+
+bool
+stats_due(StatsCache &c)
+{
+	const uint32_t frames = perf_budget_total_frames();
+	const uint32_t budget = perf_budget_budget_cycles();
+	const uint32_t zones  = zones_signature();
+	const double   now    = ImGui::GetTime();
+	if (c.at >= 0.0) {
+		// The zone table is the user's own edit, so it refreshes at once; the
+		// rest waits out the interval.
+		if (zones == c.zones &&
+		    ((frames == c.frames && budget == c.budget) || now - c.at < STATS_REFRESH_S))
+			return false;
+	}
+	c.at     = now;
+	c.frames = frames;
+	c.budget = budget;
+	c.zones  = zones;
+	return true;
+}
+
 void
 draw_statistics(void)
 {
 	const uint32_t budget = perf_budget_budget_cycles();
+
+	static StatsCache    cache;
+	static perf_window_t win[k_window_count];
+	static bool          win_ok[k_window_count];
+	if (stats_due(cache)) {
+		for (int i = 0; i < k_window_count; i++)
+			win_ok[i] = perf_budget_window(k_windows[i].seconds, &win[i]);
+	}
 
 	if (!ImGui::BeginTable("perfstats", 9,
 	                       ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
@@ -466,9 +575,9 @@ draw_statistics(void)
 	ImGui::TableHeadersRow();
 
 	for (int i = 0; i < k_window_count; i++) {
-		perf_window_t w;
-		if (!perf_budget_window(k_windows[i].seconds, &w))
+		if (!win_ok[i])
 			continue;
+		const perf_window_t &w = win[i];
 
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
@@ -527,6 +636,16 @@ draw_breakdown(void)
 	perf_frame_t last;
 	const bool   have_last = perf_budget_last_frame(&last);
 
+	// 30-second zone statistics are a sort per zone; cached like the
+	// Statistics table (see stats_due()).
+	static StatsCache  cache;
+	static perf_stat_t zone_st[PERF_MAX_ZONES];
+	static bool        zone_ok[PERF_MAX_ZONES];
+	if (stats_due(cache)) {
+		for (int i = 0; i < PERF_MAX_ZONES; i++)
+			zone_ok[i] = i < nzones && perf_budget_zone_window(i, 30.0f, &zone_st[i]);
+	}
+
 	for (int i = 0; i < nzones; i++) {
 		perf_zone_t z;
 		if (!perf_budget_zone_get(i, &z))
@@ -555,8 +674,8 @@ draw_breakdown(void)
 		else
 			ImGui::TextDisabled("-");
 
-		perf_stat_t st;
-		const bool  have_stat = perf_budget_zone_window(i, 30.0f, &st);
+		const perf_stat_t &st        = zone_st[i];
+		const bool         have_stat = zone_ok[i];
 		ImGui::TableSetColumnIndex(3);
 		if (have_stat)
 			stat_cell(st.mean, budget);
@@ -695,12 +814,15 @@ draw_controls(void)
 		    "idle zone, or bracket the real work with $9FBC markers.");
 	}
 
-	if (ImGui::Checkbox("Keep profiling when this panel is closed", &s.perf_always_on))
+	if (ImGui::Checkbox("Keep profiling when hidden", &s.perf_always_on))
 		debug_ui_settings_mark_dirty();
 	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Profiling costs the running machine an add and a table lookup\n"
-		                  "per instruction, so it is normally armed only while this panel\n"
-		                  "is open. Turn this on to keep a DAP client fed with the panel shut.");
+		ImGui::SetTooltip("Profiling costs the running machine about 0.4 ms of host time\n"
+		                  "per frame, so it normally runs only while this panel is on\n"
+		                  "screen. Closing the panel or putting it behind another tab\n"
+		                  "stops it and discards the history.\n\n"
+		                  "Turn this on to keep recording regardless -- to build up\n"
+		                  "history while you look at other panels.");
 	}
 
 	ImGui::SetNextItemWidth(dbgui_field_width("99999"));
@@ -931,27 +1053,12 @@ draw_bandwidth(void)
 void
 perf_panel_render(bool *p_open)
 {
-	// Arm profiling for as long as the panel is open. Done before Begin() so a
-	// collapsed-but-open panel keeps collecting: the user has said they are
-	// interested, and a gap in the history helps nobody.
-	static bool armed = false;
-	DebugUiSettings &s = debug_ui_settings();
-	const bool want = (p_open ? *p_open : true) || s.perf_always_on;
-	if (want != armed) {
-		perf_budget_arm(PERF_OWNER_UI, want);
-		vera_bandwidth_arm(VERA_BW_OWNER_UI, want);
-		if (want) {
-			perf_budget_set_capacity(s.perf_capacity);
-			perf_budget_set_target_fps(s.perf_target_fps);
-			perf_budget_set_idle_mode((perf_idle_mode_t)s.perf_idle_mode);
-		}
-		armed = want;
-	}
-
+	// The recorders follow visibility, not "open": see perf_recorders_tick().
 	if (!ImGui::Begin("Performance", p_open)) {
 		dbgui_window_end();
 		return;
 	}
+	perf_recorders_mark_visible();
 	dbgui_window_zoom("perf");
 
 	if (!perf_budget_is_enabled()) {
@@ -984,3 +1091,17 @@ perf_panel_render(bool *p_open)
 DebugPanelRegistration s_reg("Performance", perf_panel_render, true);
 
 } // namespace
+
+void
+debug_ui_perf_recorders_tick(void)
+{
+	const bool keep = debug_ui_settings().perf_always_on;
+	if (g_drawn_this_frame || keep) {
+		g_hidden_frames = 0;
+		if (!g_armed)
+			perf_recorders_set(true);
+	} else if (g_armed && ++g_hidden_frames >= PERF_HIDDEN_GRACE_FRAMES) {
+		perf_recorders_set(false);
+	}
+	g_drawn_this_frame = false;
+}
