@@ -32,7 +32,6 @@ bool  g_rec_tree   = true;
 char  g_filter[64] = "";
 char  g_export[260] = "profile";
 
-const ImVec4 COL_DIM(0.60f, 0.60f, 0.60f, 1.0f);
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
 
@@ -398,12 +397,12 @@ draw_report(void)
 		                    bs->work_max, bs->budget, bs->overruns);
 
 	// Export, beside the working directory unless a path is given.
-	static char export_msg[300] = "";
+	static char export_msg[sizeof g_export + 48] = "";
 	ImGui::SetNextItemWidth(dbgui_col_width("", "wwwwwwwwwwwwwwwwwwww"));
 	ImGui::InputText("##profexport", g_export, sizeof g_export);
 	ImGui::SameLine();
 	if (r->node_count > 2 && ImGui::Button("Save .folded")) {
-		char path[300];
+		char path[sizeof g_export + 16];
 		snprintf(path, sizeof path, "%s.folded", g_export);
 		const int n = profile_session_export_folded(path);
 		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
@@ -413,7 +412,7 @@ draw_report(void)
 		                  "or feed to flamegraph.pl.");
 	ImGui::SameLine();
 	if (ImGui::Button("Save .json")) {
-		char path[300];
+		char path[sizeof g_export + 16];
 		snprintf(path, sizeof path, "%s.json", g_export);
 		const int n = profile_session_export_json(path);
 		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
