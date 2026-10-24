@@ -132,8 +132,33 @@ draw_overview(const sprite_trace_frame_t *f)
     ImGui::Separator();
     ImGui::TextUnformatted("CPU cost of multiplexing");
     float cpu_pct = s.cpu_cycles ? 100.0f * (float)s.mutation_cycles / (float)s.cpu_cycles : 0.0f;
-    ImGui::Text("  %u cycles/frame of %u (%.1f%% of the frame budget)",
+    // "of the frame budget" is what this used to say, and it invited the
+    // obvious question: the Performance panel says 134,400 and this says
+    // 134,402, so which is wrong? Neither. "Budget" is perf_budget's word for
+    // a figure derived by arithmetic; the number here is the span this
+    // particular frame actually took, so it is deliberately called measured.
+    ImGui::Text("  %u cycles/frame of %u measured (%.1f%% of the frame)",
                 s.mutation_cycles, s.cpu_cycles, cpu_pct);
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("MEASURED, not the nominal frame period.");
+        ImGui::Separator();
+        ImGui::Text("%u cycles elapsed across this frame.", s.cpu_cycles);
+        ImGui::TextDisabled("Sampled at the two instruction boundaries where the");
+        ImGui::TextDisabled("frame rollover was detected, so the instruction that");
+        ImGui::TextDisabled("straddles the boundary carries a few cycles of");
+        ImGui::TextDisabled("overshoot either way.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("The Performance panel's cycles/frame is the NOMINAL");
+        ImGui::TextDisabled("figure instead -- pure arithmetic, 134,400 at 8 MHz on");
+        ImGui::TextDisabled("VGA -- so expect this to sit within a handful of");
+        ImGui::TextDisabled("cycles of it, straddling it rather than drifting. At an");
+        ImGui::TextDisabled("idle prompt the loop is periodic enough that the two");
+        ImGui::TextDisabled("agree exactly; under a real program this wanders.");
+        ImGui::Spacing();
+        ImGui::TextUnformatted("The percentage is of this measured span.");
+        ImGui::EndTooltip();
+    }
     ImGui::ProgressBar(cpu_pct / 100.0f, ImVec2(-FLT_MIN, 0), "");
     ImGui::TextDisabled("  Summed span of each burst of attribute writes (gap <= %u cycles).",
                         s.burst_gap);
