@@ -5,12 +5,27 @@ The VERA conformance tests quote Verilog by file and line. Those citations are
 only meaningful against one revision, and the revision that matters is the one
 the emulator reports itself to be: guest software reads VERA_VERSION_MAJOR,
 MINOR and PATCH back from registers 0x00-0x02 and adapts to them. Whatever
-firmware any particular physical board carries, an emulator claiming 47.0.2 has
-to behave like 47.0.2.
+firmware any particular physical board carries, an emulator claiming a version
+has to behave like it.
 
-So this fails when src/video.c and tests/fetch_vera_rtl.py stop agreeing.
-Bumping the emulator's version is legitimate, but it invalidates every cited
-line number, and that has to be a deliberate step rather than a silent one.
+So this fails when src/video.c or tests/fetch_vera_rtl.py moves without the
+other being re-checked. Bumping the emulator's version is legitimate, but it
+invalidates every cited line number, and that has to be a deliberate step
+rather than a silent one.
+
+THE CLAIM AND THE ORACLE ARE APART, ON PURPOSE
+----------------------------------------------
+The emulator reports 49.0.6, the version of the R49.0.6 release-candidate
+bitstream. There is no public RTL for it: X16Community/vera-module tops out at
+v48.0.1. The citations therefore stay pinned to v47.0.2, the revision they were
+checked against, and both halves are recorded below so that moving either one
+still fails here.
+
+What that costs: 47.0.2 -> 48.0.1 changes no timing (psg.v, already emulated,
+and the version defines in top.v), so the cited behaviour holds through 48.0.1.
+What 49.x changes is unknown until its RTL is published; when it is, re-pin
+fetch_vera_rtl.py to it, re-verify the citations, and set ORACLE_* to match
+CLAIMED_VERSION.
 
 It does not need the RTL to be present -- it compares two declarations, not the
 Verilog itself.
@@ -22,7 +37,7 @@ WHAT THIS DOES NOT CHECK, AND WHY IT MATTERS
 The version register is a claim, and the rest of the emulator does not honour
 it. This is a composite of several revisions rather than any one of them:
 
-    version register    R47.0.2         video.c
+    version register    R49.0.6         video.c (no public RTL; see above)
     PSG saw/triangle    R48             XOR with ~pulsewidth, vera_psg.c:122-123,
                                         backported by #290 on 2024-08-11 -- two
                                         months BEFORE the RTL change (a8135f32,
@@ -56,8 +71,13 @@ ROOT = Path(__file__).resolve().parent.parent
 VIDEO_C = ROOT / "src" / "video.c"
 FETCH = ROOT / "tests" / "fetch_vera_rtl.py"
 
-# The vera-module tag whose RTL the VERA tests cite, and the emulator version it
-# corresponds to. Both halves are stated so a mismatch names which side moved.
+# The version the emulator claims, and the vera-module tag whose RTL the VERA
+# tests cite. They differ on purpose; see THE CLAIM AND THE ORACLE above. Both
+# are stated so a mismatch names which side moved.
+CLAIMED_VERSION = (49, 0, 6)
+
+# The oracle's own version. Kept for the record and for the day the two agree
+# again; the claim, not this, is what video.c is checked against.
 #
 # One wrinkle, recorded rather than smoothed over: the RTL inside tag v47.0.2
 # reports 47.0.0 from its own version registers (top.v:191, 199, 207), not
@@ -101,14 +121,14 @@ def main():
 
     ok = True
 
-    if version != EXPECTED_VERSION:
+    if version != CLAIMED_VERSION:
         got = ".".join(str(n) for n in version)
-        want = ".".join(str(n) for n in EXPECTED_VERSION)
-        print(f"FAIL: emulator reports VERA {got}, tests are written against {want}")
-        print("      The cited RTL line numbers no longer describe what this")
-        print("      emulator claims to be. Re-point tests/fetch_vera_rtl.py at")
-        print(f"      the matching vera-module tag, re-verify every citation in")
-        print("      tests/test_vera_pcm.c, then update EXPECTED_* here.")
+        want = ".".join(str(n) for n in CLAIMED_VERSION)
+        print(f"FAIL: emulator reports VERA {got}, this check records {want}")
+        print("      A version bump is a deliberate step: if there is RTL for")
+        print("      the new version, re-point tests/fetch_vera_rtl.py at it and")
+        print("      re-verify every citation; either way, update")
+        print("      CLAIMED_VERSION here and say why in the docstring.")
         ok = False
 
     if commit != EXPECTED_COMMIT:
@@ -119,7 +139,8 @@ def main():
 
     if ok:
         v = ".".join(str(n) for n in version)
-        print(f"ok  : emulator reports VERA {v}; oracle pinned to {EXPECTED_TAG}")
+        note = "" if version == EXPECTED_VERSION else " (claim and oracle differ; see docstring)"
+        print(f"ok  : emulator reports VERA {v}; oracle pinned to {EXPECTED_TAG}{note}")
     return 0 if ok else 1
 
 

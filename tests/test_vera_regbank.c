@@ -143,11 +143,10 @@ test_banked_registers_do_not_alias(void)
 // version string, which is how software identifies the chip. DCSEL 3 has
 // nothing mapped at any of the four addresses.
 //
-// The last byte diverges. The RTL in tag v47.0.2 reports 47.0.0 -- its version
-// registers were never bumped to match the tag name -- while this emulator
-// reports 47.0.2 from VERA_VERSION_PATCH in video.c. v48.0.1 introduced
-// VERSION_MAJOR/MINOR/BUILD defines and is self-consistent, so no revision
-// actually reports 47.0.2.
+// The major and patch bytes diverge. The emulator claims 49.0.6 (VERA_VERSION_*
+// in video.c), the R49.0.6 bitstream, which has no public RTL; the oracle stays
+// v47.0.2, whose registers report 47.0.0 -- they were never bumped to match the
+// tag name. See tests/check_vera_version.py.
 static void
 test_unmapped_banks_return_the_version(void)
 {
@@ -158,13 +157,16 @@ test_unmapped_banks_return_the_version(void)
 	// stored composer array before the version path is reached.
 	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V',
 	         "an unmapped bank reports 'V' at the first address");
-	check_eq(video_read(VERA_DC_1, false), 47u, "the major version at the second");
+	check_divergent(video_read(VERA_DC_1, false) == 47,
+	                "the major version at the second reads 47",
+	                "emulator claims 49 (VERA_VERSION_MAJOR, R49.0.6); no public RTL "
+	                "for 49 exists, so the oracle is still v47.0.2");
 	check_eq(video_read(VERA_DC_2, false), 0u, "the minor version at the third");
 
 	check_divergent(video_read(VERA_DC_3, false) == 0,
 	                "the patch version at the fourth reads 0",
-	                "emulator reports 2 from VERA_VERSION_PATCH; the RTL in tag v47.0.2 "
-	                "reports 47.0.0, so no revision reports 47.0.2");
+	                "emulator claims 6 (VERA_VERSION_PATCH, R49.0.6); the RTL in tag "
+	                "v47.0.2 reports 47.0.0");
 }
 
 // video.c:2690   if (debugOn) return video_get_dc_value(i);

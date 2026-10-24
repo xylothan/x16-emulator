@@ -30,9 +30,9 @@ from pathlib import Path
 DEST = Path(__file__).resolve().parent / "vera-rtl"
 RAW = "https://raw.githubusercontent.com/X16Community/vera-module"
 
-# The tag matching VERA_VERSION_MAJOR/MINOR/PATCH in src/video.c. Held in step
-# by tests/check_vera_version.py: if the emulator's declared version changes,
-# this pin and every cited line number must be re-checked.
+# The tag the VERA tests' citations were checked against. The emulator claims
+# 49.0.6, which has no public RTL, so this stays at v47.0.2; see
+# tests/check_vera_version.py, which fails if either side moves alone.
 COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"  # tag v47.0.2
 
 # psg.v is pinned to R48 instead, because that is the revision the emulator
