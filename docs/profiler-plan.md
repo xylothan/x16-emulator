@@ -357,6 +357,28 @@ Each is small, and each is checked against the Phase 0 numbers.
   Caveat: with the windows hidden, nothing is composited on screen, so present
   can behave differently from a visible run. The 17–28 ms frames seen earlier
   came from visible runs. Capturing them visibly is the open question.
+
+  **Visible capture**, same workload and the same build (`profiler-spikes`,
+  which does not include #94's panel fixes):
+
+  | Config | Spikes over 16.8 ms | Worst frames |
+  | --- | --- | --- |
+  | no debugger | 15 of 3,600: emu 12, events 2, present 1 | 20–44 ms, nearly all `emu` |
+  | user layout | 0 of 3,600 | ≤ 11.3 ms; `present`, then `emu` |
+
+  - **The spikes are on the emulator thread, outside every UI section.** The
+    long frames are almost entirely `emu`, which is time no other section
+    claimed. They cluster in frames 145–189, about one second of attract mode,
+    plus one at frame 1821.
+  - **Working hypothesis: host file I/O.** Gauntlet 2 loads files through the
+    host filesystem during attract mode, and that I/O runs on the emulator
+    thread, so it is charged to `emu`. The no-debugger run went first, and the
+    layout run that followed, with any OS file cache warm, had none. That
+    fits, but does not prove it.
+  - **One frame stalled for 17 ms in the SDL event pump** (`events`), with the
+    window visible.
+  - **Next step:** add a host-filesystem section around the hostfs/IEEE file
+    calls, so this shows up by name instead of inside `emu`.
 - **Optional:** a "UI refresh rate" setting (60 / 30 / 10 Hz) for panels that
   show live data.
 
