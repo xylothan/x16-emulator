@@ -232,8 +232,8 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 
 // Children of each node, heaviest first, rebuilt when the report changes.
 std::vector<std::vector<int>> g_kids;
-const prof_node_t            *g_kids_for = nullptr;
-int                           g_kids_n   = -1;
+uint32_t                      g_kids_gen = 0;
+bool                          g_kids_ok  = false;
 
 void
 draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t frames)
@@ -295,9 +295,11 @@ draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t fra
 void
 draw_tree(const prof_report_t *r, uint64_t total, uint32_t frames)
 {
-	if (g_kids_for != r->nodes || g_kids_n != r->node_count) {
-		g_kids_for = r->nodes;
-		g_kids_n   = r->node_count;
+	// Keyed by report generation, not by pointer: a new report's tree often
+	// lands in the old one's freed block with the same node count.
+	if (!g_kids_ok || g_kids_gen != profile_session_report_generation()) {
+		g_kids_ok  = true;
+		g_kids_gen = profile_session_report_generation();
 		g_kids.assign((size_t)r->node_count, {});
 		for (int i = 0; i < r->node_count; i++)
 			if (r->nodes[i].parent >= 0)

@@ -19,6 +19,7 @@
 static prof_report_t report;
 static bool          have_report;
 static uint32_t      report_frames;
+static uint32_t      report_generation;
 
 // Whether perf_hist was armed by someone else (a DAP client) before the
 // capture, so ending the capture leaves it as it was found.
@@ -156,6 +157,7 @@ finished(cap_end_t why)
 	if (have_report)
 		prof_report_free(&report);
 	have_report = false;
+	report_generation++;
 	if (!(cap_recorders() & CAP_REC_HIST))
 		return;
 
@@ -309,6 +311,12 @@ const prof_report_t *
 profile_session_report(void)
 {
 	return have_report ? &report : NULL;
+}
+
+uint32_t
+profile_session_report_generation(void)
+{
+	return report_generation;
 }
 
 uint32_t

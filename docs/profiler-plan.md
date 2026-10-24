@@ -708,16 +708,22 @@ interleaved, six runs each, medians):
 | histogram | 3.37 ms | 3.65 ms |
 | histogram + tree | 3.42 ms | 3.69 ms |
 
-- **The tree costs about 0.05 ms per frame (~1.5%).** That run has a tree of
-  1,084 nodes and about 13k calls per frame.
-- **Guest-side determinism:** cycle totals with and without the tree agree to
-  within 4 cycles over 242M, the same spread as between two histogram-only
-  runs.
+- **The tree costs about 0.05 ms per frame (~1.5%),** with 1,084 nodes in
+  that run's tree.
+- **Guest-side determinism.** The test is a scripted BASIC loop (600 frames).
+  Two histogram-only runs and two histogram-plus-tree runs gave identical
+  main and IRQ cycles in every reported row, and identical instruction counts.
+  - Recording the tree does not change the guest. The flow hook only reads
+    memory, with side-effect-free debug reads.
+  - The Phase 0 workload cannot settle this either way: it varies by a few
+    hundred instructions between runs even with the histogram alone.
 
 Tested:
 - the DAP testbench, 138/138, including a live capture whose tree totals must
   equal the histogram's and whose `[IRQ]` root must hold the KERNAL handler;
-- a BASIC loop, which exercises `jsrfar` across ROM banks.
+- a BASIC loop, which exercises `jsrfar` across ROM banks;
+- the Profile panel's Routines and Call tree tabs, drawn in a Debug build
+  (ImGui asserts on) for two reports in a row.
 
 ## Phase 4: the report
 

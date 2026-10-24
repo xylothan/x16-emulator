@@ -27,6 +27,9 @@ void profile_session_frame_end(void);
 // The report from the last capture that ended, or NULL if none has.
 const prof_report_t *profile_session_report(void);
 uint32_t             profile_session_report_frames(void); // frames it covered
+// Bumped for every new report. A new report can reuse the old one's
+// allocations and counts, so this is what tells a cache it is stale.
+uint32_t             profile_session_report_generation(void);
 
 // Write the report as a table: totals, then the top `top` rows.
 void profile_session_print(FILE *f, int top);

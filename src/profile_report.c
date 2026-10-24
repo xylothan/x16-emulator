@@ -306,14 +306,8 @@ prof_report_add_tree(prof_report_t *r, const prof_node_t *in, int count)
 	if (count <= 0)
 		return true;
 	prof_node_t *nodes = malloc(sizeof *nodes * (size_t)count);
-	// Nearest ancestor (or self) charged to each row: -1 none. Used to skip a
-	// node already counted inside an outer call of the same routine.
-	int *outer = malloc(sizeof *outer * (size_t)count);
-	if (!nodes || !outer) {
-		free(nodes);
-		free(outer);
+	if (!nodes)
 		return false;
-	}
 	memcpy(nodes, in, sizeof *nodes * (size_t)count);
 	for (int i = 0; i < count; i++) {
 		prof_node_t *nd = &nodes[i];
@@ -326,7 +320,6 @@ prof_report_add_tree(prof_report_t *r, const prof_node_t *in, int count)
 				nested = true;
 				break;
 			}
-		outer[i] = nested;
 		if (nd->row < 0)
 			continue;
 		prof_row_t *row = &r->rows[nd->row];
@@ -338,7 +331,6 @@ prof_report_add_tree(prof_report_t *r, const prof_node_t *in, int count)
 		if (!nested)
 			row->incl_cycles += nd->incl;
 	}
-	free(outer);
 	r->nodes      = nodes;
 	r->node_count = count;
 	return true;
