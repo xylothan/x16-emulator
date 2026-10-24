@@ -45,6 +45,15 @@ static uint32_t frame_id;
 static queued_t queue[MAX_QUEUE];
 static int      nqueued;
 
+void (*cct_switch_hook)(int node) = NULL;
+
+static void
+announce(int before)
+{
+	if (cct_switch_hook && cur != before)
+		cct_switch_hook(cur);
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────────
 
 static uint32_t
@@ -166,6 +175,7 @@ apply_return(uint16_t sp)
 static void
 apply_queue(void)
 {
+	const int before = cur;
 	for (int i = 0; i < nqueued; i++) {
 		const queued_t *q = &queue[i];
 		if (q->kind == Q_CALL)
@@ -174,6 +184,7 @@ apply_queue(void)
 			apply_return(q->sp);
 	}
 	nqueued = 0;
+	announce(before);
 }
 
 static void
@@ -272,6 +283,7 @@ cct_irq_enter(uint32_t handler_key, uint16_t sp_before)
 {
 	if (!nodes)
 		return;
+	const int before = cur;
 	retire(sp_before);
 	const int n = child(CCT_NODE_IRQ, handler_key);
 	frame_t  *f = push();
@@ -284,13 +296,17 @@ cct_irq_enter(uint32_t handler_key, uint16_t sp_before)
 	f->level     = (uint8_t)level;
 	f->start     = levels[level];
 	cur          = n;
+	announce(before);
 }
 
 void
 cct_irq_leave(uint16_t sp_after)
 {
-	if (nodes)
-		apply_return(sp_after);
+	if (!nodes)
+		return;
+	const int before = cur;
+	apply_return(sp_after);
+	announce(before);
 }
 
 void

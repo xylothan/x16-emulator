@@ -29,6 +29,7 @@ bool  g_on_marker  = false;
 bool  g_rec_budget = false;
 bool  g_rec_vram   = false;
 bool  g_rec_tree   = true;
+bool  g_rec_wf     = false;
 char  g_filter[64] = "";
 char  g_export[260] = "profile";
 
@@ -76,6 +77,13 @@ draw_controls(void)
 		                  "call per routine, and the call tree. Costs a little at each\n"
 		                  "JSR, RTS and interrupt.");
 	ImGui::SameLine();
+	ImGui::Checkbox("Waterfall", &g_rec_wf);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Also record every write to VERA, VRAM, the PSG, the YM and\n"
+		                  "the VIAs, per frame, with the code that made it. Keeps the\n"
+		                  "last %d frames and the worst %d in detail; save them as a\n"
+		                  "trace for ui.perfetto.dev.", 30, 8);
+	ImGui::SameLine();
 	ImGui::Checkbox("Cycle budget", &g_rec_budget);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Also record work vs. waiting per frame (perf_budget).\n"
@@ -90,7 +98,7 @@ draw_controls(void)
 		c.frames    = (uint32_t)g_frames;
 		c.seconds   = g_seconds;
 		c.on_marker = g_on_marker;
-		c.recorders = CAP_REC_HIST | (g_rec_tree ? CAP_REC_TREE : 0) |
+		c.recorders = CAP_REC_HIST | (g_rec_tree ? CAP_REC_TREE : 0) | (g_rec_wf ? CAP_REC_WATERFALL : 0) |
 		              (g_rec_budget ? CAP_REC_BUDGET : 0) | (g_rec_vram ? CAP_REC_VRAM : 0);
 		cap_start(&c);
 	}
@@ -416,6 +424,18 @@ draw_report(void)
 		snprintf(path, sizeof path, "%s.json", g_export);
 		const int n = profile_session_export_json(path);
 		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+	}
+	if (profile_session_has_waterfall()) {
+		ImGui::SameLine();
+		if (ImGui::Button("Save trace")) {
+			char path[sizeof g_export + 16];
+			snprintf(path, sizeof path, "%s.trace.json", g_export);
+			const int n = profile_session_export_trace(path);
+			snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Chrome trace-event JSON: open in ui.perfetto.dev for a\n"
+			                  "zoomable timeline of the detailed frames.");
 	}
 	if (export_msg[0]) {
 		ImGui::SameLine();

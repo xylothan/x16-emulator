@@ -94,6 +94,28 @@ void video_write(uint8_t reg, uint8_t value);
 // its data-port traffic is not charged to VERA's bandwidth accounting.
 // video_read() is told the same thing directly, as its debugOn argument.
 void video_set_debug_write(bool on);
+
+// Where in VRAM a data-port write landed: the fixed regions, then each layer's
+// map and tile (or bitmap) area as the layer registers stand at the moment of
+// the write. Layer 1 is checked first; anything else is OTHER.
+typedef enum {
+	VIDEO_VRAM_PSG = 0,
+	VIDEO_VRAM_PALETTE,
+	VIDEO_VRAM_SPRITES,
+	VIDEO_VRAM_L0_MAP,
+	VIDEO_VRAM_L0_TILES,
+	VIDEO_VRAM_L1_MAP,
+	VIDEO_VRAM_L1_TILES,
+	VIDEO_VRAM_OTHER,
+} video_vram_region_t;
+
+// Every non-debug data-port write to VRAM, when set: the address, the byte,
+// its region, and whether it was a VERA FX cache write (four bytes from one
+// store, `address` the first). NULL (the default) costs a load and a branch
+// per data-port write.
+typedef void (*video_vram_tap_fn)(uint32_t address, uint8_t value, video_vram_region_t region,
+                                  bool fx4);
+extern video_vram_tap_fn video_vram_write_tap;
 void video_update_title(const char* window_title);
 
 uint8_t via1_read(uint8_t reg, bool debug);

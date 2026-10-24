@@ -9,6 +9,10 @@
 #include "perf_hist.h"
 #include "profile_cct.h"
 #include "rom_syms.h"
+#include "waterfall.h"
+#include "io_trace.h"
+#include "video.h"
+#include "glue.h"
 #include "memory.h"
 #include "cpu/irq_ctx.h"
 #include "vera_bandwidth.h"
@@ -29,6 +33,56 @@ static bool hist_was_enabled;
 static prof_budget_summary_t budget_summary;
 
 static bool cct_ready;      // pool allocated (once; reused by every capture)
+static bool wf_ready;       // likewise, the waterfall's frame buffers
+static bool wf_recorded;    // the last capture ran the waterfall
+
+// Detail kept: the last WF_RING frames and the WF_WORST worst, each up to
+// WF_FRAME_CAP events. About 20 MB at most, allocated on first use.
+#define WF_RING      30
+#define WF_WORST     8
+#define WF_FRAME_CAP 32768
+
+static uint8_t ym_selected; // the YM register $9F40 last selected
+
+// The I/O page, sorted into lanes. VERA's data ports are left to the VRAM
+// tap, which knows where in VRAM each byte went.
+static void
+io_tap(uint16_t a, uint8_t v)
+{
+	if (a < 0x9F10) {
+		wf_note(WF_LANE_VIA1, a & 0xF, v, 0);
+	} else if (a < 0x9F20) {
+		wf_note(WF_LANE_VIA2, a & 0xF, v, 0);
+	} else if (a < 0x9F40) {
+		const uint8_t r = a & 0x1F;
+		if (r == 0x03 || r == 0x04)
+			return;
+		wf_note(r == 0x1D ? WF_LANE_PCM : r >= 0x1E ? WF_LANE_SPI : WF_LANE_VERA_REG, r, v, 0);
+	} else if (a < 0x9F60) {
+		if ((a & 1) == 0) // register select: becomes the target of the next data write
+			ym_selected = v;
+		else
+			wf_note(WF_LANE_YM, ym_selected, v, 0);
+	} else {
+		wf_note(WF_LANE_IO_OTHER, a, v, 0);
+	}
+}
+
+static void
+vram_tap(uint32_t address, uint8_t value, video_vram_region_t region, bool fx4)
+{
+	static const uint8_t lane[] = {WF_LANE_PSG,    WF_LANE_PALETTE,  WF_LANE_SPRITES, WF_LANE_L0_MAP,
+	                               WF_LANE_L0_TILES, WF_LANE_L1_MAP, WF_LANE_L1_TILES, WF_LANE_VRAM_OTHER};
+	const uint8_t flags = (uint8_t)(((address >> 16) & 1 ? WF_F_VRAM_HI : 0) | (fx4 ? WF_F_FX4 : 0));
+	wf_note(region <= VIDEO_VRAM_OTHER ? lane[region] : WF_LANE_VRAM_OTHER, (uint16_t)address, value,
+	        flags);
+}
+
+static void
+cct_switch(int node)
+{
+	wf_cpu((uint16_t)node, perf_hist_total_cycles());
+}
 static bool tree_consistent = true;
 
 // Pool size: one node per distinct call path. A large program has a few
@@ -116,6 +170,23 @@ arm(uint32_t mask)
 			cpu_flow_hook  = flow_hook;
 		}
 	}
+	if (mask & CAP_REC_WATERFALL) {
+		// Writes are stamped from the histogram's step.
+		if (!(mask & CAP_REC_HIST))
+			ok = false;
+		if (!wf_ready)
+			wf_ready = wf_init(WF_RING, WF_WORST, WF_FRAME_CAP);
+		ok = wf_ready && ok;
+		if (ok) {
+			wf_reset();
+			ym_selected          = 0;
+			io_write_tap         = io_tap;
+			video_vram_write_tap = vram_tap;
+			if (mask & CAP_REC_TREE)
+				cct_switch_hook = cct_switch;
+		}
+	}
+	wf_recorded = (mask & CAP_REC_WATERFALL) && ok;
 	if (mask & CAP_REC_BUDGET)
 		ok = perf_budget_arm(PERF_OWNER_CAPTURE, true) && ok;
 	if (mask & CAP_REC_VRAM)
@@ -129,6 +200,11 @@ arm(uint32_t mask)
 static void
 disarm(uint32_t mask)
 {
+	if (mask & CAP_REC_WATERFALL) {
+		io_write_tap         = NULL;
+		video_vram_write_tap = NULL;
+		cct_switch_hook      = NULL;
+	}
 	if (mask & CAP_REC_TREE) {
 		cpu_flow_hook  = NULL;
 		perf_hist_tree = false;
@@ -332,6 +408,270 @@ json_str(FILE *f, const char *s)
 	fputc('"', f);
 }
 
+
+// ─── Waterfall export ───────────────────────────────────────────────────────
+
+// A key's routine name, from the report's rows; or its address.
+static void
+key_name(uint32_t key, char *buf, int size)
+{
+	const int r = have_report ? prof_report_row_of_key(&report, key) : -1;
+	if (r >= 0) {
+		snprintf(buf, (size_t)size, "%s", report.rows[r].name);
+		return;
+	}
+	uint8_t  region, bank;
+	uint16_t pc;
+	perf_hist_key_decode(key, &region, &bank, &pc);
+	if (region == PH_REGION_RAM)
+		snprintf(buf, (size_t)size, "RAM %u:$%04X", (unsigned)bank, (unsigned)pc);
+	else if (region == PH_REGION_ROM)
+		snprintf(buf, (size_t)size, "ROM %u:$%04X", (unsigned)bank, (unsigned)pc);
+	else
+		snprintf(buf, (size_t)size, "$%04X", (unsigned)pc);
+}
+
+static void
+key_where(uint32_t key, char *buf, int size)
+{
+	uint8_t  region, bank;
+	uint16_t pc;
+	perf_hist_key_decode(key, &region, &bank, &pc);
+	if (region == PH_REGION_RAM)
+		snprintf(buf, (size_t)size, "RAM %u:$%04X", (unsigned)bank, (unsigned)pc);
+	else if (region == PH_REGION_ROM)
+		snprintf(buf, (size_t)size, "ROM %u:$%04X", (unsigned)bank, (unsigned)pc);
+	else
+		snprintf(buf, (size_t)size, "$%04X", (unsigned)pc);
+}
+
+static int
+cmp_writes_row(const void *a, const void *b)
+{
+	const prof_writes_t *x = a, *y = b;
+	if (x->row != y->row)
+		return x->row < y->row ? -1 : 1;
+	if (x->row < 0 && x->key != y->key)
+		return x->key < y->key ? -1 : 1;
+	return x->lane - y->lane;
+}
+
+static int
+cmp_writes_heavy(const void *a, const void *b)
+{
+	const prof_writes_t *x = a, *y = b;
+	if (x->writes != y->writes)
+		return x->writes < y->writes ? 1 : -1;
+	return cmp_writes_row(a, b);
+}
+
+const prof_writes_t *
+profile_session_writes_by_routine(int *count)
+{
+	static prof_writes_t *out;
+	*count = 0;
+	free(out);
+	out = NULL;
+	if (!profile_session_has_waterfall())
+		return NULL;
+	int             na;
+	const wf_agg_t *a = wf_aggregates(&na);
+	out = malloc(sizeof *out * (size_t)(na ? na : 1));
+	if (!out)
+		return NULL;
+	for (int i = 0; i < na; i++)
+		out[i] = (prof_writes_t){have_report ? prof_report_row_of_key(&report, a[i].key) : -1,
+		                         a[i].lane, a[i].key, a[i].writes};
+	// Merge entries for the same (row, lane): many instructions, one routine.
+	qsort(out, (size_t)na, sizeof *out, cmp_writes_row);
+	int n = 0;
+	for (int i = 0; i < na; i++) {
+		if (n && cmp_writes_row(&out[n - 1], &out[i]) == 0)
+			out[n - 1].writes += out[i].writes;
+		else
+			out[n++] = out[i];
+	}
+	qsort(out, (size_t)n, sizeof *out, cmp_writes_heavy);
+	*count = n;
+	return out;
+}
+
+// Source lines, looked up once per key: an export can hold 100k writes from a
+// few hundred instructions.
+#define SRC_CACHE 8192
+typedef struct {
+	uint32_t key;
+	bool     used;
+	char    *text; // "file:line", or "" when the debug info has none
+} src_entry_t;
+
+static const char *
+key_source(src_entry_t *cache, uint32_t key)
+{
+	uint32_t h = (key * 0x9E3779B1u) & (SRC_CACHE - 1);
+	for (int probe = 0; probe < SRC_CACHE; probe++, h = (h + 1) & (SRC_CACHE - 1)) {
+		if (cache[h].used && cache[h].key == key)
+			return cache[h].text ? cache[h].text : "";
+		if (!cache[h].used)
+			break;
+	}
+	uint8_t  region, bank;
+	uint16_t pc;
+	perf_hist_key_decode(key, &region, &bank, &pc);
+	const char *file = NULL;
+	int         line = 0;
+	char        tmp[300] = "";
+	if (region != PH_REGION_ROM &&
+	    dbg_info_addr_to_source_banked_ex(pc, region == PH_REGION_RAM ? bank : -1, &file, &line) !=
+	        DBG_BANK_NO_MATCH &&
+	    file) {
+		const char *base = strrchr(file, '/');
+		const char *b2   = strrchr(file, '\\');
+		if (b2 && (!base || b2 > base))
+			base = b2;
+		snprintf(tmp, sizeof tmp, "%s:%d", base ? base + 1 : file, line);
+	}
+	if (!cache[h].used) {
+		cache[h].used = true;
+		cache[h].key  = key;
+		cache[h].text = malloc(strlen(tmp) + 1);
+		if (cache[h].text)
+			strcpy(cache[h].text, tmp);
+		return cache[h].text ? cache[h].text : "";
+	}
+	return ""; // cache full: answer without remembering
+}
+
+typedef struct {
+	FILE             *f;
+	const wf_frame_t *frame;
+	double            us_per_cycle;
+	src_entry_t      *src;
+	long              events;
+} trace_ctx_t;
+
+static int
+trace_parent(void *ctx, int node)
+{
+	(void)ctx;
+	return (have_report && node >= 0 && node < report.node_count) ? report.nodes[node].parent : -1;
+}
+
+static void
+trace_emit(void *vctx, wf_out_kind_t kind, int thread, uint32_t cycle, int node, const wf_event_t *ev)
+{
+	trace_ctx_t *c  = vctx;
+	const double ts = (double)(c->frame->start + cycle) * c->us_per_cycle;
+	char         name[PROF_NAME_MAX + 32];
+	if (kind != WF_OUT_EVENT) {
+		profile_session_node_name(&report, node, name, sizeof name);
+		fprintf(c->f, ",\n{\"ph\":\"%c\",\"pid\":1,\"tid\":%d,\"ts\":%.3f,\"name\":",
+		        kind == WF_OUT_BEGIN ? 'B' : 'E', thread, ts);
+		json_str(c->f, name);
+		fputc('}', c->f);
+		c->events++;
+		return;
+	}
+	const int      lane = wf_event_lane(ev);
+	const uint32_t key  = wf_event_key(ev);
+	char           what[48], routine[PROF_NAME_MAX + 16], where[32];
+	if (ev->flags & WF_F_VRAM_HI || (lane >= WF_LANE_PSG && lane <= WF_LANE_VRAM_OTHER))
+		snprintf(what, sizeof what, "%s $%X%04X%s", wf_lane_name(lane),
+		         (ev->flags & WF_F_VRAM_HI) ? 1u : 0u, (unsigned)ev->target,
+		         (ev->flags & WF_F_FX4) ? " x4" : "");
+	else
+		snprintf(what, sizeof what, "%s $%02X", wf_lane_name(lane), (unsigned)ev->target);
+	key_name(key, routine, sizeof routine);
+	key_where(key, where, sizeof where);
+	fprintf(c->f, ",\n{\"ph\":\"i\",\"s\":\"t\",\"pid\":1,\"tid\":%d,\"ts\":%.3f,\"name\":", 10 + lane,
+	        ts);
+	json_str(c->f, what);
+	fprintf(c->f, ",\"args\":{\"value\":\"$%02X\",\"routine\":", (unsigned)ev->value);
+	json_str(c->f, routine);
+	fprintf(c->f, ",\"pc\":");
+	json_str(c->f, where);
+	const char *src = key_source(c->src, key);
+	if (src[0]) {
+		fprintf(c->f, ",\"source\":");
+		json_str(c->f, src);
+	}
+	fprintf(c->f, "%s}}", (ev->flags & WF_F_IRQ) ? ",\"irq\":true" : "");
+	c->events++;
+}
+
+static int
+cmp_frame_ptr(const void *a, const void *b)
+{
+	const wf_frame_t *x = *(const wf_frame_t *const *)a, *y = *(const wf_frame_t *const *)b;
+	return (x->number > y->number) - (x->number < y->number);
+}
+
+int
+profile_session_export_trace(const char *path)
+{
+	if (!profile_session_has_waterfall() || !path)
+		return -1;
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return -1;
+	src_entry_t *cache = calloc(SRC_CACHE, sizeof *cache);
+
+	// The frames: the ring and the worst list, each frame once, in order.
+	const wf_frame_t *frames[WF_RING + WF_WORST];
+	int               n = 0;
+	for (int i = 0; i < wf_ring_count(); i++)
+		frames[n++] = wf_ring_at(i);
+	for (int i = 0; i < wf_worst_count(); i++) {
+		const wf_frame_t *w   = wf_worst_at(i);
+		bool              dup = false;
+		for (int k = 0; k < n && !dup; k++)
+			dup = frames[k]->number == w->number;
+		if (!dup)
+			frames[n++] = w;
+	}
+	qsort((void *)frames, (size_t)n, sizeof frames[0], cmp_frame_ptr);
+
+	fprintf(f, "{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n");
+	fprintf(f, "{\"ph\":\"M\",\"pid\":1,\"name\":\"process_name\",\"args\":{\"name\":\"X16\"}}");
+	static const char *const fixed[] = {"CPU", "IRQ", "Frames"};
+	for (int t = 0; t < 3; t++)
+		fprintf(f, ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_name\",\"args\":{\"name\":\"%s\"}}"
+		           ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_sort_index\",\"args\":{\"sort_index\":%d}}",
+		        t, fixed[t], t, t);
+	for (int l = 1; l < WF_LANES; l++)
+		fprintf(f, ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_name\",\"args\":{\"name\":\"%s\"}}"
+		           ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_sort_index\",\"args\":{\"sort_index\":%d}}",
+		        10 + l, wf_lane_name(l), 10 + l, 10 + l);
+
+	trace_ctx_t c = {f, NULL, 1.0 / (double)(MHZ ? MHZ : 8), cache, 0};
+	for (int i = 0; i < n; i++) {
+		c.frame = frames[i];
+		bool worst = false;
+		for (int k = 0; k < wf_worst_count() && !worst; k++)
+			worst = wf_worst_at(k)->number == frames[i]->number;
+		fprintf(f, ",\n{\"ph\":\"X\",\"pid\":1,\"tid\":2,\"ts\":%.3f,\"dur\":%.3f,\"name\":\"frame %u%s\","
+		           "\"args\":{\"cycles\":%u,\"events\":%d,\"truncated\":%s}}",
+		        (double)frames[i]->start * c.us_per_cycle, (double)frames[i]->length * c.us_per_cycle,
+		        frames[i]->number, worst ? " (worst)" : "", frames[i]->length, frames[i]->count,
+		        frames[i]->truncated ? "true" : "false");
+		if (have_report && report.node_count > 2)
+			wf_walk_frame(frames[i], trace_parent, CCT_NODE_IRQ, trace_emit, &c);
+		else
+			for (int e = 0; e < frames[i]->count; e++)
+				if (wf_event_lane(&frames[i]->events[e]) != WF_LANE_CPU)
+					trace_emit(&c, WF_OUT_EVENT, 0, frames[i]->events[e].cycle, -1,
+					           &frames[i]->events[e]);
+	}
+	fprintf(f, "\n]}\n");
+	fclose(f);
+	if (cache) {
+		for (int i = 0; i < SRC_CACHE; i++)
+			free(cache[i].text);
+		free(cache);
+	}
+	return (int)c.events;
+}
+
 int
 profile_session_export_json(const char *path)
 {
@@ -440,7 +780,22 @@ profile_session_init(void)
 void
 profile_session_frame_end(void)
 {
+	// The waterfall's frame closes first: ending the capture disarms it.
+	if (cap_running() && (cap_recorders() & CAP_REC_WATERFALL) && wf_ready) {
+		uint64_t     score = 0; // 0: rank by event count
+		perf_frame_t fr;
+		if ((cap_recorders() & CAP_REC_BUDGET) && perf_budget_last_frame(&fr))
+			score = perf_frame_work(&fr);
+		wf_frame_end(perf_hist_total_cycles(), score,
+		             (uint16_t)((cap_recorders() & CAP_REC_TREE) ? cct_current() : 0));
+	}
 	cap_frame_end();
+}
+
+bool
+profile_session_has_waterfall(void)
+{
+	return wf_recorded && wf_ready && wf_frames_seen() > 0;
 }
 
 const prof_report_t *
@@ -523,6 +878,24 @@ profile_session_print(FILE *f, int top)
 		        row->instructions && t < row->instructions * 3 / 2 ? "  (waiting: WAI)" : "");
 	}
 
+	if (profile_session_has_waterfall()) {
+		int                  na;
+		const prof_writes_t *a = profile_session_writes_by_routine(&na);
+		fprintf(f, "\ndevice writes by routine (%u frames; %d frames of detail kept%s)\n",
+		        wf_frames_seen(), wf_ring_count() + wf_worst_count(),
+		        wf_dropped() ? ", some writes dropped" : "");
+		fprintf(f, "%10s %10s  %-10s %s\n", "writes", "per frame", "lane", "routine");
+		for (int i = 0; i < na && i < top / 2; i++) {
+			char name[PROF_NAME_MAX + 16];
+			if (a[i].row >= 0)
+				snprintf(name, sizeof name, "%s", r->rows[a[i].row].name);
+			else
+				key_name(a[i].key, name, sizeof name);
+			fprintf(f, "%10u %10.1f  %-10s %s\n", a[i].writes,
+			        (double)a[i].writes / (double)frames, wf_lane_name(a[i].lane), name);
+		}
+	}
+
 	if (r->node_count > 2) {
 		int *first = malloc(sizeof *first * (size_t)r->node_count);
 		int *next  = malloc(sizeof *next * (size_t)r->node_count);
@@ -561,6 +934,7 @@ profile_session_recorder_bit(const char *name)
 	if (!strcmp(name, "budget")) return CAP_REC_BUDGET;
 	if (!strcmp(name, "vram"))   return CAP_REC_VRAM;
 	if (!strcmp(name, "tree"))   return CAP_REC_TREE;
+	if (!strcmp(name, "waterfall")) return CAP_REC_WATERFALL;
 	return 0;
 }
 
@@ -572,6 +946,7 @@ profile_session_recorder_name(uint32_t bit)
 		case CAP_REC_BUDGET: return "budget";
 		case CAP_REC_VRAM:   return "vram";
 		case CAP_REC_TREE:   return "tree";
+		case CAP_REC_WATERFALL: return "waterfall";
 	}
 	return "?";
 }

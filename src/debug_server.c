@@ -12,6 +12,7 @@
 #include "perf_hist.h"
 #include "host_prof.h"
 #include "profile_session.h"
+#include "waterfall.h"
 #include "vera_bandwidth.h"
 #include "sprite_trace.h"
 #include "glue.h"
@@ -2432,7 +2433,7 @@ static int handle_x16_capture(int seq, cJSON *args) {
                 const uint32_t bit = cJSON_IsString(r) ? profile_session_recorder_bit(r->valuestring) : 0;
                 if (!bit) {
                     send_dap_error_response(seq, "x16/capture",
-                                            "unknown recorder (expected hist, tree, budget or vram)");
+                                            "unknown recorder (expected hist, tree, budget, vram or waterfall)");
                     return 0;
                 }
                 c.recorders |= bit;
@@ -2540,6 +2541,22 @@ static int handle_x16_capture(int seq, cJSON *args) {
             cJSON_AddItemToObject(rep, "tree", tree);
             cJSON_AddBoolToObject(rep, "treeConsistent", profile_session_tree_consistent());
         }
+        if (profile_session_has_waterfall()) {
+            // Writes per (routine, lane) over the whole capture, heaviest first.
+            int                  na;
+            const prof_writes_t *ag = profile_session_writes_by_routine(&na);
+            cJSON *dw = cJSON_CreateArray();
+            for (int i = 0; i < na && i < top; i++) {
+                const int row = ag[i].row;
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddStringToObject(o, "routine", row >= 0 ? r->rows[row].name : "?");
+                cJSON_AddStringToObject(o, "lane", wf_lane_name(ag[i].lane));
+                cJSON_AddNumberToObject(o, "writes", ag[i].writes);
+                cJSON_AddItemToArray(dw, o);
+            }
+            cJSON_AddItemToObject(rep, "deviceWrites", dw);
+            cJSON_AddNumberToObject(rep, "waterfallFrames", wf_ring_count() + wf_worst_count());
+        }
         cJSON_AddItemToObject(body, "report", rep);
 
         // export: {folded: path, json: path} -- files written by the emulator.
@@ -2552,6 +2569,9 @@ static int handle_x16_capture(int seq, cJSON *args) {
                 cJSON_AddNumberToObject(done, "folded", profile_session_export_folded(fp->valuestring));
             if (cJSON_IsString(jp))
                 cJSON_AddNumberToObject(done, "json", profile_session_export_json(jp->valuestring));
+            cJSON *tp = cJSON_GetObjectItemCaseSensitive(ex, "trace");
+            if (cJSON_IsString(tp))
+                cJSON_AddNumberToObject(done, "trace", profile_session_export_trace(tp->valuestring));
             cJSON_AddItemToObject(body, "exported", done);
         }
     }

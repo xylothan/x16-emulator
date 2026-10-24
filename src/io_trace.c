@@ -26,6 +26,8 @@ static uint32_t    s_dropped = 0;
 
 static io_trace_context_fn s_context = NULL;
 
+void (*io_write_tap)(uint16_t address, uint8_t value) = NULL;
+
 void
 io_trace_set_context_provider(io_trace_context_fn fn)
 {

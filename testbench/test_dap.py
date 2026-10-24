@@ -831,6 +831,44 @@ if rep:
                sum(int(l.rsplit(" ", 1)[-1]) for l in lines)
                == rep.get("mainCycles", 0) + rep.get("irqCycles", 0))
     expect("and JSON", done.get("json", 0) >= 1 and os.path.exists(js))
+
+    # The waterfall: at the BASIC prompt the KERNAL's interrupt handler talks
+    # to VERA and the VIAs every frame, so the trace cannot be empty.
+    r = capture(360, {"start": {"frames": 20, "recorders": ["hist", "tree", "waterfall"]}})
+    expect("a waterfall capture starts", r is not None and r.get("success"))
+    wrep = None
+    for i in range(40):
+        r = capture(361 + i, {"top": 10})
+        b = r.get("body", {}) if r and r.get("success") else {}
+        if b.get("state") == "done":
+            wrep = b
+            break
+        time.sleep(0.1)
+    expect("and finishes", wrep is not None)
+    if wrep:
+        dw = wrep.get("report", {}).get("deviceWrites", [])
+        expect("device writes are attributed to routines",
+               bool(dw) and all(d.get("writes", 0) > 0 and d.get("lane") for d in dw))
+        tr = os.path.join(tmp, "cap.trace.json")
+        r = capture(410, {"top": 0, "export": {"trace": tr}})
+        n = r.get("body", {}).get("exported", {}).get("trace", -1) if r and r.get("success") else -1
+        expect("x16/capture writes a trace", n > 0 and os.path.exists(tr))
+        if os.path.exists(tr):
+            import json as _json
+            ev = _json.load(open(tr)).get("traceEvents", [])
+            stacks, ok = {}, True
+            for e in ev:
+                if e.get("ph") == "B":
+                    stacks.setdefault(e["tid"], []).append(e["name"])
+                elif e.get("ph") == "E":
+                    s = stacks.get(e["tid"], [])
+                    ok = ok and bool(s) and s.pop() == e["name"]
+            ok = ok and not any(stacks.values())
+            expect("whose routine spans nest and balance on every track", ok)
+            expect("with device writes on their lanes",
+                   any(e.get("ph") == "i" and e.get("tid", 0) >= 10 for e in ev))
+            expect("and interrupt spans on the IRQ track",
+                   any(e.get("ph") == "B" and e.get("tid") == 1 for e in ev))
     if os.path.exists(js):
         import json as _json
         data = _json.load(open(js))

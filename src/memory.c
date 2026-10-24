@@ -425,6 +425,9 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 			if (io_trace_wants(dev)) {
 				io_trace_access(dev, address, value, true);
 			}
+			if (io_write_tap) {
+				io_write_tap(address, value);
+			}
 		}
 		if (!debugOn && address >= 0x9fa0) {
 			// slow IO5-7 range

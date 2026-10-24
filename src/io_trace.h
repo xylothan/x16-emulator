@@ -109,6 +109,11 @@ io_trace_wants(io_device_t dev)
 	return io_trace_enabled && (io_trace_device_mask & IO_TRACE_BIT(dev)) != 0;
 }
 
+// Every non-debug write to the I/O page, before it is dispatched, when set.
+// NULL (the default) costs a load and a branch per I/O write. Kept here,
+// beside the trace, because every link of memory.c already links this file.
+extern void (*io_write_tap)(uint16_t address, uint8_t value);
+
 // Supplies the CPU context stamped onto each event. Installed by memory.c;
 // when absent, events are recorded with a zero PC and cycle count rather than
 // not at all, so the module stays usable in unit tests.
