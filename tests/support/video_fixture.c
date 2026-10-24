@@ -37,6 +37,7 @@ uint8_t  activity_led;
 uint8_t  MHZ = 8;
 uint16_t opcode_addr;
 bool     warp_mode;
+bool     hidden_windows;
 bool     testbench;
 bool     enable_midline;
 bool     grab_mouse;

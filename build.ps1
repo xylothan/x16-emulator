@@ -474,7 +474,9 @@ if ($DapTest) {
         Fail "-DapTest needs python on PATH."
     }
     $dapPort = Get-FreePort
-    $runArgs = @('-rom', $romPath, '-debugport', "$dapPort", '-warp')
+    # -hidden: nothing appears on screen at all. The quiet launch below is
+    # kept as well, for an older emulator that does not know -hidden.
+    $runArgs = @('-rom', $romPath, '-debugport', "$dapPort", '-warp', '-hidden')
     if ($EmuArgs) { $runArgs += $EmuArgs }
 
     Write-Step "Booting the emulator on DAP port $dapPort (minimized, no focus)"

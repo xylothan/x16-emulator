@@ -515,6 +515,11 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 	}
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, quality);
 	SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1"); // Grabs keyboard shortcuts from the system during window grab
+	// Hidden, not minimized: a minimized window reports a zero size and ImGui
+	// stops drawing into it, which would hide exactly the cost a benchmark is
+	// measuring. A hidden one keeps its size, so everything still renders.
+	if (hidden_windows)
+		window_flags |= SDL_WINDOW_HIDDEN;
 	window = SDL_CreateWindow(NULL, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
 	                          SCREEN_WIDTH * window_scale * screen_x_scale,
 	                          SCREEN_HEIGHT * window_scale, window_flags);
@@ -643,7 +648,8 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 		imgui_window = SDL_CreateWindow("Commander X16 - ImGui Debugger",
 			mainX + mainW + 4, mainY,
 			960, 720,
-			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+			(hidden_windows ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) |
+			    SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 		if (imgui_window) {
 #ifdef HAS_DX12
 			// With a native DX12 main output, draw the debugger natively too,

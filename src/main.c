@@ -164,6 +164,7 @@ char *scale_quality = "best";
 char *render_driver = NULL;
 bool test_init_complete=false;
 bool headless = false;
+bool hidden_windows = false;
 bool fullscreen = false;
 bool testbench = false;
 bool enable_midline = false;
@@ -585,6 +586,11 @@ usage()
 	printf("\tStart the -prg/-bas program using RUN\n");
 	printf("-warp\n");
 	printf("\tEnable warp mode, run emulator as fast as possible.\n");
+	printf("-hidden\n");
+	printf("\tCreate the emulator (and -imgui debugger) windows hidden.\n");
+	printf("\tEverything still runs and renders; nothing appears on screen.\n");
+	printf("\tFor scripted runs and benchmarks. Unlike -headless, video,\n");
+	printf("\taudio and the debugger all stay on.\n");
 	printf("-bench <frames> [<warmup frames>]\n");
 	printf("\tAfter the warm-up (default 600 frames), run <frames> emulated\n");
 	printf("\tframes, print where the host's time went, and exit. Combine with\n");
@@ -986,6 +992,10 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			warp_mode = true;
+		} else if (!strcmp(argv[0], "-hidden")) {
+			argc--;
+			argv++;
+			hidden_windows = true;
 		} else if (!strcmp(argv[0], "-bench")) {
 			argc--;
 			argv++;

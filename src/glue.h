@@ -86,6 +86,9 @@ extern uint8_t *fsroot_path;
 extern uint8_t *startin_path;
 extern uint8_t keymap;
 extern bool warp_mode;
+// -hidden: create the emulator and debugger windows hidden. Everything still
+// runs and renders; nothing appears on screen.
+extern bool hidden_windows;
 extern bool grab_mouse;
 extern bool testbench;
 extern bool has_via2;
