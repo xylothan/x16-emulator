@@ -306,19 +306,32 @@ Each is small, and each is checked against the Phase 0 numbers.
   Target: emulation under `-imgui` with no panels within 5% of the no-debugger
   2.93 ms per frame.
 
-  **Done (`67ff70f`).** Measured back to back in one session, at native speed
-  on the Phase 0 workload, emulation per frame:
+  **Done (`67ff70f`, `307712f`).** Measured interleaved: the same source with
+  the fast path switched off ("before": the inline check always takes the slow
+  path and the gate makes its old out-of-line calls) alternating with it on,
+  three runs each, at native speed on the Phase 0 workload, with `-hidden`.
+  Emulation per frame, median of three; the runs agreed within ±0.05 ms:
 
   | Build | no debugger | `-debugport` | `-imgui`, no panels |
   | --- | --- | --- | --- |
-  | before (`main` at `4735808`) | 3.11 ms | 4.15 ms | 3.93 ms |
-  | fast path | 2.86 ms | 3.12 ms | 2.99 ms |
+  | before | 3.04 ms | 3.92 ms | 3.91 ms |
+  | fast path | 2.96 ms | 3.10 ms | 2.95 ms |
 
-  `-imgui` is now 4.3% over the no-debugger figure (it was 26%), which meets
-  the target. `-debugport` is 9% over, because it still runs `code_map`.
+  - **`-imgui` now costs nothing measurable:** 2.95 ms against 2.96 with no
+    debugger, where it was 32% over. The target is met with room to spare.
+  - **`-debugport` is 5% over,** which is `code_map`, still recorded on every
+    instruction in that mode.
+  - **The no-debugger figure improved too (−0.08 ms),** because the old gate
+    called `debug_server_is_enabled()` on every instruction in every DAP-capable
+    build, debugger or not. It is now read once per frame.
+
+  An earlier single-session comparison against `main` gave the same picture
+  but sat within the ~5% drift seen between sessions, which is why this was
+  re-measured interleaved.
+
   DAP testbench: 129/129, including three new checks for state changed while
-  the machine runs. A deliberately broken poll counter fails the suite
-  immediately.
+  the machine runs. Its pause check fails above 0.2 s, which a counter that
+  polled once per million instructions (~0.4 s) would exceed.
 - **Attribute spikes:** keep a per-frame ring of section times in `host_prof`,
   and have `-bench` and `x16/hostPerf` report the worst frames by section. That
   answers whether the 17–28 ms frames come from the emulator, the UI, present,
