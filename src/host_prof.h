@@ -19,6 +19,9 @@
 //   ui_draw   turning that frame into GPU work and presenting it.
 //   sleep     the throttle sleeping off surplus time.
 //   dap       the debug adapter socket.
+//   hostfs    KERNAL file calls the emulator intercepts and serves from the
+//             host filesystem (-fsroot): real file I/O on this thread.
+//   dbginfo   reading the debug info for a program the guest just loaded.
 //
 // Sections NEST and are EXCLUSIVE: a section begun inside another pauses the
 // outer one, so the throttle's repaint (present + UI inside the sleep loop) is
@@ -50,6 +53,8 @@ typedef enum {
 	HP_UI_DRAW,
 	HP_SLEEP,
 	HP_DAP,
+	HP_HOSTFS,
+	HP_DBGINFO,
 	HP_SECTIONS
 } hp_section_t;
 

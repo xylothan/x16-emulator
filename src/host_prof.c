@@ -47,7 +47,7 @@ static panel_t panels[HP_MAX_PANELS];
 static int     npanels;
 
 static const char *const names[HP_SECTIONS] = {
-	"emu", "events", "present", "ui_build", "ui_draw", "sleep", "dap",
+	"emu", "events", "present", "ui_build", "ui_draw", "sleep", "dap", "hostfs", "dbginfo",
 };
 
 static uint64_t

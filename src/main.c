@@ -1897,6 +1897,9 @@ handle_ieee_intercept()
 	}
 
 	uint64_t base_ticks = SDL_GetPerformanceCounter();
+	// Past the cheap PC checks, so this is reached only for a KERNAL call
+	// the emulator may serve itself -- not once per instruction.
+	host_prof_begin(HP_HOSTFS);
 
 	static int count_unlistn = 0;
 	bool handled = true;
@@ -2053,6 +2056,7 @@ handle_ieee_intercept()
 		increment_wrap_at_page_boundary(&regs.sp);
 		regs.pc = ((debug_read6502(regs.sp, 0, USE_CURRENT_X16_BANK) << 8) | low) + 1;
 	}
+	host_prof_end(HP_HOSTFS);
 	return handled;
 }
 
@@ -2450,7 +2454,9 @@ emulator_step_during_move(void)
 			// returning to the main loop, and only one completed load is held
 			// at a time, so a second would overwrite the first. Reachable only
 			// via -dbgauto; the status check repeats before the next instruction.
+			host_prof_begin(HP_DBGINFO);
 			dbg_load_poll();
+			host_prof_end(HP_DBGINFO);
 			continue;
 		}
 		instruction_counter += waiting ^ 0x1;
@@ -2679,7 +2685,9 @@ emulator_loop(void *param)
 			// makes the single pending slot self-evidently safe: an intercept
 			// finishes at most one channel, and it is drained before the next
 			// one can run.
+			host_prof_begin(HP_DBGINFO);
 			dbg_load_poll();
+			host_prof_end(HP_DBGINFO);
 			continue;
 		}
 

@@ -379,6 +379,35 @@ Each is small, and each is checked against the Phase 0 numbers.
     window visible.
   - **Next step:** add a host-filesystem section around the hostfs/IEEE file
     calls, so this shows up by name instead of inside `emu`.
+
+  **Hypothesis tested and ruled out.** Two new sections: `hostfs` (KERNAL file
+  calls served from `-fsroot`) and `dbginfo` (`dbg_load_poll`). The game files
+  were copied with `robocopy /J` (unbuffered, so not left in the file cache),
+  then run visibly twice, cold then warm, with no debugger:
+
+  | Run | Spikes over 16.8 ms | Long frames |
+  | --- | --- | --- |
+  | cold | 4 of 3,610, plus 6 just under | all `events`: 15–25 ms each, ten consecutive frames (1873–1882) |
+  | warm | 0 of 3,600 | worst 7.7 ms |
+
+  - **File I/O is not the cause.** `hostfs` averaged 0.2 µs per frame and
+    `dbginfo` zero, and neither appears in any long frame.
+  - **The stalls move around.** This run caught them in the SDL event pump
+    (`events`); the earlier one caught them inside `emu`. The same cold files
+    a minute later produced none.
+  - **Reading:** these are intermittent host-side stalls of the emulator
+    thread, landing in whatever section the thread happened to be in. The
+    debugger plays no part: every spike so far was in a run with no debugger
+    attached.
+  - **Remaining candidates:**
+    - the OS descheduling the thread;
+    - the Windows message pump blocking inside `SDL_PollEvent` (window or
+      compositor messages);
+    - SDL's audio device lock, which sits inside `emu` because audio is
+      rendered there.
+
+    An `audio` section, and timestamps on each spike for matching against
+    system events, would separate them.
 - **Optional:** a "UI refresh rate" setting (60 / 30 / 10 Hz) for panels that
   show live data.
 
