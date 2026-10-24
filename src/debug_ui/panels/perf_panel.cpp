@@ -49,9 +49,11 @@ const Window k_windows[] = {
 };
 const int k_window_count = (int)(sizeof k_windows / sizeof k_windows[0]);
 
-// Graph history, refilled each frame from the ring.
-float  g_graph[1024];
-int    g_graph_n = 0;
+// Graph history, refilled each frame from the ring. The frame ordinals ride
+// alongside so a hovered bar can name the frame it came from.
+float    g_graph[1024];
+uint32_t g_graph_frame[1024];
+int      g_graph_n = 0;
 
 // Zone editor scratch.
 char     g_zone_name[PERF_ZONE_NAME_MAX] = "";
@@ -71,6 +73,29 @@ utilization_color(float pct)
 	return ImVec4(0.45f, 0.90f, 0.50f, 1.0f);
 }
 
+// 134400 -> "134,400". Cycle counts are the entire content of these tooltips,
+// and a bare %g renders one as "1.344e+05" -- which is exactly how ImGui's own
+// plot tooltip used to report the history graph before this file drew it.
+void
+group_u32(char *out, size_t outsz, uint32_t v)
+{
+	char      digits[16];
+	const int n = snprintf(digits, sizeof digits, "%u", (unsigned)v);
+	if (n <= 0 || outsz == 0) {
+		if (outsz)
+			out[0] = '\0';
+		return;
+	}
+	size_t o = 0;
+	for (int i = 0; i < n; i++) {
+		if (i && ((n - i) % 3) == 0 && o + 1 < outsz)
+			out[o++] = ',';
+		if (o + 1 < outsz)
+			out[o++] = digits[i];
+	}
+	out[o < outsz ? o : outsz - 1] = '\0';
+}
+
 // Cycles as a share of a scanline, which is the unit X16 programs are written
 // in far more often than raw cycles.
 void
@@ -79,13 +104,58 @@ cycles_tooltip(uint32_t cycles)
 	if (!ImGui::IsItemHovered())
 		return;
 	const uint32_t per_line = perf_budget_cycles_per_scanline();
+	char           grouped[24];
+	group_u32(grouped, sizeof grouped, cycles);
 	ImGui::BeginTooltip();
-	ImGui::Text("%u cycles", (unsigned)cycles);
+	ImGui::Text("%s cycles", grouped);
 	if (per_line)
 		ImGui::Text("%.1f scanlines", (double)cycles / (double)per_line);
 	const uint32_t khz = (uint32_t)MHZ * 1000u;
 	if (khz)
 		ImGui::Text("%.3f ms", (double)cycles / (double)khz);
+	ImGui::EndTooltip();
+}
+
+// Why these numbers are exact, and why a measured frame span is not quite the
+// same number. Both halves get asked about: "256 per scanline, really?" and
+// "the Multiplex tab says 134,402, so which is right?". Both are right -- one
+// is arithmetic, the other is a measurement.
+void
+nominal_tooltip(void)
+{
+	if (!ImGui::IsItemHovered())
+		return;
+
+	char per_frame[24], per_line[24], hz[24];
+	group_u32(per_frame, sizeof per_frame, perf_budget_cycles_per_frame());
+	group_u32(per_line, sizeof per_line, perf_budget_cycles_per_scanline());
+	snprintf(hz, sizeof hz, "%.4f", (double)perf_budget_vsync_hz());
+
+	ImGui::BeginTooltip();
+	ImGui::TextUnformatted("NOMINAL: derived from the machine, not measured.");
+	ImGui::Separator();
+	ImGui::Text("cycles/frame = MHz x dot-clocks per frame / 25");
+	ImGui::Text("vsync        = CPU Hz / cycles per frame = %s Hz", hz);
+	ImGui::Spacing();
+	ImGui::TextUnformatted("At 8 MHz on VGA both come out exact, with nothing rounded:");
+	ImGui::BulletText("25 MHz / 800 dots = 31.25 kHz line rate");
+	ImGui::BulletText("8,000,000 / 31,250 = %s cycles per scanline", per_line);
+	ImGui::BulletText("x 525 lines = %s cycles per frame", per_frame);
+	ImGui::Spacing();
+	ImGui::TextDisabled("The frame rate is 59.52 Hz, NOT 60 -- which is why");
+	ImGui::TextDisabled("%s x 59.5238 closes on 8,000,000 exactly, while", per_frame);
+	ImGui::TextDisabled("the old 8,000,000/60 estimate was 1,067 cycles light.");
+	ImGui::Spacing();
+	ImGui::TextDisabled("NTSC is a different frame: a 794-dot half-scan gives");
+	ImGui::TextDisabled("254.08 cycles per line, reported truncated as 254.");
+	ImGui::Separator();
+	ImGui::TextUnformatted("Not to be confused with a MEASURED frame span.");
+	ImGui::TextDisabled("VERA panel > Multiplex reports the cycles actually");
+	ImGui::TextDisabled("elapsed across one frame, which lands a few either side");
+	ImGui::TextDisabled("of this: its endpoints are sampled at instruction");
+	ImGui::TextDisabled("boundaries, so the instruction straddling the frame");
+	ImGui::TextDisabled("boundary carries some overshoot. It averages to exactly");
+	ImGui::TextDisabled("this figure -- the error is phase, not drift.");
 	ImGui::EndTooltip();
 }
 
@@ -131,6 +201,7 @@ draw_budget_header(void)
 	ImGui::Text("Machine %u MHz  |  vsync %.2f Hz  |  %u cycles/frame  |  %u/scanline",
 	            (unsigned)MHZ, (double)perf_budget_vsync_hz(), (unsigned)per_frame,
 	            (unsigned)perf_budget_cycles_per_scanline());
+	nominal_tooltip();
 	ImGui::Text("Budget: %u cycles", (unsigned)budget);
 	cycles_tooltip(budget);
 	if (span > 1) {
@@ -257,8 +328,10 @@ draw_graph(void)
 	g_graph_n = 0;
 	// Oldest to newest, so the graph reads left-to-right like a timeline.
 	for (int i = n - 1; i >= 0; i--) {
-		if (perf_budget_frame_at(i, &f))
-			g_graph[g_graph_n++] = (float)f.period_work;
+		if (perf_budget_frame_at(i, &f)) {
+			g_graph_frame[g_graph_n] = f.frame;
+			g_graph[g_graph_n++]     = (float)f.period_work;
+		}
 	}
 	if (g_graph_n <= 0) {
 		ImGui::TextDisabled("(no frames yet)");
@@ -275,18 +348,77 @@ draw_graph(void)
 	const ImVec2 p0     = ImGui::GetCursorScreenPos();
 	const float  width  = ImGui::GetContentRegionAvail().x;
 
-	ImGui::PlotHistogram("##perfgraph", g_graph, g_graph_n, 0, nullptr, 0.0f, top,
-	                     ImVec2(width, height));
+	// A panel squeezed to nothing leaves no width to plot into, and the
+	// InvisibleButton below asserts outright on a zero-size rect
+	// (imgui_widgets.cpp:784) -- which would take the emulator down rather
+	// than merely drawing nothing. PlotHistogram used to absorb that case
+	// internally, so this guard arrives with the hand-drawn version.
+	if (width < 1.0f || height < 1.0f) {
+		ImGui::TextDisabled("(too narrow to plot)");
+		return;
+	}
+
+	// Drawn by hand rather than with ImGui::PlotHistogram, for the tooltip:
+	// PlotEx() formats a hovered value with "%8.4g" (imgui_widgets.cpp:8395),
+	// which renders a frame's worth of cycles as "1.344e+05" and cannot be
+	// overridden through the public API. A cycle count in exponent notation is
+	// no use to anybody, and the hover is the one place there is room to say
+	// which frame it was and what share of the budget it took.
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p0, ImVec2(p0.x + width, p0.y + height),
+	                  ImGui::GetColorU32(ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
+
+	const float bar_w    = width / (float)g_graph_n;
+	const ImU32 col_ok   = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+	const ImU32 col_over = ImGui::GetColorU32(utilization_color(100.0f));
+	for (int i = 0; i < g_graph_n; i++) {
+		const float h = top > 0.0f ? (g_graph[i] / top) * height : 0.0f;
+		const float x0 = p0.x + bar_w * (float)i;
+		// Leave a hairline gap only when the bars are wide enough to show one.
+		const float x1 = x0 + (bar_w > 2.0f ? bar_w - 1.0f : bar_w);
+		dl->AddRectFilled(ImVec2(x0, p0.y + height - h), ImVec2(x1, p0.y + height),
+		                  budget > 0.0f && g_graph[i] > budget ? col_over : col_ok);
+	}
 
 	// The budget line over the top: without it the histogram says how much the
 	// work varies but not whether any of it mattered.
 	if (top > 0.0f) {
 		const float y = p0.y + height * (1.0f - budget / top);
-		ImGui::GetWindowDrawList()->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + width, y),
-		                                    ImGui::GetColorU32(ImVec4(1.0f, 0.4f, 0.4f, 0.9f)),
-		                                    1.5f);
+		dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + width, y),
+		            ImGui::GetColorU32(ImVec4(1.0f, 0.4f, 0.4f, 0.9f)), 1.5f);
+	}
+
+	ImGui::InvisibleButton("##perfgraph", ImVec2(width, height));
+	if (ImGui::IsItemHovered() && bar_w > 0.0f) {
+		int idx = (int)((ImGui::GetIO().MousePos.x - p0.x) / bar_w);
+		idx     = idx < 0 ? 0 : (idx >= g_graph_n ? g_graph_n - 1 : idx);
+
+		const uint32_t work = (uint32_t)g_graph[idx];
+		const float    pct  = budget > 0.0f ? 100.0f * g_graph[idx] / budget : 0.0f;
+		char           grouped[24], budget_grouped[24];
+		group_u32(grouped, sizeof grouped, work);
+		group_u32(budget_grouped, sizeof budget_grouped, (uint32_t)budget);
+
+		ImGui::BeginTooltip();
+		ImGui::Text("Frame %u", (unsigned)g_graph_frame[idx]);
+		ImGui::Separator();
+		ImGui::TextColored(utilization_color(pct), "%s cycles of work  (%.1f%% of budget)",
+		                   grouped, (double)pct);
+		ImGui::TextDisabled("budget %s cycles", budget_grouped);
+		const uint32_t per_line = perf_budget_cycles_per_scanline();
+		if (per_line)
+			ImGui::TextDisabled("%.1f scanlines", (double)work / (double)per_line);
+		const uint32_t khz = (uint32_t)MHZ * 1000u;
+		if (khz)
+			ImGui::TextDisabled("%.3f ms", (double)work / (double)khz);
+		ImGui::Separator();
+		ImGui::TextDisabled("Work, not elapsed cycles: a frame always burns its");
+		ImGui::TextDisabled("whole period, so what varies is the share classified");
+		ImGui::TextDisabled("as work rather than waiting.");
+		ImGui::EndTooltip();
 	}
 	ImGui::TextDisabled("%d frames, oldest left. Red line is the budget.", g_graph_n);
+	ImGui::SetItemTooltip("Hover a bar for its frame number and cycle count.");
 }
 
 void
@@ -295,11 +427,16 @@ stat_cell(uint32_t v, uint32_t budget)
 	const float pct = budget ? 100.0f * (float)v / (float)budget : 0.0f;
 	ImGui::TextColored(utilization_color(pct), "%u", (unsigned)v);
 	if (ImGui::IsItemHovered()) {
+		char grouped[24];
+		group_u32(grouped, sizeof grouped, v);
 		ImGui::BeginTooltip();
-		ImGui::Text("%u cycles (%.1f%% of budget)", (unsigned)v, (double)pct);
+		ImGui::Text("%s cycles (%.1f%% of budget)", grouped, (double)pct);
 		const uint32_t per_line = perf_budget_cycles_per_scanline();
 		if (per_line)
 			ImGui::Text("%.1f scanlines", (double)v / (double)per_line);
+		const uint32_t khz = (uint32_t)MHZ * 1000u;
+		if (khz)
+			ImGui::Text("%.3f ms", (double)v / (double)khz);
 		ImGui::EndTooltip();
 	}
 }
