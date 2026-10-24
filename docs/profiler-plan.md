@@ -126,8 +126,8 @@ Exit: the hypotheses above are confirmed or replaced by measured numbers.
 Each configuration below is one run of:
 
 ```
-x16emu -rom latest_rom\rom.bin -prg <ship>\Gauntlet2.prg -run -fsroot <ship>
-       -ram 2048 -dbgfile <ship>\Gauntlet2.dbg -srcpath <repo>\src\x16
+x16emu -rom latest_rom\rom.bin -prg <dir>\<program>.prg -run -fsroot <dir>
+       -ram 2048 -dbgfile <dir>\<program>.dbg -srcpath <src>
        <config flags> -bench <frames> <warmup> [-warp]
 ```
 
@@ -145,22 +145,21 @@ The config flags are:
 
 ### Phase 0: baseline (2026-10-23)
 
-> **Correction (2026-10-24): the workload was not attract mode.** Gauntlet 2's
-> launcher (`Gauntlet2.prg`, `$0801-$13F6`) stops at a Start/Options menu and
-> waits for fire in a `WAI` loop. The runs below, and every Gauntlet 2 run up
-> to the Phase 2 work, never pressed it. Most of them therefore measured the
-> launcher's wait loop: about 1 cycle per emulator step, against about 2.9 for
-> real game code.
+> **Correction (2026-10-24): the workload was a wait loop.** The test program
+> stops at a start menu and waits for a button in a `WAI` loop. The runs below,
+> and every run up to the Phase 2 work, never pressed it. Most of them
+> therefore measured that wait loop: about 1 cycle per emulator step, against
+> about 2.9 for the program's running code.
 >
 > - **Comparisons still hold.** Before and after were always measured on the
 >   same workload, so they remain valid as comparisons.
 > - **Per-step costs were overstated.** That includes the debugger check: a
->   wait loop runs about three times as many emulator steps per frame as game
->   code does.
+>   wait loop runs about three times as many emulator steps per frame as
+>   running code does.
 >
-> Runs now pass `-autostart` (tap START until the game is running), and the
-> benchmark output names the guest PC at the end, so a run stuck in the
-> launcher is caught. The fast-path result was re-measured on running code;
+> Runs now pass `-autostart` (tap START until the program is running), and the
+> benchmark output names the guest PC at the end, so a run stuck in a wait
+> loop is caught. The fast-path result was re-measured on running code;
 > see Phase 1.
 
 Setup:
@@ -170,12 +169,12 @@ Setup:
   phase. It does **not** include the uncommitted Performance-panel and
   sprite-tab edits, or the VERA 49 version bump, from the main checkout. The
   Performance-panel numbers therefore describe the committed panel.
-- **Workload:** Gauntlet 2 (`ship\Gauntlet2.prg` as built at 00:17 that day,
-  `-ram 2048`, with `-dbgfile`) running its attract mode untouched.
+- **Workload:** a banked assembly program (`-ram 2048`, files served from
+  `-fsroot`, with `-dbgfile`), left running with no input.
 - **ROM:** `latest_rom\rom.bin`.
 - **Native runs:** 1,200 warm-up frames, then 1,800 measured.
 - **Warp runs:** 3,600 warm-up frames, then 3,600 measured.
-- **"user":** a copy of `S:\Code\Gauntlet2\imgui.ini`, which has I/O capture
+- **"user":** a copy of the developer's own `imgui.ini`, which has I/O capture
   off.
 
 **Native speed** (ms per emulated frame; one frame is 16.8 ms):
@@ -324,10 +323,10 @@ Each is small, and each is checked against the Phase 0 numbers.
   Target: emulation under `-imgui` with no panels within 5% of the no-debugger
   2.93 ms per frame.
 
-  **Re-measured on running game code (2026-10-24).** The table below this one
-  was taken on the launcher's wait loop (see the correction under Phase 0).
-  This is the same interleaved method, three runs each, with `-autostart`.
-  All 18 runs ended in game code:
+  **Re-measured on running code (2026-10-24).** The table below this one was
+  taken on the start menu's wait loop (see the correction under Phase 0). This
+  is the same interleaved method, three runs each, with `-autostart`. All 18
+  runs ended in running code:
 
   | Build | no debugger | `-debugport` | `-imgui`, no panels |
   | --- | --- | --- | --- |
@@ -335,7 +334,7 @@ Each is small, and each is checked against the Phase 0 numbers.
   | fast path | 3.21 ms | 3.37 ms | 3.35 ms |
 
   `-imgui` is 4.4% over no debugger, within the 5% target. The saving is
-  0.54 ms per frame, not 0.96. Game code averages about 2.9 cycles per
+  0.54 ms per frame, not 0.96. Running code averages about 2.9 cycles per
   instruction, so it takes about a third as many emulator steps per frame as
   the wait loop, and a per-step cost shrinks accordingly.
 
@@ -377,14 +376,14 @@ Each is small, and each is checked against the Phase 0 numbers.
   dominated it. `-bench` prints both, and `x16/hostPerf` returns `spikes` and
   `worstFrames`.
 
-  First capture: Gauntlet 2 attract mode, 3,600 frames, `-hidden`:
+  First capture: the Phase 0 workload, 3,600 frames, `-hidden`:
 
   - **No spikes.** No frame exceeded 16.8 ms, either with no debugger or with
     the user's layout.
   - **The worst frames are present stalls.** Busy time was 8.7–11.7 ms, with
     6–8 ms of it spent presenting the main window (normally 0.3–0.5 ms).
   - **Next come emulation peaks:** up to 6.1 ms against a typical 3–4 ms,
-    which is the game's own work.
+    which is the program's own work.
   - **The debugger UI was never the worst part**, at about 1.5 ms at most.
 
   Caveat: with the windows hidden, nothing is composited on screen, so present
@@ -401,10 +400,10 @@ Each is small, and each is checked against the Phase 0 numbers.
 
   - **The spikes are on the emulator thread, outside every UI section.** The
     long frames are almost entirely `emu`, which is time no other section
-    claimed. They cluster in frames 145–189, about one second of attract mode,
+    claimed. They cluster in frames 145–189, about one second of the run,
     plus one at frame 1821.
-  - **Working hypothesis: host file I/O.** Gauntlet 2 loads files through the
-    host filesystem during attract mode, and that I/O runs on the emulator
+  - **Working hypothesis: host file I/O.** The program loads files through
+    the host filesystem in that stretch, and that I/O runs on the emulator
     thread, so it is charged to `emu`. The no-debugger run went first, and the
     layout run that followed, with any OS file cache warm, had none. That
     fits, but does not prove it.
@@ -414,8 +413,8 @@ Each is small, and each is checked against the Phase 0 numbers.
     calls, so this shows up by name instead of inside `emu`.
 
   **Hypothesis tested and ruled out.** Two new sections: `hostfs` (KERNAL file
-  calls served from `-fsroot`) and `dbginfo` (`dbg_load_poll`). The game files
-  were copied with `robocopy /J` (unbuffered, so not left in the file cache),
+  calls served from `-fsroot`) and `dbginfo` (`dbg_load_poll`). The program's
+  files were copied with `robocopy /J` (unbuffered, so not left in the file cache),
   then run visibly twice, cold then warm, with no debugger:
 
   | Run | Spikes over 16.8 ms | Long frames |
@@ -537,8 +536,8 @@ different targets.
   - scope records, so local labels (`loop`, `next`) roll up into their
     routine.
 
-  On Gauntlet 2 this took the report from 3,017 of 3,291 rows "bank not
-  established" to 0 of 325, all named by routine.
+  On a banked test program this took the report from 3,017 of 3,291 rows
+  "bank not established" to 0 of 325, all named by routine.
 - **`perf_budget`'s marker hook** runs ahead of its marker-mode latch, so
   starting a capture from the guest does not change how work and waiting are
   classified.
@@ -548,13 +547,14 @@ different targets.
 - **Commands:** DAP `x16/capture`, and on the command line
   `-profile <frames> [<warmup>]`. (`-capture` already means "grab the mouse".)
 - **`-autostart <frames>`** taps START so scripted runs get past a start menu.
-  `-bench` now prints the guest PC at the end.
+  `-bench` now prints the guest PC at the end. (Since generalised: see
+  "Scripted input" below.)
 
-`perf_hist` costs 0.24 ms per frame on the launcher's wait loop. On game code,
+`perf_hist` costs 0.24 ms per frame on a `WAI` wait loop. On running code,
 which takes fewer emulator steps per frame, the cost is within noise.
 
-**Exit criteria, met** (Gauntlet 2 running, `-hidden`, 1,800 frames, two
-runs each; all six ended in game code):
+**Exit criteria, met** (the Phase 0 workload past its start menu, `-hidden`,
+1,800 frames, two runs each; all six ended in running code):
 
 | Config | Emulation | Busy p50 | UI build |
 | --- | --- | --- | --- |
@@ -569,8 +569,33 @@ runs each; all six ended in game code):
   plus `code_map` recording every instruction. Pausing `code_map` during a
   capture would remove most of it, at the cost of the Disassembly views having
   a gap for that stretch. That is still the open question below.
-- **Determinism:** the guest's cycle count in `MainLoop` matched to within 6
-  cycles across all four captures, with and without the debugger.
+- **Determinism:** the guest's cycle count in its top routine matched to
+  within 6 cycles across all four captures, with and without the debugger.
+
+### Scripted input
+
+A benchmark or capture is only repeatable if the guest does the same thing
+each run, so input is scripted by emulated frame, like a TAS input file
+(`src/input_script.c`, unit-tested in `tests/test_input_script.c`):
+
+```
+# <frame> <command>          frame 1 is the first; +N is N after the previous line
+60   joy1 start              # pad 1 holds START from frame 60
++6   joy1 none               # ...and lets go 6 frames later
++30  key Return              # press and release a key (SDL key names)
++2   keydown Left Shift
++1   key A
++1   keyup Left Shift
+900  joy1 right+a            # held until changed
+1800 joy1 off                # hand the pad back to the host
+```
+
+- **`-inputscript <file>`**, or **`-input "<cmd>; <cmd>"`** inline.
+- **`-autostart <frames>`** is now shorthand for a script of START taps.
+- Sources combine; each is its own timeline, and events merge by frame.
+- A bad line stops the emulator at startup, naming the line.
+- Pads go through `joystick_set_virtual`, keys through `handle_keyboard`:
+  the same paths as DAP `x16/joystick` and `x16/sendKey`.
 
 ## Phase 3: inclusive time and the call tree
 
