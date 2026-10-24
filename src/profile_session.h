@@ -38,6 +38,28 @@ void profile_session_print(FILE *f, int top);
 // or the bare address when nothing names it.
 void profile_session_node_name(const prof_report_t *r, int node, char *buf, int size);
 
+// Work against waiting over the capture, from perf_budget's classifier --
+// only when the capture ran the budget recorder.
+typedef struct {
+	bool     have;
+	uint32_t frames;     // frames it covers
+	uint64_t total;      // cycles
+	uint64_t idle;       // of which classified as waiting (WAI, spin loops)
+	uint32_t work_max;   // worst frame's work
+	uint32_t overruns;   // frames whose work exceeded the budget
+	uint32_t budget;     // the per-frame budget, in cycles
+} prof_budget_summary_t;
+const prof_budget_summary_t *profile_session_budget_summary(void);
+
+// Write the last report to a file. Both return the number of records written,
+// or -1 if there is no report or the file cannot be written.
+//   folded: one line per call path with self cycles, "a;b;c 1234" -- the
+//           collapsed-stack format speedscope and flamegraph.pl read. Needs
+//           the call tree.
+//   json:   totals, every row, and the call tree, for scripts.
+int profile_session_export_folded(const char *path);
+int profile_session_export_json(const char *path);
+
 // Whether the tree's self cycles matched the histogram's totals exactly, for
 // the last report (true when there was no tree).
 bool profile_session_tree_consistent(void);

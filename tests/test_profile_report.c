@@ -27,6 +27,14 @@ covered(uint16_t pc, int ram_bank)
 	return 0;
 }
 
+// For the ROM block: the program covers only its own $0800-$0EFF.
+static int
+covered_prog(uint16_t pc, int ram_bank)
+{
+	(void)ram_bank;
+	return pc >= 0x0800 && pc < 0x0F00;
+}
+
 static void
 run(uint16_t pc, uint8_t ram, uint8_t rom, uint32_t clocks, int times, bool irq)
 {
@@ -139,5 +147,36 @@ main(void)
 
 	prof_report_free(&r);
 	check(r.rows == NULL && r.count == 0, "free empties it");
+
+	// ── ROM labels: by ROM bank; KERNAL low-RAM code as a fallback ──────────
+	{
+		perf_hist_reset();
+		run(0xC123, 0, 0, 10, 1, false);  // ROM 0
+		run(0xC123, 0, 4, 20, 1, false);  // ROM 4: same address, other bank
+		run(0xC800, 0, 7, 5, 1, false);   // ROM 7: no labels there
+		run(0x0390, 0, 0, 30, 1, true);   // KERNAL's RAM IRQ code
+		run(0x0810, 0, 0, 4, 1, false);   // the program's own init
+		const prof_sym_t rsyms[] = {
+			{"init", 0x0810, -1, false},
+			{"k_thing", 0xC100, 0, true},  {"b_thing", 0xC100, 4, true},
+			{"zzz", 0xC100, 4, true},          // second name, same place: by name
+			{"__irq", 0x038B, -1, true},
+			{"k_late", 0xC200, 0, true},
+			{"CHROUT", 0xFFD2, -1, false},     // a program's equate: not a ROM label
+		};
+		prof_report_t q;
+		check(prof_report_build(&q, rsyms, 7, covered_prog), "report with ROM labels builds");
+		const prof_row_t *k = row_named(&q, "k_thing");
+		check(k && k->region == PH_REGION_ROM && k->bank == 0 && k->main_cycles == 10,
+		      "ROM 0 time named from bank 0's labels");
+		const prof_row_t *b = row_named(&q, "b_thing");
+		check(b && b->bank == 4 && b->main_cycles == 20, "ROM 4 from bank 4's, first name wins");
+		check(row_named(&q, "zzz") == NULL, "the other name at that address is not used");
+		check(row_named(&q, "ROM 7:$C8xx") != NULL, "a bank with no labels stays by page");
+		const prof_row_t *i = row_named(&q, "__irq");
+		check(i && i->irq_cycles == 30, "KERNAL RAM code named where the program is silent");
+		check(row_named(&q, "init") != NULL, "the program's labels still apply");
+		prof_report_free(&q);
+	}
 	return x16_test_summary("profile_report");
 }

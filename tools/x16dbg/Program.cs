@@ -134,6 +134,7 @@ class Program
         Console.WriteLine("  vram <addr> <len>       Read VRAM by length (e.g., vram 1B000 20)");
         Console.WriteLine("  setvram <addr> <hex>    Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  joy <port> [buttons]    Drive a SNES controller port (1-4)");
+        Console.WriteLine("  profile <frames> [...]  Capture, then print routines and call paths");
         Console.WriteLine("  bp add <addr>           Add breakpoint");
         Console.WriteLine("  bp remove <addr>        Remove breakpoint");
         Console.WriteLine("  bp list                 List all breakpoints");
@@ -146,6 +147,7 @@ class Program
         Console.WriteLine("  x16dbg bp add 080D              Set breakpoint at $080D");
         Console.WriteLine("  x16dbg bp add 33:A123           Set breakpoint at $A123 in bank $33 only");
         Console.WriteLine("  x16dbg -port 9010 status        Connect to port 9010");
+        Console.WriteLine("  x16dbg profile 600 folded a.folded  Profile 600 frames, write a flame graph file");
         Console.WriteLine();
         Console.WriteLine("  VRAM -- VERA's video RAM, which is not in the CPU map. The CPU only");
         Console.WriteLine("  reaches it through the data port, so these are the only way to see it:");

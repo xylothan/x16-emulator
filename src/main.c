@@ -44,6 +44,7 @@
 #include "host_prof.h"
 #include "profile_session.h"
 #include "input_script.h"
+#include "rom_syms.h"
 #include "keyboard.h"
 #include "io_trace.h"
 #ifdef HAS_IMGUI
@@ -143,6 +144,8 @@ static uint32_t    bench_warmup = 600;
 static uint32_t    capture_cli_frames = 0;
 static uint32_t    capture_cli_warmup = 600;
 static uint32_t    capture_cli_recorders = CAP_REC_HIST | CAP_REC_TREE; // -profilerec
+static const char *rom_syms_dir = NULL; // -romsyms; default: rom.bin's folder
+static const char *profile_out  = NULL; // -profileout: <prefix>.folded / .json
 // -input / -inputscript / -autostart: joypad and keyboard events replayed at
 // set frames. See input_script.h.
 static bool        input_script_loaded = false;
@@ -681,6 +684,12 @@ usage()
 	printf("\tAfter the warm-up (default 600 frames), capture <frames> emulated\n");
 	printf("\tframes, print where the guest's time went by routine, and exit.\n");
 	printf("\tRoutines are named from the loaded debug info (-dbgfile).\n");
+	printf("-profileout <prefix>\n");
+	printf("\tWith -profile, also write <prefix>.folded (collapsed stacks, for\n");
+	printf("\tspeedscope or flamegraph.pl) and <prefix>.json (rows and tree).\n");
+	printf("-romsyms <dir>\n");
+	printf("\tLoad the ROM's .sym files (kernal.sym, basic.sym, ...) from <dir>,\n");
+	printf("\tto name ROM routines in profiles. Default: the folder of rom.bin.\n");
 	printf("-profilerec <name,name,...>\n");
 	printf("\tRecorders for -profile: hist (always), tree (default: who called\n");
 	printf("\twhat), budget (work vs. waiting), vram (VRAM traffic).\n");
@@ -1153,6 +1162,24 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
+		} else if (!strcmp(argv[0], "-profileout")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			profile_out = argv[0];
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-romsyms")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			rom_syms_dir = argv[0];
+			argc--;
+			argv++;
 		} else if (!strcmp(argv[0], "-profilerec")) {
 			argc--;
 			argv++;
@@ -1759,6 +1786,28 @@ main(int argc, char **argv)
 	size_t rom_size = SDL_RWread(f, ROM, ROM_SIZE, 1);
 	(void)rom_size;
 	SDL_RWclose(f);
+
+	// The ROM's .sym files, for naming ROM time in profiles. A release ships
+	// them beside rom.bin; quietly none if they are not there.
+	{
+		char dir[PATH_MAX];
+		if (rom_syms_dir) {
+			snprintf(dir, sizeof dir, "%s", rom_syms_dir);
+		} else {
+			snprintf(dir, sizeof dir, "%s", rom_path);
+			char *slash = strrchr(dir, '/');
+			char *bslash = strrchr(dir, '\\');
+			if (bslash && (!slash || bslash > slash))
+				slash = bslash;
+			if (slash)
+				slash[1] = 0;
+			else
+				snprintf(dir, sizeof dir, ".");
+		}
+		const int n = rom_syms_load_dir(dir);
+		if (rom_syms_dir && !n)
+			fprintf(stderr, "-romsyms: no ROM .sym files in %s\n", dir);
+	}
 
 	if (nvram_path) {
 		SDL_RWops *f = SDL_RWFromFile(nvram_path, "rb");
@@ -2634,6 +2683,15 @@ capture_cli_tick(void)
 	}
 	if (cap_state() == CAP_DONE) {
 		profile_session_print(stdout, 40);
+		if (profile_out) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof path, "%s.folded", profile_out);
+			const int folded = profile_session_export_folded(path);
+			printf("%s: %d call paths\n", path, folded);
+			snprintf(path, sizeof path, "%s.json", profile_out);
+			const int json = profile_session_export_json(path);
+			printf("%s: %d records\n", path, json);
+		}
 		bench_report(); // the host's side of the same frames
 		return false;
 	}

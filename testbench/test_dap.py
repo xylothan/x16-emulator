@@ -815,6 +815,28 @@ if rep:
     expect("rows carry inclusive time and calls",
            all("inclCycles" in row and "calls" in row for row in rep.get("rows", [])))
 
+    # The emulator writes the exports itself: collapsed stacks and JSON.
+    import os
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    folded, js = os.path.join(tmp, "cap.folded"), os.path.join(tmp, "cap.json")
+    r = capture(350, {"top": 0, "export": {"folded": folded, "json": js}})
+    done = r.get("body", {}).get("exported", {}) if r and r.get("success") else {}
+    expect("x16/capture writes collapsed stacks", done.get("folded", 0) >= 1 and os.path.exists(folded))
+    if os.path.exists(folded):
+        lines = open(folded).read().splitlines()
+        expect("each line is a path and a cycle count",
+               lines and all(l.rsplit(" ", 1)[-1].isdigit() for l in lines))
+        expect("whose counts add up to every cycle",
+               sum(int(l.rsplit(" ", 1)[-1]) for l in lines)
+               == rep.get("mainCycles", 0) + rep.get("irqCycles", 0))
+    expect("and JSON", done.get("json", 0) >= 1 and os.path.exists(js))
+    if os.path.exists(js):
+        import json as _json
+        data = _json.load(open(js))
+        expect("the JSON holds the rows and the tree",
+               len(data.get("rows", [])) >= 1 and len(data.get("tree", [])) >= 2)
+
 baseline = bp_addrs(sock)
 print("       breakpoints before this session: %s" % (" ".join(baseline) or "(none)"))
 

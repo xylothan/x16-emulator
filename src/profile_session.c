@@ -8,6 +8,7 @@
 #include "perf_budget.h"
 #include "perf_hist.h"
 #include "profile_cct.h"
+#include "rom_syms.h"
 #include "memory.h"
 #include "cpu/irq_ctx.h"
 #include "vera_bandwidth.h"
@@ -24,6 +25,8 @@ static uint32_t      report_generation;
 // Whether perf_hist was armed by someone else (a DAP client) before the
 // capture, so ending the capture leaves it as it was found.
 static bool hist_was_enabled;
+
+static prof_budget_summary_t budget_summary;
 
 static bool cct_ready;      // pool allocated (once; reused by every capture)
 static bool tree_consistent = true;
@@ -158,11 +161,34 @@ finished(cap_end_t why)
 		prof_report_free(&report);
 	have_report = false;
 	report_generation++;
+
+	// Work against waiting, from the budget recorder's ring, newest first:
+	// the capture's frames are the most recent ones.
+	memset(&budget_summary, 0, sizeof budget_summary);
+	if (cap_recorders() & CAP_REC_BUDGET) {
+		const int want = (int)cap_frames();
+		budget_summary.budget = perf_budget_budget_cycles();
+		for (int i = 0; i < want && i < perf_budget_frame_count(); i++) {
+			perf_frame_t fr;
+			if (!perf_budget_frame_at(i, &fr))
+				break;
+			const uint32_t work = perf_frame_work(&fr);
+			budget_summary.frames++;
+			budget_summary.total += fr.total;
+			budget_summary.idle += fr.idle;
+			if (work > budget_summary.work_max)
+				budget_summary.work_max = work;
+			if (budget_summary.budget && fr.period_work > budget_summary.budget)
+				budget_summary.overruns++;
+		}
+		budget_summary.have = budget_summary.frames > 0;
+	}
 	if (!(cap_recorders() & CAP_REC_HIST))
 		return;
 
 	const int   n    = dbg_info_symbol_count();
-	prof_sym_t *syms = n > 0 ? calloc((size_t)n, sizeof *syms) : NULL;
+	const int   nrom = rom_syms_count();
+	prof_sym_t *syms = n + nrom > 0 ? calloc((size_t)(n + nrom), sizeof *syms) : NULL;
 	int         ns   = 0;
 	// Name time by routine: when the debug info says which labels open a
 	// .proc/.scope, only those count, so a local like `loop` or `next` rolls
@@ -181,6 +207,10 @@ finished(cap_end_t why)
 		syms[ns].addr = (uint16_t)addr;
 		syms[ns].bank = (int16_t)dbg_info_symbol_bank_at(i);
 		ns++;
+	}
+	for (int i = 0; syms && i < nrom; i++) {
+		const rom_sym_t *r = rom_syms_at(i);
+		syms[ns++] = (prof_sym_t){r->name, r->addr, r->bank, true};
 	}
 	have_report   = prof_report_build(&report, syms, ns, covered);
 	report_frames = cap_frames();
@@ -245,6 +275,112 @@ bool
 profile_session_tree_consistent(void)
 {
 	return tree_consistent;
+}
+
+const prof_budget_summary_t *
+profile_session_budget_summary(void)
+{
+	return &budget_summary;
+}
+
+int
+profile_session_export_folded(const char *path)
+{
+	const prof_report_t *r = profile_session_report();
+	if (!r || r->node_count <= 2 || !path)
+		return -1;
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return -1;
+	int lines = 0;
+	int chain[512];
+	for (int i = 0; i < r->node_count; i++) {
+		if (!r->nodes[i].self)
+			continue;
+		int depth = 0;
+		for (int n = i; n >= 0 && depth < 512; n = r->nodes[n].parent)
+			chain[depth++] = n;
+		for (int d = depth - 1; d >= 0; d--) {
+			char name[PROF_NAME_MAX + 16];
+			profile_session_node_name(r, chain[d], name, sizeof name);
+			// ';' separates frames in this format; no symbol has one, but a
+			// stray one would split a frame in two.
+			for (char *c = name; *c; c++)
+				if (*c == ';')
+					*c = ',';
+			fprintf(f, "%s%s", name, d ? ";" : "");
+		}
+		fprintf(f, " %llu\n", (unsigned long long)r->nodes[i].self);
+		lines++;
+	}
+	fclose(f);
+	return lines;
+}
+
+static void
+json_str(FILE *f, const char *s)
+{
+	fputc('"', f);
+	for (; *s; s++) {
+		if (*s == '"' || *s == '\\')
+			fprintf(f, "\\%c", *s);
+		else if ((unsigned char)*s < 0x20)
+			fprintf(f, "\\u%04x", (unsigned char)*s);
+		else
+			fputc(*s, f);
+	}
+	fputc('"', f);
+}
+
+int
+profile_session_export_json(const char *path)
+{
+	const prof_report_t *r = profile_session_report();
+	if (!r || !path)
+		return -1;
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return -1;
+	static const char *const regions[] = {"low", "ram", "rom"};
+	fprintf(f, "{\n  \"frames\": %u,\n  \"mainCycles\": %llu,\n  \"irqCycles\": %llu,\n"
+	           "  \"instructions\": %llu,\n",
+	        report_frames, (unsigned long long)r->main_cycles, (unsigned long long)r->irq_cycles,
+	        (unsigned long long)r->instructions);
+	if (budget_summary.have)
+		fprintf(f, "  \"budget\": {\"frames\": %u, \"totalCycles\": %llu, \"idleCycles\": %llu, "
+		           "\"workMax\": %u, \"overruns\": %u, \"budgetCycles\": %u},\n",
+		        budget_summary.frames, (unsigned long long)budget_summary.total,
+		        (unsigned long long)budget_summary.idle, budget_summary.work_max,
+		        budget_summary.overruns, budget_summary.budget);
+	fprintf(f, "  \"rows\": [\n");
+	for (int i = 0; i < r->count; i++) {
+		const prof_row_t *row = &r->rows[i];
+		fprintf(f, "    {\"name\": ");
+		json_str(f, row->name);
+		fprintf(f, ", \"region\": \"%s\", \"bank\": %u, \"addr\": %u, \"named\": %s, "
+		           "\"mainCycles\": %llu, \"irqCycles\": %llu, \"instructions\": %llu, "
+		           "\"inclCycles\": %llu, \"calls\": %u, \"callMax\": %u, \"frameMax\": %u}%s\n",
+		        regions[row->region < 3 ? row->region : 0], (unsigned)row->bank,
+		        (unsigned)row->addr, row->named ? "true" : "false",
+		        (unsigned long long)row->main_cycles, (unsigned long long)row->irq_cycles,
+		        (unsigned long long)row->instructions, (unsigned long long)row->incl_cycles,
+		        row->calls, row->call_max, row->frame_max, i + 1 < r->count ? "," : "");
+	}
+	fprintf(f, "  ],\n  \"tree\": [\n");
+	for (int i = 0; i < r->node_count; i++) {
+		const prof_node_t *n = &r->nodes[i];
+		char name[PROF_NAME_MAX + 16];
+		profile_session_node_name(r, i, name, sizeof name);
+		fprintf(f, "    {\"name\": ");
+		json_str(f, name);
+		fprintf(f, ", \"parent\": %d, \"row\": %d, \"self\": %llu, \"incl\": %llu, "
+		           "\"calls\": %u, \"callMax\": %u, \"frameMax\": %u}%s\n",
+		        n->parent, n->row, (unsigned long long)n->self, (unsigned long long)n->incl,
+		        n->calls, n->call_max, n->frame_max, i + 1 < r->node_count ? "," : "");
+	}
+	fprintf(f, "  ],\n  \"treeConsistent\": %s\n}\n", tree_consistent ? "true" : "false");
+	fclose(f);
+	return r->count + r->node_count;
 }
 
 // The tree, top-down, heaviest first: every node of at least `min` cycles
@@ -343,6 +479,17 @@ profile_session_print(FILE *f, int top)
 	        (unsigned long long)r->instructions);
 	fprintf(f, "%d routines/pages, %d named by label, %d with an unestablished bank (*)\n", r->count,
 	        r->named_rows, r->ambiguous_rows);
+	if (budget_summary.have)
+		fprintf(f, "work %.1f%%, waiting %.1f%% (cycle budget); worst frame %u of %u cycles, "
+		           "%u over budget\n",
+		        budget_summary.total
+		            ? 100.0 * (double)(budget_summary.total - budget_summary.idle) /
+		                  (double)budget_summary.total
+		            : 0.0,
+		        budget_summary.total
+		            ? 100.0 * (double)budget_summary.idle / (double)budget_summary.total
+		            : 0.0,
+		        budget_summary.work_max, budget_summary.budget, budget_summary.overruns);
 	// cyc/ins: no 6502 instruction takes fewer than 2 cycles, so a figure near
 	// 1 means the CPU sat in WAI there, ticking one cycle per step -- waiting,
 	// not working.

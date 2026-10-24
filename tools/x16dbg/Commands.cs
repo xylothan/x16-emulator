@@ -52,6 +52,8 @@ public static class Commands
                     return await DoJoy(client, args);
                 case "bp":
                     return await DoBp(client, args);
+                case "profile":
+                    return await DoProfile(client, args);
                 default:
                     Console.Error.WriteLine($"Unknown command: {cmd}");
                     return 1;
@@ -339,6 +341,129 @@ public static class Commands
     {
         "up", "down", "left", "right", "a", "b", "x", "y", "start", "select", "l", "r"
     };
+
+    // profile <frames> [top <n>] [folded <path>] [json <path>] [rec <a,b,..>]
+    // Capture <frames> frames, wait for the report, print the top routines and
+    // the heaviest call paths; optionally have the emulator write the exports.
+    static async Task<int> DoProfile(X16DebugClient client, string[] args)
+    {
+        if (args.Length < 1 || !uint.TryParse(args[0], out uint frames) || frames == 0)
+        {
+            Console.Error.WriteLine("Usage: profile <frames> [top <n>] [folded <path>] [json <path>] [rec <list>]");
+            Console.Error.WriteLine("       profile 600                       capture 600 frames, print the report");
+            Console.Error.WriteLine("       profile 600 folded run.folded     also write collapsed stacks (speedscope)");
+            Console.Error.WriteLine("       profile 600 rec hist,budget       choose recorders (default hist,tree)");
+            return 1;
+        }
+        int top = 25;
+        string? folded = null, json = null;
+        JsonArray? recs = null;
+        for (int i = 1; i + 1 < args.Length; i += 2)
+        {
+            switch (args[i].ToLower())
+            {
+                case "top": top = int.Parse(args[i + 1]); break;
+                case "folded": folded = System.IO.Path.GetFullPath(args[i + 1]); break;
+                case "json": json = System.IO.Path.GetFullPath(args[i + 1]); break;
+                case "rec":
+                    recs = new JsonArray();
+                    foreach (var r in args[i + 1].Split(','))
+                        recs.Add(r.Trim());
+                    break;
+                default:
+                    Console.Error.WriteLine($"Error: unknown option '{args[i]}'");
+                    return 1;
+            }
+        }
+
+        var start = new JsonObject { ["frames"] = frames };
+        if (recs != null)
+            start["recorders"] = recs;
+        var resp = await client.SendRequestAsync("x16/capture", new JsonObject { ["start"] = start, ["top"] = 0 });
+        if (!DapSuccess(resp))
+        {
+            PrintDapError(resp);
+            return 1;
+        }
+        Console.Error.Write($"Capturing {frames} frames");
+
+        JsonNode? body = null;
+        for (;;)
+        {
+            await Task.Delay(250);
+            var args2 = new JsonObject { ["top"] = top };
+            var ex = new JsonObject();
+            if (folded != null) ex["folded"] = folded;
+            if (json != null) ex["json"] = json;
+            if (ex.Count > 0) args2["export"] = ex;
+            var st = await client.SendRequestAsync("x16/capture", args2);
+            if (!DapSuccess(st))
+            {
+                PrintDapError(st);
+                return 1;
+            }
+            body = st["body"];
+            if (body?["state"]?.GetValue<string>() == "done")
+                break;
+            Console.Error.Write(".");
+        }
+        Console.Error.WriteLine();
+
+        var rep = body?["report"];
+        if (rep == null)
+        {
+            Console.Error.WriteLine("Error: the capture produced no report");
+            return 1;
+        }
+        double main = rep["mainCycles"]?.GetValue<double>() ?? 0, irq = rep["irqCycles"]?.GetValue<double>() ?? 0;
+        double total = main + irq;
+        double nframes = Math.Max(1, rep["frames"]?.GetValue<double>() ?? 1);
+        Console.WriteLine($"{nframes} frames, {total / nframes:F0} cycles per frame, {(total > 0 ? 100 * irq / total : 0):F1}% in interrupts");
+        Console.WriteLine($"{"self%",6} {"incl%",6} {"calls",8}  routine");
+        foreach (var row in rep["rows"]?.AsArray() ?? new JsonArray())
+        {
+            double self = (row?["mainCycles"]?.GetValue<double>() ?? 0) + (row?["irqCycles"]?.GetValue<double>() ?? 0);
+            double incl = row?["inclCycles"]?.GetValue<double>() ?? 0;
+            double calls = row?["calls"]?.GetValue<double>() ?? 0;
+            Console.WriteLine($"{100 * self / Math.Max(1, total),6:F2} {(incl > 0 ? (100 * incl / Math.Max(1, total)).ToString("F2") : "-"),6} {calls,8}  {row?["name"]?.GetValue<string>()}");
+        }
+
+        // The tree, heaviest paths first.
+        var tree = rep["tree"]?.AsArray();
+        if (tree != null && tree.Count > 2)
+        {
+            var kids = new List<int>[tree.Count];
+            for (int i = 0; i < tree.Count; i++) kids[i] = new List<int>();
+            for (int i = 0; i < tree.Count; i++)
+            {
+                int p = (int)(tree[i]?["parent"]?.GetValue<double>() ?? -1);
+                if (p >= 0) kids[p].Add(i);
+            }
+            double Incl(int i) => tree[i]?["incl"]?.GetValue<double>() ?? 0;
+            foreach (var k in kids) k.Sort((a, b) => Incl(b).CompareTo(Incl(a)));
+            Console.WriteLine();
+            Console.WriteLine($"{"incl%",6} {"calls",8}  call path");
+            int lines = top * 2;
+            void Walk(int i, int depth)
+            {
+                if (lines-- <= 0 || Incl(i) * 200 < total) return;
+                Console.WriteLine($"{100 * Incl(i) / Math.Max(1, total),6:F2} {tree[i]?["calls"]?.GetValue<double>() ?? 0,8}  {new string(' ', depth * 2)}{tree[i]?["name"]?.GetValue<string>()}");
+                foreach (int c in kids[i]) Walk(c, depth + 1);
+            }
+            for (int i = 0; i < tree.Count; i++)
+                if ((tree[i]?["parent"]?.GetValue<double>() ?? 0) < 0)
+                    Walk(i, 0);
+            if (rep["treeConsistent"]?.GetValue<bool>() == false)
+                Console.WriteLine("warning: the tree's totals do not match the histogram's");
+        }
+
+        var done = body?["exported"];
+        if (folded != null)
+            Console.WriteLine($"{folded}: {done?["folded"]?.GetValue<double>() ?? -1} call paths");
+        if (json != null)
+            Console.WriteLine($"{json}: {done?["json"]?.GetValue<double>() ?? -1} records");
+        return 0;
+    }
 
     static async Task<int> DoJoy(X16DebugClient client, string[] args)
     {

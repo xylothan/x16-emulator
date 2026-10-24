@@ -315,6 +315,7 @@ set(X16_SOURCES
     src/profile_report.c
     src/profile_session.c
     src/profile_cct.c
+    src/rom_syms.c
     src/input_script.c
     src/vera_bandwidth.c
     src/disasm.c
@@ -744,6 +745,10 @@ x16_add_test(profile_report
 # The call tree is fed synthetic call/return/interrupt streams by a toy CPU.
 x16_add_test(profile_cct
     SOURCES tests/test_profile_cct.c tests/support/harness.c src/profile_cct.c)
+
+# ROM .sym parsing: which labels are kept, as which bank.
+x16_add_test(rom_syms
+    SOURCES tests/test_rom_syms.c tests/support/harness.c src/rom_syms.c)
 
 x16_add_test(input_script
     SOURCES tests/test_input_script.c tests/support/harness.c src/input_script.c)
