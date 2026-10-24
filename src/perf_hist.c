@@ -21,7 +21,6 @@ static uint32_t         task_frame[PH_MAX_TASKS]; // this frame's cycles
 static int              ntasks;
 static int              cur_task = -1;            // -1: none open
 static uint32_t         cur_call;                 // cycles of the open call
-static bool             pending_jsr;
 
 static uint32_t
 key_of(uint16_t pc, uint8_t ram_bank, uint8_t rom_bank)
@@ -82,7 +81,6 @@ perf_hist_reset(void)
 	ntasks = 0;
 	cur_task = -1;
 	cur_call = 0;
-	pending_jsr = false;
 }
 
 void
@@ -91,7 +89,6 @@ perf_hist_set_caller(uint16_t start, uint16_t end)
 	perf_hist_caller_start = start;
 	perf_hist_caller_end   = end;
 	close_call();
-	pending_jsr = false;
 }
 
 bool
