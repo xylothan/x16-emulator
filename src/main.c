@@ -2292,7 +2292,6 @@ debug_gate_refresh(void)
 static void
 host_prof_close_frame(void)
 {
-	debug_gate_refresh();
 	const uint32_t now = clockticks6502;
 	host_prof_frame_end(now - host_prof_last_cycles);
 	host_prof_last_cycles = now;
@@ -2472,6 +2471,7 @@ emulator_step_during_move(void)
 	}
 	if (new_frame) {
 		host_prof_close_frame();
+		debug_gate_refresh();
 	}
 
 	in_step = false;
@@ -2713,6 +2713,7 @@ emulator_loop(void *param)
 			// After it, unlike the guest budget: the host frame is the whole
 			// interval, sleep included, so its sections sum to wall time.
 			host_prof_close_frame();
+			debug_gate_refresh();
 			if (!bench_tick()) {
 				break;
 			}

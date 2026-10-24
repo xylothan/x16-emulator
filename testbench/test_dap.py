@@ -1069,7 +1069,10 @@ t0 = time.time()
 bk_req("pause", {"threadId": 1})
 e = bk_wait_stop(2)
 dt = time.time() - t0
-bk_case("pause while running stops promptly (%.2fs)" % dt, e is not None and dt < 1.0)
+# The socket is polled every DEBUG_POLL_INTERVAL (1000) instructions, about
+# 0.1 ms at 8 MHz. 0.2 s is far above that but well below what a counting bug
+# polling once per million instructions would take (~0.4 s).
+bk_case("pause while running stops promptly (%.2fs)" % dt, e is not None and dt < 0.2)
 
 bk_run_free()
 r = bk_instr("2:A000")
