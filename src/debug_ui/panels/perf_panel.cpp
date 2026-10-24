@@ -450,6 +450,52 @@ stat_cell(uint32_t v, uint32_t budget)
 // machine recomputes nothing.
 const double STATS_REFRESH_S = 0.25;
 
+// ─── When the recorders run ─────────────────────────────────────────────────
+// perf_budget and vera_bandwidth cost the running machine about 0.4 ms per
+// frame between them (docs/profiler-plan.md). They used to run whenever this
+// panel was open -- and every panel opens by default, so that was every -imgui
+// session, even with Performance behind another tab. Now they run while the
+// panel is actually drawn, or while "Keep profiling when hidden" is on.
+// Disarming discards the history.
+//
+// The panel reports that it was drawn; debug_ui_render() calls the tick once
+// per debugger frame whether or not the panel rendered, which is what lets a
+// closed panel disarm at all (a closed panel's render is never called).
+//
+// Disarming waits PERF_HIDDEN_GRACE_FRAMES: ImGui can report a window as not
+// drawn for a frame or two (its first frame, a dock drag), and each disarm
+// throws the history away.
+const int PERF_HIDDEN_GRACE_FRAMES = 30; // about half a second at 60 Hz
+
+bool g_armed           = false;
+bool g_drawn_this_frame = false;
+int  g_hidden_frames   = 0;
+
+void
+perf_recorders_set(bool want)
+{
+	DebugUiSettings &s = debug_ui_settings();
+	perf_budget_arm(PERF_OWNER_UI, want);
+	vera_bandwidth_arm(VERA_BW_OWNER_UI, want);
+	if (want) {
+		perf_budget_set_capacity(s.perf_capacity);
+		perf_budget_set_target_fps(s.perf_target_fps);
+		perf_budget_set_idle_mode((perf_idle_mode_t)s.perf_idle_mode);
+	}
+	g_armed = want;
+}
+
+// Called by the panel once Begin() says it is being drawn. Arms at once, so the
+// first visible frame already has data rather than "Profiling is off."
+void
+perf_recorders_mark_visible(void)
+{
+	g_drawn_this_frame = true;
+	g_hidden_frames    = 0;
+	if (!g_armed)
+		perf_recorders_set(true);
+}
+
 struct StatsCache {
 	double   at      = -1.0;
 	uint32_t frames  = 0;
@@ -768,12 +814,15 @@ draw_controls(void)
 		    "idle zone, or bracket the real work with $9FBC markers.");
 	}
 
-	if (ImGui::Checkbox("Keep profiling when this panel is closed", &s.perf_always_on))
+	if (ImGui::Checkbox("Keep profiling when hidden", &s.perf_always_on))
 		debug_ui_settings_mark_dirty();
 	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Profiling costs the running machine an add and a table lookup\n"
-		                  "per instruction, so it is normally armed only while this panel\n"
-		                  "is open. Turn this on to keep a DAP client fed with the panel shut.");
+		ImGui::SetTooltip("Profiling costs the running machine about 0.4 ms of host time\n"
+		                  "per frame, so it normally runs only while this panel is on\n"
+		                  "screen. Closing the panel or putting it behind another tab\n"
+		                  "stops it and discards the history.\n\n"
+		                  "Turn this on to keep recording regardless -- to build up\n"
+		                  "history while you look at other panels.");
 	}
 
 	ImGui::SetNextItemWidth(dbgui_field_width("99999"));
@@ -1004,27 +1053,12 @@ draw_bandwidth(void)
 void
 perf_panel_render(bool *p_open)
 {
-	// Arm profiling for as long as the panel is open. Done before Begin() so a
-	// collapsed-but-open panel keeps collecting: the user has said they are
-	// interested, and a gap in the history helps nobody.
-	static bool armed = false;
-	DebugUiSettings &s = debug_ui_settings();
-	const bool want = (p_open ? *p_open : true) || s.perf_always_on;
-	if (want != armed) {
-		perf_budget_arm(PERF_OWNER_UI, want);
-		vera_bandwidth_arm(VERA_BW_OWNER_UI, want);
-		if (want) {
-			perf_budget_set_capacity(s.perf_capacity);
-			perf_budget_set_target_fps(s.perf_target_fps);
-			perf_budget_set_idle_mode((perf_idle_mode_t)s.perf_idle_mode);
-		}
-		armed = want;
-	}
-
+	// The recorders follow visibility, not "open": see perf_recorders_tick().
 	if (!ImGui::Begin("Performance", p_open)) {
 		dbgui_window_end();
 		return;
 	}
+	perf_recorders_mark_visible();
 	dbgui_window_zoom("perf");
 
 	if (!perf_budget_is_enabled()) {
@@ -1057,3 +1091,17 @@ perf_panel_render(bool *p_open)
 DebugPanelRegistration s_reg("Performance", perf_panel_render, true);
 
 } // namespace
+
+void
+debug_ui_perf_recorders_tick(void)
+{
+	const bool keep = debug_ui_settings().perf_always_on;
+	if (g_drawn_this_frame || keep) {
+		g_hidden_frames = 0;
+		if (!g_armed)
+			perf_recorders_set(true);
+	} else if (g_armed && ++g_hidden_frames >= PERF_HIDDEN_GRACE_FRAMES) {
+		perf_recorders_set(false);
+	}
+	g_drawn_this_frame = false;
+}

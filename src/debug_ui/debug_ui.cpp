@@ -1072,6 +1072,9 @@ debug_ui_render(void)
         }
     }
 
+    // After the panels, so it knows whether Performance was drawn this frame.
+    debug_ui_perf_recorders_tick();
+
     // Optional vendored demo window (Help → Show ImGui Demo).
     if (s_show_demo) {
         ImGui::ShowDemoWindow(&s_show_demo);

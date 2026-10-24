@@ -109,4 +109,10 @@ void debug_ui_settings_mark_dirty(void);
 // thing wherever it was changed. Defined in panels/io_panel.cpp.
 void debug_ui_apply_io_capture(void);
 
+// Arm or disarm the Performance panel's recorders: on while the panel was
+// drawn this frame (or "Keep profiling when hidden" is set), off after a short
+// grace once it is not. Called once per debugger frame, after the panels.
+// Defined in panels/perf_panel.cpp.
+void debug_ui_perf_recorders_tick(void);
+
 #endif

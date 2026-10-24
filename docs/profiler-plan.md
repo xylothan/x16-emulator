@@ -361,10 +361,14 @@ render time per panel:
 - **Performance:** the Statistics and zone percentiles are cached, and
   refreshed at most every 0.25 s, only when a frame completed or the budget or
   zones changed.
-- **Still open: when the Performance panel's recorders run.** With the panel
-  open, emulation is about 0.3–0.45 ms per frame above the no-recorder figure.
-  That cost is `perf_budget` plus `vera_bandwidth`, armed whenever the panel is
-  open, even as a hidden tab.
+- **The Performance panel's recorders now run only while it is drawn.**
+  With the panel visible, emulation is about 0.3–0.45 ms per frame above the
+  no-recorder figure; that is `perf_budget` plus `vera_bandwidth`. They used to
+  be armed whenever the panel was open, which by default meant every `-imgui`
+  session, even with Performance behind another tab, and they stayed armed
+  after the panel was closed with its [x]. They are now armed while the panel
+  is drawn, or while "Keep profiling when hidden" is on, and disarmed half a
+  second after it stops being drawn. Disarming discards the history.
 
 Done when the Phase 0 benchmark set, rerun, meets these targets, and CI
 (including `wasm`) is green.
