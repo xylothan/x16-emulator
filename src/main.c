@@ -135,8 +135,12 @@ bool warp_mode = false;
 // warm-up, print where the host's time went, and exit. See host_prof.h.
 static uint32_t    bench_frames = 0;
 static uint32_t    bench_warmup = 600;
+#ifdef HAS_IMGUI
+// Only an ImGui build reads these, so only an ImGui build has them: a build
+// without the debugger would otherwise set them and never read them.
 static const char *bench_ui_panels = NULL; // -uipanels
 static bool        bench_ui_iotrace = false; // -uiiotrace
+#endif
 static uint32_t    host_prof_last_cycles;
 bool warp_pastes = false;
 bool grab_mouse = false;
@@ -996,19 +1000,26 @@ main(int argc, char **argv)
 				argc--;
 				argv++;
 			}
-		} else if (!strcmp(argv[0], "-uipanels")) {
+		} else if (!strcmp(argv[0], "-uipanels") || !strcmp(argv[0], "-uiiotrace")) {
+#ifdef HAS_IMGUI
+			const bool panels = !strcmp(argv[0], "-uipanels");
 			argc--;
 			argv++;
-			if (!argc) {
-				usage();
+			if (panels) {
+				if (!argc) {
+					usage();
+				}
+				bench_ui_panels = !strcmp(argv[0], "none") ? "" : argv[0];
+				argc--;
+				argv++;
+			} else {
+				bench_ui_iotrace = true;
 			}
-			bench_ui_panels = !strcmp(argv[0], "none") ? "" : argv[0];
-			argc--;
-			argv++;
-		} else if (!strcmp(argv[0], "-uiiotrace")) {
-			argc--;
-			argv++;
-			bench_ui_iotrace = true;
+#else
+			// Same as -imgui: fail loudly rather than ignore a debugger flag.
+			printf("This build has no graphical debugger; %s is unavailable.\n", argv[0]);
+			exit(1);
+#endif
 		} else if (!strcmp(argv[0], "-pastewarp")) {
 			argc--;
 			argv++;
