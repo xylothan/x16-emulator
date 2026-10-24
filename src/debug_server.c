@@ -11,6 +11,7 @@
 #include "perf_budget.h"
 #include "perf_hist.h"
 #include "host_prof.h"
+#include "profile_session.h"
 #include "vera_bandwidth.h"
 #include "sprite_trace.h"
 #include "glue.h"
@@ -2405,6 +2406,108 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Capture mode (x16/capture) ─────────────────────────────────────────────
+// Record a stretch of running with the debugger quiet, then read where the
+// guest's time went, by routine. See profile_capture.h.
+// Arguments, all optional, applied in this order:
+//   start: {frames, seconds, onMarker, recorders: ["hist","budget","vram"]}
+//          begin one (recorders default to ["hist"]); refused while one runs
+//   stop:  true   end a running capture, or cancel one armed for a marker
+//   top:   n      report rows to return (default 50; 0 = none)
+// The body always carries the state; once a capture has ended, its report.
+static int handle_x16_capture(int seq, cJSON *args) {
+    cJSON *start = args ? cJSON_GetObjectItemCaseSensitive(args, "start") : NULL;
+    if (cJSON_IsObject(start)) {
+        cap_config_t c = {0};
+        cJSON *v = cJSON_GetObjectItemCaseSensitive(start, "frames");
+        if (cJSON_IsNumber(v) && v->valuedouble > 0) c.frames = (uint32_t)v->valuedouble;
+        v = cJSON_GetObjectItemCaseSensitive(start, "seconds");
+        if (cJSON_IsNumber(v) && v->valuedouble > 0) c.seconds = v->valuedouble;
+        v = cJSON_GetObjectItemCaseSensitive(start, "onMarker");
+        c.on_marker = cJSON_IsTrue(v);
+        cJSON *recs = cJSON_GetObjectItemCaseSensitive(start, "recorders");
+        if (cJSON_IsArray(recs)) {
+            cJSON *r;
+            cJSON_ArrayForEach(r, recs) {
+                const uint32_t bit = cJSON_IsString(r) ? profile_session_recorder_bit(r->valuestring) : 0;
+                if (!bit) {
+                    send_dap_error_response(seq, "x16/capture",
+                                            "unknown recorder (expected hist, budget or vram)");
+                    return 0;
+                }
+                c.recorders |= bit;
+            }
+        } else {
+            c.recorders = CAP_REC_HIST;
+        }
+        if (cap_state() == CAP_RUNNING || cap_state() == CAP_ARMED) {
+            send_dap_error_response(seq, "x16/capture", "a capture is already running or armed");
+            return 0;
+        }
+        if (!cap_start(&c) && cap_state() != CAP_ARMED) {
+            send_dap_error_response(seq, "x16/capture", "the recorders could not be armed");
+            return 0;
+        }
+    }
+    cJSON *stop = args ? cJSON_GetObjectItemCaseSensitive(args, "stop") : NULL;
+    if (cJSON_IsTrue(stop))
+        cap_stop();
+    int top = 50;
+    cJSON *t = args ? cJSON_GetObjectItemCaseSensitive(args, "top") : NULL;
+    if (cJSON_IsNumber(t) && t->valuedouble >= 0)
+        top = (int)t->valuedouble;
+
+    static const char *const state_names[] = {"idle", "armed", "running", "done"};
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "state", state_names[cap_state()]);
+    cJSON_AddNumberToObject(body, "frames", cap_frames());
+    cJSON_AddNumberToObject(body, "elapsedSeconds", cap_elapsed_s());
+    if (cap_state() == CAP_DONE)
+        cJSON_AddStringToObject(body, "ended", cap_end_name(cap_end_reason()));
+    cJSON *recs = cJSON_CreateArray();
+    for (uint32_t bit = 1; bit <= CAP_REC_VRAM; bit <<= 1)
+        if (cap_recorders() & bit)
+            cJSON_AddItemToArray(recs, cJSON_CreateString(profile_session_recorder_name(bit)));
+    cJSON_AddItemToObject(body, "recorders", recs);
+
+    const prof_report_t *r = profile_session_report();
+    if (r && cap_state() == CAP_DONE) {
+        cJSON *rep = cJSON_CreateObject();
+        const uint64_t total  = r->main_cycles + r->irq_cycles;
+        const uint32_t frames = profile_session_report_frames();
+        cJSON_AddNumberToObject(rep, "frames", frames);
+        cJSON_AddNumberToObject(rep, "mainCycles", (double)r->main_cycles);
+        cJSON_AddNumberToObject(rep, "irqCycles", (double)r->irq_cycles);
+        cJSON_AddNumberToObject(rep, "instructions", (double)r->instructions);
+        cJSON_AddNumberToObject(rep, "rowCount", r->count);
+        cJSON_AddNumberToObject(rep, "namedRows", r->named_rows);
+        cJSON_AddNumberToObject(rep, "ambiguousRows", r->ambiguous_rows);
+        cJSON *rows = cJSON_CreateArray();
+        static const char *const regions[] = {"low", "ram", "rom"};
+        for (int i = 0; i < r->count && i < top; i++) {
+            const prof_row_t *row = &r->rows[i];
+            const uint64_t    tc  = row->main_cycles + row->irq_cycles;
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddStringToObject(o, "name", row->name);
+            cJSON_AddStringToObject(o, "region", regions[row->region < 3 ? row->region : 0]);
+            cJSON_AddNumberToObject(o, "bank", row->bank);
+            cJSON_AddNumberToObject(o, "addr", row->addr);
+            cJSON_AddBoolToObject(o, "named", row->named);
+            cJSON_AddBoolToObject(o, "ambiguous", row->ambiguous);
+            cJSON_AddNumberToObject(o, "mainCycles", (double)row->main_cycles);
+            cJSON_AddNumberToObject(o, "irqCycles", (double)row->irq_cycles);
+            cJSON_AddNumberToObject(o, "instructions", (double)row->instructions);
+            cJSON_AddNumberToObject(o, "percent", total ? 100.0 * (double)tc / (double)total : 0.0);
+            cJSON_AddNumberToObject(o, "perFrame", frames ? (double)tc / frames : 0.0);
+            cJSON_AddItemToArray(rows, o);
+        }
+        cJSON_AddItemToObject(rep, "rows", rows);
+        cJSON_AddItemToObject(body, "report", rep);
+    }
+    send_dap_response(seq, "x16/capture", true, body);
+    return 0;
+}
+
 // ─── Host time (x16/hostPerf) ───────────────────────────────────────────────
 // Where the HOST's time goes per emulated frame: emulation, input, present,
 // the debugger UI, sleep, DAP -- plus each debugger panel. Guest cycle numbers
@@ -3669,6 +3772,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);
     else if (!strcmp(cmd, "x16/hostPerf")) result = handle_x16_host_perf(seq, args);
+    else if (!strcmp(cmd, "x16/capture")) result = handle_x16_capture(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);

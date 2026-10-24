@@ -22,6 +22,15 @@
 #define CYCLES_PER_FRAME 134400
 #define SCANLINES        525
 
+// A stand-in for capture mode's marker hook: takes $F8, declines the rest.
+static int hook_calls;
+static bool
+hook_takes_f8(uint8_t value)
+{
+	hook_calls++;
+	return value == 0xF8;
+}
+
 static void
 configure(void)
 {
@@ -605,6 +614,35 @@ main(void)
 		check_eq((uint32_t)perf_budget_frames_per_budget(), 2,
 		         "while leaving the target fps alone");
 
+		perf_budget_set_enabled(false);
+	}
+
+	// ── A value the marker hook consumes never reaches the protocol ─────────
+	// Capture mode takes $F8/$F9 through perf_budget_marker_hook. Any marker
+	// that does reach the protocol switches this module into marker mode for
+	// the session, which turns the spin detector off -- so a guest starting a
+	// capture must not silently change how work and waiting are classified.
+	{
+		configure();
+		perf_budget_marker_hook = hook_takes_f8;
+		perf_budget_marker_write(0xF8);
+		run_spin(0x4000, 20);
+		perf_budget_frame_end(0);
+		perf_frame_t f;
+		perf_budget_last_frame(&f);
+		check_eq(hook_calls, 1, "the hook sees the write");
+		check(f.idle > 0, "and a consumed value leaves the spin detector on");
+
+		// A value the hook declines is an ordinary marker, as before.
+		perf_budget_reset();
+		perf_budget_marker_write(0x01); // enter region 1
+		run_spin(0x4000, 20);
+		perf_budget_frame_end(0);
+		perf_budget_last_frame(&f);
+		check_eq(hook_calls, 2, "the hook is offered every write");
+		check_eq(f.idle, 0, "and a value it declines still puts the module in marker mode");
+
+		perf_budget_marker_hook = NULL;
 		perf_budget_set_enabled(false);
 	}
 

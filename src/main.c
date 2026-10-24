@@ -42,6 +42,7 @@
 #include "perf_budget.h"
 #include "perf_hist.h"
 #include "host_prof.h"
+#include "profile_session.h"
 #include "io_trace.h"
 #ifdef HAS_IMGUI
 #include "debug_ui/debug_ui.h"
@@ -135,6 +136,13 @@ bool warp_mode = false;
 // warm-up, print where the host's time went, and exit. See host_prof.h.
 static uint32_t    bench_frames = 0;
 static uint32_t    bench_warmup = 600;
+// -profile: after `capture_cli_warmup` frames, capture `capture_cli_frames`
+// frames, print the report and exit. See profile_capture.h.
+static uint32_t    capture_cli_frames = 0;
+static uint32_t    capture_cli_warmup = 600;
+// -autostart: tap START on pad 1 for the first `autostart_frames` frames, so a
+// scripted run gets past a program's start menu without anyone at the keys.
+static uint32_t    autostart_frames = 0;
 #ifdef HAS_IMGUI
 // Only an ImGui build reads these, so only an ImGui build has them: a build
 // without the debugger would otherwise set them and never read them.
@@ -597,6 +605,14 @@ usage()
 	printf("\t-warp for throughput. With -uipanels, imgui.ini is neither read\n");
 	printf("\tnor written, so the run is reproducible; without it, the run\n");
 	printf("\tuses the imgui.ini in the working directory (your own layout).\n");
+	printf("-profile <frames> [<warmup frames>]\n");
+	printf("\tAfter the warm-up (default 600 frames), capture <frames> emulated\n");
+	printf("\tframes, print where the guest's time went by routine, and exit.\n");
+	printf("\tRoutines are named from the loaded debug info (-dbgfile).\n");
+	printf("-autostart <frames>\n");
+	printf("\tTap START on joystick 1 (held 6 frames, every 30) for the first\n");
+	printf("\t<frames> frames, then let go: gets a scripted -bench or -profile\n");
+	printf("\trun past a program's start menu.\n");
 #ifdef HAS_IMGUI
 	printf("-uipanels <name,name,...|all|none>\n");
 	printf("\tOpen exactly these debugger panels (with -imgui).\n");
@@ -1007,6 +1023,29 @@ main(int argc, char **argv)
 			argv++;
 			if (argc && argv[0][0] != '-') {
 				bench_warmup = (uint32_t)strtoul(argv[0], NULL, 10);
+				argc--;
+				argv++;
+			}
+		} else if (!strcmp(argv[0], "-autostart")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			autostart_frames = (uint32_t)strtoul(argv[0], NULL, 10);
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-profile")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			capture_cli_frames = (uint32_t)strtoul(argv[0], NULL, 10);
+			argc--;
+			argv++;
+			if (argc && argv[0][0] != '-') {
+				capture_cli_warmup = (uint32_t)strtoul(argv[0], NULL, 10);
 				argc--;
 				argv++;
 			}
@@ -1760,8 +1799,13 @@ main(int argc, char **argv)
 		fprintf(stderr, "-bench needs a window; it cannot run with -headless.\n");
 		exit(1);
 	}
+	if (capture_cli_frames && headless) {
+		fprintf(stderr, "-profile needs a window; it cannot run with -headless.\n");
+		exit(1);
+	}
 	host_prof_init(SDL_GetPerformanceCounter, SDL_GetPerformanceFrequency());
 	host_prof_last_cycles = clockticks6502;
+	profile_session_init();
 
 	instruction_counter = 0;
 
@@ -2349,6 +2393,11 @@ bench_report(void)
 	       perf_budget_is_enabled() ? "on" : "off", perf_budget_frame_count(),
 	       vera_bandwidth_is_enabled() ? "on" : "off", io_trace_enabled ? "on" : "off",
 	       io_trace_count(), io_trace_capacity());
+	// Where the guest ended up: a run whose program never got past its start
+	// menu still produces a perfectly plausible profile -- of the menu's wait.
+	printf("guest PC at end: %02X:%04X (RAM bank %u, ROM bank %u)%s\n", (unsigned)regs.k,
+	       (unsigned)regs.pc, (unsigned)memory_get_ram_bank(), (unsigned)memory_get_rom_bank(),
+	       waiting ? ", in WAI" : "");
 
 	// Spikes: frames that could not have kept real speed, and where their
 	// time went.
@@ -2402,6 +2451,57 @@ bench_tick(void)
 	}
 	if (n >= bench_frames) {
 		bench_report();
+		return false;
+	}
+	return true;
+}
+
+// Called once per closed frame. Taps START on pad 1 -- held for 6 frames out of
+// every 30 -- until `autostart_frames` frames have passed, then hands the pad
+// back. A tap rather than a hold: a menu that waits for a NEW press (pressed
+// now, up before) never sees a button held from the start.
+static void
+autostart_tick(void)
+{
+	static uint32_t n = 0;
+	if (!autostart_frames || n > autostart_frames) {
+		return;
+	}
+	if (n == autostart_frames) {
+		joystick_clear_virtual(0);
+	} else {
+		const bool down = (n % 30) < 6;
+		joystick_set_virtual(0, down ? (uint16_t)~JOY_BIT_START : 0xFFFF);
+	}
+	n++;
+}
+
+// Called once per closed frame, after profile_session_frame_end(). Returns
+// false when -profile is finished.
+static bool
+capture_cli_tick(void)
+{
+	static uint32_t n       = 0;
+	static bool     started = false;
+	if (!capture_cli_frames) {
+		return true;
+	}
+	if (!started) {
+		if (++n >= capture_cli_warmup) {
+			cap_config_t c = {0};
+			c.frames       = capture_cli_frames;
+			c.recorders    = CAP_REC_HIST;
+			if (!cap_start(&c)) {
+				fprintf(stderr, "-profile: the recorders could not be armed.\n");
+				return false;
+			}
+			started = true;
+		}
+		return true;
+	}
+	if (cap_state() == CAP_DONE) {
+		profile_session_print(stdout, 40);
+		bench_report(); // the host's side of the same frames
 		return false;
 	}
 	return true;
@@ -2522,7 +2622,9 @@ emulator_step_during_move(void)
 	}
 	if (new_frame) {
 		host_prof_close_frame();
+		profile_session_frame_end();
 		debug_gate_refresh();
+		autostart_tick();
 	}
 
 	in_step = false;
@@ -2766,8 +2868,10 @@ emulator_loop(void *param)
 			// After it, unlike the guest budget: the host frame is the whole
 			// interval, sleep included, so its sections sum to wall time.
 			host_prof_close_frame();
+			profile_session_frame_end();
 			debug_gate_refresh();
-			if (!bench_tick()) {
+			autostart_tick();
+			if (!bench_tick() || !capture_cli_tick()) {
 				break;
 			}
 #ifdef __EMSCRIPTEN__

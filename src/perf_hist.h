@@ -86,6 +86,35 @@ uint64_t perf_hist_loop_cycles(void);   // main-line cycles in the caller range
 int      perf_hist_task_count(void);
 bool     perf_hist_task_get(int i, perf_hist_task_t *out);
 
+// ─── Read access for analysis ───────────────────────────────────────────────
+// Which memory a key describes, and the bank and CPU address within it.
+#define PH_REGION_LOW 0   // $0000-$9FFF, not banked
+#define PH_REGION_RAM 1   // $A000-$BFFF, by RAM bank
+#define PH_REGION_ROM 2   // $C000-$FFFF, by ROM bank
+
+static inline void
+perf_hist_key_decode(uint32_t k, uint8_t *region, uint8_t *bank, uint16_t *pc)
+{
+	if (k < PH_RAM_BASE) {
+		*region = PH_REGION_LOW;
+		*bank   = 0;
+		*pc     = (uint16_t)k;
+	} else if (k < PH_ROM_BASE) {
+		*region = PH_REGION_RAM;
+		*bank   = (uint8_t)((k - PH_RAM_BASE) / PH_RAM_SIZE);
+		*pc     = (uint16_t)(0xA000u + (k - PH_RAM_BASE) % PH_RAM_SIZE);
+	} else {
+		*region = PH_REGION_ROM;
+		*bank   = (uint8_t)((k - PH_ROM_BASE) / PH_ROM_SIZE);
+		*pc     = (uint16_t)(0xC000u + (k - PH_ROM_BASE) % PH_ROM_SIZE);
+	}
+}
+
+// Counts at one key since the last reset. False when the histogram was never
+// armed or `key` is out of range.
+bool perf_hist_key_counts(uint32_t key, uint32_t *main_cycles, uint32_t *irq_cycles,
+                          uint32_t *instructions);
+
 // Sparse binary dump: "PHST", u32 version 2, u32 PH_KEYS, u32 frames, then
 // (u32 key, u32 main cycles, u32 irq cycles, u32 instructions executed) for
 // every key that ran. Returns entry count or -1.

@@ -11,6 +11,10 @@
 #include "debug_ui_image.h"  // panel image textures (SDL_Texture or shared DX12)
 #include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
 #include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
+#include "../profile_capture.h" // capture mode: the debugger goes quiet while it records
+
+// How often the debugger repaints its menu bar while a capture records.
+static const Uint32 CAPTURE_UI_INTERVAL_MS = 250;
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* for the first-run default layout
@@ -567,6 +571,28 @@ ctrl_button(const char *label, bool enabled, const char *tip)
     return clicked;
 }
 
+// Capture state in the menu bar. While one records, this and the rest of the
+// bar are all the debugger draws, so Stop has to live here.
+static void
+draw_capture_status(void)
+{
+    const cap_state_t st = cap_state();
+    if (st == CAP_RUNNING) {
+        ImGui::TextColored(ImVec4(1.00f, 0.45f, 0.45f, 1.0f), "CAPTURING %u frames, %.1f s",
+                           cap_frames(), cap_elapsed_s());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stop"))
+            cap_stop();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("End the capture. The report appears in the Profile panel.");
+    } else if (st == CAP_ARMED) {
+        ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.00f, 1.0f), "capture armed ($F8)");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel"))
+            cap_stop();
+    }
+}
+
 // Host time per emulated frame, smoothed, with the breakdown on hover. This is
 // the "is the debugger slowing the machine down" number: once busy time passes
 // the frame period, the machine cannot keep real speed. Reads only the last
@@ -876,6 +902,11 @@ debug_ui_draw_control_bar(void)
     ImGui::Separator();
     draw_host_time();
 
+    if (cap_state() == CAP_RUNNING || cap_state() == CAP_ARMED) {
+        ImGui::Separator();
+        draw_capture_status();
+    }
+
     ImGui::EndMainMenuBar();
 }
 
@@ -906,6 +937,7 @@ static const DebugPanelPlacement s_placement[] = {
     // Added last in this slot so Memory stays the tab the bottom group opens
     // on -- the loop below takes the first entry per slot as that slot's front.
     {"I/O",          DOCK_BOTTOM},
+    {"Profile",      DOCK_BOTTOM},
 };
 
 // A representative, long-established window for each slot. Used to find the
@@ -1021,6 +1053,20 @@ debug_ui_render(void)
         return false;
     }
 
+    // While a capture records, the debugger goes quiet: it rebuilds its frame
+    // at most every CAPTURE_UI_INTERVAL_MS, and then only the menu bar -- the
+    // capture status and its Stop button. Every panel costs the emulator's own
+    // thread to draw, and a capture exists to measure the machine without that.
+    const bool quiet = cap_running();
+    if (quiet) {
+        static Uint32 last_quiet = 0;
+        const Uint32  now        = SDL_GetTicks();
+        if (now - last_quiet < CAPTURE_UI_INTERVAL_MS) {
+            return true;
+        }
+        last_quiet = now;
+    }
+
     // Interface scale is read from settings and applied to the style + default
     // font. Must happen before NewFrame, which latches the current font.
     debug_ui_apply_ui_scale();
@@ -1064,7 +1110,7 @@ debug_ui_render(void)
     debug_ui_apply_io_capture();
 
     for (DebugPanel &panel : debug_ui_panels()) {
-        if (panel.open && panel.render) {
+        if (!quiet && panel.open && panel.render) {
             debug_ui_place_new_panel(panel.name);
             const uint64_t t0 = host_prof_now();
             panel.render(&panel.open);
@@ -1073,15 +1119,19 @@ debug_ui_render(void)
     }
 
     // After the panels, so it knows whether Performance was drawn this frame.
+    // During a capture it was not, so the panel's own recorders stand down; a
+    // capture that wants them arms them under its own owner.
     debug_ui_perf_recorders_tick();
 
-    // Optional vendored demo window (Help → Show ImGui Demo).
-    if (s_show_demo) {
-        ImGui::ShowDemoWindow(&s_show_demo);
-    }
+    if (!quiet) {
+        // Optional vendored demo window (Help → Show ImGui Demo).
+        if (s_show_demo) {
+            ImGui::ShowDemoWindow(&s_show_demo);
+        }
 
-    // User preferences (System → Settings...).
-    debug_ui_draw_settings_window(&s_show_settings);
+        // User preferences (System → Settings...).
+        debug_ui_draw_settings_window(&s_show_settings);
+    }
 
     ImGui::Render();
 
