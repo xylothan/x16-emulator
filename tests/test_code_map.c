@@ -479,7 +479,6 @@ main(void)
 		int             center_index = -99;
 		int             n = code_map_disasm_window(0x8004, 0, 0, 0, 2, 2, lines, 16, &center_index);
 
-		check(n > 0, "still produces a window when the walks disagree");
 		check(center_index >= 0, "does not lose the center line to width drift");
 		check(center_index >= 0 && center_index < n && lines[center_index].addr == 0x8004,
 		      "re-aligns onto the center address after drifting");
@@ -631,21 +630,49 @@ main(void)
 		check(code_map_disasm_forward(0x8000, 0, 0, 0, -1, lines, 4, &next) == 0,
 		      "treats a negative count as nothing to do");
 
-		// Negative "lines before" must be clamped, not used as an array size.
-		check(code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index) >= 1,
-		      "clamps a negative lines_before");
+		// A negative "lines before" must behave exactly like none: one line, the
+		// center itself, at index 0. Asserting merely that *something* came back
+		// would pass however the count was mishandled -- including the failure
+		// that matters, a negative count reaching unsigned arithmetic somewhere
+		// and turning into a huge one.
+		check(code_map_disasm_window(0x8000, 0, 0, 0, -5, 1, lines, 4, &center_index) == 1 &&
+		          center_index == 0 && lines[0].addr == 0x8000,
+		      "treats a negative lines_before as none");
+
+		// An absurd one must be capped rather than walked. The backward pass
+		// collects into a fixed-size array and does so before anything consults
+		// the output capacity, so an uncapped count runs off the end of it.
+		int big = code_map_disasm_window(0x8000, 0, 0, 0, 10000, 1, lines, 4, &center_index);
+		check(big >= 1 && big <= 4, "caps an absurd lines_before instead of walking it");
+		check_tiles(lines, big, "still tiles the window with an absurd lines_before");
 	}
 
 	// ── Wrapping at the top of the address space ────────────────────────────
-	// Decoding off the end of memory must wrap rather than read past the end of
-	// the address space.
+	// An instruction can start near $FFFF and take its operand bytes from the
+	// bottom of memory. Decoding it has to wrap rather than read past the end of
+	// the address space, and the line after it has to continue from where the
+	// wrapped operand ended.
 	{
 		reset_all();
+		// $FFFE: EA         NOP
+		// $FFFF: AD 34 12   LDA $1234 -- operand bytes live at $0000/$0001
+		g_mem[0xFFFF] = 0xAD;
+		g_mem[0x0000] = 0x34;
+		g_mem[0x0001] = 0x12;
+
 		code_map_line_t lines[4];
 		uint16_t        next = 0;
 		int             n = code_map_disasm_forward(0xFFFE, 0, 0, 0, 3, lines, 4, &next);
+
 		check(n == 3, "keeps disassembling across the $FFFF boundary");
-		check(n == 3 && lines[2].addr < 0x0100, "wraps to the bottom of memory");
+		check(n == 3 && lines[1].addr == 0xFFFF && lines[1].size == 3,
+		      "decodes an instruction whose operand is below $0000");
+		check(n == 3 && lines[1].bytes[0] == 0xAD && lines[1].bytes[1] == 0x34 &&
+		          lines[1].bytes[2] == 0x12,
+		      "reads the wrapped operand bytes from the bottom of memory");
+		check(n == 3 && lines[2].addr == 0x0002, "resumes after the wrapped operand");
+		check(next == 0x0003, "reports a wrapped next address");
+		check_tiles(lines, n, "tiles the range across the wrap");
 	}
 
 	if (failures) {
