@@ -188,12 +188,22 @@ What this says, against the hypotheses:
      the same per emulated frame at native speed (+0.84 ms) and in warp
      (+0.88 ms), even though warp draws the UI about 4.5 times less often per
      frame (0.92 down to 0.20 UI frames per emulated frame).
-   - **It is the status check, not `code_map`.** `-debugport` without `-imgui`
-     runs `DEBUGGetCurrentStatus` on every instruction but never
-     `code_map_record_current`, and it costs the same (3.85 ms of emulation
-     against 3.77). So `code_map` is close to free, and nearly all of the
-     cost is the per-instruction status check (hypothesis 4: right place,
-     wrong function).
+   - **It is the status check, not `code_map`.** (Corrected. This first
+     argued from `-debugport` costing the same as `-imgui`, but `-debugport`
+     also sets `debugger_enabled`, so it runs `code_map` too and that
+     comparison proved nothing.) Measured instead with two throwaway builds on
+     `main` at `4735808`, `-imgui` with no panels, emulation per frame:
+
+     | Build | `-debugport` | `-imgui` |
+     | --- | --- | --- |
+     | as is | 3.88 ms | 3.86 ms |
+     | `code_map_record_current` removed | 3.77 ms | 3.69 ms |
+     | status check removed (call and gate) | 2.94 ms | 2.86 ms |
+
+     The same run without a debugger was 2.97 ms. So the status check costs
+     about 0.9 ms per frame and `code_map` about 0.1–0.17 ms, near noise.
+     Removing the status check alone reaches the no-debugger speed
+     (hypothesis 4: right place, wrong function).
 
    Phase 1 should look at this first.
 2. **The Performance panel costs about 1 ms per frame in two parts.**
