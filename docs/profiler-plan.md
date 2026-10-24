@@ -305,6 +305,20 @@ Each is small, and each is checked against the Phase 0 numbers.
 
   Target: emulation under `-imgui` with no panels within 5% of the no-debugger
   2.93 ms per frame.
+
+  **Done (`67ff70f`).** Measured back to back in one session, at native speed
+  on the Phase 0 workload, emulation per frame:
+
+  | Build | no debugger | `-debugport` | `-imgui`, no panels |
+  | --- | --- | --- | --- |
+  | before (`main` at `4735808`) | 3.11 ms | 4.15 ms | 3.93 ms |
+  | fast path | 2.86 ms | 3.12 ms | 2.99 ms |
+
+  `-imgui` is now 4.3% over the no-debugger figure (it was 26%), which meets
+  the target. `-debugport` is 9% over, because it still runs `code_map`.
+  DAP testbench: 129/129, including three new checks for state changed while
+  the machine runs. A deliberately broken poll counter fails the suite
+  immediately.
 - **Attribute spikes:** keep a per-frame ring of section times in `host_prof`,
   and have `-bench` and `x16/hostPerf` report the worst frames by section. That
   answers whether the 17–28 ms frames come from the emulator, the UI, present,
