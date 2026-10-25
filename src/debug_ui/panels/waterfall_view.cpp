@@ -143,6 +143,30 @@ lane_color(int lane)
 	return ImColor::HSV((float)(lane * 0.137f - (int)(lane * 0.137f)), 0.65f, 0.95f);
 }
 
+// What each row is, for its label's tooltip.
+const char *
+lane_help(int lane)
+{
+	switch (lane) {
+		case WF_LANE_VERA_REG:   return "Writes to VERA's registers ($9F20-$9F3C): address setup, scroll,\nlayer and display settings, FX. Not the data ports: those bytes are\nsorted below by where in VRAM they landed.";
+		case WF_LANE_PSG:        return "Writes to the PSG sound registers in VRAM ($1F9C0-$1F9FF).";
+		case WF_LANE_PALETTE:    return "Writes to the palette in VRAM ($1FA00-$1FBFF).";
+		case WF_LANE_SPRITES:    return "Writes to the sprite attribute table in VRAM ($1FC00-$1FFFF).";
+		case WF_LANE_L0_MAP:     return "Writes to layer 0's tile map (which tile goes where).";
+		case WF_LANE_L0_TILES:   return "Writes to layer 0's tile graphics, font, or bitmap.";
+		case WF_LANE_L1_MAP:     return "Writes to layer 1's tile map (which tile goes where).";
+		case WF_LANE_L1_TILES:   return "Writes to layer 1's tile graphics, font, or bitmap.";
+		case WF_LANE_VRAM_OTHER: return "Writes to VRAM outside every layer's map and tile area, as the\nlayer registers stood at the time: sprite graphics, spare buffers.";
+		case WF_LANE_PCM:        return "Bytes pushed into VERA's PCM audio buffer ($9F3D).";
+		case WF_LANE_SPI:        return "SD card traffic through VERA's SPI port ($9F3E/$9F3F).";
+		case WF_LANE_YM:         return "Writes to the YM2151 FM sound chip, labelled by register.";
+		case WF_LANE_VIA1:       return "Writes to VIA 1 ($9F00): joystick/keyboard lines, I2C, timers.";
+		case WF_LANE_VIA2:       return "Writes to VIA 2 ($9F10).";
+		case WF_LANE_IO_OTHER:   return "Writes to the rest of the I/O page: emulator registers, MIDI,\nexpansion cards.";
+		default:                 return "";
+	}
+}
+
 void
 goto_key(uint32_t key)
 {
@@ -339,7 +363,7 @@ profile_waterfall_draw(const prof_report_t *r)
 	if (ImGui::Button("Fit"))
 		g_view_len = 0;
 	ImGui::SameLine();
-	ImGui::TextDisabled("wheel: zoom   right-drag: pan   drag: select   click: open source");
+	ImGui::TextDisabled("Mouse wheel: zoom.  Right-drag: pan.  Drag: select a stretch.  Click: open the code.");
 
 	const wf_frame_t *f = frames[g_pick];
 	if (g_fv.number != f->number || g_fv.frame != f)
@@ -519,8 +543,22 @@ profile_waterfall_draw(const prof_report_t *r)
 	dl->PopClipRect();
 	dl->PopClipRect();
 
+	// Row labels explain their row.
+	if (hovered && mouse.x < x0 && mouse.y >= row_y(0)) {
+		const int row = (int)((mouse.y - row_y(0)) / row_h);
+		if (row >= 0 && row < cpu_rows)
+			ImGui::SetTooltip("Which routine the CPU was running. A routine called from another\n"
+			                  "is drawn one row below its caller, under the stretch of time it\n"
+			                  "ran in.");
+		else if (row >= cpu_rows && row < cpu_rows + irq_rows)
+			ImGui::SetTooltip("Interrupt handlers (IRQ): code the hardware ran in between, while\n"
+			                  "the routine above it was paused.");
+		else if (row >= cpu_rows + irq_rows && row < rows)
+			ImGui::SetTooltip("%s\nEach tick is one write.", lane_help(lanes[(size_t)(row - cpu_rows - irq_rows)]));
+	}
+
 	// Hover and click.
-	if (hovered && !g_dragging) {
+	if (hovered && !g_dragging && mouse.x >= x0) {
 		if (hover_ev) {
 			const int lane = wf_event_lane(hover_ev);
 			ImGui::BeginTooltip();

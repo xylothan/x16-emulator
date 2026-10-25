@@ -43,58 +43,84 @@ draw_controls(void)
 	const cap_state_t st = cap_state();
 	if (st == CAP_RUNNING || st == CAP_ARMED) {
 		if (st == CAP_ARMED)
-			ImGui::TextColored(COL_WAIT, "Armed: waiting for the guest to write $F8 to $9FBC.");
+			ImGui::TextColored(COL_WAIT, "Armed: waiting for the program to write $F8 to $9FBC.");
 		else
-			ImGui::Text("Capturing: %u frames, %.1f s", cap_frames(), cap_elapsed_s());
+			ImGui::Text("Recording: %u frames, %.1f s", cap_frames(), cap_elapsed_s());
 		ImGui::SameLine();
 		if (ImGui::Button(st == CAP_ARMED ? "Cancel" : "Stop"))
 			cap_stop();
 		return;
 	}
 
-	ImGui::SetNextItemWidth(dbgui_col_width("", "99999999"));
-	ImGui::InputInt("frames", &g_frames, 60, 600);
+	// InputInt / InputFloat draw their -/+ buttons inside the item width, so
+	// the width has to hold the digits AND both buttons.
+	const ImGuiStyle &style = ImGui::GetStyle();
+	const float buttons = 2.0f * (ImGui::GetFrameHeight() + style.ItemInnerSpacing.x);
+
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Stop after");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_field_width("999999") + buttons);
+	ImGui::InputInt("##frames", &g_frames, 60, 600);
 	if (g_frames < 0)
 		g_frames = 0;
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Stop after this many emulated frames. 0 = no frame limit.");
+		ImGui::SetTooltip("How many emulated frames to record (60 frames is one second).\n"
+		                  "0 = no frame limit.");
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(dbgui_col_width("", "99999.9"));
-	ImGui::InputFloat("seconds", &g_seconds, 1.0f, 10.0f, "%.1f");
+	ImGui::TextUnformatted("frames  or");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_field_width("9999.9") + buttons);
+	ImGui::InputFloat("##seconds", &g_seconds, 1.0f, 10.0f, "%.1f");
 	if (g_seconds < 0.0f)
 		g_seconds = 0.0f;
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Stop after this much host time. 0 = no time limit.\n"
-		                  "With both limits at 0 the capture runs until Stop.");
+		ImGui::SetTooltip("How long to record, in real (host) seconds. 0 = no time limit.\n"
+		                  "With both at 0, recording runs until you press Stop.");
+	ImGui::SameLine();
+	ImGui::TextUnformatted("seconds");
+	ImGui::SameLine();
+	ImGui::TextDisabled("(whichever comes first; 0 = no limit)");
 
-	ImGui::Checkbox("Start on guest marker", &g_on_marker);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Arm, and start only when the program writes $F8 to $9FBC;\n"
-		                  "$F9 stops it. Brackets exactly the code you want measured.");
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Record:");
 	ImGui::SameLine();
-	ImGui::Checkbox("Call tree", &g_rec_tree);
+	ImGui::TextDisabled("time by routine (always)");
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Also record who called what: inclusive time, calls and worst\n"
-		                  "call per routine, and the call tree. Costs a little at each\n"
-		                  "JSR, RTS and interrupt.");
+		ImGui::SetTooltip("Always recorded: how many CPU cycles were spent at every address,\n"
+		                  "rolled up into routines by the debug info's labels.");
 	ImGui::SameLine();
-	ImGui::Checkbox("Waterfall", &g_rec_wf);
+	ImGui::Checkbox("Who called what", &g_rec_tree);
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Also record every write to VERA, VRAM, the PSG, the YM and\n"
-		                  "the VIAs, per frame, with the code that made it. Keeps the\n"
-		                  "last %d frames and the worst %d in detail; save them as a\n"
-		                  "trace for ui.perfetto.dev.", 30, 8);
+		ImGui::SetTooltip("Follow every call (JSR) and return (RTS), to show each routine's\n"
+		                  "time including the routines it calls, how often it was called,\n"
+		                  "its slowest call, and the Call tree tab. On by default.");
 	ImGui::SameLine();
-	ImGui::Checkbox("Cycle budget", &g_rec_budget);
+	ImGui::Checkbox("Frame timeline", &g_rec_wf);
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Also record work vs. waiting per frame (perf_budget).\n"
-		                  "Costs the running machine a little more.");
+		ImGui::SetTooltip("Record every write to VERA (registers, VRAM, palette, sprites,\n"
+		                  "PSG), the YM2151 and the VIAs, with the code that made it, frame\n"
+		                  "by frame. Shown in the Waterfall tab. Keeps the last %d frames\n"
+		                  "and the %d busiest in full detail.", 30, 8);
+	ImGui::SameLine();
+	ImGui::Checkbox("Work vs. waiting", &g_rec_budget);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Split each frame into work and waiting (WAI, or a loop polling\n"
+		                  "for vsync), so the summary can say how much of the frame the\n"
+		                  "program actually used, and which frames ran over.");
 	ImGui::SameLine();
 	ImGui::Checkbox("VRAM bandwidth", &g_rec_vram);
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Also record VERA's VRAM traffic per scanline.");
+		ImGui::SetTooltip("Also measure VERA's VRAM bus traffic per scanline (shown in the\n"
+		                  "Performance panel).");
 
-	if (ImGui::Button("Start capture")) {
+	ImGui::Checkbox("Wait for the program to start it", &g_on_marker);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Don't start recording until the program writes $F8 to $9FBC,\n"
+		                  "and stop when it writes $F9. Lets the program bracket exactly\n"
+		                  "the code you want measured.");
+
+	if (ImGui::Button("Start recording")) {
 		cap_config_t c = {};
 		c.frames    = (uint32_t)g_frames;
 		c.seconds   = g_seconds;
@@ -104,9 +130,79 @@ draw_controls(void)
 		cap_start(&c);
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("The debugger goes quiet while it records.");
+	ImGui::TextDisabled("The debugger stops updating while it records, so the measurement is clean.");
 	if (st == CAP_DONE && cap_end_reason() == CAP_END_FAILED)
-		ImGui::TextColored(COL_AMBIG, "The last capture could not arm its recorders.");
+		ImGui::TextColored(COL_AMBIG, "The last recording could not start: a recorder failed to set up.");
+}
+
+// A table header row whose cells explain themselves on hover. Sorting still
+// works: TableHeader() is what TableHeadersRow() draws for each column.
+void
+header_row(const char *const *tips, int n)
+{
+	ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+	for (int c = 0; c < n; c++) {
+		if (!ImGui::TableSetColumnIndex(c))
+			continue;
+		ImGui::TableHeader(ImGui::TableGetColumnName(c));
+		if (tips[c] && ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", tips[c]);
+	}
+}
+
+const char *const ROW_TIPS[] = {
+	"Own time: the share of all recorded CPU time spent running this routine's\n"
+	"own instructions. Time in the routines it calls is not counted here.\n"
+	"High own time = the slow code is inside this routine.",
+	"Total time: the share of recorded CPU time from entering this routine\n"
+	"until it returned, including everything it called. 'What this whole\n"
+	"job costs.' Needs 'Who called what'.",
+	"The part of the own time that ran inside an interrupt handler.",
+	"Own time per frame, in CPU cycles, on average. A whole frame at 8 MHz\n"
+	"is 134,400 cycles.",
+	"How many times the routine was called (JSR) during the recording.",
+	"Average CPU cycles per instruction. Real code runs 2-7; close to 1 means\n"
+	"the CPU was sitting in WAI there: waiting, not working.",
+	"The routine, named from the program's debug info (and the ROM's\n"
+	"symbols). A name like $08xx or ROM 4:$F2xx means no label covered that\n"
+	"code, so it is grouped by 256-byte page. * = the debug info could not\n"
+	"tell which RAM bank this code is in, so the name may be another bank's.",
+	"Where the routine starts: address, and RAM or ROM bank for banked code.",
+};
+
+const char *const TREE_TIPS[] = {
+	"Who called whom: each row is called by the row it is indented under.\n"
+	"The same routine appears once per caller, so you can see which call\n"
+	"path the time went down.",
+	"Total time of this call path: from entering it until it returned,\n"
+	"including everything it called, as a share of all recorded CPU time.",
+	"Own time of this call path: its own instructions only.",
+	"Total time per frame, in CPU cycles, on average.",
+	"How many times this exact call path happened.",
+	"The slowest single call, in CPU cycles: where an occasional stutter shows\n"
+	"up even when the average looks fine.",
+};
+
+void
+draw_help(void)
+{
+	if (!ImGui::CollapsingHeader("How to read this"))
+		return;
+	ImGui::Indent();
+	ImGui::TextWrapped("Own time is time spent in a routine's own instructions. Total time also "
+	                   "counts everything it calls, from the moment it is entered until it "
+	                   "returns.");
+	ImGui::TextWrapped("Example: UpdateEnemies calls DrawSprite for each enemy. UpdateEnemies' own "
+	                   "time is just its loop; its total time includes all the DrawSprite calls. "
+	                   "High own time means the slow code is in that routine. High total time with "
+	                   "low own time means the cost is in something it calls: open the Call tree "
+	                   "tab to see what.");
+	ImGui::TextWrapped("Routines: every routine, heaviest first (click a column to sort). "
+	                   "Call tree: the same time, split by who called whom. Waterfall: one frame "
+	                   "as a timeline, with every device write.");
+	ImGui::TextWrapped("Hover any column title or number for what it means. Double-click a "
+	                   "routine to open it in Source or Disassembly.");
+	ImGui::Unindent();
 }
 
 void
@@ -151,17 +247,17 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 	const ImGuiTableColumnFlags num = ImGuiTableColumnFlags_WidthFixed |
 	                                  ImGuiTableColumnFlags_PreferSortDescending;
 	ImGui::TableSetupScrollFreeze(0, 1);
-	ImGui::TableSetupColumn("Self %", num | ImGuiTableColumnFlags_DefaultSort,
-	                        dbgui_col_width("Self %", "99.99"));
-	ImGui::TableSetupColumn("Incl %", num, dbgui_col_width("Incl %", "100.00"));
-	ImGui::TableSetupColumn("IRQ %", num, dbgui_col_width("IRQ %", "99.99"));
+	ImGui::TableSetupColumn("Own %", num | ImGuiTableColumnFlags_DefaultSort,
+	                        dbgui_col_width("Own %", "99.99"));
+	ImGui::TableSetupColumn("Total %", num, dbgui_col_width("Total %", "100.00"));
+	ImGui::TableSetupColumn("In IRQ %", num, dbgui_col_width("In IRQ %", "99.99"));
 	ImGui::TableSetupColumn("Cycles/frame", num | ImGuiTableColumnFlags_NoSort,
 	                        dbgui_col_width("Cycles/frame", "9999999"));
 	ImGui::TableSetupColumn("Calls", num, dbgui_col_width("Calls", "99999999"));
-	ImGui::TableSetupColumn("Cyc/ins", num, dbgui_col_width("Cyc/ins", "9.99"));
+	ImGui::TableSetupColumn("Cycles/instr", num, dbgui_col_width("Cycles/instr", "9.99"));
 	ImGui::TableSetupColumn("Routine", ImGuiTableColumnFlags_WidthStretch);
-	ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthFixed,
-	                        dbgui_col_width("Where", "RAM 255:$BFFF"));
+	ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed,
+	                        dbgui_col_width("Address", "RAM 255:$BFFF"));
 
 	// Sort the view when the user picks a column, or when it was rebuilt.
 	if (ImGuiTableSortSpecs *sp = ImGui::TableGetSortSpecs()) {
@@ -195,7 +291,7 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 			sp->SpecsDirty = false;
 		}
 	}
-	ImGui::TableHeadersRow();
+	header_row(ROW_TIPS, 8);
 
 	ImGuiListClipper clipper;
 	clipper.Begin(view_n);
@@ -214,8 +310,8 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 			else
 				ImGui::TextDisabled("-");
 			if (tree && row.calls && ImGui::IsItemHovered())
-				ImGui::SetTooltip("From each call's entry to its return, callees included.\n"
-				                  "Worst call %u cycles, worst frame %u.",
+				ImGui::SetTooltip("Total time: from each call's start to its return, including everything\n"
+				                  "it called. Slowest single call %u cycles; busiest frame %u cycles.",
 				                  row.call_max, row.frame_max);
 			ImGui::TableSetColumnIndex(2);
 			if (row.irq_cycles)
@@ -245,10 +341,10 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 			                      ImGuiSelectableFlags_SpanAllColumns |
 			                          ImGuiSelectableFlags_AllowDoubleClick) &&
 			    ImGui::IsMouseDoubleClicked(0))
-				debug_ui_request_goto(row.addr, 0);
+				debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
 			if (ImGui::IsItemHovered()) {
 				ImGui::BeginTooltip();
-				ImGui::Text("%llu main + %llu IRQ cycles, %llu instructions",
+				ImGui::Text("Own time: %llu cycles outside interrupts + %llu inside, %llu instructions",
 				            (unsigned long long)row.main_cycles, (unsigned long long)row.irq_cycles,
 				            (unsigned long long)row.instructions);
 				if (!row.named)
@@ -257,9 +353,7 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 					ImGui::TextColored(COL_AMBIG, "The debug info did not establish this code's "
 					                              "RAM bank,\nso the name may belong to another "
 					                              "bank's code at this address.");
-				ImGui::TextDisabled("Double-click to open in Disassembly%s.",
-				                    row.region == PH_REGION_RAM ? " (shows the RAM bank mapped now)"
-				                                                : "");
+				ImGui::TextDisabled("Double-click to open it in Source (or Disassembly).");
 				ImGui::EndTooltip();
 			}
 			ImGui::TableSetColumnIndex(7);
@@ -301,19 +395,21 @@ draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t fra
 	const bool open = ImGui::TreeNodeEx("node", fl, "%s", name);
 	if (ImGui::IsItemHovered()) {
 		ImGui::BeginTooltip();
-		ImGui::Text("%s: %llu cycles inclusive, %llu self", name, (unsigned long long)n.incl,
-		            (unsigned long long)n.self);
-		ImGui::Text("%u calls, worst call %u cycles, worst frame %u", n.calls, n.call_max,
-		            n.frame_max);
+		ImGui::Text("%s", name);
+		ImGui::Text("Total %llu cycles (with everything it called), own %llu cycles",
+		            (unsigned long long)n.incl, (unsigned long long)n.self);
+		if (n.parent >= 0)
+			ImGui::Text("%u calls; slowest single call %u cycles; busiest frame %u cycles",
+			            n.calls, n.call_max, n.frame_max);
 		if (n.row >= 0)
-			ImGui::TextDisabled("Click to open in Disassembly.");
+			ImGui::TextDisabled("Click to open it in Source or Disassembly.");
 		ImGui::EndTooltip();
 	}
 	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() && n.row >= 0) {
 		uint8_t  region, bank;
 		uint16_t pc;
 		perf_hist_key_decode(n.key, &region, &bank, &pc);
-		debug_ui_request_goto(pc, 0);
+		debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 	}
 	ImGui::TableSetColumnIndex(1);
 	ImGui::Text("%.2f", total ? 100.0 * (double)n.incl / (double)total : 0.0);
@@ -362,15 +458,15 @@ draw_tree(const prof_report_t *r, uint64_t total, uint32_t frames)
 	                           ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE))
 		return;
 	ImGui::TableSetupScrollFreeze(0, 1);
-	ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
-	ImGui::TableSetupColumn("Incl %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Incl %", "100.00"));
-	ImGui::TableSetupColumn("Self %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Self %", "99.99"));
+	ImGui::TableSetupColumn("Call path", ImGuiTableColumnFlags_WidthStretch);
+	ImGui::TableSetupColumn("Total %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Total %", "100.00"));
+	ImGui::TableSetupColumn("Own %", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Own %", "99.99"));
 	ImGui::TableSetupColumn("Cycles/frame", ImGuiTableColumnFlags_WidthFixed,
 	                        dbgui_col_width("Cycles/frame", "9999999"));
 	ImGui::TableSetupColumn("Calls", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Calls", "99999999"));
-	ImGui::TableSetupColumn("Worst call", ImGuiTableColumnFlags_WidthFixed,
-	                        dbgui_col_width("Worst call", "99999999"));
-	ImGui::TableHeadersRow();
+	ImGui::TableSetupColumn("Slowest call", ImGuiTableColumnFlags_WidthFixed,
+	                        dbgui_col_width("Slowest call", "99999999"));
+	header_row(TREE_TIPS, 6);
 	draw_node(r, 0, 0, total, frames); // [main]
 	draw_node(r, 1, 0, total, frames); // [IRQ]
 	ImGui::EndTable();
@@ -381,66 +477,89 @@ draw_report(void)
 {
 	const prof_report_t *r = profile_session_report();
 	if (!r) {
-		ImGui::TextDisabled("No report yet. Start a capture; the report appears when it ends.");
+		ImGui::TextDisabled("No report yet. Press Start recording; the report appears here when it stops.");
 		return;
 	}
 	const uint64_t total  = r->main_cycles + r->irq_cycles;
 	const uint32_t frames = profile_session_report_frames() ? profile_session_report_frames() : 1;
-	ImGui::Text("Last capture: %s, %u frames, %.1f s.", cap_end_name(cap_end_reason()), frames,
-	            cap_elapsed_s());
-	ImGui::TextDisabled("%llu cycles per frame (%.1f%% in interrupts), %d routines/pages, "
-	                    "%d named.",
+	ImGui::Text("Last recording: %u frames, %.1f s (%s).", frames, cap_elapsed_s(),
+	            cap_end_name(cap_end_reason()));
+	ImGui::TextDisabled("%llu CPU cycles per frame, %.1f%% of them in interrupt handlers. "
+	                    "%d routines, %d of them named.",
 	                    (unsigned long long)(total / frames),
 	                    total ? 100.0 * (double)r->irq_cycles / (double)total : 0.0, r->count,
 	                    r->named_rows);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Cycles per frame counts every cycle the CPU ran, work and waiting\n"
+		                  "alike: at 8 MHz a frame is always about 134,400. Turn on 'Work vs.\n"
+		                  "waiting' to see how much of it the program actually used.\n"
+		                  "Unnamed routines are code with no label in the debug info,\n"
+		                  "grouped by 256-byte page.");
+	draw_help();
 	if (r->ambiguous_rows)
 		ImGui::TextColored(COL_AMBIG, "%d rows marked * name code whose RAM bank the debug info "
 		                              "did not establish.", r->ambiguous_rows);
 	const prof_budget_summary_t *bs = profile_session_budget_summary();
-	if (bs->have)
-		ImGui::TextDisabled("Work %.1f%%, waiting %.1f%%; worst frame %u of %u cycles, %u over "
-		                    "budget.",
+	if (bs->have) {
+		ImGui::TextDisabled("The program worked %.1f%% of the time and waited %.1f%%. Busiest frame: "
+		                    "%u of %u cycles. Frames over budget: %u.",
 		                    bs->total ? 100.0 * (double)(bs->total - bs->idle) / (double)bs->total
 		                              : 0.0,
 		                    bs->total ? 100.0 * (double)bs->idle / (double)bs->total : 0.0,
 		                    bs->work_max, bs->budget, bs->overruns);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Waiting is time in WAI or in a loop polling for vsync: cycles the\n"
+			                  "program could have used. A frame is over budget when its work\n"
+			                  "alone needed more cycles than the frame has, so it ran late.");
+	}
 
-	// Export, beside the working directory unless a path is given.
-	static char export_msg[sizeof g_export + 48] = "";
-	ImGui::SetNextItemWidth(dbgui_col_width("", "wwwwwwwwwwwwwwwwwwww"));
-	ImGui::InputText("##profexport", g_export, sizeof g_export);
-	ImGui::SameLine();
-	if (r->node_count > 2 && ImGui::Button("Save .folded")) {
-		char path[sizeof g_export + 16];
-		snprintf(path, sizeof path, "%s.folded", g_export);
-		const int n = profile_session_export_folded(path);
-		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-	}
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Collapsed stacks with self cycles: open in speedscope.app\n"
-		                  "or feed to flamegraph.pl.");
-	ImGui::SameLine();
-	if (ImGui::Button("Save .json")) {
-		char path[sizeof g_export + 16];
-		snprintf(path, sizeof path, "%s.json", g_export);
-		const int n = profile_session_export_json(path);
-		snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-	}
-	if (profile_session_has_waterfall()) {
+	// Exports, for other tools. Collapsed: nothing in the panel needs them.
+	if (ImGui::TreeNode("Export for other tools")) {
+		static char export_msg[sizeof g_export + 48] = "";
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("File name");
 		ImGui::SameLine();
-		if (ImGui::Button("Save trace")) {
+		ImGui::SetNextItemWidth(dbgui_field_width("wwwwwwwwwwwwwwwwwwww"));
+		ImGui::InputText("##profexport", g_export, sizeof g_export);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Without a folder, files go in the emulator's working directory.\n"
+			                  "The extension is added for you.");
+		if (r->node_count > 2) {
+			ImGui::SameLine();
+			if (ImGui::Button("Flame graph (.folded)")) {
+				char path[sizeof g_export + 16];
+				snprintf(path, sizeof path, "%s.folded", g_export);
+				const int n = profile_session_export_folded(path);
+				snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("One line per call path with its own time. Open it in\n"
+				                  "speedscope.app or pass it to flamegraph.pl.");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Everything (.json)")) {
 			char path[sizeof g_export + 16];
-			snprintf(path, sizeof path, "%s.trace.json", g_export);
-			const int n = profile_session_export_trace(path);
+			snprintf(path, sizeof path, "%s.json", g_export);
+			const int n = profile_session_export_json(path);
 			snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
 		}
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Chrome trace-event JSON: open in ui.perfetto.dev for a\n"
-			                  "zoomable timeline of the detailed frames.");
-	}
-	if (export_msg[0]) {
-		ImGui::SameLine();
-		ImGui::TextDisabled("%s", export_msg);
+			ImGui::SetTooltip("Every routine and the whole call tree, for scripts.");
+		if (profile_session_has_waterfall()) {
+			ImGui::SameLine();
+			if (ImGui::Button("Timeline (.trace.json)")) {
+				char path[sizeof g_export + 16];
+				snprintf(path, sizeof path, "%s.trace.json", g_export);
+				const int n = profile_session_export_trace(path);
+				snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("The Waterfall's frames as a Chrome trace: opens in\n"
+				                  "ui.perfetto.dev or chrome://tracing.");
+		}
+		if (export_msg[0])
+			ImGui::TextDisabled("%s", export_msg);
+		ImGui::TreePop();
 	}
 
 	if (r->node_count <= 2 && !profile_session_has_waterfall()) {
