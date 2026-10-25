@@ -79,6 +79,15 @@ typedef struct {
 static inline uint32_t wf_event_key(const wf_event_t *e) { return e->key_lane & 0xFFFFFFu; }
 static inline int      wf_event_lane(const wf_event_t *e) { return (int)(e->key_lane >> 24); }
 
+// Not a device: marks in the CPU's own story, kept with the events but never
+// counted as writes. `target` says which.
+#define WF_LANE_MARK 0xFF
+enum {
+	WF_MARK_HELD_ON = 0, // an interrupt was requested but the I flag held it off...
+	WF_MARK_HELD_OFF,    // ...until here (taken, withdrawn, or the frame ended)
+};
+static inline bool wf_event_is_mark(const wf_event_t *e) { return wf_event_lane(e) == WF_LANE_MARK; }
+
 typedef struct {
 	uint32_t    number;     // frames since the capture began, from 0
 	uint64_t    start;      // perf_hist cycle count when it began
@@ -127,6 +136,16 @@ wf_flush(uint32_t key, bool irq, uint64_t t)
 // The innermost call-tree node changed at time `t`.
 void wf_cpu(uint16_t node, uint64_t t);
 
+// An interrupt line is asserted after instruction number `instr`, which ended
+// at time `t`; `held` when the I flag kept it from being taken. Called for
+// every such instruction, so a gap in `instr` means the line was withdrawn.
+// Only main-line code holds an interrupt off in this sense: the caller does not
+// report a line still up inside a handler (that is the request being served).
+void wf_irq_line(bool held, uint64_t t, uint32_t instr);
+// Close a held-off stretch if instruction `instr` (the latest) did not see the
+// line held: called at a frame's end, before wf_frame_end().
+void wf_irq_poll(uint32_t instr);
+
 // VERA's output mode for the frame being recorded (DC_VIDEO bits 0-1). It
 // decides what a scanline is: VGA and NTSC time their frames differently.
 // Sticky: carries to later frames until set again.
@@ -166,7 +185,7 @@ const wf_agg_t *wf_aggregates(int *count);
 // an interrupt runs; interrupt spans close when the main line resumes.
 // `parent_of(node)` is the tree's parent (-1 at a root); `root_irq` is the
 // node that roots interrupt paths.
-typedef enum { WF_OUT_BEGIN, WF_OUT_END, WF_OUT_EVENT } wf_out_kind_t;
+typedef enum { WF_OUT_BEGIN, WF_OUT_END, WF_OUT_EVENT, WF_OUT_MARK } wf_out_kind_t;
 typedef void (*wf_emit_fn)(void *ctx, wf_out_kind_t kind, int thread, uint32_t cycle,
                            int node, const wf_event_t *ev);
 typedef int (*wf_parent_fn)(void *ctx, int node);

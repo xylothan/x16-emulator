@@ -1083,6 +1083,38 @@ Tested:
   budget forced small enough that the summary-only fallback draws;
 - GCC on every touched file.
 
+### Phase 5e: interrupts in the waterfall (2026-10-25)
+
+- **Handler entry and exit lines.** A red line marks where each interrupt
+  handler began, and a blue line where it returned, across the CPU and IRQ
+  rows. The yellow line is still the vblank marker at scanline 480.
+- **Suspended code is drawn as suspended.** While a handler runs, the
+  routines above it are hatched and faded rather than drawn as running. A
+  routine's tooltip says how much of its time went to handlers, and says
+  "Suspended here" when you hover inside a handler.
+- **Interrupts held off.** A red hatched band on the IRQ row runs from where an
+  interrupt was requested while the I flag was set (after `SEI`) to where it
+  was taken, or to where the request went away. Its tooltip says which.
+  - Recorded through `cpu_irq_line_hook`, which `irq6502()` calls only while
+    an interrupt line is asserted, and only when a waterfall capture is
+    listening. A line still up inside a handler is the request being served,
+    so it is not counted.
+  - The marks are kept with the frame's events on a lane of their own,
+    `WF_LANE_MARK`. They are not writes: aggregates, per-frame write counts and
+    range tables skip them.
+  - A stretch open at a frame's end closes there and reopens at the next
+    frame's start, so every frame's marks pair up.
+- **Export:** held-off stretches are spans on their own "IRQ held off" track.
+
+Tested:
+- unit tests for stretches ended by being taken, withdrawn, and crossing a
+  frame boundary, and for marks staying out of write counts and ranges;
+- a test program that runs with interrupts off for about 5 ms at a time. Its
+  stretches were 0.1-3.3 ms, and every one not cut by a frame boundary ended
+  where a handler began;
+- the tab drawn in a Debug build on that program, with the tooltips forced on;
+- GCC on every touched file.
+
 ## Phase 6: seeing who calls what
 
 Every view here is a different summary of the call tree that Phase 3 already

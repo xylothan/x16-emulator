@@ -47,7 +47,40 @@ struct FrameView {
 	std::vector<Span>                spans;
 	int                              depth[2] = {0, 0};
 	std::vector<std::vector<int>>    lane_events; // per lane: event indices, in time order
+	struct Run { uint32_t c0, c1; };
+	std::vector<Run>                 irq_runs; // each interrupt handler, entry to RTI
+	std::vector<Run>                 held;     // an interrupt kept waiting by the I flag
 };
+
+// Where interrupts are drawn: handler entry and exit, and held-off stretches.
+const ImU32 COL_IRQ_IN   = IM_COL32(255, 110, 90, 200);
+const ImU32 COL_IRQ_OUT  = IM_COL32(90, 190, 255, 200);
+const ImU32 COL_HELD     = IM_COL32(255, 80, 80, 70);
+const ImU32 COL_HELD_EDGE = IM_COL32(255, 80, 80, 200);
+
+// Cycles of [c0, c1) that interrupt handlers took.
+uint64_t
+irq_overlap(const std::vector<FrameView::Run> &runs, uint32_t c0, uint32_t c1)
+{
+	uint64_t n = 0;
+	for (const auto &r : runs) {
+		const uint32_t a = std::max(r.c0, c0), b = std::min(r.c1, c1);
+		if (b > a)
+			n += b - a;
+	}
+	return n;
+}
+
+// Diagonal hatching over a rectangle.
+void
+hatch(ImDrawList *dl, ImVec2 a, ImVec2 b, ImU32 col, float step = 6.0f)
+{
+	dl->PushClipRect(a, b, true);
+	const float h = b.y - a.y;
+	for (float x = a.x - h; x < b.x; x += step)
+		dl->AddLine(ImVec2(x, b.y), ImVec2(x + h, a.y), col);
+	dl->PopClipRect();
+}
 
 FrameView g_fv;
 int       g_frame    = -1;   // the frame asked for (wf_frame index); -1 = choose the default
@@ -154,8 +187,18 @@ build(FrameView &fv, const prof_report_t *r, const wf_frame_t *f)
 	fv.spans.clear();
 	fv.depth[0] = fv.depth[1] = 0;
 	fv.lane_events.assign(WF_LANES, {});
+	fv.irq_runs.clear();
+	fv.held.clear();
 	for (int i = 0; i < f->count; i++) {
-		const int lane = wf_event_lane(&f->events[i]);
+		const wf_event_t *e = &f->events[i];
+		if (wf_event_is_mark(e)) {
+			if (e->target == WF_MARK_HELD_ON)
+				fv.held.push_back({e->cycle, f->length});
+			else if (!fv.held.empty())
+				fv.held.back().c1 = e->cycle;
+			continue;
+		}
+		const int lane = wf_event_lane(e);
 		if (lane != WF_LANE_CPU && lane < WF_LANES)
 			fv.lane_events[(size_t)lane].push_back(i);
 	}
@@ -165,6 +208,9 @@ build(FrameView &fv, const prof_report_t *r, const wf_frame_t *f)
 	}
 	// The roots ([main], [IRQ]) span everything and say nothing: drop them,
 	// and lift everything else one row.
+	for (const Span &sp : fv.spans)
+		if (sp.thread == 1 && sp.depth == 0)
+			fv.irq_runs.push_back({sp.c0, sp.c1});
 	std::vector<Span> kept;
 	kept.reserve(fv.spans.size());
 	fv.depth[0] = fv.depth[1] = 0;
@@ -642,7 +688,7 @@ profile_waterfall_draw(const prof_report_t *r)
 	for (int l = 1; l < WF_LANES; l++)
 		frame_lanes += !g_fv.lane_events[(size_t)l].empty();
 	const int   cpu_rows = std::max(1, g_fv.depth[0]);
-	const int   irq_rows = g_fv.depth[1];
+	const int   irq_rows = std::max(g_fv.depth[1], g_fv.held.empty() ? 0 : 1);
 	const float row_h    = ImGui::GetTextLineHeight() + 4.0f;
 	const float axis_h   = ImGui::GetTextLineHeight() + 6.0f;
 	const float label_w  = dbgui_text_width("VRAM other ") + 8.0f;
@@ -772,6 +818,50 @@ profile_waterfall_draw(const prof_report_t *r)
 			hover_span = &s;
 	}
 
+	// While a handler runs, the routines above it are suspended, not running:
+	// hatch and fade them there. Then the handler's entry and exit lines, and
+	// the stretches where an interrupt was asked for but held off.
+	const float cpu_y0 = row_y(0), cpu_y1 = row_y(cpu_rows);
+	const float irq_y0 = row_y(cpu_rows), irq_y1 = row_y(cpu_rows + irq_rows);
+	const float right  = origin.x + width;
+	{
+		const ImU32 fade = ImGui::GetColorU32(ImGuiCol_FrameBg, 0.65f);
+		const ImU32 hcol = ImGui::GetColorU32(ImGuiCol_Text, 0.18f);
+		int last_in = INT_MIN, last_out = INT_MIN;
+		for (const auto &run : g_fv.irq_runs) {
+			const float a = x_of(run.c0), b = x_of(run.c1);
+			if (b < x0 || a > right)
+				continue;
+			if (b - a >= 2.0f) {
+				dl->AddRectFilled(ImVec2(a, cpu_y0), ImVec2(b, cpu_y1), fade);
+				hatch(dl, ImVec2(a, cpu_y0), ImVec2(b, cpu_y1), hcol);
+			}
+			if ((int)a != last_in) {
+				dl->AddLine(ImVec2(a, cpu_y0), ImVec2(a, irq_y1), COL_IRQ_IN);
+				last_in = (int)a;
+			}
+			if ((int)b != last_out && (int)b != (int)a) {
+				dl->AddLine(ImVec2(b, cpu_y0), ImVec2(b, irq_y1), COL_IRQ_OUT);
+				last_out = (int)b;
+			}
+		}
+		for (const auto &h : g_fv.held) {
+			const float a = x_of(h.c0), b = std::max(x_of(h.c1), a + 1.0f);
+			if (b < x0 || a > right)
+				continue;
+			dl->AddRectFilled(ImVec2(a, irq_y0 + 1), ImVec2(b, irq_y1 - 1), COL_HELD);
+			hatch(dl, ImVec2(a, irq_y0 + 1), ImVec2(b, irq_y1 - 1), COL_HELD_EDGE, 5.0f);
+			dl->AddLine(ImVec2(a, irq_y0), ImVec2(a, irq_y1), COL_HELD_EDGE, 1.5f);
+			if (b - a > dbgui_text_width("held off") + 8.0f)
+				dl->AddText(ImVec2(std::max(a, x0) + 3.0f, irq_y0 + 2), COL_HELD_EDGE, "held off");
+		}
+	}
+	const FrameView::Run *hover_held = nullptr;
+	if (hovered && mouse.y >= irq_y0 && mouse.y < irq_y1)
+		for (const auto &h : g_fv.held)
+			if (mouse_c >= h.c0 && mouse_c < std::max<double>(h.c1, h.c0 + 1.0 / sx))
+				hover_held = &h;
+
 	// Ticks, at most one per pixel column per lane.
 	const wf_event_t *hover_ev = nullptr;
 	float             hover_dx = 4.0f;
@@ -822,10 +912,14 @@ profile_waterfall_draw(const prof_report_t *r)
 		if (row >= 0 && row < cpu_rows)
 			ImGui::SetTooltip("Which routine the CPU was running. A routine called from another\n"
 			                  "is drawn one row below its caller, under the stretch of time it\n"
-			                  "ran in.");
+			                  "ran in. Hatched and faded: suspended while an interrupt handler\n"
+			                  "ran (red line: handler entered; blue line: it returned).");
 		else if (row >= cpu_rows && row < cpu_rows + irq_rows)
 			ImGui::SetTooltip("Interrupt handlers (IRQ): code the hardware ran in between, while\n"
-			                  "the routine above it was paused.");
+			                  "the routine above it was paused.\n"
+			                  "Red hatched band: an interrupt was asked for while the I flag was\n"
+			                  "set (after SEI), so it had to wait. It ends when the interrupt was\n"
+			                  "taken, or when the request went away untaken.");
 		else if (row >= cpu_rows + irq_rows && row < rows) {
 			const int lane = lanes[(size_t)(row - cpu_rows - irq_rows)];
 			ImGui::SetTooltip("%s\nEach tick is one write.%s", lane_help(lane),
@@ -854,6 +948,21 @@ profile_waterfall_draw(const prof_report_t *r)
 			ImGui::EndTooltip();
 			if (clicked)
 				goto_key(wf_event_key(hover_ev));
+		} else if (hover_held) {
+			char when[128], len[96];
+			moment(tb, hover_held->c0, when, sizeof when);
+			span_len(tb, hover_held->c1 - hover_held->c0, len, sizeof len);
+			bool taken = false;
+			for (const auto &run : g_fv.irq_runs)
+				if (run.c0 >= hover_held->c1 && run.c0 <= hover_held->c1 + 24)
+					taken = true;
+			ImGui::BeginTooltip();
+			ImGui::Text("Interrupt held off for %s", len);
+			ImGui::TextDisabled("Requested at %s, while the I flag was set.", when);
+			ImGui::TextDisabled(taken ? "Taken as soon as interrupts were enabled again."
+			                  : hover_held->c1 >= f->length ? "Still waiting when the frame ended."
+			                                                : "The request went away before it was taken.");
+			ImGui::EndTooltip();
 		} else if (hover_span) {
 			const prof_node_t &n = r->nodes[hover_span->node];
 			char name[PROF_NAME_MAX + 16];
@@ -865,6 +974,18 @@ profile_waterfall_draw(const prof_report_t *r)
 			span_len(tb, hover_span->c1 - hover_span->c0, len, sizeof len);
 			ImGui::TextDisabled("Ran for %s", len);
 			ImGui::TextDisabled("starting at %s", when);
+			if (hover_span->thread == 0) {
+				const uint64_t in_irq = irq_overlap(g_fv.irq_runs, hover_span->c0, hover_span->c1);
+				if (in_irq) {
+					char sus[96];
+					span_len(tb, (double)in_irq, sus, sizeof sus);
+					ImGui::TextDisabled("of which %s suspended while interrupt handlers ran", sus);
+				}
+				for (const auto &run : g_fv.irq_runs)
+					if (mouse_c >= run.c0 && mouse_c < run.c1)
+						ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f),
+						                   "Suspended here: an interrupt handler is running.");
+			}
 			if (n.key < PH_KEYS)
 				key_tooltip_lines(n.key);
 			ImGui::TextDisabled("Over the whole capture: %u calls, worst %u cycles.", n.calls, n.call_max);

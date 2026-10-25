@@ -22,6 +22,7 @@ typedef struct {
 	int  depth[2];
 	bool balanced;
 	int  events;
+	int  marks;
 } walk_t;
 
 static void
@@ -40,6 +41,9 @@ emit(void *ctx, wf_out_kind_t kind, int thread, uint32_t cycle, int node, const 
 				w->balanced = false;
 			snprintf(b, sizeof b, "E%d:%d@%u ", thread, node, cycle);
 			break;
+		case WF_OUT_MARK:
+			w->marks++;
+			return;
 		default:
 			w->events++;
 			snprintf(b, sizeof b, "i%d@%u ", thread, cycle);
@@ -77,6 +81,20 @@ range_write(void *ctx, const wf_event_t *ev)
 {
 	(void)ev;
 	((range_t *)ctx)->writes++;
+}
+
+// The marks in a frame, as "ON@cycle OFF@cycle ...".
+static void
+marks_of(const wf_frame_t *f, char *out, size_t n)
+{
+	out[0] = 0;
+	for (int i = 0; f && i < f->count; i++)
+		if (wf_event_is_mark(&f->events[i])) {
+			char b[24];
+			snprintf(b, sizeof b, "%s@%u ", f->events[i].target == WF_MARK_HELD_ON ? "ON" : "OFF",
+			         f->events[i].cycle);
+			strncat(out, b, n - strlen(out) - 1);
+		}
 }
 
 int
@@ -264,6 +282,47 @@ main(void)
 		check(a[0].key == 0x0810 && a[0].lane == WF_LANE_SPRITES && a[0].writes == 9, "heaviest first");
 		check(a[1].key == 0x0810 && a[1].lane == WF_LANE_PALETTE && a[1].writes == 5, "same key, other lane");
 		check(a[2].key == 0x0900 && a[2].writes == 2, "then the lightest");
+	}
+
+	// ── An interrupt held off by the I flag, and how the stretch ends ───────
+	{
+		char m[256];
+		wf_reset();
+		// Held after instructions 10..12 (ending at 100, 110, 120), taken after 13.
+		wf_irq_line(true, 100, 10);
+		wf_irq_line(true, 110, 11);
+		wf_irq_line(true, 120, 12);
+		wf_irq_line(false, 130, 13);
+		// Held after 20 and 21, then the line is withdrawn: 22 never reports.
+		wf_irq_line(true, 200, 20);
+		wf_irq_line(true, 210, 21);
+		wf_irq_line(true, 300, 30); // held again, later
+		wf_irq_poll(30);            // still held at the frame's end
+		wf_frame_end(400, 0, 0);
+		marks_of(wf_frame(0), m, sizeof m);
+		check(strcmp(m, "ON@100 OFF@130 ON@200 OFF@210 ON@300 OFF@400 ") == 0,
+		      "held from the first held instruction to when it was taken or withdrawn");
+		if (strcmp(m, "ON@100 OFF@130 ON@200 OFF@210 ON@300 OFF@400 ") != 0)
+			printf("      marks: %s\n", m);
+		check_eq(wf_frame(0)->writes, 0, "marks are not writes");
+		int na;
+		wf_aggregates(&na);
+		check_eq((uint32_t)na, 0, "nor in the aggregates");
+
+		wf_irq_line(true, 410, 31); // the same stretch, into the next frame
+		wf_irq_poll(40);            // and over before it ends
+		wf_frame_end(800, 0, 0);
+		marks_of(wf_frame(1), m, sizeof m);
+		check(strcmp(m, "ON@0 OFF@10 ") == 0, "a stretch over a frame's end reopens at the next's start");
+		if (strcmp(m, "ON@0 OFF@10 ") != 0)
+			printf("      marks: %s\n", m);
+
+		range_t r;
+		memset(&r, 0, sizeof r);
+		wf_frame_range(wf_frame(0), 0, 400, range_node, range_write, &r);
+		check_eq((uint32_t)r.writes, 0, "a range does not count marks as writes");
+		const walk_t w = walk(wf_frame(0));
+		check(w.balanced && w.events == 0 && w.marks == 6, "the walk hands marks out as marks");
 	}
 
 	// ── The walk: nested spans, two threads, balanced ───────────────────────

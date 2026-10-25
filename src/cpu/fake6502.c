@@ -225,7 +225,9 @@ void nmi6502() {
 }
 
 void irq6502() {
-    if (!(regs.status & FLAG_INTERRUPT)) {
+    const bool held = (regs.status & FLAG_INTERRUPT) != 0;
+    if (cpu_irq_line_hook) cpu_irq_line_hook(held);
+    if (!held) {
         interrupt6502(INT_IRQ);
     }
     waiting = 0;

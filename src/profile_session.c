@@ -97,6 +97,23 @@ cct_switch(int node)
 {
 	wf_cpu((uint16_t)node, perf_hist_total_cycles());
 }
+
+// The CPU's instruction count (fake6502.c), for telling a held line's gaps.
+static uint32_t
+instr_now(void)
+{
+	extern uint32_t instructions;
+	return instructions;
+}
+
+// An interrupt line is up. Inside a handler that is the request being
+// served, not one being kept waiting, so only main-line code reports.
+static void
+irq_line_hook(bool held)
+{
+	if (cpu_irq_depth() == 0)
+		wf_irq_line(held, perf_hist_total_cycles(), instr_now());
+}
 static bool tree_consistent = true;
 
 // Pool size: one node per distinct call path. A large program has a few
@@ -196,6 +213,7 @@ arm(uint32_t mask)
 			ym_selected          = 0;
 			io_write_tap         = io_tap;
 			video_vram_write_tap = vram_tap;
+			cpu_irq_line_hook    = irq_line_hook;
 			if (mask & CAP_REC_TREE)
 				cct_switch_hook = cct_switch;
 		}
@@ -218,6 +236,7 @@ disarm(uint32_t mask)
 	if (mask & CAP_REC_WATERFALL) {
 		io_write_tap         = NULL;
 		video_vram_write_tap = NULL;
+		cpu_irq_line_hook    = NULL;
 		cct_switch_hook      = NULL;
 	}
 	if (mask & CAP_REC_TREE) {
@@ -580,6 +599,12 @@ trace_emit(void *vctx, wf_out_kind_t kind, int thread, uint32_t cycle, int node,
 	trace_ctx_t *c  = vctx;
 	const double ts = (double)(c->frame->start + cycle) * c->us_per_cycle;
 	char         name[PROF_NAME_MAX + 32];
+	if (kind == WF_OUT_MARK) {
+		fprintf(c->f, ",\n{\"ph\":\"%c\",\"pid\":1,\"tid\":3,\"ts\":%.3f,\"name\":\"IRQ held off\"}",
+		        ev->target == WF_MARK_HELD_ON ? 'B' : 'E', ts);
+		c->events++;
+		return;
+	}
 	if (kind != WF_OUT_EVENT) {
 		profile_session_node_name(&report, node, name, sizeof name);
 		fprintf(c->f, ",\n{\"ph\":\"%c\",\"pid\":1,\"tid\":%d,\"ts\":%.3f,\"name\":",
@@ -715,8 +740,8 @@ profile_session_export_trace(const char *path)
 
 	fprintf(f, "{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n");
 	fprintf(f, "{\"ph\":\"M\",\"pid\":1,\"name\":\"process_name\",\"args\":{\"name\":\"X16\"}}");
-	static const char *const fixed[] = {"CPU", "IRQ", "Frames"};
-	for (int t = 0; t < 3; t++)
+	static const char *const fixed[] = {"CPU", "IRQ", "Frames", "IRQ held off"};
+	for (int t = 0; t < 4; t++)
 		fprintf(f, ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_name\",\"args\":{\"name\":\"%s\"}}"
 		           ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_sort_index\",\"args\":{\"sort_index\":%d}}",
 		        t, fixed[t], t, t);
@@ -738,8 +763,8 @@ profile_session_export_trace(const char *path)
 		else
 			for (int e = 0; e < frames[i]->count; e++)
 				if (wf_event_lane(&frames[i]->events[e]) != WF_LANE_CPU)
-					trace_emit(&c, WF_OUT_EVENT, 0, frames[i]->events[e].cycle, -1,
-					           &frames[i]->events[e]);
+					trace_emit(&c, wf_event_is_mark(&frames[i]->events[e]) ? WF_OUT_MARK : WF_OUT_EVENT, 0,
+					           frames[i]->events[e].cycle, -1, &frames[i]->events[e]);
 	}
 	fprintf(f, "\n]}\n");
 	fclose(f);
@@ -866,6 +891,7 @@ profile_session_frame_end(void)
 		if (((cap_recorders() & CAP_REC_BUDGET) || wf_armed_budget) && perf_budget_last_frame(&fr))
 			work = perf_frame_work(&fr);
 		wf_frame_set_video_mode(video_get_dc_value(0));
+		wf_irq_poll(instr_now());
 		wf_frame_end(perf_hist_total_cycles(), work,
 		             (uint16_t)((cap_recorders() & CAP_REC_TREE) ? cct_current() : 0));
 	}

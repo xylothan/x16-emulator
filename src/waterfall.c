@@ -24,6 +24,11 @@ static wf_frame_t *frames;            // every frame ended, oldest first
 static int        frame_n, frame_alloc_n;
 static uint32_t   frames_seen, dropped;
 
+// An interrupt held off by the I flag: open since the last ON mark.
+static bool       held_open;
+static uint32_t   held_instr;  // the last instruction that saw it held
+static uint64_t   held_last_t; // and when that instruction ended
+
 // Detail is kept for frame i when i % stride == 0, or when it is one of the
 // protected extremes. The stride doubles whenever the budget would be passed.
 static size_t     budget, detail_bytes;
@@ -236,6 +241,7 @@ wf_reset(void)
 	cur_start      = 0;
 	frames_seen = dropped = 0;
 	wf_pending            = 0;
+	held_open             = false;
 }
 
 void
@@ -277,6 +283,44 @@ wf_cpu(uint16_t node, uint64_t t)
 	append(cycle, (uint32_t)WF_LANE_CPU << 24, node, 0, 0);
 }
 
+static void
+mark(uint64_t t, int which)
+{
+	const uint32_t cycle = t > cur_start ? (uint32_t)(t - cur_start) : 0;
+	append(cycle, (uint32_t)WF_LANE_MARK << 24, (uint16_t)which, 0, 0);
+}
+
+void
+wf_irq_line(bool held, uint64_t t, uint32_t instr)
+{
+	if (!agg)
+		return;
+	// Withdrawn since it was last seen held: the stretch ended back then.
+	if (held_open && instr != held_instr + 1 && instr != held_instr) {
+		mark(held_last_t, WF_MARK_HELD_OFF);
+		held_open = false;
+	}
+	if (held) {
+		if (!held_open)
+			mark(t, WF_MARK_HELD_ON);
+		held_open   = true;
+		held_instr  = instr;
+		held_last_t = t;
+	} else if (held_open) {
+		mark(t, WF_MARK_HELD_OFF); // taken now
+		held_open = false;
+	}
+}
+
+void
+wf_irq_poll(uint32_t instr)
+{
+	if (agg && held_open && instr != held_instr) {
+		mark(held_last_t, WF_MARK_HELD_OFF);
+		held_open = false;
+	}
+}
+
 void
 wf_frame_set_video_mode(uint8_t mode)
 {
@@ -295,6 +339,9 @@ wf_frame_end(uint64_t t, uint64_t work, uint16_t node)
 
 	cur.length = (uint32_t)(t - cur_start);
 	cur.work   = work;
+	const bool held_carry = held_open;
+	if (held_open)
+		mark(t, WF_MARK_HELD_OFF);
 
 	// The summary, always (unless memory has run out entirely).
 	if (frame_n == frame_alloc_n) {
@@ -333,6 +380,8 @@ wf_frame_end(uint64_t t, uint64_t work, uint16_t node)
 	cur.truncated  = false;
 	cur.start_node = node;
 	cur_start      = t;
+	if (held_carry)
+		mark(t, WF_MARK_HELD_ON);
 }
 
 int
@@ -482,7 +531,7 @@ wf_frame_range(const wf_frame_t *f, uint32_t c0, uint32_t c1, wf_range_node_fn o
 		const bool       last = i == f->count;
 		const wf_event_t *e   = last ? NULL : &f->events[i];
 		if (!last && wf_event_lane(e) != WF_LANE_CPU) {
-			if (on_write && e->cycle >= c0 && e->cycle < c1)
+			if (on_write && !wf_event_is_mark(e) && e->cycle >= c0 && e->cycle < c1)
 				on_write(ctx, e);
 			continue;
 		}
@@ -546,6 +595,10 @@ wf_walk_frame(const wf_frame_t *f, wf_parent_fn parent_of, int root_irq, wf_emit
 
 	for (int i = 0; i < f->count; i++) {
 		const wf_event_t *e = &f->events[i];
+		if (wf_event_is_mark(e)) {
+			emit(ctx, WF_OUT_MARK, 1, e->cycle, -1, e);
+			continue;
+		}
 		if (wf_event_lane(e) != WF_LANE_CPU) {
 			emit(ctx, WF_OUT_EVENT, (e->flags & WF_F_IRQ) ? 1 : 0, e->cycle, -1, e);
 			continue;
