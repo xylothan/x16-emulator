@@ -4,6 +4,7 @@
 #include "imgui_internal.h" // ImGuiSettingsHandler
 #include "debug_ui_settings.h"
 #include "debug_ui_bridge.h"
+#include "../source_view.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -80,6 +81,12 @@ settings_read_open(ImGuiContext *, ImGuiSettingsHandler *, const char *name)
 void
 settings_read_line(ImGuiContext *, ImGuiSettingsHandler *, void *, const char *line)
 {
+    // Text-valued keys first: a path does not parse as a number.
+    if (strncmp(line, "SourceFolder=", 13) == 0) {
+        if (line[13])
+            debug_ui_settings().source_folders.push_back(line + 13);
+        return;
+    }
     char key[64];
     float value = 0.0f;
     if (sscanf(line, "%63[^=]=%f", key, &value) != 2) {
@@ -110,6 +117,11 @@ settings_apply_to_core()
     DebugUiSettings &s = debug_ui_settings();
     DEBUGSetFollowInterrupts(s.follow_interrupts);
     DEBUGSetBreakOnInterrupt(s.break_on_interrupt);
+    // Saved source folders join -srcpath and the debug info's own folder.
+    for (const std::string &dir : s.source_folders)
+        source_view_add_path(dir.c_str());
+    if (!s.source_folders.empty())
+        source_view_retry_missing();
 }
 
 void
@@ -133,6 +145,8 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
             buf->appendf("%s=%d\n", t[i].key, *t[i].i);
         }
     }
+    for (const std::string &dir : debug_ui_settings().source_folders)
+        buf->appendf("SourceFolder=%s\n", dir.c_str());
     buf->append("\n");
 }
 

@@ -35,6 +35,30 @@ const source_file_t *source_view_get(const char *name);
 // re-read fresh). Registered search paths are kept.
 void source_view_invalidate(void);
 
+// ---- Managing the search folders from the debugger ------------------------
+// The registered folders, most recently added first.
+int         source_view_path_count(void);
+const char *source_view_path_at(int i);
+// Forget a folder. False if it was not registered.
+bool        source_view_remove_path(const char *dir);
+
+// Forget every cached "not found", so the next lookup searches again: call
+// after adding a folder. Files that were found stay cached.
+void source_view_retry_missing(void);
+
+// Whether `name` would be found, by the same rules as source_view_get(), without
+// reading or caching it. The cache holds only a few files, so a caller that
+// checks many (a list of every file in the debug info) must use this instead.
+bool source_view_can_find(const char *name);
+
+// Look for a file named like `name` (its last path component, compared without
+// regard to case) anywhere under `root`, and write the folder that holds it to
+// `dir`. Searches breadth-first, at most `max_depth` folders deep and `max_dirs`
+// folders in all, and skips hidden folders (.git and friends). For a debugger
+// UI that must not hang on a huge tree. True if found.
+bool source_view_find_under(const char *root, const char *name, int max_depth, int max_dirs,
+                            char *dir, int dir_size);
+
 // Free everything (cached files and registered paths). Call on shutdown.
 void source_view_free(void);
 

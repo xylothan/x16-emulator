@@ -3,9 +3,12 @@
 
 #include "source_view.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "dirent_win32.h" // portable opendir/readdir (native <dirent.h> elsewhere); needs <stdio.h> first
 
 // ─── Search paths ───────────────────────────────────────────────────
 
@@ -214,6 +217,166 @@ const source_file_t *source_view_get(const char *name)
 	memset(entry, 0, sizeof(*entry));
 	load_entry(entry, name);
 	return entry;
+}
+
+int source_view_path_count(void)
+{
+	return search_path_count;
+}
+
+const char *source_view_path_at(int i)
+{
+	return (i >= 0 && i < search_path_count) ? search_paths[i] : NULL;
+}
+
+bool source_view_remove_path(const char *dir)
+{
+	for (int i = 0; dir && i < search_path_count; i++) {
+		if (strcmp(search_paths[i], dir) == 0) {
+			free(search_paths[i]);
+			for (int j = i + 1; j < search_path_count; j++)
+				search_paths[j - 1] = search_paths[j];
+			search_path_count--;
+			return true;
+		}
+	}
+	return false;
+}
+
+void source_view_retry_missing(void)
+{
+	int kept = 0;
+	for (int i = 0; i < cache_count; i++) {
+		if (cache[i].found) {
+			cache[kept++] = cache[i];
+		} else {
+			free_entry(&cache[i]);
+		}
+	}
+	cache_count = kept;
+}
+
+static bool file_exists(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return false;
+	fclose(f);
+	return true;
+}
+
+bool source_view_can_find(const char *name)
+{
+	if (!name || !name[0])
+		return false;
+	if (file_exists(name))
+		return true;
+	const char *base = basename_ptr(name);
+	for (int i = 0; i < search_path_count; i++) {
+		size_t need = strlen(search_paths[i]) + 1 + strlen(base) + 1;
+		char  *p    = malloc(need);
+		if (!p)
+			return false;
+		snprintf(p, need, "%s/%s", search_paths[i], base);
+		const bool ok = file_exists(p);
+		free(p);
+		if (ok)
+			return true;
+	}
+	return file_exists(base);
+}
+
+static bool same_name(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++)
+		if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+			return false;
+	return !*a && !*b;
+}
+
+bool source_view_find_under(const char *root, const char *name, int max_depth, int max_dirs,
+                            char *dir, int dir_size)
+{
+	if (!root || !root[0] || !name || !dir || dir_size <= 0)
+		return false;
+	const char *base = basename_ptr(name);
+	// Breadth-first, so a file near the top wins over a same-named copy deep
+	// in a vendored tree. The queue holds folders still to read, with depths.
+	int    cap = 64, head = 0, tail = 0, visited = 0;
+	char **queue = malloc(sizeof *queue * (size_t)cap);
+	int   *depth = malloc(sizeof *depth * (size_t)cap);
+	bool   found = false;
+	if (!queue || !depth) {
+		free(queue);
+		free(depth);
+		return false;
+	}
+	queue[tail] = malloc(strlen(root) + 1);
+	if (queue[tail])
+		strcpy(queue[tail], root);
+	depth[tail++] = 0;
+	while (head < tail && !found) {
+		char     *cur = queue[head];
+		const int d   = depth[head++];
+		if (!cur)
+			continue;
+		DIR *dp = opendir(cur);
+		if (dp && ++visited <= max_dirs) {
+			struct dirent *de;
+			while (!found && (de = readdir(dp)) != NULL) {
+				const char *n = de->d_name;
+				if (n[0] == '.')
+					continue; // ".", "..", and hidden folders such as .git
+				size_t need  = strlen(cur) + 1 + strlen(n) + 1;
+				char  *child = malloc(need);
+				if (!child)
+					continue;
+				snprintf(child, need, "%s/%s", cur, n);
+				if (same_name(n, base)) {
+					FILE *f = fopen(child, "rb");
+					if (f) {
+						fclose(f);
+						snprintf(dir, (size_t)dir_size, "%s", cur);
+						found = true;
+					}
+					free(child);
+					continue;
+				}
+				// A folder? Try to open it; only folders open. Queue it.
+				DIR *sub = d < max_depth ? opendir(child) : NULL;
+				if (sub) {
+					closedir(sub);
+					if (tail == cap) {
+						cap *= 2;
+						char **q2 = realloc(queue, sizeof *queue * (size_t)cap);
+						int   *d2 = realloc(depth, sizeof *depth * (size_t)cap);
+						if (q2)
+							queue = q2;
+						if (d2)
+							depth = d2;
+						if (!q2 || !d2) {
+							free(child);
+							cap /= 2;
+							continue;
+						}
+					}
+					queue[tail]   = child;
+					depth[tail++] = d + 1;
+				} else {
+					free(child);
+				}
+			}
+		}
+		if (dp)
+			closedir(dp);
+		if (visited > max_dirs)
+			break;
+	}
+	for (int i = 0; i < tail; i++)
+		free(queue[i]);
+	free(queue);
+	free(depth);
+	return found;
 }
 
 void source_view_invalidate(void)

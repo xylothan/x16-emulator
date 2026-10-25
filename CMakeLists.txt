@@ -414,6 +414,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/io_panel.cpp
         src/debug_ui/panels/perf_panel.cpp
         src/debug_ui/panels/profile_panel.cpp
+        src/debug_ui/source_folders.cpp
         src/debug_ui/panels/waterfall_view.cpp
     )
 
@@ -703,6 +704,10 @@ x16_add_test(irq_ctx
 # two alongside it. dbg_info.c has no dependency on the emulator core either.
 x16_add_test(dbg_load
     SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c)
+
+# Source folders: add, remove, forget cached misses, find a file in a tree.
+x16_add_test(source_view
+    SOURCES tests/test_source_view.c tests/support/harness.c src/source_view.c)
 
 # vera_pcm.c includes only its own header and libc, so the test links it alone.
 x16_add_test(vera_pcm
