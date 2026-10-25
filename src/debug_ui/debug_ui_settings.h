@@ -11,6 +11,9 @@
 
 #include <stdbool.h>
 
+#include <string>
+#include <vector>
+
 struct DebugUiSettings {
     // --- Appearance ---------------------------------------------------------
     // Global interface scale: the whole debugger, not just panel text. Per-panel
@@ -88,6 +91,11 @@ struct DebugUiSettings {
     //
     // The E (emulation) flag is the clearest case - see cpu_panel.cpp.
     bool allow_breaking_changes = false;
+
+    // --- Source folders -----------------------------------------------------
+    // Folders added in System > Source folders, searched for the files the
+    // debug info names. One "SourceFolder=" line each in imgui.ini.
+    std::vector<std::string> source_folders;
 };
 
 // The live settings. Mutating these takes effect immediately.

@@ -19,6 +19,7 @@
 #include "debug_ui_bridge.h"  // regs, DEBUGRunTo/DEBUGIsPaused, breakpoints, dbg_info_label_to_addr
 #include "debug_ui_widgets.h" // dbgui_value_lines
 #include "debug_ui_insn_tooltip.h" // dbgui_instruction_tooltip_body
+#include "../source_folders.h"      // add folders / search a tree for missing files
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -390,9 +391,43 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
 
     if (!sf || !sf->found) {
         ImGui::TextColored(orange, "%s   (source file not found)", src_basename(file));
-        ImGui::TextWrapped("Could not locate '%s' on disk. Add a search directory "
-                           "with -srcpath <dir>.",
-                           file);
+        ImGui::TextWrapped("The debug info names it as \"%s\", but it is not there, and not in "
+                           "any source folder:", file);
+        ImGui::Indent();
+        const int np = source_view_path_count();
+        for (int i = 0; i < np; i++)
+            ImGui::BulletText("%s", source_view_path_at(i));
+        ImGui::BulletText("the emulator's working directory");
+        ImGui::Unindent();
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Tell the debugger where your sources are:");
+        static char where[512] = "";
+        static bool seeded     = false;
+        static char result[600] = "";
+        if (!seeded) {
+            const char *d = dbg_info_get_dbg_dir();
+            snprintf(where, sizeof where, "%s", d ? d : "");
+            seeded = true;
+        }
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##srcwhere", "C:\\path\\to\\your\\project", where, sizeof where);
+        if (ImGui::Button("Find it under this folder")) {
+            source_folders_find_under(where, file, result, sizeof result);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Search this folder and its subfolders for %s, and add the folder\n"
+                              "it is in to the search list (saved for next time).",
+                              src_basename(file));
+        ImGui::SameLine();
+        if (ImGui::Button("Add this exact folder")) {
+            source_folders_add(where, true);
+            snprintf(result, sizeof result, "Added %s.", where);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("All source folders..."))
+            debug_ui_open_source_folders();
+        if (result[0])
+            ImGui::TextDisabled("%s", result);
         return;
     }
 
@@ -732,6 +767,12 @@ source_panel_render(bool *p_open)
     if (ImGui::Button("Open..."))
         ImGui::OpenPopup("src_open");
     src_render_open_popup();
+    ImGui::SameLine();
+    if (ImGui::Button("Folders..."))
+        debug_ui_open_source_folders();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Where the debugger looks for source files (also System >\n"
+                          "Source folders...).");
     ImGui::SameLine(0, 16);
     ImGui::TextUnformatted("Goto line:");
     ImGui::SameLine();
