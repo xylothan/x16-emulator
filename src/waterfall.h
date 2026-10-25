@@ -79,6 +79,7 @@ typedef struct {
 	uint64_t    score;      // what the worst-K list ranks by
 	uint32_t    length;     // cycles the frame lasted
 	uint16_t    start_node; // innermost tree node when the frame began
+	uint8_t     video_mode; // VERA DC_VIDEO output mode (0 off, 1 VGA, 2 NTSC, 3 RGB)
 	bool        truncated;  // events past the buffer were dropped
 	int         count;
 	wf_event_t *events;
@@ -114,6 +115,11 @@ wf_flush(uint32_t key, bool irq, uint64_t t)
 
 // The innermost call-tree node changed at time `t`.
 void wf_cpu(uint16_t node, uint64_t t);
+
+// VERA's output mode for the frame being recorded (DC_VIDEO bits 0-1). It
+// decides what a scanline is: VGA and NTSC time their frames differently.
+// Sticky: carries to later frames until set again.
+void wf_frame_set_video_mode(uint8_t mode);
 
 // A frame ended at time `t`. `score` ranks it for the worst list (0: rank by
 // event count); `node` is the innermost tree node, which the next frame

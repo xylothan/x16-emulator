@@ -840,6 +840,7 @@ profile_session_frame_end(void)
 		perf_frame_t fr;
 		if ((cap_recorders() & CAP_REC_BUDGET) && perf_budget_last_frame(&fr))
 			score = perf_frame_work(&fr);
+		wf_frame_set_video_mode(video_get_dc_value(0));
 		wf_frame_end(perf_hist_total_cycles(), score,
 		             (uint16_t)((cap_recorders() & CAP_REC_TREE) ? cct_current() : 0));
 	}
