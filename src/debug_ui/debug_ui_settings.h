@@ -97,7 +97,19 @@ struct DebugUiSettings {
     // Folders added on the Source folders page, searched for the files the
     // debug info names. One "SourceFolder=" line each in imgui.ini.
     std::vector<std::string> source_folders;
+
+    // --- Files ----------------------------------------------------------------
+    // Folders for the files the emulator writes on its own (export_paths.h),
+    // empty for the working directory. Text keys in imgui.ini.
+    std::string export_profile_dir;
+    std::string export_screenshot_dir;
+    std::string export_dump_dir;
+    std::string profile_export_name = "profile"; // the Profile panel's file name
+    bool        profile_export_stamp = false;     // add the date and time to it
 };
+
+// Push the export folders into export_paths, after a load or an edit.
+void debug_ui_apply_export_dirs(void);
 
 // The live settings. Mutating these takes effect immediately.
 DebugUiSettings &debug_ui_settings();

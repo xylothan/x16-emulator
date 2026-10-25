@@ -335,6 +335,7 @@ set(X16_SOURCES
     src/sdcard.c
     src/sdcard_fat.c
     src/main.c
+    src/export_paths.c
     src/debugger.c
     src/dbg_info.c
     src/dbg_load.c
@@ -416,6 +417,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/profile_panel.cpp
         src/debug_ui/source_folders.cpp
         src/debug_ui/debug_info_page.cpp
+        src/debug_ui/export_page.cpp
         src/debug_ui/panels/waterfall_view.cpp
         src/debug_ui/panels/flame_view.cpp
         src/debug_ui/panels/callers_view.cpp
@@ -781,6 +783,10 @@ x16_add_test(vera_bandwidth
 x16_add_test(sdcard_fat
     SOURCES tests/test_sdcard_fat.c tests/support/harness.c src/sdcard_fat.c)
 
+# Where screenshots, dumps and profile exports go: libc only.
+x16_add_test(export_paths
+    SOURCES tests/test_export_paths.c tests/support/harness.c src/export_paths.c)
+
 # vera_psg.c likewise has no dependency beyond its own header and libc.
 x16_add_test(vera_psg
     SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
@@ -792,7 +798,8 @@ x16_add_test(vera_psg
 # never initialized by these tests, which do not open a window.
 set(VERA_VIDEO_TEST_SOURCES
     src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c
-    src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c src/host_prof.c)
+    src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c src/host_prof.c
+    src/export_paths.c)
 
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c

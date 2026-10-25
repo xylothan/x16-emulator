@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <time.h>
 #include "compat.h"
+#include "export_paths.h"
 
 #ifdef __EMSCRIPTEN__
 #include "emscripten.h"
@@ -995,9 +996,12 @@ struct video_sprite_properties
 static void
 screenshot(void)
 {
-	char path[PATH_MAX];
+	char name[64], path[PATH_MAX];
 	const time_t now = time(NULL);
-	strftime(path, PATH_MAX, "x16emu-%Y-%m-%d-%H-%M-%S.png", localtime(&now));
+	strftime(name, sizeof name, "x16emu-%Y-%m-%d-%H-%M-%S.png", localtime(&now));
+	// In the screenshot folder (Settings), made if it is missing.
+	if (!export_path(EXPORT_SCREENSHOT, name, path, sizeof path))
+		printf("WARNING: Couldn't make the screenshot folder %s\n", export_dir(EXPORT_SCREENSHOT));
 
 	memset(png_buffer, 0, SCREEN_WIDTH * SCREEN_HEIGHT * 3);
 
