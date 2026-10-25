@@ -8,7 +8,7 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h" // regs + execution-control (DEBUGContinue/…/DEBUGIsRunning)
 #include "debug_ui_settings.h" // user preferences (System → Settings...)
-#include "source_folders.h"    // where to look for source files (System → Source folders...)
+#include "source_folders.h"    // where to look for source files (Settings > Source folders)
 #include "debug_ui_image.h"  // panel image textures (SDL_Texture or shared DX12)
 #include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
 #include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
@@ -50,7 +50,6 @@ static std::string s_bench_panels;
 static bool        s_bench_have_panels = false;
 static bool        s_bench_io_capture  = false;
 static bool          s_show_demo    = false;         // Help → ImGui Demo (vendored imgui_demo.cpp)
-static bool          s_show_settings = false;        // System → Settings...
 
 static void debug_ui_latch_goto(void); // defined below; called from debug_ui_render
 static void debug_ui_follow_stop_location(void); // ditto
@@ -692,17 +691,12 @@ debug_ui_draw_control_bar(void)
         ImGui::Separator();
 
         // Behavioural toggles live in Settings, not scattered through menus.
-        if (ImGui::MenuItem("Source folders...")) {
-            debug_ui_open_source_folders();
+        if (ImGui::MenuItem("Settings...", nullptr, debug_ui_settings_is_open())) {
+            debug_ui_open_settings(nullptr);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Where the debugger looks for the source files named in the debug\n"
-                              "info: add, remove, or search a folder tree for missing files.");
-        }
-        ImGui::MenuItem("Settings...", nullptr, &s_show_settings);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Interrupt following, panel auto-switching, memory change\n"
-                              "highlighting and other preferences.");
+            ImGui::SetTooltip("Every preference, by group: appearance, stepping, source folders,\n"
+                              "memory, audio, the I/O trace and the frame budget.");
         }
         ImGui::EndMenu();
     }
@@ -1138,9 +1132,7 @@ debug_ui_render(void)
         }
 
         // User preferences (System → Settings...).
-        debug_ui_draw_settings_window(&s_show_settings);
-        // Source search folders (System → Source folders...).
-        debug_ui_draw_source_folders_window();
+        debug_ui_draw_settings_window();
     }
 
     ImGui::Render();

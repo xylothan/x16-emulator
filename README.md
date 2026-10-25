@@ -438,12 +438,19 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 * **System** — *Reset* (`Ctrl+Shift+F5`, keeps your breakpoints), *Trigger IRQ*, *Trigger NMI*, and *Settings…*.
 * **Help** — the keyboard shortcut table, so you never need this README for it.
 
-**Settings…** covers interrupt following, break-on-interrupt, whether a break auto-switches you to
-the Disassembly or Source panel, memory change highlighting and its duration, holding audio while
-paused, I/O capture and its per-device gating, and the global interface scale. Settings and your
-window layout are saved to `imgui.ini` and restored next run.
+**Settings…** opens one window: a list of pages on the left, grouped, and the selected page on
+the right. A search box at the top of the list finds a setting by name.
 
-![The Settings window, with Appearance, Navigation, Execution, Memory, Audio and Safety sections](./.gh/screenshots/settings.png)
+| Group | Pages |
+| --- | --- |
+| General | Appearance (interface scale), Navigation (switching to Disassembly or Source on a break) |
+| Debugging | Stepping & interrupts, Source folders, Safety |
+| Memory & Audio | Memory (change highlighting), Audio (hold while paused) |
+| I/O trace | Capture (on/off, ring size, SD image indexing), Devices (per-device capture) |
+| Performance | Frame budget (target FPS, idle detection, history) |
+
+Changes apply at once. Settings, the page last shown and your window layout are saved to
+`imgui.ini` and restored next run.
 
 #### Keyboard shortcuts
 

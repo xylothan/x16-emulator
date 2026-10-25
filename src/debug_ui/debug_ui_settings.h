@@ -2,7 +2,8 @@
 //
 // One place for the debugger's behavioural toggles, so panels read a single
 // source of truth instead of each keeping its own static, and so the user can
-// see and change them together (System > Settings).
+// see and change them together (System > Settings, one window with a page per
+// group of settings).
 //
 // Preferences persist in imgui.ini through an ImGuiSettingsHandler, alongside
 // the window layout ImGui already stores there — no extra config file.
@@ -93,7 +94,7 @@ struct DebugUiSettings {
     bool allow_breaking_changes = false;
 
     // --- Source folders -----------------------------------------------------
-    // Folders added in System > Source folders, searched for the files the
+    // Folders added on the Source folders page, searched for the files the
     // debug info names. One "SourceFolder=" line each in imgui.ini.
     std::vector<std::string> source_folders;
 };
@@ -105,8 +106,14 @@ DebugUiSettings &debug_ui_settings();
 // ini file (i.e. before the first NewFrame).
 void debug_ui_settings_register(void);
 
-// The Settings window itself (System > Settings).
-void debug_ui_draw_settings_window(bool *p_open);
+// The Settings window (System > Settings). Draw it every frame; it shows
+// itself once opened. Open it on a page by name, or nullptr for the last one.
+void debug_ui_draw_settings_window(void);
+void debug_ui_open_settings(const char *page);
+bool debug_ui_settings_is_open(void);
+// The page shown, saved in imgui.ini.
+void        debug_ui_settings_set_page(const char *page);
+const char *debug_ui_settings_page(void);
 
 // Note that a preference changed so it gets written back to imgui.ini. Panels
 // that expose the same toggle call this instead of pulling in imgui_internal.h.
@@ -116,6 +123,11 @@ void debug_ui_settings_mark_dirty(void);
 // frame whether or not the I/O panel is visible, so the setting means the same
 // thing wherever it was changed. Defined in panels/io_panel.cpp.
 void debug_ui_apply_io_capture(void);
+
+// The I/O trace's per-device capture checkboxes, one per line with a tooltip
+// each, for the Settings window. True when one changed. Defined in
+// panels/io_panel.cpp, beside the panel's own row of them.
+bool debug_ui_io_device_toggles(void);
 
 // Arm or disarm the Performance panel's recorders: on while the panel was
 // drawn this frame (or "Keep profiling when hidden" is set), off after a short

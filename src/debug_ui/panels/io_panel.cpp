@@ -432,7 +432,7 @@ draw_capture_controls()
             ImGui::SameLine();
             ImGui::TextColored(COL_DIM, "\xc2\xb7 %u overwritten", dropped);
             tip("The ring wrapped and older events were discarded. Raise the capacity in "
-                "System > Settings, or capture fewer devices.");
+                "System > Settings > I/O trace > Capture, or capture fewer devices.");
         }
     }
 }
@@ -1805,4 +1805,22 @@ void
 debug_ui_apply_io_capture(void)
 {
     apply_capture_settings();
+}
+
+bool
+debug_ui_io_device_toggles(void)
+{
+    DebugUiSettings &s       = debug_ui_settings();
+    bool             changed = false;
+    ImGui::SeparatorText("Registers");
+    for (const DeviceToggle &t : RAW_TOGGLES) {
+        changed |= ImGui::Checkbox(t.label, &(s.*(t.field)));
+        tip(t.tip);
+    }
+    ImGui::SeparatorText("Decoded events");
+    for (const DeviceToggle &t : DECODED_TOGGLES) {
+        changed |= ImGui::Checkbox(t.label, &(s.*(t.field)));
+        tip(t.tip);
+    }
+    return changed;
 }

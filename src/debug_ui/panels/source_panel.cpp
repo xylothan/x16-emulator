@@ -772,7 +772,7 @@ source_panel_render(bool *p_open)
         debug_ui_open_source_folders();
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Where the debugger looks for source files (also System >\n"
-                          "Source folders...).");
+                          "Settings > Source folders).");
     ImGui::SameLine(0, 16);
     ImGui::TextUnformatted("Goto line:");
     ImGui::SameLine();
