@@ -147,7 +147,7 @@ void draw_emulation_toggle(const char *label)
                               "The running program owns this flag. Changing it moves interrupts\n"
                               "from $FFFE to $FFEE, and a 6502-era ROM has no handler there, so\n"
                               "the machine crashes at the next IRQ.\n\n"
-                              "Enable System > Settings > Safety > \"Allow breaking\n"
+                              "Enable System > Settings > Debugging > Safety > \"Allow breaking\n"
                               "modifications\" if you are hand-driving the CPU.");
         } else {
             ImGui::SetTooltip("E - Emulation flag (pause to edit)\n"

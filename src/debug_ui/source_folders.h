@@ -2,13 +2,14 @@
 //
 // The debug info names source files, often by a path from the machine that
 // built the program. These are the folders the debugger searches for them,
-// managed from System > Source folders (and the Source panel). Folders added
+// managed from the Settings window's Source folders page (and the Source
+// panel). Folders added
 // here are saved in imgui.ini; -srcpath and the debug info's own folder are
 // added at startup and are not saved.
 #pragma once
 
-// The window. Open it from anywhere with debug_ui_open_source_folders().
-void debug_ui_draw_source_folders_window(void);
+// The Settings page. Open it from anywhere with debug_ui_open_source_folders().
+void source_folders_draw_page(void);
 void debug_ui_open_source_folders(void);
 
 // Add a folder to the search list, and look again for every file not found

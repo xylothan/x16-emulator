@@ -18,7 +18,6 @@
 
 namespace {
 
-bool        s_open = false;
 char        s_folder[512] = "";
 bool        s_seeded = false;
 std::string s_msg;
@@ -142,20 +141,12 @@ source_folders_find_under(const char *root, const char *only, char *msg, int msg
 void
 debug_ui_open_source_folders(void)
 {
-	s_open = true;
-	ImGui::SetWindowFocus("Source Folders");
+	debug_ui_open_settings("Source folders");
 }
 
 void
-debug_ui_draw_source_folders_window(void)
+source_folders_draw_page(void)
 {
-	if (!s_open)
-		return;
-	ImGui::SetNextWindowSize(ImVec2(620, 420), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Source Folders", &s_open)) {
-		ImGui::End();
-		return;
-	}
 	seed_folder();
 	ImGui::TextWrapped("The debug info names each source file. The debugger looks for it at that "
 	                   "path first, then in each folder below (top first), then in the emulator's "
@@ -248,5 +239,4 @@ debug_ui_draw_source_folders_window(void)
 			ImGui::TreePop();
 		}
 	}
-	ImGui::End();
 }
