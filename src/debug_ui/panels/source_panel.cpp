@@ -60,6 +60,11 @@ static int                      s_pcLine     = 0; // 1-based PC line within s_pc
 static std::string              s_lastPcFile;     // for edge-detecting PC movement
 static int                      s_lastPcLine = 0;
 static bool                     s_follow       = true; // auto-follow the PC while stepping
+// Follow PC acts only while the machine is stopped. Running, the PC visits
+// dozens of files a second: opening and selecting each would bury the tab bar
+// and yank the view away from whatever the user was reading. Set once per
+// frame in source_panel_render().
+static bool                     s_followNow    = false;
 static bool                     s_addedDbgPath = false;
 
 // Scroll request applied to whichever tab body renders this frame (only the
@@ -406,7 +411,7 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
     // or a manual pause is a jump to somewhere new - there the line must be
     // centred, or it turns up wherever the old scroll position happened to leave
     // it and you have to hunt for the highlight.
-    if (isPcFile && s_follow && pcMoved) {
+    if (isPcFile && s_followNow && pcMoved) {
         const char *why = debug_server_last_stop_reason();
         const bool  stepping = (why && strcmp(why, "step") == 0);
         src_request_scroll(file, pcLine, !stepping, /*flash=*/false);
@@ -564,6 +569,13 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
 static void
 source_panel_render(bool *p_open)
 {
+    // Arriving at a stop counts as the PC moving, even when it had already got
+    // there by the last running frame: that is the moment to follow it.
+    static bool wasRunning = false;
+    const bool  running    = DEBUGIsRunning();
+    const bool  justStopped = wasRunning && !running;
+    wasRunning  = running;
+    s_followNow = s_follow && !running;
     if (!ImGui::Begin("Source", p_open)) {
         dbgui_window_end();
         return;
@@ -648,11 +660,17 @@ source_panel_render(bool *p_open)
         if (pcf) {
             s_pcFile = pcf;
             s_pcLine = pcl;
-            src_ensure_tab(s_pcFile.c_str()); // keep the PC's file open as a tab
+            // Open the PC's file as a tab only when following, and only while
+            // stopped. With Follow PC off the panel never opens a file the user
+            // did not ask for; the "> " marker still shows when the PC is in a
+            // tab that is already open, and Go to PC opens it on request.
+            if (s_followNow)
+                src_ensure_tab(s_pcFile.c_str());
         }
     }
 
-    bool pcMoved = (mapping || viaCaller) && (s_pcLine != s_lastPcLine || s_pcFile != s_lastPcFile);
+    bool pcMoved = (mapping || viaCaller) &&
+                   (justStopped || s_pcLine != s_lastPcLine || s_pcFile != s_lastPcFile);
 
     // Cross-panel goto (clicking a Call Stack / Symbols / Breakpoints entry):
     // open that address's source file and jump to its line, so selecting a
@@ -663,7 +681,11 @@ source_panel_render(bool *p_open)
         if (debug_ui_peek_goto(&gaddr, &gbank)) {
             const char *gf = nullptr;
             int         gl = 0;
-            if (dbg_info_addr_to_source_banked(gaddr, (int)memory_get_ram_bank(), &gf, &gl) && gf) {
+            // A banked address names its own bank when the caller knows it (the
+            // Profile panel does); 0 means "whatever is mapped now".
+            const int gram = (gaddr >= 0xA000 && gaddr < 0xC000 && gbank) ? (int)gbank
+                                                                          : (int)memory_get_ram_bank();
+            if (dbg_info_addr_to_source_banked(gaddr, gram, &gf, &gl) && gf) {
                 if (!s_addedDbgPath) {
                     source_view_add_path(dbg_info_get_dbg_dir());
                     s_addedDbgPath = true;
@@ -678,7 +700,9 @@ source_panel_render(bool *p_open)
     // --- Toolbar ---
     ImGui::Checkbox("Follow PC", &s_follow);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Select and scroll to the PC's file and line on every stop.");
+        ImGui::SetTooltip("On every stop (breakpoint, step, pause), open the PC's file and\n"
+                          "scroll to its line. While the machine runs it leaves the view\n"
+                          "alone. Off: never opens or switches tabs by itself; use Go to PC.");
     if (dbg_info_has_high_level()) {
         // Only offered where a line is more than an instruction. For assembly
         // the two are the same thing, and stepping a whole macro expansion per
@@ -769,7 +793,7 @@ source_panel_render(bool *p_open)
             bool               isPc = (mapping || viaCaller) && (f == s_pcFile);
 
             ImGuiTabItemFlags flags = 0;
-            if (s_follow && isPc && pcMoved)
+            if (s_followNow && isPc && pcMoved)
                 flags |= ImGuiTabItemFlags_SetSelected; // snap to PC while following
             if (!s_selectFile.empty() && f == s_selectFile)
                 flags |= ImGuiTabItemFlags_SetSelected; // cross-panel goto target
