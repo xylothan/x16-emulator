@@ -607,6 +607,65 @@ cmp_frame_ptr(const void *a, const void *b)
 }
 
 int
+profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int max)
+{
+	int n = 0;
+	if (!profile_session_has_waterfall())
+		return 0;
+	for (int i = 0; i < wf_ring_count() && n < max; i++)
+		out[n++] = wf_ring_at(i);
+	for (int i = 0; i < wf_worst_count() && n < max; i++) {
+		const wf_frame_t *w   = wf_worst_at(i);
+		bool              dup = false;
+		for (int k = 0; k < n && !dup; k++)
+			dup = out[k]->number == w->number;
+		if (!dup)
+			out[n++] = w;
+	}
+	qsort((void *)out, (size_t)n, sizeof out[0], cmp_frame_ptr);
+	for (int i = 0; worst && i < n; i++) {
+		worst[i] = false;
+		for (int k = 0; k < wf_worst_count() && !worst[i]; k++)
+			worst[i] = wf_worst_at(k)->number == out[i]->number;
+	}
+	return n;
+}
+
+void
+profile_session_key_name(uint32_t key, char *buf, int size)
+{
+	key_name(key, buf, size);
+}
+
+void
+profile_session_key_where(uint32_t key, char *buf, int size)
+{
+	key_where(key, buf, size);
+}
+
+bool
+profile_session_key_source(uint32_t key, char *buf, int size)
+{
+	uint8_t  region, bank;
+	uint16_t pc;
+	perf_hist_key_decode(key, &region, &bank, &pc);
+	const char *file = NULL;
+	int         line = 0;
+	buf[0]           = 0;
+	if (region == PH_REGION_ROM ||
+	    dbg_info_addr_to_source_banked_ex(pc, region == PH_REGION_RAM ? bank : -1, &file, &line) ==
+	        DBG_BANK_NO_MATCH ||
+	    !file)
+		return false;
+	const char *base = strrchr(file, '/');
+	const char *b2   = strrchr(file, '\\');
+	if (b2 && (!base || b2 > base))
+		base = b2;
+	snprintf(buf, (size_t)size, "%s:%d", base ? base + 1 : file, line);
+	return true;
+}
+
+int
 profile_session_export_trace(const char *path)
 {
 	if (!profile_session_has_waterfall() || !path)
@@ -618,18 +677,7 @@ profile_session_export_trace(const char *path)
 
 	// The frames: the ring and the worst list, each frame once, in order.
 	const wf_frame_t *frames[WF_RING + WF_WORST];
-	int               n = 0;
-	for (int i = 0; i < wf_ring_count(); i++)
-		frames[n++] = wf_ring_at(i);
-	for (int i = 0; i < wf_worst_count(); i++) {
-		const wf_frame_t *w   = wf_worst_at(i);
-		bool              dup = false;
-		for (int k = 0; k < n && !dup; k++)
-			dup = frames[k]->number == w->number;
-		if (!dup)
-			frames[n++] = w;
-	}
-	qsort((void *)frames, (size_t)n, sizeof frames[0], cmp_frame_ptr);
+	const int         n = profile_session_waterfall_frames(frames, NULL, WF_RING + WF_WORST);
 
 	fprintf(f, "{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n");
 	fprintf(f, "{\"ph\":\"M\",\"pid\":1,\"name\":\"process_name\",\"args\":{\"name\":\"X16\"}}");

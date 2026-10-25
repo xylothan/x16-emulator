@@ -59,6 +59,26 @@ walk(const wf_frame_t *f)
 	return w;
 }
 
+typedef struct { int node[8]; uint32_t cyc[8]; int n; int writes; } range_t;
+
+static void
+range_node(void *ctx, int node, uint32_t cycles)
+{
+	range_t *r = ctx;
+	if (r->n < 8) {
+		r->node[r->n] = node;
+		r->cyc[r->n]  = cycles;
+		r->n++;
+	}
+}
+
+static void
+range_write(void *ctx, const wf_event_t *ev)
+{
+	(void)ev;
+	((range_t *)ctx)->writes++;
+}
+
 int
 main(void)
 {
@@ -180,6 +200,41 @@ main(void)
 		const walk_t w = walk(wf_ring_at(wf_ring_count() - 1));
 		check(w.balanced, "balanced");
 		check(strncmp(w.log, "B0:0@0 B0:2@0 B0:3@0 E0:3@10", 28) == 0, "opens main/A/B at 0");
+	}
+
+	// ── A range: cycles per innermost node, and the writes in it ────────────
+	{
+		wf_reset();
+		wf_frame_end(0, 1, 0);         // frame starts in [main] (node 0)
+		wf_cpu(2, 100);                // A from 100
+		wf_note(WF_LANE_PALETTE, 0, 0, 0);
+		wf_flush(0x0810, false, 150);  // a write at 150
+		wf_cpu(3, 200);                // B from 200
+		wf_cpu(2, 300);                // back in A at 300
+		wf_note(WF_LANE_VIA1, 0, 0, 0);
+		wf_flush(0x0900, false, 350);
+		wf_frame_end(400, 1, 0);
+		const wf_frame_t *f = wf_ring_at(wf_ring_count() - 1);
+
+		range_t r;
+		memset(&r, 0, sizeof r);
+		wf_frame_range(f, 0, 400, range_node, range_write, &r);
+		check_eq((uint32_t)r.n, 4, "four stretches over the whole frame");
+		check(r.node[0] == 0 && r.cyc[0] == 100, "[main] 0-100");
+		check(r.node[1] == 2 && r.cyc[1] == 100, "A 100-200");
+		check(r.node[2] == 3 && r.cyc[2] == 100, "B 200-300");
+		check(r.node[3] == 2 && r.cyc[3] == 100, "A again 300-400, to the frame's end");
+		check_eq((uint32_t)r.writes, 2, "both writes");
+
+		memset(&r, 0, sizeof r);
+		wf_frame_range(f, 150, 250, range_node, range_write, &r);
+		check(r.n == 2 && r.node[0] == 2 && r.cyc[0] == 50 && r.node[1] == 3 && r.cyc[1] == 50,
+		      "a range cuts the stretches it overlaps");
+		check_eq((uint32_t)r.writes, 1, "and holds only its own writes (150 is in, 350 is not)");
+
+		memset(&r, 0, sizeof r);
+		wf_frame_range(f, 250, 250, range_node, range_write, &r);
+		check(r.n == 0 && r.writes == 0, "an empty range holds nothing");
 	}
 
 	wf_free();

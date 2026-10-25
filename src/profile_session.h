@@ -13,6 +13,7 @@
 
 #include "profile_capture.h"
 #include "profile_report.h"
+#include "waterfall.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,6 +80,17 @@ typedef struct {
 	uint32_t writes;
 } prof_writes_t;
 const prof_writes_t *profile_session_writes_by_routine(int *count);
+
+// The waterfall's detailed frames -- the recent ring and the worst list, each
+// frame once -- in frame order, into `out` (up to `max`). `worst[i]` says
+// whether frame i is among the worst. Returns how many.
+int profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int max);
+
+// A perf_hist key, for display: its routine (or address), its bank:PC, and
+// its source line as "file:line" (false when the debug info has none).
+void profile_session_key_name(uint32_t key, char *buf, int size);
+void profile_session_key_where(uint32_t key, char *buf, int size);
+bool profile_session_key_source(uint32_t key, char *buf, int size);
 
 // Whether the tree's self cycles matched the histogram's totals exactly, for
 // the last report (true when there was no tree).
