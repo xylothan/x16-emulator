@@ -5,6 +5,7 @@
 #include "debug_ui_settings.h"
 #include "debug_ui_bridge.h"
 #include "debug_info_page.h"
+#include "export_page.h"
 #include "source_folders.h"
 #include "../perf_budget.h"
 #include "../source_view.h"
@@ -71,6 +72,7 @@ fields(int *count)
         { "PerfIdleMode",        nullptr, nullptr, &s.perf_idle_mode },
         { "PerfCapacity",        nullptr, nullptr, &s.perf_capacity },
         { "PerfGraphFrames",     nullptr, nullptr, &s.perf_graph_frames },
+        { "ProfileExportStamp",  &s.profile_export_stamp,   nullptr, nullptr },
     };
     *count = (int)(sizeof(table) / sizeof(table[0]));
     return table;
@@ -87,6 +89,22 @@ void
 settings_read_line(ImGuiContext *, ImGuiSettingsHandler *, void *, const char *line)
 {
     // Text-valued keys first: a path does not parse as a number.
+    {
+        DebugUiSettings &ds = debug_ui_settings();
+        static const struct { const char *key; std::string DebugUiSettings::*field; } text[] = {
+            { "ExportProfileDir=",    &DebugUiSettings::export_profile_dir },
+            { "ExportScreenshotDir=", &DebugUiSettings::export_screenshot_dir },
+            { "ExportDumpDir=",       &DebugUiSettings::export_dump_dir },
+            { "ProfileExportName=",   &DebugUiSettings::profile_export_name },
+        };
+        for (const auto &t : text) {
+            const size_t n = strlen(t.key);
+            if (strncmp(line, t.key, n) == 0) {
+                ds.*(t.field) = line + n;
+                return;
+            }
+        }
+    }
     if (strncmp(line, "SettingsPage=", 13) == 0) {
         debug_ui_settings_set_page(line + 13);
         return;
@@ -131,6 +149,7 @@ settings_apply_to_core()
         source_view_add_path(dir.c_str());
     if (!s.source_folders.empty())
         source_view_retry_missing();
+    debug_ui_apply_export_dirs();
 }
 
 void
@@ -156,6 +175,13 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
     }
     for (const std::string &dir : debug_ui_settings().source_folders)
         buf->appendf("SourceFolder=%s\n", dir.c_str());
+    {
+        const DebugUiSettings &ds = debug_ui_settings();
+        buf->appendf("ExportProfileDir=%s\n", ds.export_profile_dir.c_str());
+        buf->appendf("ExportScreenshotDir=%s\n", ds.export_screenshot_dir.c_str());
+        buf->appendf("ExportDumpDir=%s\n", ds.export_dump_dir.c_str());
+        buf->appendf("ProfileExportName=%s\n", ds.profile_export_name.c_str());
+    }
     const char *page = debug_ui_settings_page();
     if (page && page[0])
         buf->appendf("SettingsPage=%s\n", page);
@@ -404,6 +430,8 @@ const Page PAGES[] = {
      "srcpath path search missing files folder", source_folders_draw_page},
     {"Debugging", "Safety", "Edits that can crash a running program are locked unless allowed here.",
      "breaking modifications emulation flag 65c816 unlock", page_safety},
+    {"Files", "Export folders", "Where screenshots, memory dumps and profile exports are written.",
+     "export folder path directory screenshot dump profile save output", export_draw_page},
     {"Memory & Audio", "Memory", "The Memory panel.", "highlight changed bytes fade pulse", page_memory},
     {"Memory & Audio", "Audio", "The PSG, YM2151 and PCM panels.", "pause hold meters scopes psg ym pcm",
      page_audio},

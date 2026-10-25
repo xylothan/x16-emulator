@@ -445,6 +445,7 @@ the right. A search box at the top of the list finds a setting by name.
 | --- | --- |
 | General | Appearance (interface scale), Navigation (switching to Disassembly or Source on a break) |
 | Debugging | Stepping & interrupts, Debug info (switch to another builds .dbg while running), Source folders, Safety |
+| Files | Export folders (where screenshots, memory dumps and profile exports go; profile export name and date stamp) |
 | Memory & Audio | Memory (change highlighting), Audio (hold while paused) |
 | I/O trace | Capture (on/off, ring size, SD image indexing), Devices (per-device capture) |
 | Performance | Frame budget (target FPS, idle detection, history) |

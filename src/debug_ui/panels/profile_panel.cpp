@@ -10,9 +10,11 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"  // debug_ui_request_goto
 #include "debug_ui_widgets.h" // dbgui_window_zoom/end, dbgui_col_width
+#include "debug_ui_settings.h" // the export file name and folder
 
 #include "../perf_hist.h"
 #include "../profile_session.h"
+#include "../export_paths.h"
 #include "waterfall_view.h"
 #include "flame_view.h"
 #include "callers_view.h"
@@ -20,6 +22,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <algorithm>
 #include <vector>
@@ -34,7 +37,7 @@ bool  g_rec_vram   = false;
 bool  g_rec_tree   = true;
 bool  g_rec_wf     = false;
 char  g_filter[64] = "";
-char  g_export[260] = "profile";
+char  g_export[260] = "";  // seeded from Settings on first draw
 
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
@@ -538,48 +541,74 @@ draw_report(void)
 
 	// Exports, for other tools. Collapsed: nothing in the panel needs them.
 	if (ImGui::TreeNode("Export for other tools")) {
-		static char export_msg[sizeof g_export + 48] = "";
+		DebugUiSettings &st = debug_ui_settings();
+		static char export_msg[1200] = "";
+		static bool editing = false; // the box was being typed in last frame
+		if (!editing && st.profile_export_name != g_export)
+			snprintf(g_export, sizeof g_export, "%s", st.profile_export_name.c_str());
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted("File name");
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(dbgui_field_width("wwwwwwwwwwwwwwwwwwww"));
-		ImGui::InputText("##profexport", g_export, sizeof g_export);
+		if (ImGui::InputText("##profexport", g_export, sizeof g_export)) {
+			st.profile_export_name = g_export;
+			debug_ui_settings_mark_dirty();
+		}
+		editing = ImGui::IsItemActive();
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Without a folder, files go in the emulator's working directory.\n"
-			                  "The extension is added for you.");
+			ImGui::SetTooltip("Without a folder, files go in the profile export folder:\n"
+			                  "%s\n"
+			                  "(System > Settings > Files > Export folders). The extension is added for you.",
+			                  export_dir(EXPORT_PROFILE)[0] ? export_dir(EXPORT_PROFILE)
+			                                                : "the emulator's working directory");
+		// The path for one export: the name, the date and time if asked for,
+		// the extension, in the export folder.
+		auto path_for = [&](const char *ext, char *out, size_t n) {
+			char name[sizeof g_export + 48];
+			if (st.profile_export_stamp) {
+				char         stamp[32];
+				const time_t now = time(nullptr);
+				strftime(stamp, sizeof stamp, "-%Y%m%d-%H%M%S", localtime(&now));
+				snprintf(name, sizeof name, "%s%s%s", g_export, stamp, ext);
+			} else {
+				snprintf(name, sizeof name, "%s%s", g_export, ext);
+			}
+			if (!export_path(EXPORT_PROFILE, name, out, n)) {
+				snprintf(export_msg, sizeof export_msg, "Could not make the folder %s", export_dir(EXPORT_PROFILE));
+				return false;
+			}
+			return true;
+		};
+		auto report = [&](int n, const char *path) {
+			snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
+		};
+		char path[1100];
 		if (r->node_count > 2) {
 			ImGui::SameLine();
-			if (ImGui::Button("Flame graph (.folded)")) {
-				char path[sizeof g_export + 16];
-				snprintf(path, sizeof path, "%s.folded", g_export);
-				const int n = profile_session_export_folded(path);
-				snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-			}
+			if (ImGui::Button("Flame graph (.folded)") && path_for(".folded", path, sizeof path))
+				report(profile_session_export_folded(path), path);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("One line per call path with its own time. Open it in\n"
 				                  "speedscope.app or pass it to flamegraph.pl.");
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Everything (.json)")) {
-			char path[sizeof g_export + 16];
-			snprintf(path, sizeof path, "%s.json", g_export);
-			const int n = profile_session_export_json(path);
-			snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-		}
+		if (ImGui::Button("Everything (.json)") && path_for(".json", path, sizeof path))
+			report(profile_session_export_json(path), path);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Every routine and the whole call tree, for scripts.");
 		if (profile_session_has_waterfall()) {
 			ImGui::SameLine();
-			if (ImGui::Button("Timeline (.trace.json)")) {
-				char path[sizeof g_export + 16];
-				snprintf(path, sizeof path, "%s.trace.json", g_export);
-				const int n = profile_session_export_trace(path);
-				snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-			}
+			if (ImGui::Button("Timeline (.trace.json)") && path_for(".trace.json", path, sizeof path))
+				report(profile_session_export_trace(path), path);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("The Waterfall's frames as a Chrome trace: opens in\n"
 				                  "ui.perfetto.dev or chrome://tracing.");
 		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Folder..."))
+			debug_ui_open_settings("Export folders");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Choose where exports go, and whether to add the date and time.");
 		if (export_msg[0])
 			ImGui::TextDisabled("%s", export_msg);
 		ImGui::TreePop();

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "export_paths.h"
 #include "compat.h"
 #include <limits.h>
 #ifdef __MINGW32__
@@ -340,13 +341,15 @@ machine_dump(const char* reason)
 {
 	printf("Dumping system memory. Reason: %s\n", reason);
 	int index = 0;
-	char filename[22];
+	char name[32], filename[PATH_MAX];
 	for (;;) {
 		if (!index) {
-			strcpy(filename, "dump.bin");
+			strcpy(name, "dump.bin");
 		} else {
-			sprintf(filename, "dump-%i.bin", index);
+			snprintf(name, sizeof name, "dump-%i.bin", index);
 		}
+		// In the dump folder (Settings), made if it is missing.
+		export_path(EXPORT_DUMP, name, filename, sizeof filename);
 		if (access(filename, F_OK) == -1) {
 			break;
 		}
