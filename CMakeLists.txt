@@ -416,6 +416,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/profile_panel.cpp
         src/debug_ui/source_folders.cpp
         src/debug_ui/panels/waterfall_view.cpp
+        src/debug_ui/panels/flame_view.cpp
     )
 
     if(USE_DX12)

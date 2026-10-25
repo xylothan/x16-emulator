@@ -14,6 +14,7 @@
 #include "../perf_hist.h"
 #include "../profile_session.h"
 #include "waterfall_view.h"
+#include "flame_view.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -575,6 +576,12 @@ draw_report(void)
 			draw_tree(r, total, frames);
 			ImGui::EndTabItem();
 		}
+		if (r->node_count > 2 && ImGui::BeginTabItem("Flame graph")) {
+			profile_flame_draw(r);
+			ImGui::EndTabItem();
+		}
+		if (ImGui::IsItemHovered() && r->node_count > 2)
+			ImGui::SetTooltip("The call tree as boxes: wide = expensive. See where time goes at a glance.");
 		if (profile_session_has_waterfall() && ImGui::BeginTabItem("Waterfall")) {
 			profile_waterfall_draw(r);
 			ImGui::EndTabItem();
