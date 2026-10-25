@@ -58,6 +58,11 @@ double    g_drag_c   = 0.0;
 float     g_press_x  = 0.0f; // where the left button went down, for click vs. drag
 double    g_sel_c0 = 0.0, g_sel_c1 = 0.0; // selection, cycles; empty when equal
 
+// How the axis is labelled. Every tooltip shows all four regardless.
+enum TimeUnit { TU_MS = 0, TU_LINES, TU_PERCENT, TU_CYCLES };
+int g_unit = TU_MS;
+const char *const UNIT_NAMES[] = {"Milliseconds", "Scanlines", "% of the frame", "CPU cycles"};
+
 // ─── Building ───────────────────────────────────────────────────────────────
 
 struct WalkCtx {
@@ -187,15 +192,83 @@ key_tooltip_lines(uint32_t key)
 		ImGui::TextDisabled("%s", src);
 }
 
-// A tick step, in scanlines, that leaves labels at least `min_px` apart.
-int
-line_step(double px_per_line, float min_px)
+// ─── Time ───────────────────────────────────────────────────────────────────
+//
+// A frame is a fixed span of emulated time: at 8 MHz, 134,400 CPU cycles =
+// 16.8 ms = 525 VGA scanlines of 32 us. Cycles are what the recorder counts;
+// these turn them into the units a person thinks in.
+
+struct TimeBase {
+	double cyc_per_us;   // the CPU clock in MHz
+	double cyc_per_line; // this frame's length / 525
+	double length;       // cycles in this frame
+};
+
+double
+to_unit(const TimeBase &tb, int unit, double cyc)
 {
-	static const int steps[] = {1, 2, 5, 10, 25, 50, 100, 250, 525};
-	for (int s : steps)
-		if (px_per_line * s >= min_px)
-			return s;
-	return 525;
+	switch (unit) {
+		case TU_MS:      return cyc / (tb.cyc_per_us * 1000.0);
+		case TU_LINES:   return cyc / tb.cyc_per_line;
+		case TU_PERCENT: return 100.0 * cyc / tb.length;
+		default:         return cyc;
+	}
+}
+
+double
+from_unit(const TimeBase &tb, int unit, double v)
+{
+	return v / to_unit(tb, unit, 1.0);
+}
+
+// The 1-2-5 step at least `raw` long, so ticks land on round numbers.
+double
+nice_step(double raw)
+{
+	if (raw <= 0)
+		return 1;
+	const double p = std::pow(10.0, std::floor(std::log10(raw)));
+	const double m = raw / p;
+	return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+
+// An axis label for `v` in `unit`, with as many decimals as the step needs.
+void
+axis_label(int unit, double v, double step, char *buf, size_t n)
+{
+	const int dec = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
+	switch (unit) {
+		case TU_MS:      snprintf(buf, n, "%.*f ms", dec, v); break;
+		case TU_LINES:   snprintf(buf, n, "line %.0f", v); break;
+		case TU_PERCENT: snprintf(buf, n, "%.*f%%", dec, v); break;
+		default:
+			if (step >= 1000)
+				snprintf(buf, n, "%.*fk", step >= 10000 ? 0 : 1, v / 1000.0);
+			else
+				snprintf(buf, n, "%.0f", v);
+			break;
+	}
+}
+
+// A moment, in every unit: "4.210 ms, line 131.5, 25.0% of the frame, cycle 33,600".
+void
+moment(const TimeBase &tb, double cyc, char *buf, size_t n)
+{
+	snprintf(buf, n, "%.3f ms, line %.1f, %.1f%% of the frame, cycle %.0f",
+	         to_unit(tb, TU_MS, cyc), to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
+}
+
+// A length of time, in every unit: "0.512 ms (16.0 lines, 3.0% of the frame, 4,096 cycles)".
+void
+span_len(const TimeBase &tb, double cyc, char *buf, size_t n)
+{
+	const double us = cyc / tb.cyc_per_us;
+	if (us < 1000.0)
+		snprintf(buf, n, "%.1f us (%.1f lines, %.1f%% of the frame, %.0f cycles)", us,
+		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
+	else
+		snprintf(buf, n, "%.3f ms (%.1f lines, %.1f%% of the frame, %.0f cycles)", us / 1000.0,
+		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 }
 
 // ─── Range table ────────────────────────────────────────────────────────────
@@ -224,7 +297,7 @@ range_write(void *ctx, const wf_event_t *ev)
 }
 
 void
-draw_selection(const prof_report_t *r, const wf_frame_t *f, double cyc_per_line)
+draw_selection(const prof_report_t *r, const wf_frame_t *f, const TimeBase &tb)
 {
 	const uint32_t c0 = (uint32_t)std::max(0.0, std::min(g_sel_c0, g_sel_c1));
 	const uint32_t c1 = (uint32_t)std::min((double)f->length, std::max(g_sel_c0, g_sel_c1));
@@ -233,8 +306,10 @@ draw_selection(const prof_report_t *r, const wf_frame_t *f, double cyc_per_line)
 	RangeAcc a{r, std::vector<uint64_t>((size_t)(r->node_count > 0 ? r->node_count : 1), 0)};
 	wf_frame_range(f, c0, c1, range_node, range_write, &a);
 
-	ImGui::Text("Selection: cycles %u-%u (%u cycles, lines %.0f-%.0f)", c0, c1, c1 - c0,
-	            c0 / cyc_per_line, c1 / cyc_per_line);
+	char from[96], len[96];
+	snprintf(from, sizeof from, "%.3f ms (line %.0f)", to_unit(tb, TU_MS, c0), to_unit(tb, TU_LINES, c0));
+	span_len(tb, c1 - c0, len, sizeof len);
+	ImGui::Text("Selection from %s, lasting %s", from, len);
 	ImGui::SameLine();
 	if (ImGui::SmallButton("Zoom to selection")) {
 		g_view_c0  = c0;
@@ -363,6 +438,13 @@ profile_waterfall_draw(const prof_report_t *r)
 	if (ImGui::Button("Fit"))
 		g_view_len = 0;
 	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_combo_width("% of the frame "));
+	ImGui::Combo("##wfunit", &g_unit, UNIT_NAMES, IM_ARRAYSIZE(UNIT_NAMES));
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("What the time axis counts in. Tooltips always show every unit.\n"
+		                  "A frame lasts about 16.7 ms: 525 scanlines of 32 us each,\n"
+		                  "or 134,400 CPU cycles at 8 MHz.");
+	ImGui::SameLine();
 	ImGui::TextDisabled("Mouse wheel: zoom.  Right-drag: pan.  Drag: select a stretch.  Click: open the code.");
 
 	const wf_frame_t *f = frames[g_pick];
@@ -378,7 +460,8 @@ profile_waterfall_draw(const prof_report_t *r)
 		g_view_c0  = 0;
 		g_view_len = length;
 	}
-	const double cyc_per_line = length / LINES_PER_FRAME;
+	const double   cyc_per_line = length / LINES_PER_FRAME;
+	const TimeBase tb{profile_session_mhz(), cyc_per_line, length};
 
 	// Rows: CPU depths, IRQ depths, then each lane that has writes.
 	std::vector<int> lanes;
@@ -441,26 +524,40 @@ profile_waterfall_draw(const prof_report_t *r)
 	dl->PushClipRect(origin, ImVec2(origin.x + width, origin.y + height), true);
 	dl->AddRectFilled(ImVec2(x0, origin.y), ImVec2(origin.x + width, origin.y + height),
 	                  ImGui::GetColorU32(ImGuiCol_FrameBg));
-	const int    step = line_step(sx * cyc_per_line, dbgui_text_width("L999") + 10.0f);
-	const int    l0   = (int)(g_view_c0 / cyc_per_line) / step * step;
-	for (int line = l0; line <= LINES_PER_FRAME; line += step) {
-		const float x = x_of(line * cyc_per_line);
-		if (x > origin.x + width)
-			break;
-		if (x < x0)
-			continue;
-		dl->AddLine(ImVec2(x, origin.y + axis_h - 4), ImVec2(x, origin.y + height),
-		            ImGui::GetColorU32(ImGuiCol_Separator, 0.5f));
-		char t[16];
-		snprintf(t, sizeof t, "L%d", line);
-		dl->AddText(ImVec2(x + 2, origin.y), ImGui::GetColorU32(ImGuiCol_TextDisabled), t);
+	{
+		const float  min_px = dbgui_text_width("88.888 ms") + 12.0f;
+		double       step   = nice_step(to_unit(tb, g_unit, min_px / sx));
+		if (g_unit == TU_LINES && step < 1)
+			step = 1;
+		const double v_end = to_unit(tb, g_unit, g_view_c0 + g_view_len);
+		for (double v = std::floor(to_unit(tb, g_unit, g_view_c0) / step) * step; v <= v_end + step * 0.001;
+		     v += step) {
+			const float x = x_of(from_unit(tb, g_unit, v));
+			if (x < x0 - 0.5f)
+				continue;
+			dl->AddLine(ImVec2(x, origin.y + axis_h - 4), ImVec2(x, origin.y + height),
+			            ImGui::GetColorU32(ImGuiCol_Separator, 0.5f));
+			char t[24];
+			axis_label(g_unit, v, step, t, sizeof t);
+			dl->AddText(ImVec2(x + 2, origin.y), ImGui::GetColorU32(ImGuiCol_TextDisabled), t);
+		}
 	}
-	// The visible-display boundary: VGA's 480 active lines.
+	bool vblank_tip = false;
+	// Where the picture ends: VGA draws 480 visible lines, then the beam is in
+	// the vertical blank until the frame wraps. Work done after this line is
+	// done while nothing is being drawn.
 	{
 		const float xv = x_of(480 * cyc_per_line);
-		if (xv >= x0 && xv <= origin.x + width)
-			dl->AddLine(ImVec2(xv, origin.y), ImVec2(xv, origin.y + height),
-			            IM_COL32(255, 200, 80, 120), 1.5f);
+		if (xv >= x0 && xv <= origin.x + width) {
+			dl->AddLine(ImVec2(xv, origin.y + axis_h - 4), ImVec2(xv, origin.y + height),
+			            IM_COL32(255, 200, 80, 140), 1.5f);
+			dl->AddText(ImVec2(xv + 3, origin.y + axis_h + 1), IM_COL32(255, 200, 80, 200), "vblank");
+		}
+		vblank_tip = hovered && std::fabs(mouse.x - xv) < 4.0f && mouse.y < origin.y + axis_h + row_h;
+		if (vblank_tip)
+			ImGui::SetTooltip("Line 480: the last visible line of the picture. From here to the end\n"
+			                  "of the frame the screen is in vertical blank, the usual time to\n"
+			                  "update VRAM without tearing.");
 	}
 	auto row_y = [&](int row) { return origin.y + axis_h + row * row_h; };
 	for (int i = 0; i < rows; i++) {
@@ -569,8 +666,10 @@ profile_waterfall_draw(const prof_report_t *r)
 			else
 				ImGui::Text("%s write: reg $%02X = $%02X", wf_lane_name(lane), (unsigned)hover_ev->target,
 				            (unsigned)hover_ev->value);
-			ImGui::TextDisabled("cycle %u, line %.1f%s", hover_ev->cycle, hover_ev->cycle / cyc_per_line,
-			                    (hover_ev->flags & WF_F_IRQ) ? ", in an interrupt handler" : "");
+			char when[128];
+			moment(tb, hover_ev->cycle, when, sizeof when);
+			ImGui::TextDisabled("At %s%s", when,
+			                    (hover_ev->flags & WF_F_IRQ) ? "; in an interrupt handler" : "");
 			key_tooltip_lines(wf_event_key(hover_ev));
 			ImGui::TextDisabled("Click to open the writing instruction.");
 			ImGui::EndTooltip();
@@ -582,22 +681,30 @@ profile_waterfall_draw(const prof_report_t *r)
 			profile_session_node_name(r, hover_span->node, name, sizeof name);
 			ImGui::BeginTooltip();
 			ImGui::Text("%s", name);
-			ImGui::TextDisabled("cycles %u-%u (%u), lines %.1f-%.1f", hover_span->c0, hover_span->c1,
-			                    hover_span->c1 - hover_span->c0, hover_span->c0 / cyc_per_line,
-			                    hover_span->c1 / cyc_per_line);
+			char when[128], len[96];
+			moment(tb, hover_span->c0, when, sizeof when);
+			span_len(tb, hover_span->c1 - hover_span->c0, len, sizeof len);
+			ImGui::TextDisabled("Ran for %s", len);
+			ImGui::TextDisabled("starting at %s", when);
 			if (n.key < PH_KEYS)
 				key_tooltip_lines(n.key);
 			ImGui::TextDisabled("Over the whole capture: %u calls, worst %u cycles.", n.calls, n.call_max);
 			ImGui::EndTooltip();
 			if (clicked && n.key < PH_KEYS)
 				goto_key(n.key);
-		} else if (mouse.x >= x0) {
-			ImGui::SetTooltip("cycle %.0f, line %.1f", mouse_c, mouse_c / cyc_per_line);
+		} else if (mouse.x >= x0 && !vblank_tip) {
+			char when[128];
+			moment(tb, mouse_c, when, sizeof when);
+			ImGui::SetTooltip("%s", when);
 		}
 	}
 
-	ImGui::TextDisabled("%u cycles, %d events; %d lanes written. Detail kept: %d frames.", f->length,
-	                    f->count, (int)lanes.size(), nf);
+	{
+		char len[96];
+		span_len(tb, length, len, sizeof len);
+		ImGui::TextDisabled("This frame lasted %s. %d events, %d devices written. %d frames kept in detail.",
+		                    len, f->count, (int)lanes.size(), nf);
+	}
 	if (g_sel_c0 != g_sel_c1)
-		draw_selection(r, f, cyc_per_line);
+		draw_selection(r, f, tb);
 }

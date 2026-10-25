@@ -631,6 +631,12 @@ profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int max)
 	return n;
 }
 
+double
+profile_session_mhz(void)
+{
+	return MHZ ? (double)MHZ : 8.0;
+}
+
 void
 profile_session_key_name(uint32_t key, char *buf, int size)
 {

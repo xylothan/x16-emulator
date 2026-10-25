@@ -89,6 +89,9 @@ int profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int ma
 // A perf_hist key, for display: its routine (or address), its bank:PC, and
 // its source line as "file:line" (false when the debug info has none).
 void profile_session_key_name(uint32_t key, char *buf, int size);
+
+// The emulated CPU clock, in MHz: cycles per microsecond.
+double profile_session_mhz(void);
 void profile_session_key_where(uint32_t key, char *buf, int size);
 bool profile_session_key_source(uint32_t key, char *buf, int size);
 
