@@ -108,6 +108,22 @@ main(void)
 		check(f && (f->events[0].flags & WF_F_IRQ), "an IRQ write is flagged");
 	}
 
+	// ── A frame carries the output mode it was recorded in ──────────────────
+	{
+		wf_reset();
+		check_eq(wf_ring_count(), 0, "empty");
+		wf_frame_end(100, 0, 0);
+		check_eq(wf_ring_at(0)->video_mode, 1, "VGA by default");
+		wf_frame_set_video_mode(2);
+		wf_frame_end(200, 0, 0);
+		check_eq(wf_ring_at(1)->video_mode, 2, "NTSC once set");
+		wf_frame_end(300, 0, 0);
+		check_eq(wf_ring_at(2)->video_mode, 2, "and it sticks for later frames");
+		wf_frame_set_video_mode(0x83);
+		wf_frame_end(400, 0, 0);
+		check_eq(wf_ring_at(2)->video_mode, 3, "only the mode bits are kept");
+	}
+
 	// ── The ring keeps the newest N, oldest first ───────────────────────────
 	{
 		wf_reset();

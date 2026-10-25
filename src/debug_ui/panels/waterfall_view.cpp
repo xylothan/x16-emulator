@@ -239,7 +239,7 @@ axis_label(int unit, double v, double step, char *buf, size_t n)
 	const int dec = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
 	switch (unit) {
 		case TU_MS:      snprintf(buf, n, "%.*f ms", dec, v); break;
-		case TU_LINES:   snprintf(buf, n, "line %.0f", v); break;
+		case TU_LINES:   snprintf(buf, n, "scanline %.0f", v); break;
 		case TU_PERCENT: snprintf(buf, n, "%.*f%%", dec, v); break;
 		default:
 			if (step >= 1000)
@@ -254,20 +254,20 @@ axis_label(int unit, double v, double step, char *buf, size_t n)
 void
 moment(const TimeBase &tb, double cyc, char *buf, size_t n)
 {
-	snprintf(buf, n, "%.3f ms, line %.1f, %.1f%% of the frame, cycle %.0f",
+	snprintf(buf, n, "%.3f ms, scanline %.1f, %.1f%% of the frame, cycle %.0f",
 	         to_unit(tb, TU_MS, cyc), to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 }
 
-// A length of time, in every unit: "0.512 ms (16.0 lines, 3.0% of the frame, 4,096 cycles)".
+// A length of time, in every unit: "0.512 ms (16.0 scanlines, 3.0% of the frame, 4,096 cycles)".
 void
 span_len(const TimeBase &tb, double cyc, char *buf, size_t n)
 {
 	const double us = cyc / tb.cyc_per_us;
 	if (us < 1000.0)
-		snprintf(buf, n, "%.1f us (%.1f lines, %.1f%% of the frame, %.0f cycles)", us,
+		snprintf(buf, n, "%.1f us (%.1f scanlines, %.1f%% of the frame, %.0f cycles)", us,
 		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 	else
-		snprintf(buf, n, "%.3f ms (%.1f lines, %.1f%% of the frame, %.0f cycles)", us / 1000.0,
+		snprintf(buf, n, "%.3f ms (%.1f scanlines, %.1f%% of the frame, %.0f cycles)", us / 1000.0,
 		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 }
 
@@ -307,7 +307,7 @@ draw_selection(const prof_report_t *r, const wf_frame_t *f, const TimeBase &tb)
 	wf_frame_range(f, c0, c1, range_node, range_write, &a);
 
 	char from[96], len[96];
-	snprintf(from, sizeof from, "%.3f ms (line %.0f)", to_unit(tb, TU_MS, c0), to_unit(tb, TU_LINES, c0));
+	snprintf(from, sizeof from, "%.3f ms (scanline %.0f)", to_unit(tb, TU_MS, c0), to_unit(tb, TU_LINES, c0));
 	span_len(tb, c1 - c0, len, sizeof len);
 	ImGui::Text("Selection from %s, lasting %s", from, len);
 	ImGui::SameLine();
@@ -450,6 +450,15 @@ profile_waterfall_draw(const prof_report_t *r)
 	const wf_frame_t *f = frames[g_pick];
 	if (g_fv.number != f->number || g_fv.frame != f)
 		build(g_fv, r, f);
+	// Scanlines are VGA's: 525 a frame, 256 CPU cycles each at 8 MHz. NTSC and
+	// 15 kHz RGB time their frames differently, so in those modes the scanline
+	// numbers below (and the vblank marker) do not match the beam.
+	const bool vga = !(f->video_mode & 2);
+	if (!vga)
+		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+		                   "Recorded in %s mode: scanline numbers assume VGA timing and are not where "
+		                   "the beam was. Milliseconds and cycles are correct.",
+		                   f->video_mode == 2 ? "NTSC composite" : "15 kHz RGB");
 	if (f->truncated)
 		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
 		                   "This frame overflowed its buffer: events after the first %d are missing.",
@@ -525,7 +534,7 @@ profile_waterfall_draw(const prof_report_t *r)
 	dl->AddRectFilled(ImVec2(x0, origin.y), ImVec2(origin.x + width, origin.y + height),
 	                  ImGui::GetColorU32(ImGuiCol_FrameBg));
 	{
-		const float  min_px = dbgui_text_width("88.888 ms") + 12.0f;
+		const float  min_px = dbgui_text_width("scanline 888") + 12.0f;
 		double       step   = nice_step(to_unit(tb, g_unit, min_px / sx));
 		if (g_unit == TU_LINES && step < 1)
 			step = 1;
@@ -548,16 +557,16 @@ profile_waterfall_draw(const prof_report_t *r)
 	// done while nothing is being drawn.
 	{
 		const float xv = x_of(480 * cyc_per_line);
-		if (xv >= x0 && xv <= origin.x + width) {
+		if (vga && xv >= x0 && xv <= origin.x + width) {
 			dl->AddLine(ImVec2(xv, origin.y + axis_h - 4), ImVec2(xv, origin.y + height),
 			            IM_COL32(255, 200, 80, 140), 1.5f);
 			dl->AddText(ImVec2(xv + 3, origin.y + axis_h + 1), IM_COL32(255, 200, 80, 200), "vblank");
 		}
-		vblank_tip = hovered && std::fabs(mouse.x - xv) < 4.0f && mouse.y < origin.y + axis_h + row_h;
+		vblank_tip = vga && hovered && std::fabs(mouse.x - xv) < 4.0f && mouse.y < origin.y + axis_h + row_h;
 		if (vblank_tip)
-			ImGui::SetTooltip("Line 480: the last visible line of the picture. From here to the end\n"
-			                  "of the frame the screen is in vertical blank, the usual time to\n"
-			                  "update VRAM without tearing.");
+			ImGui::SetTooltip("Scanline 480: the picture has ended (scanlines 0-479 are the visible\n"
+			                  "picture). From here to the end of the frame the screen is in vertical\n"
+			                  "blank, the usual time to update VRAM without tearing.");
 	}
 	auto row_y = [&](int row) { return origin.y + axis_h + row * row_h; };
 	for (int i = 0; i < rows; i++) {

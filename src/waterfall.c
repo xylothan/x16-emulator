@@ -155,8 +155,9 @@ wf_reset(void)
 	memset(agg, 0, sizeof *agg * AGG_SIZE);
 	cur.count     = 0;
 	cur.truncated = false;
-	cur.number    = 0;
-	cur.start     = 0;
+	cur.number     = 0;
+	cur.start      = 0;
+	cur.video_mode = 1; // VGA until told otherwise
 	cur.start_node = 0;
 	cur_start      = 0;
 	ring_head = ring_count = worst_count = 0;
@@ -200,6 +201,12 @@ wf_cpu(uint16_t node, uint64_t t)
 		return;
 	const uint32_t cycle = t > cur_start ? (uint32_t)(t - cur_start) : 0;
 	append(cycle, (uint32_t)WF_LANE_CPU << 24, node, 0, 0);
+}
+
+void
+wf_frame_set_video_mode(uint8_t mode)
+{
+	cur.video_mode = mode & 3;
 }
 
 void
