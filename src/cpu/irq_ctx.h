@@ -99,6 +99,12 @@ enum {
 typedef void (*cpu_flow_hook_fn)(int kind, uint32_t pc, uint16_t sp, uint16_t ret);
 extern cpu_flow_hook_fn cpu_flow_hook;
 
+// Called after each instruction while an interrupt line is asserted: `held`
+// when the I flag kept it from being taken. NULL when nothing is listening,
+// and only reached while a line is up, so it costs nothing otherwise.
+typedef void (*cpu_irq_line_hook_fn)(bool held);
+extern cpu_irq_line_hook_fn cpu_irq_line_hook;
+
 // The same flag, read without clearing it. The emulator loop tests it on every
 // instruction to decide whether the debugger's status check has anything to do;
 // only cpu_irq_take_entered_flag() may consume it.
