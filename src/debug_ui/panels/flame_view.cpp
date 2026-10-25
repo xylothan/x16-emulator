@@ -16,6 +16,7 @@
 #include "../perf_hist.h"
 #include "../profile_cct.h"
 #include "../profile_session.h"
+#include "callers_view.h"
 
 #include <algorithm>
 #include <ctype.h>
@@ -29,6 +30,7 @@ namespace {
 std::vector<std::vector<int>> g_kids;
 uint32_t                      g_gen   = ~0u;
 int                           g_focus = -1; // node the view is zoomed into; -1 = everything
+int                           g_ctx   = -1; // node the right-click menu is for
 char                          g_find[64] = "";
 
 void
@@ -244,7 +246,7 @@ profile_flame_draw(const prof_report_t *r)
 				ImGui::TextDisabled("  %*s%s", ((int)path.size() - 1 - i) * 2, "", pn);
 			}
 		}
-		ImGui::TextDisabled("Click: zoom in.  Double-click: open the source.");
+		ImGui::TextDisabled("Click: zoom in.  Double-click: open the source.  Right-click: more.");
 		ImGui::EndTooltip();
 		if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && n.key < PH_KEYS) {
 			uint8_t  region, bank;
@@ -254,6 +256,26 @@ profile_flame_draw(const prof_report_t *r)
 		} else if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 			g_focus = c.hover;
 		}
+	}
+	if (item_hovered && c.hover >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+		g_ctx = c.hover;
+		ImGui::OpenPopup("flamectx");
+	}
+	if (ImGui::BeginPopup("flamectx")) {
+		if (g_ctx >= 0 && g_ctx < r->node_count) {
+			const prof_node_t &n = r->nodes[g_ctx];
+			if (ImGui::MenuItem("Callers & callees", nullptr, false, n.row >= 0))
+				profile_select_routine(n.row, true);
+			if (ImGui::MenuItem("Zoom in"))
+				g_focus = g_ctx;
+			if (ImGui::MenuItem("Open source", nullptr, false, n.key < PH_KEYS)) {
+				uint8_t  region, bank;
+				uint16_t pc;
+				perf_hist_key_decode(n.key, &region, &bank, &pc);
+				debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+			}
+		}
+		ImGui::EndPopup();
 	}
 	ImGui::EndChild();
 
