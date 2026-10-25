@@ -1040,6 +1040,41 @@ Tested:
 Hover and click were not exercised by a script: a hidden window takes no
 mouse input.
 
+## Phase 6: seeing who calls what
+
+Every view here is a different summary of the call tree that Phase 3 already
+records, so none of them records anything new or costs the running machine
+anything. In order:
+
+1. **Flame graph (done, 2026-10-25).** A Flame graph tab in the Profile panel
+   (`src/debug_ui/panels/flame_view.cpp`).
+   - **Layout:** each routine is a box as wide as its total time, and the
+     routines it called sit beneath it, widest first. The gap at a box's right
+     is its own time.
+   - **Navigation:** click to zoom into a box, with a breadcrumb trail back to
+     "Everything". Double-click opens the source.
+   - **Colour** follows the routine, so it reads the same under every caller.
+   - **Search** lights up matching boxes, dims the rest, and reports the
+     matches' share of the recording, each counted once even when nested.
+   - **Tooltips:** total and own time as a percentage and in ms per frame,
+     calls and the slowest call, `bank:PC`, source line, and the call path.
+   - **Cost:** only boxes at least a pixel wide are drawn, so a 1,000-node tree
+     costs what is visible.
+   - This replaces speedscope for everyday use; the `.folded` export stays for
+     other tools.
+2. **Callers and callees of one routine.** Pick a routine anywhere. The view
+   shows its callers to the left (how much of its time each one caused) and its
+   callees to the right (how much each one costs it), merged across every call
+   path. It answers "where is this called from".
+3. **Neighbourhood call graph.** Boxes and arrows two levels each way around the
+   selected routine. Box size is own time; arrow width is time or calls along
+   that edge. Click a box to re-centre on it.
+4. **Source annotations (Phase 5c).** A gutter with each line's share of time,
+   and a "called from" list on each routine's first line.
+
+Steps 2–4 share one piece of data: edges merged by routine (caller routine →
+callee routine, with calls and total time), built once per report.
+
 ## Constraints every phase has to respect
 
 - **Two per-instruction loops.** `emulator_loop` and
