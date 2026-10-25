@@ -373,6 +373,112 @@ prof_report_add_tree(prof_report_t *r, const prof_node_t *in, int count)
 	return true;
 }
 
+// ─── One routine's callers and callees ──────────────────────────────────────
+
+// Is `node` under another node of the same row? Then its time is already
+// inside that outer call.
+static bool
+nested_in_row(const prof_report_t *r, int node, int row)
+{
+	for (int p = r->nodes[node].parent; p >= 0; p = r->nodes[p].parent)
+		if (r->nodes[p].row == row)
+			return true;
+	return false;
+}
+
+// Add to the edge list entry for neighbour `node` (merged by row, or by node
+// when it has none).
+static bool
+edge_add(prof_edge_t **list, int *n, int *cap, const prof_report_t *r, int node, uint64_t cycles,
+         uint32_t calls)
+{
+	const int row = r->nodes[node].row;
+	for (int i = 0; i < *n; i++) {
+		prof_edge_t *e = &(*list)[i];
+		if (row >= 0 ? e->row == row : (e->row < 0 && e->node == node)) {
+			e->cycles += cycles;
+			e->calls += calls;
+			return true;
+		}
+	}
+	if (*n == *cap) {
+		const int    ncap  = *cap ? *cap * 2 : 16;
+		prof_edge_t *grown = realloc(*list, sizeof **list * (size_t)ncap);
+		if (!grown)
+			return false;
+		*list = grown;
+		*cap  = ncap;
+	}
+	(*list)[(*n)++] = (prof_edge_t){row, node, cycles, calls};
+	return true;
+}
+
+// Fold one call of the routine: its own time, and its callees. A child that is
+// the routine again (recursion) is folded in rather than listed.
+static bool
+fold_call(const prof_report_t *r, int node, int row, prof_routine_view_t *v, int *cap)
+{
+	v->own += r->nodes[node].self;
+	for (int c = 0; c < r->node_count; c++) {
+		if (r->nodes[c].parent != node)
+			continue;
+		if (r->nodes[c].row == row) {
+			if (!fold_call(r, c, row, v, cap))
+				return false;
+		} else if (!edge_add(&v->callees, &v->ncallees, cap, r, c, r->nodes[c].incl, r->nodes[c].calls)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static int
+cmp_edges(const void *a, const void *b)
+{
+	const prof_edge_t *x = a, *y = b;
+	if (x->cycles != y->cycles)
+		return x->cycles < y->cycles ? 1 : -1;
+	return x->node - y->node;
+}
+
+bool
+prof_report_routine_view(const prof_report_t *r, int row, prof_routine_view_t *out)
+{
+	memset(out, 0, sizeof *out);
+	if (!r || !r->nodes || r->node_count <= 2 || row < 0 || row >= r->count)
+		return false;
+	int ccap = 0, kcap = 0;
+	for (int i = 0; i < r->node_count; i++) {
+		const prof_node_t *n = &r->nodes[i];
+		if (n->row != row || nested_in_row(r, i, row))
+			continue;
+		// An outermost call of the routine: its caller, its time, its callees.
+		out->total += n->incl;
+		out->calls += n->calls;
+		if (n->parent >= 0 &&
+		    !edge_add(&out->callers, &out->ncallers, &ccap, r, n->parent, n->incl, n->calls))
+			goto oom;
+		if (!fold_call(r, i, row, out, &kcap))
+			goto oom;
+	}
+	qsort(out->callers, (size_t)out->ncallers, sizeof *out->callers, cmp_edges);
+	qsort(out->callees, (size_t)out->ncallees, sizeof *out->callees, cmp_edges);
+	return true;
+oom:
+	prof_routine_view_free(out);
+	return false;
+}
+
+void
+prof_routine_view_free(prof_routine_view_t *v)
+{
+	if (!v)
+		return;
+	free(v->callers);
+	free(v->callees);
+	memset(v, 0, sizeof *v);
+}
+
 void
 prof_report_free(prof_report_t *r)
 {
