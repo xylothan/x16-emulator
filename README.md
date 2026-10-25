@@ -444,7 +444,7 @@ the right. A search box at the top of the list finds a setting by name.
 | Group | Pages |
 | --- | --- |
 | General | Appearance (interface scale), Navigation (switching to Disassembly or Source on a break) |
-| Debugging | Stepping & interrupts, Source folders, Safety |
+| Debugging | Stepping & interrupts, Debug info (switch to another builds .dbg while running), Source folders, Safety |
 | Memory & Audio | Memory (change highlighting), Audio (hold while paused) |
 | I/O trace | Capture (on/off, ring size, SD image indexing), Devices (per-device capture) |
 | Performance | Frame budget (target FPS, idle detection, history) |
