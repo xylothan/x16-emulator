@@ -4,6 +4,7 @@
 #include "imgui_internal.h" // ImGuiSettingsHandler
 #include "debug_ui_settings.h"
 #include "debug_ui_bridge.h"
+#include "debug_info_page.h"
 #include "source_folders.h"
 #include "../perf_budget.h"
 #include "../source_view.h"
@@ -397,6 +398,8 @@ const Page PAGES[] = {
      "switch disassembly source follow focus", page_navigation},
     {"Debugging", "Stepping & interrupts", "What stepping and breaking do when an interrupt fires.",
      "irq follow break step interrupt handler", page_stepping},
+    {"Debugging", "Debug info", "Which .dbg files are loaded, and switching to another build's.",
+     "dbg debug info symbols reload replace wrong build cc65", debug_info_draw_page},
     {"Debugging", "Source folders", "Where the debugger looks for the source files the debug info names.",
      "srcpath path search missing files folder", source_folders_draw_page},
     {"Debugging", "Safety", "Edits that can crash a running program are locked unless allowed here.",

@@ -2298,6 +2298,16 @@ int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 	return result;
 }
 
+int dbg_info_loaded_count(void)
+{
+	return owner_count;
+}
+
+const char *dbg_info_loaded_at(int index)
+{
+	return (index >= 0 && index < owner_count) ? owners[index] : NULL;
+}
+
 void dbg_info_free(void)
 {
 	for (int i = 0; i < owner_count; i++)
