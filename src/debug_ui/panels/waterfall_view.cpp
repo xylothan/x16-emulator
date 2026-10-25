@@ -474,7 +474,8 @@ profile_waterfall_draw(const prof_report_t *r)
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("CPU work: cycles the CPU spent running code, not waiting for the\n"
 		                  "next frame (WAI or a polling loop counts as waiting). Measuring it\n"
-		                  "adds a small cost to every instruction while a waterfall capture runs.\n"
+		                  "costs about 0.1 ms of host time per frame while a waterfall capture\n"
+		                  "runs; it does not change what the machine does.\n"
 		                  "Device writes: writes to VERA, the sound chips, the VIAs and the rest\n"
 		                  "of the I/O page.");
 	refresh_picks();

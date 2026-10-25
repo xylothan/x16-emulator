@@ -1056,6 +1056,10 @@ count unless the `budget` recorder happened to be on.
   nearest frame that kept its detail, saying so.
 - **CPU work is always measured** with the waterfall. The capture arms the
   budget recorder itself when it was not asked for, and disarms it after.
+  That costs about 0.12 ms of host time per frame: three interleaved pairs of
+  1,800 frames gave medians of 3.71 ms against 3.59 ms for the tree alone.
+  Histogram-only and tree-plus-waterfall runs of the scripted BASIC loop still
+  match in every row and in instruction count.
 - **The Waterfall tab:**
   - *Show* All frames, Worst, Best, Typical (median), 90th percentile or
     Average, *by* CPU work or device writes. `<` and `>` step through the
