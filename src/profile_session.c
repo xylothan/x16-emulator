@@ -36,11 +36,25 @@ static bool cct_ready;      // pool allocated (once; reused by every capture)
 static bool wf_ready;       // likewise, the waterfall's frame buffers
 static bool wf_recorded;    // the last capture ran the waterfall
 
-// Detail kept: the last WF_RING frames and the WF_WORST worst, each up to
-// WF_FRAME_CAP events. About 20 MB at most, allocated on first use.
-#define WF_RING      30
-#define WF_WORST     8
+// Every frame's summary is kept. Its detail -- each write and call -- is
+// recorded up to WF_FRAME_CAP events a frame, and kept for every frame within
+// WF_BUDGET in all, thinned evenly past that (see waterfall.h).
 #define WF_FRAME_CAP 32768
+#ifdef __EMSCRIPTEN__
+#define WF_BUDGET ((size_t)32 << 20)
+#else
+#define WF_BUDGET ((size_t)128 << 20)
+#endif
+// The extremes keep their detail only while they fit: 4 * WF_PROTECT frames
+// of WF_FRAME_CAP events (about 12.6 MB) must stay well under WF_BUDGET.
+_Static_assert((size_t)4 * WF_PROTECT * WF_FRAME_CAP * sizeof(wf_event_t) < WF_BUDGET / 2,
+               "the waterfall budget must hold every protected frame");
+// Frames a trace export carries: enough to compare, few enough to load.
+#define WF_TRACE_MAX 64
+
+// The waterfall ranks frames by CPU work, which the budget recorder measures.
+// When the capture did not ask for it, the waterfall arms it and disarms it.
+static bool wf_armed_budget;
 
 static uint8_t ym_selected; // the YM register $9F40 last selected
 
@@ -175,7 +189,7 @@ arm(uint32_t mask)
 		if (!(mask & CAP_REC_HIST))
 			ok = false;
 		if (!wf_ready)
-			wf_ready = wf_init(WF_RING, WF_WORST, WF_FRAME_CAP);
+			wf_ready = wf_init(WF_FRAME_CAP, WF_BUDGET);
 		ok = wf_ready && ok;
 		if (ok) {
 			wf_reset();
@@ -187,7 +201,8 @@ arm(uint32_t mask)
 		}
 	}
 	wf_recorded = (mask & CAP_REC_WATERFALL) && ok;
-	if (mask & CAP_REC_BUDGET)
+	wf_armed_budget = wf_recorded && !(mask & CAP_REC_BUDGET);
+	if ((mask & CAP_REC_BUDGET) || wf_armed_budget)
 		ok = perf_budget_arm(PERF_OWNER_CAPTURE, true) && ok;
 	if (mask & CAP_REC_VRAM)
 		vera_bandwidth_arm(VERA_BW_OWNER_CAPTURE, true);
@@ -211,8 +226,10 @@ disarm(uint32_t mask)
 	}
 	if (mask & CAP_REC_HIST)
 		perf_hist_arm(hist_was_enabled);
-	if (mask & CAP_REC_BUDGET)
+	if ((mask & CAP_REC_BUDGET) || ((mask & CAP_REC_WATERFALL) && wf_armed_budget))
 		perf_budget_arm(PERF_OWNER_CAPTURE, false);
+	if (mask & CAP_REC_WATERFALL)
+		wf_armed_budget = false;
 	if (mask & CAP_REC_VRAM)
 		vera_bandwidth_arm(VERA_BW_OWNER_CAPTURE, false);
 }
@@ -599,36 +616,44 @@ trace_emit(void *vctx, wf_out_kind_t kind, int thread, uint32_t cycle, int node,
 	c->events++;
 }
 
+// The frames a trace export carries, at most `max`, in frame order: the
+// worst and best by each measure first, then others spread evenly. Only
+// frames whose detail was kept.
 static int
-cmp_frame_ptr(const void *a, const void *b)
+trace_frames(int *out, int max)
 {
-	const wf_frame_t *x = *(const wf_frame_t *const *)a, *y = *(const wf_frame_t *const *)b;
-	return (x->number > y->number) - (x->number < y->number);
-}
-
-int
-profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int max)
-{
-	int n = 0;
-	if (!profile_session_has_waterfall())
+	const int n = wf_frame_count();
+	if (max <= 0 || n == 0)
 		return 0;
-	for (int i = 0; i < wf_ring_count() && n < max; i++)
-		out[n++] = wf_ring_at(i);
-	for (int i = 0; i < wf_worst_count() && n < max; i++) {
-		const wf_frame_t *w   = wf_worst_at(i);
-		bool              dup = false;
-		for (int k = 0; k < n && !dup; k++)
-			dup = out[k]->number == w->number;
-		if (!dup)
-			out[n++] = w;
+	char *in = calloc((size_t)n, 1);
+	if (!in)
+		return 0;
+	int got = 0;
+	for (int m = WF_BY_WORK; m <= WF_BY_WRITES; m++)
+		for (int p = WF_PICK_WORST; p <= WF_PICK_BEST; p++) {
+			int ext[WF_PROTECT];
+			const int k = wf_pick(p, m, ext, WF_PROTECT);
+			for (int e = 0; e < k && got < max; e++)
+				if (!in[ext[e]] && wf_frame(ext[e])->events) {
+					in[ext[e]]  = 1;
+					out[got++] = ext[e];
+				}
+		}
+	const int room = max - got, have = wf_detail_count();
+	for (int s = 0; room > 0 && s < room; s++) {
+		// The s-th of `room` evenly spaced points, to the nearest kept frame.
+		const int at = wf_nearest_detail((int)((double)s * n / room));
+		if (at >= 0 && !in[at] && got < max && got < have) {
+			in[at]     = 1;
+			out[got++] = at;
+		}
 	}
-	qsort((void *)out, (size_t)n, sizeof out[0], cmp_frame_ptr);
-	for (int i = 0; worst && i < n; i++) {
-		worst[i] = false;
-		for (int k = 0; k < wf_worst_count() && !worst[i]; k++)
-			worst[i] = wf_worst_at(k)->number == out[i]->number;
-	}
-	return n;
+	got = 0;
+	for (int i = 0; i < n; i++)
+		if (in[i])
+			out[got++] = i;
+	free(in);
+	return got;
 }
 
 double
@@ -681,9 +706,12 @@ profile_session_export_trace(const char *path)
 		return -1;
 	src_entry_t *cache = calloc(SRC_CACHE, sizeof *cache);
 
-	// The frames: the ring and the worst list, each frame once, in order.
-	const wf_frame_t *frames[WF_RING + WF_WORST];
-	const int         n = profile_session_waterfall_frames(frames, NULL, WF_RING + WF_WORST);
+	// The frames: the extremes, then others spread evenly, in order.
+	int       which[WF_TRACE_MAX];
+	const int n = trace_frames(which, WF_TRACE_MAX);
+	const wf_frame_t *frames[WF_TRACE_MAX];
+	for (int i = 0; i < n; i++)
+		frames[i] = wf_frame(which[i]);
 
 	fprintf(f, "{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n");
 	fprintf(f, "{\"ph\":\"M\",\"pid\":1,\"name\":\"process_name\",\"args\":{\"name\":\"X16\"}}");
@@ -700,14 +728,11 @@ profile_session_export_trace(const char *path)
 	trace_ctx_t c = {f, NULL, 1.0 / (double)(MHZ ? MHZ : 8), cache, 0};
 	for (int i = 0; i < n; i++) {
 		c.frame = frames[i];
-		bool worst = false;
-		for (int k = 0; k < wf_worst_count() && !worst; k++)
-			worst = wf_worst_at(k)->number == frames[i]->number;
-		fprintf(f, ",\n{\"ph\":\"X\",\"pid\":1,\"tid\":2,\"ts\":%.3f,\"dur\":%.3f,\"name\":\"frame %u%s\","
-		           "\"args\":{\"cycles\":%u,\"events\":%d,\"truncated\":%s}}",
+		fprintf(f, ",\n{\"ph\":\"X\",\"pid\":1,\"tid\":2,\"ts\":%.3f,\"dur\":%.3f,\"name\":\"frame %u\","
+		           "\"args\":{\"cycles\":%u,\"work\":%llu,\"writes\":%u,\"events\":%d,\"truncated\":%s}}",
 		        (double)frames[i]->start * c.us_per_cycle, (double)frames[i]->length * c.us_per_cycle,
-		        frames[i]->number, worst ? " (worst)" : "", frames[i]->length, frames[i]->count,
-		        frames[i]->truncated ? "true" : "false");
+		        frames[i]->number, frames[i]->length, (unsigned long long)frames[i]->work,
+		        frames[i]->writes, frames[i]->count, frames[i]->truncated ? "true" : "false");
 		if (have_report && report.node_count > 2)
 			wf_walk_frame(frames[i], trace_parent, CCT_NODE_IRQ, trace_emit, &c);
 		else
@@ -836,12 +861,12 @@ profile_session_frame_end(void)
 {
 	// The waterfall's frame closes first: ending the capture disarms it.
 	if (cap_running() && (cap_recorders() & CAP_REC_WATERFALL) && wf_ready) {
-		uint64_t     score = 0; // 0: rank by event count
+		uint64_t     work = 0; // 0: not measured
 		perf_frame_t fr;
-		if ((cap_recorders() & CAP_REC_BUDGET) && perf_budget_last_frame(&fr))
-			score = perf_frame_work(&fr);
+		if (((cap_recorders() & CAP_REC_BUDGET) || wf_armed_budget) && perf_budget_last_frame(&fr))
+			work = perf_frame_work(&fr);
 		wf_frame_set_video_mode(video_get_dc_value(0));
-		wf_frame_end(perf_hist_total_cycles(), score,
+		wf_frame_end(perf_hist_total_cycles(), work,
 		             (uint16_t)((cap_recorders() & CAP_REC_TREE) ? cct_current() : 0));
 	}
 	cap_frame_end();
@@ -936,8 +961,8 @@ profile_session_print(FILE *f, int top)
 	if (profile_session_has_waterfall()) {
 		int                  na;
 		const prof_writes_t *a = profile_session_writes_by_routine(&na);
-		fprintf(f, "\ndevice writes by routine (%u frames; %d frames of detail kept%s)\n",
-		        wf_frames_seen(), wf_ring_count() + wf_worst_count(),
+		fprintf(f, "\ndevice writes by routine (%u frames; detail kept for %d%s)\n",
+		        wf_frames_seen(), wf_detail_count(),
 		        wf_dropped() ? ", some writes dropped" : "");
 		fprintf(f, "%10s %10s  %-10s %s\n", "writes", "per frame", "lane", "routine");
 		for (int i = 0; i < na && i < top / 2; i++) {

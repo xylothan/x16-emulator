@@ -849,6 +849,10 @@ if rep:
         dw = wrep.get("report", {}).get("deviceWrites", [])
         expect("device writes are attributed to routines",
                bool(dw) and all(d.get("writes", 0) > 0 and d.get("lane") for d in dw))
+        wr = wrep.get("report", {})
+        expect("every frame is kept, each with its detail",
+               wr.get("waterfallFrames", 0) >= 19
+               and wr.get("waterfallDetailFrames", -1) == wr.get("waterfallFrames"))
         tr = os.path.join(tmp, "cap.trace.json")
         r = capture(410, {"top": 0, "export": {"trace": tr}})
         n = r.get("body", {}).get("exported", {}).get("trace", -1) if r and r.get("success") else -1
