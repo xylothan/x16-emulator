@@ -1105,10 +1105,23 @@ anything. In order:
      costs what is visible.
    - This replaces speedscope for everyday use; the `.folded` export stays for
      other tools.
-2. **Callers and callees of one routine.** Pick a routine anywhere. The view
-   shows its callers to the left (how much of its time each one caused) and its
-   callees to the right (how much each one costs it), merged across every call
-   path. It answers "where is this called from".
+2. **Callers and callees of one routine (done, 2026-10-25).** A "Callers &
+   callees" tab (`src/debug_ui/panels/callers_view.cpp`).
+   - **Layout:** the chosen routine's callers on the left, each with the share
+     of its total time it caused. On the right, "its own code" and its
+     callees, each with the share they cost it. Both sides add up to its total.
+   - **Navigation:** click a neighbour to move to it, with back and forward.
+     Double-click opens the source.
+   - **Opening it:** click a routine in the Routines tab to select it, or
+     right-click in Routines, Call tree or Flame graph and choose "Callers &
+     callees". A picker with a filter lists every routine that was called.
+   - **The arithmetic** is `prof_report_routine_view()` in `profile_report.c`.
+     It merges every outermost call of the routine across all paths, and folds
+     recursion in, so a routine calling itself is neither caller nor callee and
+     its time counts once.
+   - **Tested:** unit tests check both invariants (callers sum to the total;
+     own plus callees sum to the total) on a tree with mutual recursion,
+     direct recursion and an interrupt caller.
 3. **Neighbourhood call graph.** Boxes and arrows two levels each way around the
    selected routine. Box size is own time; arrow width is time or calls along
    that edge. Click a box to re-centre on it.
