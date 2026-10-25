@@ -17,14 +17,22 @@ static struct {
 	uint8_t  value, flags;
 } queue[MAX_QUEUE];
 
-static int        ring_n, worst_n, frame_cap;
-static wf_frame_t cur;                // the frame being recorded
+static int        frame_cap;
+static wf_frame_t cur;                // the frame being recorded, frame_cap events
 static uint64_t   cur_start;
-static wf_frame_t *ring;              // ring_n slots
-static int        ring_head, ring_count;
-static wf_frame_t *worst;             // worst_n slots, worst first
-static int        worst_count;
+static wf_frame_t *frames;            // every frame ended, oldest first
+static int        frame_n, frame_alloc_n;
 static uint32_t   frames_seen, dropped;
+
+// Detail is kept for frame i when i % stride == 0, or when it is one of the
+// protected extremes. The stride doubles whenever the budget would be passed.
+static size_t     budget, detail_bytes;
+static int        detail_n, stride;
+
+// The WF_PROTECT highest and lowest frames by each measure, best-placed
+// first: [metric][0 = highest, 1 = lowest].
+static int        ext[2][2][WF_PROTECT];
+static int        ext_n[2][2];
 
 static struct {
 	uint32_t key_lane, writes;
@@ -44,21 +52,85 @@ wf_lane_name(int lane)
 
 // ─── Frames ─────────────────────────────────────────────────────────────────
 
-static bool
-frame_alloc(wf_frame_t *f)
+static size_t
+detail_size(const wf_frame_t *f)
 {
-	memset(f, 0, sizeof *f);
-	f->events = malloc(sizeof *f->events * (size_t)frame_cap);
-	return f->events != NULL;
+	return sizeof *f->events * (size_t)(f->count ? f->count : 1);
 }
 
 static void
-frame_copy(wf_frame_t *dst, const wf_frame_t *src)
+drop_detail(int i)
 {
-	wf_event_t *keep = dst->events;
-	*dst             = *src;
-	dst->events      = keep;
-	memcpy(dst->events, src->events, sizeof *src->events * (size_t)src->count);
+	wf_frame_t *f = &frames[i];
+	if (!f->events)
+		return;
+	detail_bytes -= detail_size(f);
+	detail_n--;
+	free(f->events);
+	f->events = NULL;
+}
+
+static bool
+is_protected(int i)
+{
+	for (int m = 0; m < 2; m++)
+		for (int hl = 0; hl < 2; hl++)
+			for (int k = 0; k < ext_n[m][hl]; k++)
+				if (ext[m][hl][k] == i)
+					return true;
+	return false;
+}
+
+static bool
+wanted(int i)
+{
+	return i % stride == 0 || is_protected(i);
+}
+
+// Frame i has just been summarised: place it among the extremes. A frame
+// pushed out loses its detail unless something else still wants it.
+static void
+place_extremes(int i)
+{
+	for (int m = 0; m < 2; m++) {
+		const uint64_t v = wf_metric_of(&frames[i], m);
+		for (int hl = 0; hl < 2; hl++) {
+			int *list = ext[m][hl], *n = &ext_n[m][hl];
+			// Ties go to the earlier frame, so a later one must beat strictly.
+			int at = *n;
+			while (at > 0) {
+				const uint64_t o = wf_metric_of(&frames[list[at - 1]], m);
+				if (hl == 0 ? v > o : v < o)
+					at--;
+				else
+					break;
+			}
+			if (at >= WF_PROTECT)
+				continue;
+			int out = -1;
+			if (*n == WF_PROTECT)
+				out = list[WF_PROTECT - 1];
+			else
+				(*n)++;
+			memmove(&list[at + 1], &list[at], sizeof *list * (size_t)(*n - 1 - at));
+			list[at] = i;
+			if (out >= 0 && !wanted(out))
+				drop_detail(out);
+		}
+	}
+}
+
+// Thin evenly until `need` more bytes fit: double the stride and drop what it
+// no longer reaches.
+static void
+make_room(size_t need)
+{
+	while (detail_bytes + need > budget && stride < frame_n) {
+		stride *= 2;
+		for (int i = 0; i < frame_n; i++)
+			if (frames[i].events && !wanted(i))
+				drop_detail(i);
+	}
 }
 
 static void
@@ -105,21 +177,14 @@ cmp_agg(const void *a, const void *b)
 // ─── API ────────────────────────────────────────────────────────────────────
 
 bool
-wf_init(int ring_frames, int worst_frames, int cap)
+wf_init(int cap, size_t budget_bytes)
 {
 	wf_free();
-	ring_n    = ring_frames > 0 ? ring_frames : 1;
-	worst_n   = worst_frames > 0 ? worst_frames : 0;
-	frame_cap = cap > 16 ? cap : 16;
-	ring      = calloc((size_t)ring_n, sizeof *ring);
-	worst     = calloc((size_t)(worst_n ? worst_n : 1), sizeof *worst);
-	agg       = calloc(AGG_SIZE, sizeof *agg);
-	bool ok   = ring && worst && agg && frame_alloc(&cur);
-	for (int i = 0; ok && i < ring_n; i++)
-		ok = frame_alloc(&ring[i]);
-	for (int i = 0; ok && i < worst_n; i++)
-		ok = frame_alloc(&worst[i]);
-	if (!ok) {
+	frame_cap  = cap > 16 ? cap : 16;
+	budget     = budget_bytes;
+	agg        = calloc(AGG_SIZE, sizeof *agg);
+	cur.events = malloc(sizeof *cur.events * (size_t)frame_cap);
+	if (!agg || !cur.events) {
 		wf_free();
 		return false;
 	}
@@ -127,23 +192,28 @@ wf_init(int ring_frames, int worst_frames, int cap)
 	return true;
 }
 
+static void
+free_frames(void)
+{
+	for (int i = 0; i < frame_n; i++)
+		free(frames[i].events);
+	frame_n = detail_n = 0;
+	detail_bytes       = 0;
+}
+
 void
 wf_free(void)
 {
-	for (int i = 0; ring && i < ring_n; i++)
-		free(ring[i].events);
-	for (int i = 0; worst && i < worst_n; i++)
-		free(worst[i].events);
-	free(ring);
-	free(worst);
+	free_frames();
+	free(frames);
+	frames        = NULL;
+	frame_alloc_n = 0;
 	free(cur.events);
 	free(agg);
 	free(agg_sorted);
-	ring = worst = NULL;
 	agg        = NULL;
 	agg_sorted = NULL;
 	memset(&cur, 0, sizeof cur);
-	ring_n = worst_n = 0;
 	wf_pending = 0;
 }
 
@@ -153,14 +223,17 @@ wf_reset(void)
 	if (!agg)
 		return;
 	memset(agg, 0, sizeof *agg * AGG_SIZE);
-	cur.count     = 0;
-	cur.truncated = false;
+	free_frames();
+	memset(ext_n, 0, sizeof ext_n);
+	stride         = 1;
+	cur.count      = 0;
+	cur.writes     = 0;
+	cur.truncated  = false;
 	cur.number     = 0;
 	cur.start      = 0;
 	cur.video_mode = 1; // VGA until told otherwise
 	cur.start_node = 0;
 	cur_start      = 0;
-	ring_head = ring_count = worst_count = 0;
 	frames_seen = dropped = 0;
 	wf_pending            = 0;
 }
@@ -187,6 +260,7 @@ wf_flush_(uint32_t key, bool irq, uint64_t t)
 	const uint32_t cycle = t > cur_start ? (uint32_t)(t - cur_start) : 0;
 	for (int i = 0; i < wf_pending; i++) {
 		const uint32_t kl = (key & 0xFFFFFFu) | ((uint32_t)queue[i].lane << 24);
+		cur.writes++;
 		append(cycle, kl, queue[i].target, queue[i].value,
 		       (uint8_t)(queue[i].flags | (irq ? WF_F_IRQ : 0)));
 		agg_add(kl);
@@ -210,7 +284,7 @@ wf_frame_set_video_mode(uint8_t mode)
 }
 
 void
-wf_frame_end(uint64_t t, uint64_t score, uint16_t node)
+wf_frame_end(uint64_t t, uint64_t work, uint16_t node)
 {
 	if (!agg)
 		return;
@@ -220,30 +294,34 @@ wf_frame_end(uint64_t t, uint64_t score, uint16_t node)
 	wf_pending = 0;
 
 	cur.length = (uint32_t)(t - cur_start);
-	cur.score  = score ? score : (uint64_t)cur.count;
+	cur.work   = work;
 
-	// Into the ring, over the oldest.
-	frame_copy(&ring[ring_head], &cur);
-	ring_head = (ring_head + 1) % ring_n;
-	if (ring_count < ring_n)
-		ring_count++;
-
-	// Into the worst list if it beats the least bad one there.
-	if (worst_n) {
-		int at = worst_count < worst_n ? worst_count : -1;
-		if (at < 0 && cur.score > worst[worst_n - 1].score)
-			at = worst_n - 1;
-		if (at >= 0) {
-			while (at > 0 && worst[at - 1].score < cur.score) {
-				// Shift down, swapping buffers rather than copying events.
-				wf_event_t *buf = worst[at].events;
-				worst[at]        = worst[at - 1];
-				worst[at - 1].events = buf;
-				at--;
+	// The summary, always (unless memory has run out entirely).
+	if (frame_n == frame_alloc_n) {
+		const int   want = frame_alloc_n ? frame_alloc_n * 2 : 1024;
+		wf_frame_t *grow = realloc(frames, sizeof *frames * (size_t)want);
+		if (grow) {
+			frames        = grow;
+			frame_alloc_n = want;
+		}
+	}
+	if (frame_n < frame_alloc_n) {
+		const int i  = frame_n++;
+		frames[i]    = cur;
+		frames[i].events = NULL;
+		place_extremes(i);
+		// The detail, if this frame is wanted and it fits.
+		if (wanted(i)) {
+			const size_t need = detail_size(&frames[i]);
+			make_room(need);
+			if (wanted(i) && detail_bytes + need <= budget) {
+				frames[i].events = malloc(need);
+				if (frames[i].events) {
+					memcpy(frames[i].events, cur.events, sizeof *cur.events * (size_t)cur.count);
+					detail_bytes += need;
+					detail_n++;
+				}
 			}
-			frame_copy(&worst[at], &cur);
-			if (worst_count < worst_n)
-				worst_count++;
 		}
 	}
 
@@ -251,40 +329,118 @@ wf_frame_end(uint64_t t, uint64_t score, uint16_t node)
 	cur.number     = frames_seen;
 	cur.start      = t;
 	cur.count      = 0;
+	cur.writes     = 0;
 	cur.truncated  = false;
 	cur.start_node = node;
 	cur_start      = t;
 }
 
 int
-wf_ring_count(void)
+wf_frame_count(void)
 {
-	return ring_count;
+	return frame_n;
 }
 
 const wf_frame_t *
-wf_ring_at(int i)
+wf_frame(int i)
 {
-	if (i < 0 || i >= ring_count)
-		return NULL;
-	const int oldest = (ring_head - ring_count + ring_n) % ring_n;
-	return &ring[(oldest + i) % ring_n];
+	return (i >= 0 && i < frame_n) ? &frames[i] : NULL;
+}
+
+uint32_t wf_frames_seen(void)  { return frames_seen; }
+uint32_t wf_dropped(void)      { return dropped; }
+int      wf_detail_count(void) { return detail_n; }
+size_t   wf_detail_bytes(void) { return detail_bytes; }
+
+// ─── Picking ────────────────────────────────────────────────────────────────
+
+uint64_t
+wf_metric_of(const wf_frame_t *f, int metric)
+{
+	return metric == WF_BY_WRITES ? f->writes : f->work;
+}
+
+static int sort_metric;
+
+static int
+cmp_by_metric(const void *a, const void *b)
+{
+	const int      x = *(const int *)a, y = *(const int *)b;
+	const uint64_t u = wf_metric_of(&frames[x], sort_metric), v = wf_metric_of(&frames[y], sort_metric);
+	if (u != v)
+		return u < v ? -1 : 1;
+	return x - y;
 }
 
 int
-wf_worst_count(void)
+wf_pick(int pick, int metric, int *out, int max)
 {
-	return worst_count;
+	if (max <= 0 || frame_n == 0)
+		return 0;
+	metric = metric == WF_BY_WRITES ? WF_BY_WRITES : WF_BY_WORK;
+	switch (pick) {
+	case WF_PICK_ALL: {
+		const int n = frame_n < max ? frame_n : max;
+		for (int i = 0; i < n; i++)
+			out[i] = i;
+		return n;
+	}
+	case WF_PICK_WORST:
+	case WF_PICK_BEST: {
+		const int hl = pick == WF_PICK_WORST ? 0 : 1;
+		const int n  = ext_n[metric][hl] < max ? ext_n[metric][hl] : max;
+		memcpy(out, ext[metric][hl], sizeof *out * (size_t)n);
+		return n;
+	}
+	case WF_PICK_MEDIAN:
+	case WF_PICK_P90: {
+		int *idx = malloc(sizeof *idx * (size_t)frame_n);
+		if (!idx)
+			return 0;
+		for (int i = 0; i < frame_n; i++)
+			idx[i] = i;
+		sort_metric = metric;
+		qsort(idx, (size_t)frame_n, sizeof *idx, cmp_by_metric);
+		// Nearest rank: the median is the middle (lower of two), the 90th
+		// percentile the smallest frame at or above 90% of the others.
+		const int rank = pick == WF_PICK_MEDIAN ? (frame_n - 1) / 2 : (9 * frame_n + 9) / 10 - 1;
+		out[0]         = idx[rank];
+		free(idx);
+		return 1;
+	}
+	case WF_PICK_AVERAGE: {
+		double sum = 0;
+		for (int i = 0; i < frame_n; i++)
+			sum += (double)wf_metric_of(&frames[i], metric);
+		const double mean = sum / frame_n;
+		int          best = 0;
+		double       gap  = -1;
+		for (int i = 0; i < frame_n; i++) {
+			const double d = (double)wf_metric_of(&frames[i], metric) - mean;
+			const double g = d < 0 ? -d : d;
+			if (gap < 0 || g < gap) {
+				gap  = g;
+				best = i;
+			}
+		}
+		out[0] = best;
+		return 1;
+	}
+	}
+	return 0;
 }
 
-const wf_frame_t *
-wf_worst_at(int i)
+int
+wf_nearest_detail(int i)
 {
-	return (i >= 0 && i < worst_count) ? &worst[i] : NULL;
+	for (int d = 0; d < frame_n; d++) {
+		if (i - d >= 0 && i - d < frame_n && frames[i - d].events)
+			return i - d;
+		if (d && i + d >= 0 && i + d < frame_n && frames[i + d].events)
+			return i + d;
+	}
+	return -1;
 }
-
-uint32_t wf_frames_seen(void) { return frames_seen; }
-uint32_t wf_dropped(void)     { return dropped; }
 
 const wf_agg_t *
 wf_aggregates(int *count)

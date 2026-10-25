@@ -6,16 +6,21 @@
 // made it, as an effective (bank, PC) key like perf_hist's, so every mark can
 // be traced to source.
 //
-// TWO LAYERS, because a busy program writes VERA tens of thousands of times a
+// THREE LAYERS, because a busy program writes VERA tens of thousands of times a
 // frame:
 //
 //   1. AGGREGATES for the whole capture: writes per (source key, lane). Size
 //      depends on the code, not on how long it runs. "Which routine writes the
 //      palette most?"
-//   2. DETAIL for a bounded set of frames: a ring of the last N, plus the
-//      worst K by a score the caller supplies (work cycles, or event count),
-//      kept after they leave the ring. A frame that overflows its buffer is
-//      flagged truncated rather than quietly cut.
+//   2. A SUMMARY of every frame -- its work, writes, length -- always kept.
+//      This is what "worst", "median" and "90th percentile" are computed from.
+//   3. DETAIL (every event) for every frame, within a memory budget. Each
+//      frame's events are kept at their own size. If a long capture would go
+//      over, detail is thinned evenly (every 2nd frame, then every 4th, ...)
+//      but never for the WF_PROTECT busiest and quietest frames by either
+//      measure. A frame that overflows the per-frame buffer while recording is
+//      flagged truncated rather than quietly cut; one whose detail could not be
+//      kept still has its summary.
 //
 // TIMING. Writes happen inside an instruction, before its cycles are known.
 // They are queued, and wf_flush() -- called from perf_hist_step_ with the
@@ -29,6 +34,7 @@
 #define WATERFALL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -76,14 +82,19 @@ static inline int      wf_event_lane(const wf_event_t *e) { return (int)(e->key_
 typedef struct {
 	uint32_t    number;     // frames since the capture began, from 0
 	uint64_t    start;      // perf_hist cycle count when it began
-	uint64_t    score;      // what the worst-K list ranks by
+	uint64_t    work;       // CPU cycles working, not waiting (0 if not measured)
+	uint32_t    writes;     // device writes in the frame, including any not kept
 	uint32_t    length;     // cycles the frame lasted
 	uint16_t    start_node; // innermost tree node when the frame began
 	uint8_t     video_mode; // VERA DC_VIDEO output mode (0 off, 1 VGA, 2 NTSC, 3 RGB)
 	bool        truncated;  // events past the buffer were dropped
-	int         count;
-	wf_event_t *events;
+	int         count;      // events recorded
+	wf_event_t *events;     // NULL when this frame's detail was not kept
 } wf_frame_t;
+
+// How many of the busiest and of the quietest frames, by each measure, always
+// keep their detail.
+#define WF_PROTECT 8
 
 typedef struct {
 	uint32_t key;   // perf_hist key
@@ -91,9 +102,9 @@ typedef struct {
 	uint32_t writes;
 } wf_agg_t;
 
-// `ring` detailed frames, `worst` kept by score, up to `frame_cap` events
-// each. False if out of memory.
-bool wf_init(int ring, int worst, int frame_cap);
+// Record up to `frame_cap` events a frame, and keep detail within
+// `budget_bytes` in all. False if out of memory.
+bool wf_init(int frame_cap, size_t budget_bytes);
 void wf_free(void);
 void wf_reset(void); // forget everything; keep the sizes
 
@@ -121,18 +132,29 @@ void wf_cpu(uint16_t node, uint64_t t);
 // Sticky: carries to later frames until set again.
 void wf_frame_set_video_mode(uint8_t mode);
 
-// A frame ended at time `t`. `score` ranks it for the worst list (0: rank by
-// event count); `node` is the innermost tree node, which the next frame
-// starts in.
-void wf_frame_end(uint64_t t, uint64_t score, uint16_t node);
+// A frame ended at time `t`, having done `work` CPU cycles of work (not
+// waiting; 0 when not measured). `node` is the innermost tree node, which the
+// next frame starts in.
+void wf_frame_end(uint64_t t, uint64_t work, uint16_t node);
 
 // ---- Queries -----------------------------------------------------------
-int               wf_ring_count(void);
-const wf_frame_t *wf_ring_at(int i);   // 0 = oldest
-int               wf_worst_count(void);
-const wf_frame_t *wf_worst_at(int i);  // 0 = worst
-uint32_t          wf_frames_seen(void);
-uint32_t          wf_dropped(void);    // writes lost to a full queue or table
+int               wf_frame_count(void);   // every frame ended since the reset
+const wf_frame_t *wf_frame(int i);       // 0 = first; events NULL when not kept
+uint32_t          wf_frames_seen(void);  // more than wf_frame_count() only if memory ran out
+int               wf_detail_count(void); // frames whose events are kept
+size_t            wf_detail_bytes(void);
+uint32_t          wf_dropped(void);      // writes lost to a full queue or table
+
+// Picking frames. A measure to rank by, and which frames to pick: every one,
+// the WF_PROTECT worst (highest) or best (lowest) first, or the one frame at
+// the median, at the 90th percentile, or closest to the mean. Ties go to the
+// earlier frame. Writes frame indices into `out` and returns how many.
+enum { WF_BY_WORK = 0, WF_BY_WRITES };
+enum { WF_PICK_ALL = 0, WF_PICK_WORST, WF_PICK_BEST, WF_PICK_MEDIAN, WF_PICK_P90, WF_PICK_AVERAGE };
+uint64_t wf_metric_of(const wf_frame_t *f, int metric);
+int      wf_pick(int pick, int metric, int *out, int max);
+// The nearest frame to `i` whose detail is kept (i itself if it is), or -1.
+int      wf_nearest_detail(int i);
 
 // Aggregates, heaviest first. The returned array lives until the next call
 // or wf_reset(). `*count` is set to its length.

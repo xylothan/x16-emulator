@@ -81,11 +81,6 @@ typedef struct {
 } prof_writes_t;
 const prof_writes_t *profile_session_writes_by_routine(int *count);
 
-// The waterfall's detailed frames -- the recent ring and the worst list, each
-// frame once -- in frame order, into `out` (up to `max`). `worst[i]` says
-// whether frame i is among the worst. Returns how many.
-int profile_session_waterfall_frames(const wf_frame_t **out, bool *worst, int max);
-
 // A perf_hist key, for display: its routine (or address), its bank:PC, and
 // its source line as "file:line" (false when the debug info has none).
 void profile_session_key_name(uint32_t key, char *buf, int size);

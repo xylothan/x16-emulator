@@ -2555,7 +2555,8 @@ static int handle_x16_capture(int seq, cJSON *args) {
                 cJSON_AddItemToArray(dw, o);
             }
             cJSON_AddItemToObject(rep, "deviceWrites", dw);
-            cJSON_AddNumberToObject(rep, "waterfallFrames", wf_ring_count() + wf_worst_count());
+            cJSON_AddNumberToObject(rep, "waterfallFrames", wf_frame_count());
+            cJSON_AddNumberToObject(rep, "waterfallDetailFrames", wf_detail_count());
         }
         cJSON_AddItemToObject(body, "report", rep);
 
