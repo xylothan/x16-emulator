@@ -112,6 +112,32 @@ bool prof_report_add_tree(prof_report_t *r, const prof_node_t *nodes, int count)
 // The row a perf_hist key is charged to, or -1 if that key never ran.
 int prof_report_row_of_key(const prof_report_t *r, uint32_t key);
 
+// One routine's neighbours, merged over every call path: who called it and
+// how much of its time each caller caused; what it called and how much each
+// cost it. A neighbour is a report row, or for a tree root ([main], [IRQ]) or
+// code no row names, a single node: `row` is -1 then and `node` is it.
+typedef struct {
+	int      row;
+	int      node;   // a node of this neighbour, for naming and jumping
+	uint64_t cycles; // callers: the routine's time they caused; callees: their cost to it
+	uint32_t calls;
+} prof_edge_t;
+
+typedef struct {
+	prof_edge_t *callers, *callees;  // heaviest first
+	int          ncallers, ncallees;
+	uint64_t     total;  // the routine's total time (== rows[row].incl_cycles)
+	uint64_t     own;    // its own instructions
+	uint32_t     calls;
+} prof_routine_view_t;
+
+// Build the view for report row `row`. Recursion is folded in: a call from the
+// routine to itself is neither a caller nor a callee, and time inside it is
+// counted once. Invariants: the callers' cycles sum to `total`, and so do `own`
+// plus the callees' cycles. False if the report has no tree or row is out of range.
+bool prof_report_routine_view(const prof_report_t *r, int row, prof_routine_view_t *out);
+void prof_routine_view_free(prof_routine_view_t *v);
+
 #ifdef __cplusplus
 }
 #endif

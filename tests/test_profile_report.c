@@ -145,6 +145,69 @@ main(void)
 		         "nodes carry their row");
 	}
 
+	// ── One routine's callers and callees, merged over every path ───────────
+	{
+		const uint32_t K_INIT = 0x0810, K_UPD = 0x0900, K_DRAW = perf_hist_key(0xA000, 64, 0);
+		// [main] -> init (self 40)
+		//             -> update (self 20) -> init (self 4) -> draw64 (6)   mutual recursion
+		//             -> init (self 10) -> draw64 (5)                       direct recursion
+		//             -> draw64 (15)
+		//        -> update (self 50)
+		// [IRQ]  -> update (self 7)
+		const prof_node_t t[] = {
+			// parent row key            self incl calls max fmax
+			{-1, 0, 0xFFFFFFF0u,           0, 187, 0, 0, 0},  // 0 [main]
+			{-1, 0, 0xFFFFFFF1u,           0,   7, 0, 0, 0},  // 1 [IRQ]
+			{0,  0, K_INIT,               40, 100, 2, 0, 0},  // 2 init
+			{2,  0, K_UPD,                20,  30, 3, 0, 0},  // 3 init/update
+			{3,  0, K_INIT,                4,  10, 1, 0, 0},  // 4 init/update/init
+			{4,  0, K_DRAW,                6,   6, 1, 0, 0},  // 5 .../init/draw64
+			{2,  0, K_INIT,               10,  15, 1, 0, 0},  // 6 init/init
+			{6,  0, K_DRAW,                5,   5, 1, 0, 0},  // 7 init/init/draw64
+			{2,  0, K_DRAW,               15,  15, 4, 0, 0},  // 8 init/draw64
+			{0,  0, K_UPD,                50,  50, 5, 0, 0},  // 9 update
+			{1,  0, K_UPD,                 7,   7, 6, 0, 0},  // 10 [IRQ]/update
+		};
+		check(prof_report_add_tree(&r, t, 11), "tree for the routine view");
+		const int init_row = (int)(row_named(&r, "init") - r.rows);
+		const int upd_row  = (int)(row_named(&r, "update") - r.rows);
+		const int draw_row = (int)(row_named(&r, "draw64") - r.rows);
+
+		prof_routine_view_t v;
+		check(prof_report_routine_view(&r, init_row, &v), "init's view builds");
+		check_eq((uint32_t)v.total, 100, "init total: the one outermost call (the inner ones are inside it)");
+		check_eq((uint32_t)v.own, 50, "own: 40 + 10 from the direct recursion, folded in");
+		check(v.ncallers == 1 && v.callers[0].node == 0 && v.callers[0].cycles == 100,
+		      "called only from [main], for all 100");
+		check_eq((uint32_t)v.ncallees, 2, "two callees: update and draw64 (not init itself)");
+		check(v.callees[0].row == upd_row && v.callees[0].cycles == 30, "update costs it 30 (with the init inside)");
+		check(v.callees[1].row == draw_row && v.callees[1].cycles == 20 && v.callees[1].calls == 5,
+		      "draw64 costs it 20 over 5 calls, merged across both paths");
+		uint64_t sum = v.own;
+		for (int i = 0; i < v.ncallees; i++)
+			sum += v.callees[i].cycles;
+		check_eq((uint32_t)sum, (uint32_t)v.total, "own + callees = total");
+		check_eq((uint32_t)v.total, (uint32_t)r.rows[init_row].incl_cycles, "and total is the row's total");
+		prof_routine_view_free(&v);
+
+		check(prof_report_routine_view(&r, upd_row, &v), "update's view builds");
+		check_eq((uint32_t)v.total, 87, "update total: 30 + 50 + 7 over its three outermost calls");
+		check_eq((uint32_t)v.ncallers, 3, "three callers");
+		check(v.callers[0].node == 0 && v.callers[0].cycles == 50, "[main] caused 50");
+		check(v.callers[1].row == init_row && v.callers[1].cycles == 30, "init caused 30");
+		check(v.callers[2].node == 1 && v.callers[2].cycles == 7, "[IRQ] caused 7");
+		uint64_t csum = 0;
+		for (int i = 0; i < v.ncallers; i++)
+			csum += v.callers[i].cycles;
+		check_eq((uint32_t)csum, (uint32_t)v.total, "callers add up to the total");
+		check(v.ncallees == 1 && v.callees[0].row == init_row && v.callees[0].cycles == 10,
+		      "update calls init back, for 10");
+		check_eq((uint32_t)(v.own + v.callees[0].cycles), 87, "own 77 + callee 10");
+		prof_routine_view_free(&v);
+
+		check(!prof_report_routine_view(&r, -1, &v), "no view for a row that is not there");
+	}
+
 	prof_report_free(&r);
 	check(r.rows == NULL && r.count == 0, "free empties it");
 
