@@ -17,6 +17,7 @@
 #include "../waterfall.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <stdio.h>
 #include <string.h>
@@ -481,7 +482,7 @@ profile_waterfall_draw(const prof_report_t *r)
 		const int   lane = lanes[li];
 		const float y    = row_y(cpu_rows + irq_rows + (int)li);
 		const ImU32 col  = lane_color(lane);
-		int         last_px = -1 << 30;
+		int         last_px = INT_MIN; // no column drawn yet
 		const auto &ev   = g_fv.lane_events[(size_t)lane];
 		// First visible event, by binary search on cycle.
 		size_t lo = 0, hi = ev.size();
