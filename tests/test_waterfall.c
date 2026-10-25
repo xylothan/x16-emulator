@@ -1,6 +1,6 @@
-// Checks for the frame waterfall recorder (src/waterfall.c): stamping, the
-// frame ring, the worst-K list, truncation, aggregates, and the export walk's
-// begin/end nesting.
+// Checks for the frame waterfall recorder (src/waterfall.c): stamping, every
+// frame's summary, picking frames, thinning detail to a budget, truncation,
+// aggregates, and the export walk's begin/end nesting.
 
 #include "waterfall.h"
 #include "support/harness.h"
@@ -82,7 +82,7 @@ range_write(void *ctx, const wf_event_t *ev)
 int
 main(void)
 {
-	check(wf_init(3, 2, 64), "init");
+	check(wf_init(64, 1 << 20), "init");
 
 	// ── Writes are stamped with the instruction that made them ──────────────
 	{
@@ -93,7 +93,7 @@ main(void)
 		check_eq((uint32_t)wf_pending, 0, "and is stamped by the flush");
 		wf_flush(0x0999, false, 200); // nothing queued: no event
 		wf_frame_end(1000, 0, 0);
-		const wf_frame_t *f = wf_ring_at(0);
+		const wf_frame_t *f = wf_frame(0);
 		check(f && f->count == 1, "one event");
 		check_eq(wf_event_key(&f->events[0]), 0x0810, "keyed by the writing instruction");
 		check_eq((uint32_t)wf_event_lane(&f->events[0]), WF_LANE_PALETTE, "in its lane");
@@ -103,12 +103,28 @@ main(void)
 		wf_note(WF_LANE_YM, 0x20, 0x55, 0);
 		wf_flush(0x0900, true, 1100);
 		wf_frame_end(2000, 0, 0);
-		f = wf_ring_at(1);
+		f = wf_frame(1);
 		check(f && f->count == 1 && f->events[0].cycle == 100, "times are frame-relative");
 		check(f && (f->events[0].flags & WF_F_IRQ), "an IRQ write is flagged");
 	}
 
-	// ── The ring keeps the newest N, oldest first ───────────────────────────
+	// ── A frame carries the output mode it was recorded in ──────────────────
+	{
+		wf_reset();
+		check_eq(wf_frame_count(), 0, "empty");
+		wf_frame_end(100, 0, 0);
+		check_eq(wf_frame(0)->video_mode, 1, "VGA by default");
+		wf_frame_set_video_mode(2);
+		wf_frame_end(200, 0, 0);
+		check_eq(wf_frame(1)->video_mode, 2, "NTSC once set");
+		wf_frame_end(300, 0, 0);
+		check_eq(wf_frame(2)->video_mode, 2, "and it sticks for later frames");
+		wf_frame_set_video_mode(0x83);
+		wf_frame_end(400, 0, 0);
+		check_eq(wf_frame(3)->video_mode, 3, "only the mode bits are kept");
+	}
+
+	// ── Every frame is kept, oldest first, with its writes counted ──────────
 	{
 		wf_reset();
 		for (int i = 0; i < 5; i++) {
@@ -118,23 +134,106 @@ main(void)
 			}
 			wf_frame_end((uint64_t)(i + 1) * 1000, 0, 0);
 		}
-		check_eq((uint32_t)wf_ring_count(), 3, "ring holds three");
-		check_eq(wf_ring_at(0)->number, 2, "oldest kept is frame 2");
-		check_eq(wf_ring_at(2)->number, 4, "newest is frame 4");
+		check_eq((uint32_t)wf_frame_count(), 5, "all five kept");
 		check_eq(wf_frames_seen(), 5, "five frames seen");
+		check_eq(wf_frame(0)->number, 0, "oldest first");
+		check_eq(wf_frame(4)->writes, 5, "frame 4 made five writes");
+		check_eq((uint32_t)wf_detail_count(), 5, "with detail, inside the budget");
+		check(wf_frame(4)->events != NULL, "events kept");
+		check_eq((uint32_t)wf_detail_bytes(), (uint32_t)(sizeof(wf_event_t) * 15), "at their own size");
 	}
 
-	// ── Worst K survive leaving the ring ────────────────────────────────────
+	// ── Picking: worst, best, median, 90th percentile, average, all ─────────
 	{
 		wf_reset();
-		const uint64_t scores[] = {10, 90, 20, 70, 30, 40};
-		for (int i = 0; i < 6; i++)
-			wf_frame_end((uint64_t)(i + 1) * 1000, scores[i], 0);
-		check_eq((uint32_t)wf_worst_count(), 2, "two worst kept");
-		check_eq((uint32_t)wf_worst_at(0)->score, 90, "the worst first");
-		check_eq(wf_worst_at(0)->number, 1, "frame 1, long gone from the ring");
-		check_eq((uint32_t)wf_worst_at(1)->score, 70, "then the next");
-		check_eq(wf_ring_at(0)->number, 3, "while the ring moved on");
+		const uint64_t work[]   = {10, 90, 20, 70, 30, 40};
+		const int      writes[] = {3, 1, 4, 1, 5, 9};
+		for (int i = 0; i < 6; i++) {
+			for (int k = 0; k < writes[i]; k++) {
+				wf_note(WF_LANE_PSG, 0, 0, 0);
+				wf_flush(0x1000, false, (uint64_t)i * 1000 + (uint64_t)k);
+			}
+			wf_frame_end((uint64_t)(i + 1) * 1000, work[i], 0);
+		}
+		int out[16], n;
+		n = wf_pick(WF_PICK_ALL, WF_BY_WORK, out, 16);
+		check(n == 6 && out[0] == 0 && out[5] == 5, "all, in order");
+		n = wf_pick(WF_PICK_WORST, WF_BY_WORK, out, 16);
+		check(n == 6 && out[0] == 1 && out[1] == 3 && out[2] == 5 && out[5] == 0, "worst work first: 90, 70, 40 ...");
+		n = wf_pick(WF_PICK_BEST, WF_BY_WORK, out, 16);
+		check(n == 6 && out[0] == 0 && out[1] == 2 && out[5] == 1, "best work first: 10, 20 ...");
+		n = wf_pick(WF_PICK_MEDIAN, WF_BY_WORK, out, 16);
+		check(n == 1 && out[0] == 4, "median work: 30 (lower middle of 10 20 30 40 70 90)");
+		n = wf_pick(WF_PICK_P90, WF_BY_WORK, out, 16);
+		check(n == 1 && out[0] == 1, "90th percentile work: 90");
+		n = wf_pick(WF_PICK_AVERAGE, WF_BY_WORK, out, 16);
+		check(n == 1 && out[0] == 5, "nearest the mean (43.3): 40");
+		n = wf_pick(WF_PICK_WORST, WF_BY_WRITES, out, 16);
+		check(n == 6 && out[0] == 5 && out[1] == 4 && out[2] == 2, "worst writes: 9, 5, 4 ...");
+		check(out[4] == 1 && out[5] == 3, "ties go to the earlier frame");
+		n = wf_pick(WF_PICK_BEST, WF_BY_WRITES, out, 2);
+		check(n == 2 && out[0] == 1 && out[1] == 3, "best writes, capped at max");
+		n = wf_pick(WF_PICK_MEDIAN, WF_BY_WRITES, out, 16);
+		check(n == 1 && out[0] == 0, "median writes: 3");
+	}
+
+	// ── Over budget: thin evenly, never the extremes ────────────────────────
+	{
+		// Four events (48 bytes) a frame; room for 48 frames' detail of 200.
+		check(wf_init(64, sizeof(wf_event_t) * 4 * 48), "init small");
+		for (int i = 0; i < 200; i++) {
+			for (int k = 0; k < 4; k++) {
+				wf_note(WF_LANE_PSG, 0, 0, 0);
+				wf_flush(0x1000, false, (uint64_t)i * 1000 + (uint64_t)k);
+			}
+			wf_frame_end((uint64_t)(i + 1) * 1000, (uint64_t)((i * 37) % 200), 0);
+		}
+		check_eq((uint32_t)wf_frame_count(), 200, "every summary kept");
+		check(wf_detail_bytes() <= sizeof(wf_event_t) * 4 * 48, "detail within the budget");
+		check(wf_detail_count() > 32 && wf_detail_count() <= 48, "and the budget is used");
+
+		bool prot[200] = {false}, all_kept = true;
+		for (int m = 0; m < 2; m++)
+			for (int p = WF_PICK_WORST; p <= WF_PICK_BEST; p++) {
+				int out[WF_PROTECT];
+				const int n = wf_pick(p, m, out, WF_PROTECT);
+				for (int k = 0; k < n; k++) {
+					prot[out[k]] = true;
+					all_kept     = all_kept && wf_frame(out[k])->events != NULL;
+				}
+			}
+		check(all_kept, "the worst and best by both measures keep their detail");
+
+		// The others kept are evenly spaced: all multiples of one stride.
+		int stride = 1 << 30, first_half = 0, second_half = 0;
+		for (int i = 0; i < 200; i++)
+			if (wf_frame(i)->events && !prot[i]) {
+				int s = i ? (i & -i) : 1 << 30;
+				stride = s < stride ? s : stride;
+				first_half += i < 100;
+				second_half += i >= 100;
+			}
+		bool even = stride >= 2;
+		for (int i = 0; i < 200; i++)
+			if (wf_frame(i)->events && !prot[i] && i % stride)
+				even = false;
+		check(even, "the rest share one stride");
+		check(first_half && second_half, "spread over the whole capture");
+
+		int gone = -1;
+		for (int i = 0; i < 200 && gone < 0; i++)
+			if (!wf_frame(i)->events)
+				gone = i;
+		const int near = wf_nearest_detail(gone);
+		bool      none_closer = near >= 0 && wf_frame(near)->events;
+		const int d           = near > gone ? near - gone : gone - near;
+		for (int i = 0; i < 200 && none_closer; i++)
+			if (wf_frame(i)->events && (i > gone ? i - gone : gone - i) < d)
+				none_closer = false;
+		check(gone >= 0 && none_closer, "a frame without detail finds its nearest with");
+		check_eq((uint32_t)wf_nearest_detail(near), (uint32_t)near, "a kept frame is its own nearest");
+
+		check(wf_init(64, 1 << 20), "init again");
 	}
 
 	// ── A full frame is flagged, not silently cut ───────────────────────────
@@ -145,8 +244,9 @@ main(void)
 			wf_flush(0x2000, false, (uint64_t)i);
 		}
 		wf_frame_end(5000, 0, 0);
-		check(wf_ring_at(0)->truncated, "overflow flagged");
-		check_eq((uint32_t)wf_ring_at(0)->count, 64, "at the buffer's size");
+		check(wf_frame(0)->truncated, "overflow flagged");
+		check_eq(wf_frame(0)->writes, 100, "but every write is counted");
+		check_eq((uint32_t)wf_frame(0)->count, 64, "at the buffer's size");
 		int n;
 		const wf_agg_t *a = wf_aggregates(&n);
 		check(n == 1 && a[0].writes == 100, "aggregates still count every write");
@@ -180,7 +280,7 @@ main(void)
 		wf_cpu(3, 40);               // back in B: H ends
 		wf_cpu(0, 50);               // B and A return together
 		wf_frame_end(100, 1, 0);
-		const wf_frame_t *f = wf_ring_at(wf_ring_count() - 1);
+		const wf_frame_t *f = wf_frame(wf_frame_count() - 1);
 		const walk_t      w = walk(f);
 		check(w.balanced, "every begin has its end, per thread");
 		check_eq((uint32_t)w.events, 2, "both writes emitted");
@@ -197,7 +297,7 @@ main(void)
 		wf_frame_end(0, 1, 3);       // next frame starts in [main]/A/B
 		wf_cpu(2, 10);               // B returns to A
 		wf_frame_end(50, 1, 2);
-		const walk_t w = walk(wf_ring_at(wf_ring_count() - 1));
+		const walk_t w = walk(wf_frame(wf_frame_count() - 1));
 		check(w.balanced, "balanced");
 		check(strncmp(w.log, "B0:0@0 B0:2@0 B0:3@0 E0:3@10", 28) == 0, "opens main/A/B at 0");
 	}
@@ -214,7 +314,7 @@ main(void)
 		wf_note(WF_LANE_VIA1, 0, 0, 0);
 		wf_flush(0x0900, false, 350);
 		wf_frame_end(400, 1, 0);
-		const wf_frame_t *f = wf_ring_at(wf_ring_count() - 1);
+		const wf_frame_t *f = wf_frame(wf_frame_count() - 1);
 
 		range_t r;
 		memset(&r, 0, sizeof r);

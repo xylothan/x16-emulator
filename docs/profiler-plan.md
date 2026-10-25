@@ -1040,6 +1040,49 @@ Tested:
 Hover and click were not exercised by a script: a hidden window takes no
 mouse input.
 
+### Phase 5d: every frame, and a way to pick one (2026-10-25)
+
+The 5a recorder kept detail for 38 frames: the last 30 and the 8 worst.
+Anything else in a capture could not be looked at, and "worst" was by event
+count unless the `budget` recorder happened to be on.
+
+- **Every frame has a summary**: its CPU work, device writes, length and
+  output mode. Picks are computed from these, so they cover the whole capture.
+- **Detail for every frame, within a budget** (128 MB; 32 MB in the browser
+  build). Each frame's events are stored at their own size. Past the budget,
+  detail is thinned evenly: every 2nd frame, then every 4th, and so on.
+  The 8 highest and 8 lowest frames by each measure are never thinned.
+  A frame without detail still has its summary, and the view shows the
+  nearest frame that kept its detail, saying so.
+- **CPU work is always measured** with the waterfall. The capture arms the
+  budget recorder itself when it was not asked for, and disarms it after.
+  That costs about 0.12 ms of host time per frame: three interleaved pairs of
+  1,800 frames gave medians of 3.71 ms against 3.59 ms for the tree alone.
+  Histogram-only and tree-plus-waterfall runs of the scripted BASIC loop still
+  match in every row and in instruction count.
+- **The Waterfall tab:**
+  - *Show* All frames, Worst, Best, Typical (median), 90th percentile or
+    Average, *by* CPU work or device writes. `<` and `>` step through the
+    frames shown;
+  - a strip of every frame in the capture, one bar per pixel column (the
+    heaviest frame in it). It marks the frames shown and the frames without
+    detail, and a click opens a frame;
+  - device rows are fixed for the whole capture, in lane order. A row with no
+    writes in this frame is dimmed and stays in place; *Hide empty lanes*
+    leaves those rows out.
+- **Export:** a trace carries up to 64 frames: the extremes first, then
+  frames spread evenly through the capture. Each frame's work and writes are
+  in its args.
+- **DAP:** `waterfallFrames` counts every frame; `waterfallDetailFrames` counts
+  the frames that kept detail.
+
+Tested:
+- unit tests, including thinning under a small budget (the extremes keep
+  their detail, and the rest share one stride across the whole capture);
+- the tab drawn in a Debug build for every Show and Rank-by choice, with the
+  budget forced small enough that the summary-only fallback draws;
+- GCC on every touched file.
+
 ## Phase 6: seeing who calls what
 
 Every view here is a different summary of the call tree that Phase 3 already
@@ -1062,10 +1105,23 @@ anything. In order:
      costs what is visible.
    - This replaces speedscope for everyday use; the `.folded` export stays for
      other tools.
-2. **Callers and callees of one routine.** Pick a routine anywhere. The view
-   shows its callers to the left (how much of its time each one caused) and its
-   callees to the right (how much each one costs it), merged across every call
-   path. It answers "where is this called from".
+2. **Callers and callees of one routine (done, 2026-10-25).** A "Callers &
+   callees" tab (`src/debug_ui/panels/callers_view.cpp`).
+   - **Layout:** the chosen routine's callers on the left, each with the share
+     of its total time it caused. On the right, "its own code" and its
+     callees, each with the share they cost it. Both sides add up to its total.
+   - **Navigation:** click a neighbour to move to it, with back and forward.
+     Double-click opens the source.
+   - **Opening it:** click a routine in the Routines tab to select it, or
+     right-click in Routines, Call tree or Flame graph and choose "Callers &
+     callees". A picker with a filter lists every routine that was called.
+   - **The arithmetic** is `prof_report_routine_view()` in `profile_report.c`.
+     It merges every outermost call of the routine across all paths, and folds
+     recursion in, so a routine calling itself is neither caller nor callee and
+     its time counts once.
+   - **Tested:** unit tests check both invariants (callers sum to the total;
+     own plus callees sum to the total) on a tree with mutual recursion,
+     direct recursion and an interrupt caller.
 3. **Neighbourhood call graph.** Boxes and arrows two levels each way around the
    selected routine. Box size is own time; arrow width is time or calls along
    that edge. Click a box to re-centre on it.

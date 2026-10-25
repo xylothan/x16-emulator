@@ -15,6 +15,7 @@
 #include "../profile_session.h"
 #include "waterfall_view.h"
 #include "flame_view.h"
+#include "callers_view.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -338,11 +339,21 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 			ImGui::TableSetColumnIndex(6);
 			char label[PROF_NAME_MAX + 4];
 			snprintf(label, sizeof label, "%s%s", row.name, row.ambiguous ? " *" : "");
-			if (ImGui::Selectable(label, false,
+			if (ImGui::Selectable(label, view[v] == profile_selected_routine(),
 			                      ImGuiSelectableFlags_SpanAllColumns |
-			                          ImGuiSelectableFlags_AllowDoubleClick) &&
-			    ImGui::IsMouseDoubleClicked(0))
-				debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+			                          ImGuiSelectableFlags_AllowDoubleClick)) {
+				if (ImGui::IsMouseDoubleClicked(0))
+					debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+				else
+					profile_select_routine(view[v], false);
+			}
+			if (ImGui::BeginPopupContextItem("rowctx")) {
+				if (ImGui::MenuItem("Callers & callees", nullptr, false, tree && row.calls))
+					profile_select_routine(view[v], true);
+				if (ImGui::MenuItem("Open source"))
+					debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+				ImGui::EndPopup();
+			}
 			if (ImGui::IsItemHovered()) {
 				ImGui::BeginTooltip();
 				ImGui::Text("Own time: %llu cycles outside interrupts + %llu inside, %llu instructions",
@@ -394,6 +405,17 @@ draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t fra
 		fl |= ImGuiTreeNodeFlags_DefaultOpen;
 	ImGui::PushID(i);
 	const bool open = ImGui::TreeNodeEx("node", fl, "%s", name);
+	if (n.row >= 0 && ImGui::BeginPopupContextItem("treectx")) {
+		if (ImGui::MenuItem("Callers & callees"))
+			profile_select_routine(n.row, true);
+		if (ImGui::MenuItem("Open source")) {
+			uint8_t  region, bank;
+			uint16_t pc;
+			perf_hist_key_decode(n.key, &region, &bank, &pc);
+			debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+		}
+		ImGui::EndPopup();
+	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::BeginTooltip();
 		ImGui::Text("%s", name);
@@ -576,6 +598,14 @@ draw_report(void)
 			draw_tree(r, total, frames);
 			ImGui::EndTabItem();
 		}
+		const bool show_callers = profile_take_show_request();
+		if (r->node_count > 2 &&
+		    ImGui::BeginTabItem("Callers & callees", nullptr, show_callers ? ImGuiTabItemFlags_SetSelected : 0)) {
+			profile_callers_draw(r);
+			ImGui::EndTabItem();
+		}
+		if (ImGui::IsItemHovered() && r->node_count > 2)
+			ImGui::SetTooltip("One routine: who called it, and what it spends its time calling.");
 		if (r->node_count > 2 && ImGui::BeginTabItem("Flame graph")) {
 			profile_flame_draw(r);
 			ImGui::EndTabItem();

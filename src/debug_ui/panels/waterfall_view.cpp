@@ -28,7 +28,7 @@ namespace {
 // VGA: 525 lines a frame. Composite would be 262.5, but the axis is a guide,
 // and the frame's own length gives cycles per line either way.
 constexpr int LINES_PER_FRAME = 525;
-constexpr int MAX_FRAMES      = 64;
+constexpr int STRIP_H         = 36; // the frame strip's height, pixels
 constexpr int MAX_CPU_ROWS    = 16;
 constexpr int MAX_IRQ_ROWS    = 6;
 
@@ -50,7 +50,10 @@ struct FrameView {
 };
 
 FrameView g_fv;
-int       g_pick     = -1;   // index into the frames list; -1 = choose the default
+int       g_frame    = -1;   // the frame asked for (wf_frame index); -1 = choose the default
+int       g_show     = WF_PICK_WORST;
+int       g_metric   = WF_BY_WORK;
+bool      g_hide_empty = false;
 double    g_view_c0  = 0.0;  // first visible cycle
 double    g_view_len = 0.0;  // visible cycles; 0 = fit the frame
 bool      g_dragging = false;
@@ -62,6 +65,54 @@ double    g_sel_c0 = 0.0, g_sel_c1 = 0.0; // selection, cycles; empty when equal
 enum TimeUnit { TU_MS = 0, TU_LINES, TU_PERCENT, TU_CYCLES };
 int g_unit = TU_MS;
 const char *const UNIT_NAMES[] = {"Milliseconds", "Scanlines", "% of the frame", "CPU cycles"};
+
+// Which frames the picker offers, in WF_PICK_* order, and what they rank by.
+const char *const SHOW_NAMES[]   = {"All frames", "Worst", "Best", "Typical (median)", "90th percentile",
+                                    "Average"};
+const char *const METRIC_NAMES[] = {"CPU work", "Device writes"};
+
+// The frames the picker offers, rebuilt when what it shows changes.
+struct PickList {
+	uint32_t         gen = ~0u;
+	int              show = -1, metric = -1;
+	std::vector<int> frames; // wf_frame indices, in the order shown
+	std::vector<int> lanes;  // lanes written anywhere in the capture, in lane order
+};
+PickList g_pl;
+
+void
+refresh_picks()
+{
+	const uint32_t gen = profile_session_report_generation();
+	if (g_pl.gen == gen && g_pl.show == g_show && g_pl.metric == g_metric)
+		return;
+	if (g_pl.gen != gen) {
+		bool seen[WF_LANES] = {false};
+		int  na             = 0;
+		const wf_agg_t *a   = wf_aggregates(&na);
+		for (int i = 0; i < na; i++)
+			if (a[i].lane > 0 && a[i].lane < WF_LANES)
+				seen[a[i].lane] = true;
+		g_pl.lanes.clear();
+		for (int l = 1; l < WF_LANES; l++)
+			if (seen[l])
+				g_pl.lanes.push_back(l);
+	}
+	g_pl.gen    = gen;
+	g_pl.show   = g_show;
+	g_pl.metric = g_metric;
+	g_pl.frames.resize((size_t)std::max(1, wf_frame_count()));
+	g_pl.frames.resize((size_t)wf_pick(g_show, g_metric, g_pl.frames.data(), (int)g_pl.frames.size()));
+}
+
+// "frame 123  4.21 ms work  187 writes", with what is missing.
+void
+describe_frame(int i, double mhz, char *buf, size_t n)
+{
+	const wf_frame_t *f = wf_frame(i);
+	snprintf(buf, n, "frame %u  %.2f ms work  %u writes%s%s", f->number, (double)f->work / (mhz * 1000.0),
+	         f->writes, f->events ? "" : "  (summary only)", f->truncated ? "  TRUNCATED" : "");
+}
 
 // ─── Building ───────────────────────────────────────────────────────────────
 
@@ -239,7 +290,7 @@ axis_label(int unit, double v, double step, char *buf, size_t n)
 	const int dec = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
 	switch (unit) {
 		case TU_MS:      snprintf(buf, n, "%.*f ms", dec, v); break;
-		case TU_LINES:   snprintf(buf, n, "line %.0f", v); break;
+		case TU_LINES:   snprintf(buf, n, "scanline %.0f", v); break;
 		case TU_PERCENT: snprintf(buf, n, "%.*f%%", dec, v); break;
 		default:
 			if (step >= 1000)
@@ -254,20 +305,20 @@ axis_label(int unit, double v, double step, char *buf, size_t n)
 void
 moment(const TimeBase &tb, double cyc, char *buf, size_t n)
 {
-	snprintf(buf, n, "%.3f ms, line %.1f, %.1f%% of the frame, cycle %.0f",
+	snprintf(buf, n, "%.3f ms, scanline %.1f, %.1f%% of the frame, cycle %.0f",
 	         to_unit(tb, TU_MS, cyc), to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 }
 
-// A length of time, in every unit: "0.512 ms (16.0 lines, 3.0% of the frame, 4,096 cycles)".
+// A length of time, in every unit: "0.512 ms (16.0 scanlines, 3.0% of the frame, 4,096 cycles)".
 void
 span_len(const TimeBase &tb, double cyc, char *buf, size_t n)
 {
 	const double us = cyc / tb.cyc_per_us;
 	if (us < 1000.0)
-		snprintf(buf, n, "%.1f us (%.1f lines, %.1f%% of the frame, %.0f cycles)", us,
+		snprintf(buf, n, "%.1f us (%.1f scanlines, %.1f%% of the frame, %.0f cycles)", us,
 		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 	else
-		snprintf(buf, n, "%.3f ms (%.1f lines, %.1f%% of the frame, %.0f cycles)", us / 1000.0,
+		snprintf(buf, n, "%.3f ms (%.1f scanlines, %.1f%% of the frame, %.0f cycles)", us / 1000.0,
 		         to_unit(tb, TU_LINES, cyc), to_unit(tb, TU_PERCENT, cyc), cyc);
 }
 
@@ -307,7 +358,7 @@ draw_selection(const prof_report_t *r, const wf_frame_t *f, const TimeBase &tb)
 	wf_frame_range(f, c0, c1, range_node, range_write, &a);
 
 	char from[96], len[96];
-	snprintf(from, sizeof from, "%.3f ms (line %.0f)", to_unit(tb, TU_MS, c0), to_unit(tb, TU_LINES, c0));
+	snprintf(from, sizeof from, "%.3f ms (scanline %.0f)", to_unit(tb, TU_MS, c0), to_unit(tb, TU_LINES, c0));
 	span_len(tb, c1 - c0, len, sizeof len);
 	ImGui::Text("Selection from %s, lasting %s", from, len);
 	ImGui::SameLine();
@@ -377,63 +428,97 @@ profile_waterfall_draw(const prof_report_t *r)
 		ImGui::TextDisabled("No waterfall in this capture. Tick \"Waterfall\" before starting one.");
 		return;
 	}
-	const wf_frame_t *frames[MAX_FRAMES];
-	bool              worst[MAX_FRAMES];
-	const int         nf = profile_session_waterfall_frames(frames, worst, MAX_FRAMES);
-	if (!nf) {
-		ImGui::TextDisabled("The capture kept no frames in detail.");
+	const int nall = wf_frame_count();
+	if (!nall) {
+		ImGui::TextDisabled("The capture recorded no whole frame.");
 		return;
 	}
+	const double mhz = profile_session_mhz();
 
-	// A new report: pick its worst frame (or its last), and fit it.
+	// A new report: show its worst frame by work, and fit it.
 	const uint32_t gen = profile_session_report_generation();
 	if (gen != g_fv.gen) {
-		g_fv.gen = gen;
+		g_fv.gen    = gen;
 		g_fv.number = ~0u;
-		g_pick = -1;
+		g_frame     = -1;
+		g_show      = WF_PICK_WORST;
+		g_metric    = WF_BY_WORK;
 	}
-	if (g_pick < 0 || g_pick >= nf) {
-		g_pick = nf - 1;
-		uint64_t best = 0;
-		for (int i = 0; i < nf; i++)
-			if (worst[i] && frames[i]->score >= best) {
-				best   = frames[i]->score;
-				g_pick = i;
-			}
+	auto choose = [&](int i) {
+		g_frame    = i;
 		g_view_len = 0;
 		g_sel_c0 = g_sel_c1 = 0;
-	}
-
-	// Frame picker.
-	char label[96];
-	auto describe = [&](int i, char *buf, size_t n) {
-		snprintf(buf, n, "frame %u  %d events%s%s", frames[i]->number, frames[i]->count,
-		         worst[i] ? "  (worst)" : "", frames[i]->truncated ? "  TRUNCATED" : "");
 	};
-	describe(g_pick, label, sizeof label);
-	ImGui::SetNextItemWidth(dbgui_combo_width("frame 99999  99999 events  (worst)  TRUNCATED"));
+
+	// Which frames: the selector, and what it ranks by.
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Show");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_combo_width("Typical (median) "));
+	const int show_was = g_show, metric_was = g_metric;
+	ImGui::Combo("##wfshow", &g_show, SHOW_NAMES, IM_ARRAYSIZE(SHOW_NAMES));
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Which frames to step through.\n"
+		                  "  All frames: every frame of the capture, in order.\n"
+		                  "  Worst / Best: the %d frames with the most / least, highest first.\n"
+		                  "  Typical (median): the middle frame; half are lighter, half heavier.\n"
+		                  "  90th percentile: heavier than 9 frames in 10. A bad frame that is\n"
+		                  "    not a one-off.\n"
+		                  "  Average: the frame closest to the mean.\n"
+		                  "Ranked by the measure on the right.", WF_PROTECT);
+	ImGui::SameLine();
+	ImGui::TextUnformatted("by");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_combo_width("Device writes "));
+	ImGui::Combo("##wfmetric", &g_metric, METRIC_NAMES, IM_ARRAYSIZE(METRIC_NAMES));
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("CPU work: cycles the CPU spent running code, not waiting for the\n"
+		                  "next frame (WAI or a polling loop counts as waiting). Measuring it\n"
+		                  "costs about 0.1 ms of host time per frame while a waterfall capture\n"
+		                  "runs; it does not change what the machine does.\n"
+		                  "Device writes: writes to VERA, the sound chips, the VIAs and the rest\n"
+		                  "of the I/O page.");
+	refresh_picks();
+	const std::vector<int> &picks = g_pl.frames;
+	if (g_show != show_was || g_metric != metric_was || g_frame < 0 || g_frame >= nall)
+		if (!picks.empty())
+			choose(picks[0]);
+	if (g_frame < 0 || g_frame >= nall)
+		choose(nall - 1);
+
+	// The frame, among those shown.
+	int at = -1; // g_frame's place in picks
+	for (size_t k = 0; k < picks.size() && at < 0; k++)
+		if (picks[k] == g_frame)
+			at = (int)k;
+	ImGui::SameLine();
+	char label[128];
+	describe_frame(g_frame, mhz, label, sizeof label);
+	ImGui::SetNextItemWidth(dbgui_combo_width("frame 99999  99.99 ms work  99999 writes  (summary only)"));
 	if (ImGui::BeginCombo("##wfframe", label)) {
-		for (int i = 0; i < nf; i++) {
-			char item[96];
-			describe(i, item, sizeof item);
-			if (ImGui::Selectable(item, i == g_pick)) {
-				g_pick     = i;
-				g_view_len = 0;
-				g_sel_c0 = g_sel_c1 = 0;
+		ImGuiListClipper clip;
+		clip.Begin((int)picks.size());
+		while (clip.Step())
+			for (int k = clip.DisplayStart; k < clip.DisplayEnd; k++) {
+				char item[128];
+				describe_frame(picks[(size_t)k], mhz, item, sizeof item);
+				ImGui::PushID(k);
+				if (ImGui::Selectable(item, picks[(size_t)k] == g_frame))
+					choose(picks[(size_t)k]);
+				ImGui::PopID();
 			}
-		}
 		ImGui::EndCombo();
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("<") && g_pick > 0) {
-		g_pick--;
-		g_sel_c0 = g_sel_c1 = 0;
-	}
+	if (ImGui::Button("<") && !picks.empty())
+		choose(picks[(size_t)(at > 0 ? at - 1 : 0)]);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("The previous frame of those shown.");
 	ImGui::SameLine();
-	if (ImGui::Button(">") && g_pick < nf - 1) {
-		g_pick++;
-		g_sel_c0 = g_sel_c1 = 0;
-	}
+	if (ImGui::Button(">") && !picks.empty())
+		choose(picks[(size_t)(at >= 0 && at + 1 < (int)picks.size() ? at + 1 : (int)picks.size() - 1)]);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("The next frame of those shown.");
 	ImGui::SameLine();
 	if (ImGui::Button("Fit"))
 		g_view_len = 0;
@@ -445,11 +530,95 @@ profile_waterfall_draw(const prof_report_t *r)
 		                  "A frame lasts about 16.7 ms: 525 scanlines of 32 us each,\n"
 		                  "or 134,400 CPU cycles at 8 MHz.");
 	ImGui::SameLine();
-	ImGui::TextDisabled("Mouse wheel: zoom.  Right-drag: pan.  Drag: select a stretch.  Click: open the code.");
+	ImGui::Checkbox("Hide empty lanes", &g_hide_empty);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Leave out device rows with no writes in this frame. Off, every\n"
+		                  "device written anywhere in the capture keeps its row, so rows\n"
+		                  "stay put as you step through frames.");
 
-	const wf_frame_t *f = frames[g_pick];
+	// The strip: every frame of the capture, one bar per pixel column (the
+	// heaviest frame in it), by the measure chosen. Click to open a frame.
+	{
+		const ImVec2 o  = ImGui::GetCursorScreenPos();
+		const float  w  = std::max(100.0f, ImGui::GetContentRegionAvail().x);
+		const int    cols = std::max(1, (int)w);
+		ImGui::InvisibleButton("##wfstrip", ImVec2(w, (float)STRIP_H));
+		const bool   sh  = ImGui::IsItemHovered();
+		ImDrawList  *sdl = ImGui::GetWindowDrawList();
+		sdl->AddRectFilled(o, ImVec2(o.x + w, o.y + STRIP_H), ImGui::GetColorU32(ImGuiCol_FrameBg));
+		uint64_t peak = 1;
+		for (int i = 0; i < nall; i++)
+			peak = std::max(peak, wf_metric_of(wf_frame(i), g_metric));
+		// Frames per column, and the column of a frame.
+		auto col_of  = [&](int i) { return (int)((int64_t)i * cols / nall); };
+		auto first_of = [&](int c) { return (int)(((int64_t)c * nall + cols - 1) / cols); };
+		std::vector<char> shown((size_t)nall, 0);
+		for (int i : picks)
+			shown[(size_t)i] = 1;
+		const bool marking = g_show != WF_PICK_ALL;
+		int hover_frame = -1;
+		for (int c = 0; c < cols; c++) {
+			const int a = first_of(c), b = std::min(nall, first_of(c + 1));
+			if (a >= b)
+				continue;
+			int      top = a;
+			bool     any_detail = false, any_shown = false;
+			for (int i = a; i < b; i++) {
+				if (wf_metric_of(wf_frame(i), g_metric) > wf_metric_of(wf_frame(top), g_metric))
+					top = i;
+				any_detail = any_detail || wf_frame(i)->events;
+				any_shown  = any_shown || shown[(size_t)i];
+			}
+			const float h  = (float)((double)wf_metric_of(wf_frame(top), g_metric) / (double)peak * (STRIP_H - 2));
+			const float x  = o.x + (float)c;
+			ImU32       cl = any_detail ? ImGui::GetColorU32(ImGuiCol_PlotHistogram)
+			                            : ImGui::GetColorU32(ImGuiCol_PlotHistogram, 0.35f);
+			if (marking && any_shown)
+				cl = IM_COL32(255, 140, 60, 255);
+			sdl->AddLine(ImVec2(x + 0.5f, o.y + STRIP_H), ImVec2(x + 0.5f, o.y + STRIP_H - 1 - h), cl);
+			if (sh && (int)(ImGui::GetIO().MousePos.x - o.x) == c)
+				hover_frame = top;
+		}
+		const float xs = o.x + (float)col_of(g_frame) + 0.5f;
+		sdl->AddLine(ImVec2(xs, o.y), ImVec2(xs, o.y + STRIP_H), ImGui::GetColorU32(ImGuiCol_Text), 1.0f);
+		if (hover_frame >= 0) {
+			char d[128];
+			describe_frame(hover_frame, mhz, d, sizeof d);
+			ImGui::SetTooltip("%s\nEvery frame of the capture, by %s; each bar is the heaviest\n"
+			                  "frame in its column.%s Faint bars: no detail kept (summary only).\n"
+			                  "Click to open this frame.",
+			                  d, g_metric == WF_BY_WORK ? "CPU work" : "device writes",
+			                  marking ? " Orange: the frames shown." : "");
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+				choose(hover_frame);
+		}
+	}
+
+	// The frame drawn: the one chosen, or the nearest with detail.
+	int drawn = g_frame;
+	if (!wf_frame(drawn)->events) {
+		drawn = wf_nearest_detail(g_frame);
+		if (drawn < 0) {
+			ImGui::TextDisabled("No frame of this capture kept its detail.");
+			return;
+		}
+		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+		                   "Frame %u kept only its summary (the capture was too long to keep every "
+		                   "frame's detail). Showing frame %u, the nearest that kept it.",
+		                   wf_frame(g_frame)->number, wf_frame(drawn)->number);
+	}
+	const wf_frame_t *f = wf_frame(drawn);
 	if (g_fv.number != f->number || g_fv.frame != f)
 		build(g_fv, r, f);
+	// Scanlines are VGA's: 525 a frame, 256 CPU cycles each at 8 MHz. NTSC and
+	// 15 kHz RGB time their frames differently, so in those modes the scanline
+	// numbers below (and the vblank marker) do not match the beam.
+	const bool vga = !(f->video_mode & 2);
+	if (!vga)
+		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+		                   "Recorded in %s mode: scanline numbers assume VGA timing and are not where "
+		                   "the beam was. Milliseconds and cycles are correct.",
+		                   f->video_mode == 2 ? "NTSC composite" : "15 kHz RGB");
 	if (f->truncated)
 		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
 		                   "This frame overflowed its buffer: events after the first %d are missing.",
@@ -463,11 +632,15 @@ profile_waterfall_draw(const prof_report_t *r)
 	const double   cyc_per_line = length / LINES_PER_FRAME;
 	const TimeBase tb{profile_session_mhz(), cyc_per_line, length};
 
-	// Rows: CPU depths, IRQ depths, then each lane that has writes.
+	// Rows: CPU depths, IRQ depths, then each device written in the capture,
+	// in a fixed order, so rows stay put from frame to frame.
 	std::vector<int> lanes;
-	for (int l = 1; l < WF_LANES; l++)
-		if (!g_fv.lane_events[(size_t)l].empty())
+	for (int l : g_pl.lanes)
+		if (!g_hide_empty || !g_fv.lane_events[(size_t)l].empty())
 			lanes.push_back(l);
+	int frame_lanes = 0;
+	for (int l = 1; l < WF_LANES; l++)
+		frame_lanes += !g_fv.lane_events[(size_t)l].empty();
 	const int   cpu_rows = std::max(1, g_fv.depth[0]);
 	const int   irq_rows = g_fv.depth[1];
 	const float row_h    = ImGui::GetTextLineHeight() + 4.0f;
@@ -525,7 +698,7 @@ profile_waterfall_draw(const prof_report_t *r)
 	dl->AddRectFilled(ImVec2(x0, origin.y), ImVec2(origin.x + width, origin.y + height),
 	                  ImGui::GetColorU32(ImGuiCol_FrameBg));
 	{
-		const float  min_px = dbgui_text_width("88.888 ms") + 12.0f;
+		const float  min_px = dbgui_text_width("scanline 888") + 12.0f;
 		double       step   = nice_step(to_unit(tb, g_unit, min_px / sx));
 		if (g_unit == TU_LINES && step < 1)
 			step = 1;
@@ -548,23 +721,26 @@ profile_waterfall_draw(const prof_report_t *r)
 	// done while nothing is being drawn.
 	{
 		const float xv = x_of(480 * cyc_per_line);
-		if (xv >= x0 && xv <= origin.x + width) {
+		if (vga && xv >= x0 && xv <= origin.x + width) {
 			dl->AddLine(ImVec2(xv, origin.y + axis_h - 4), ImVec2(xv, origin.y + height),
 			            IM_COL32(255, 200, 80, 140), 1.5f);
 			dl->AddText(ImVec2(xv + 3, origin.y + axis_h + 1), IM_COL32(255, 200, 80, 200), "vblank");
 		}
-		vblank_tip = hovered && std::fabs(mouse.x - xv) < 4.0f && mouse.y < origin.y + axis_h + row_h;
+		vblank_tip = vga && hovered && std::fabs(mouse.x - xv) < 4.0f && mouse.y < origin.y + axis_h + row_h;
 		if (vblank_tip)
-			ImGui::SetTooltip("Line 480: the last visible line of the picture. From here to the end\n"
-			                  "of the frame the screen is in vertical blank, the usual time to\n"
-			                  "update VRAM without tearing.");
+			ImGui::SetTooltip("Scanline 480: the picture has ended (scanlines 0-479 are the visible\n"
+			                  "picture). From here to the end of the frame the screen is in vertical\n"
+			                  "blank, the usual time to update VRAM without tearing.");
 	}
 	auto row_y = [&](int row) { return origin.y + axis_h + row * row_h; };
 	for (int i = 0; i < rows; i++) {
 		const char *name = i < cpu_rows ? (i == 0 ? "CPU" : "")
 		                 : i < cpu_rows + irq_rows ? (i == cpu_rows ? "IRQ" : "")
 		                 : wf_lane_name(lanes[(size_t)(i - cpu_rows - irq_rows)]);
-		dl->AddText(ImVec2(origin.x + 2, row_y(i) + 2), ImGui::GetColorU32(ImGuiCol_Text), name);
+		const bool empty = i >= cpu_rows + irq_rows &&
+		                   g_fv.lane_events[(size_t)lanes[(size_t)(i - cpu_rows - irq_rows)]].empty();
+		dl->AddText(ImVec2(origin.x + 2, row_y(i) + 2),
+		            ImGui::GetColorU32(empty ? ImGuiCol_TextDisabled : ImGuiCol_Text), name);
 		if (i == cpu_rows || i == cpu_rows + irq_rows)
 			dl->AddLine(ImVec2(origin.x, row_y(i)), ImVec2(origin.x + width, row_y(i)),
 			            ImGui::GetColorU32(ImGuiCol_Separator));
@@ -650,8 +826,11 @@ profile_waterfall_draw(const prof_report_t *r)
 		else if (row >= cpu_rows && row < cpu_rows + irq_rows)
 			ImGui::SetTooltip("Interrupt handlers (IRQ): code the hardware ran in between, while\n"
 			                  "the routine above it was paused.");
-		else if (row >= cpu_rows + irq_rows && row < rows)
-			ImGui::SetTooltip("%s\nEach tick is one write.", lane_help(lanes[(size_t)(row - cpu_rows - irq_rows)]));
+		else if (row >= cpu_rows + irq_rows && row < rows) {
+			const int lane = lanes[(size_t)(row - cpu_rows - irq_rows)];
+			ImGui::SetTooltip("%s\nEach tick is one write.%s", lane_help(lane),
+			                  g_fv.lane_events[(size_t)lane].empty() ? "\nNo writes this frame." : "");
+		}
 	}
 
 	// Hover and click.
@@ -702,8 +881,9 @@ profile_waterfall_draw(const prof_report_t *r)
 	{
 		char len[96];
 		span_len(tb, length, len, sizeof len);
-		ImGui::TextDisabled("This frame lasted %s. %d events, %d devices written. %d frames kept in detail.",
-		                    len, f->count, (int)lanes.size(), nf);
+		ImGui::TextDisabled("This frame lasted %s. %d events, %d devices written. %d frames recorded, "
+		                    "%d with detail.",
+		                    len, f->count, frame_lanes, nall, wf_detail_count());
 	}
 	if (g_sel_c0 != g_sel_c1)
 		draw_selection(r, f, tb);
