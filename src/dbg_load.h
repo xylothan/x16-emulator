@@ -15,6 +15,7 @@
 #define _DBG_LOAD_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -104,6 +105,17 @@ bool dbg_load_path_is_dbg(const char *path);
 
 // Forget everything. For machine reset and tests.
 void dbg_load_reset(void);
+
+// Throw away all loaded debug info and load `path` in its place: for when the
+// wrong build's .dbg was loaded. If `path` cannot be read, what was loaded is
+// kept; if it opens but does not load, the files loaded before are read again.
+// DAP source breakpoints are re-resolved against the new info. Writes a
+// one-line result into `msg`. Returns 0 on success.
+int dbg_load_replace(const char *path, char *msg, size_t msg_size);
+
+// The -prg file, if any (empty otherwise): its folder is a place to look for
+// the .dbg that describes it.
+const char *dbg_load_prg_path(void);
 
 #ifdef __cplusplus
 }

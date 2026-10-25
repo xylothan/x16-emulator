@@ -5,6 +5,7 @@
 #include "debug_server.h"
 #include "source_view.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -449,4 +450,56 @@ dbg_load_reset(void)
 {
 	memset(channels, 0, sizeof(channels));
 	memset(&pending, 0, sizeof(pending));
+}
+
+const char *
+dbg_load_prg_path(void)
+{
+	return prg_path;
+}
+
+int
+dbg_load_replace(const char *path, char *msg, size_t msg_size)
+{
+	if (!path || !path[0]) {
+		snprintf(msg, msg_size, "No file given.");
+		return -1;
+	}
+	// A file that is not there must not cost what is loaded now.
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		snprintf(msg, msg_size, "Cannot open %s; the debug info loaded now is unchanged.", path);
+		return -1;
+	}
+	fclose(f);
+
+	// What is loaded, to read again if the new file turns out to be bad.
+	const int nold = dbg_info_loaded_count();
+	char    (*old)[DBG_LOAD_PATH_MAX] = nold ? calloc((size_t)nold, sizeof *old) : NULL;
+	for (int i = 0; old && i < nold; i++)
+		snprintf(old[i], sizeof old[i], "%s", dbg_info_loaded_at(i));
+
+	// Every address a DAP client's source breakpoint was resolved to came from
+	// the debug info about to go.
+	debug_server_invalidate_breakpoints_in_range(0, 0xFFFFFF);
+	dbg_info_free();
+	parsed_count = 0; // nothing merged is live any more
+
+	int rc = dbg_info_load(path);
+	if (rc == 0) {
+		snprintf(msg, msg_size, "Loaded %s: %d source files, %d symbols.", path, dbg_info_file_count(),
+		         dbg_info_symbol_count());
+	} else {
+		int back = 0;
+		for (int i = 0; old && i < nold; i++)
+			back += dbg_info_load(old[i]) == 0;
+		snprintf(msg, msg_size, "%s is not usable debug info (see the log). %s", path,
+		         back ? "The files loaded before were read again." : "Nothing is loaded now.");
+	}
+	free(old);
+
+	source_view_add_path(dbg_info_get_dbg_dir());
+	source_view_invalidate();
+	debug_server_retry_unverified_breakpoints();
+	return rc;
 }

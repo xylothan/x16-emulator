@@ -801,6 +801,43 @@ main(void)
 		}
 	}
 
+	// ── Replacing all debug info with one file ──────────────────────────────
+	{
+		const char *a_p = "replace_a.dbg", *b_p = "replace_b.dbg", *bad_p = "replace_bad.dbg";
+		const char *src = NULL;
+		int         line = 0;
+		char        msg[512];
+		check(write_dbg(a_p, "a.s", 0xA000) && write_dbg(b_p, "b.s", 0xA000) &&
+		          write_file(bad_p, "not debug info\n", 15),
+		      "replace: fixtures written");
+		dbg_info_free();
+		dbg_load_reset();
+		check(dbg_info_load(a_p) == 0, "replace: the wrong build's info is loaded");
+		check(dbg_info_loaded_count() == 1 && strcmp(dbg_info_loaded_at(0), a_p) == 0,
+		      "replace: and listed as loaded");
+
+		check(dbg_load_replace(b_p, msg, sizeof msg) == 0, "replace: the right one replaces it");
+		check(dbg_info_addr_to_source(0xA000, &src, &line) && src && strstr(src, "b.s"),
+		      "replace: lookups answer from the new file");
+		check(dbg_info_loaded_count() == 1 && strcmp(dbg_info_loaded_at(0), b_p) == 0,
+		      "replace: and only it is listed");
+
+		check(dbg_load_replace("no_such_file.dbg", msg, sizeof msg) != 0,
+		      "replace: a missing file is refused");
+		check(dbg_info_addr_to_source(0xA000, &src, &line) && src && strstr(src, "b.s"),
+		      "replace: and what was loaded is untouched");
+
+		check(dbg_load_replace(bad_p, msg, sizeof msg) != 0, "replace: a file that is not debug info fails");
+		check(dbg_info_addr_to_source(0xA000, &src, &line) && src && strstr(src, "b.s"),
+		      "replace: and the files loaded before are read again");
+		check(strstr(msg, "read again") != NULL, "replace: and it says so");
+
+		dbg_info_free();
+		remove(a_p);
+		remove(b_p);
+		remove(bad_p);
+	}
+
 	if (failures) {
 		printf("\nFAILED (%d failures)\n", failures);
 		return 1;

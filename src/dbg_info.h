@@ -122,6 +122,12 @@ void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_ba
 // Free all loaded debug info
 void dbg_info_free(void);
 
+// The .dbg files merged since the last dbg_info_free(), in the order first
+// read, as the paths they were loaded by. A module a later load displaced
+// stays listed: this is what has been read, not what still covers memory.
+int         dbg_info_loaded_count(void);
+const char *dbg_info_loaded_at(int index);
+
 // ---- Symbol / label lookups (from cc65 .dbg `sym` records) ------------------
 // Symbol names point to internal storage owned by the loaded debug info. Unlike
 // file paths, they do NOT survive a module swap: dbg_info_unload_range() frees
