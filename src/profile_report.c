@@ -469,6 +469,176 @@ oom:
 	return false;
 }
 
+// ─── A routine's neighbourhood ──────────────────────────────────────────────
+
+typedef struct {
+	prof_graph_t g;
+	int          bcap, ecap;
+	bool         oom;
+} graph_build_t;
+
+// Which box is this neighbour, if it has one: by row, or for the top of the
+// tree by its node.
+static int
+graph_find(const graph_build_t *b, int row, int node)
+{
+	for (int i = 0; i < b->g.nboxes; i++) {
+		const prof_gbox_t *x = &b->g.boxes[i];
+		if (row >= 0 ? x->row == row : (x->row < 0 && x->node == node))
+			return i;
+	}
+	return -1;
+}
+
+static int
+graph_add_box(graph_build_t *b, int row, int node, int col, uint64_t weight)
+{
+	if (b->g.nboxes == b->bcap) {
+		const int    want = b->bcap ? b->bcap * 2 : 16;
+		prof_gbox_t *g    = realloc(b->g.boxes, sizeof *g * (size_t)want);
+		if (!g) {
+			b->oom = true;
+			return -1;
+		}
+		b->g.boxes = g;
+		b->bcap    = want;
+	}
+	b->g.boxes[b->g.nboxes] = (prof_gbox_t){row, node, col, weight};
+	return b->g.nboxes++;
+}
+
+static void
+graph_add_edge(graph_build_t *b, int from, int to, uint64_t cycles, uint32_t calls)
+{
+	if (from < 0 || to < 0 || from == to)
+		return;
+	for (int i = 0; i < b->g.nedges; i++)
+		if (b->g.edges[i].from == from && b->g.edges[i].to == to)
+			return; // already drawn, from the other side
+	if (b->g.nedges == b->ecap) {
+		const int     want = b->ecap ? b->ecap * 2 : 32;
+		prof_gedge_t *g    = realloc(b->g.edges, sizeof *g * (size_t)want);
+		if (!g) {
+			b->oom = true;
+			return;
+		}
+		b->g.edges = g;
+		b->ecap    = want;
+	}
+	b->g.edges[b->g.nedges++] = (prof_gedge_t){from, to, cycles, calls};
+}
+
+// One step out from the boxes in column `from`: their callers (`callers`) or
+// callees, into column `to`. Candidates from every box are ranked together, so
+// a column keeps the heaviest wherever they came from.
+typedef struct {
+	int      box;  // the box they connect to
+	int      row, node;
+	uint64_t cycles;
+	uint32_t calls;
+} graph_cand_t;
+
+static int
+cmp_cand(const void *a, const void *b)
+{
+	const graph_cand_t *x = a, *y = b;
+	if (x->cycles != y->cycles)
+		return x->cycles < y->cycles ? 1 : -1;
+	return x->row - y->row;
+}
+
+static void
+graph_step(graph_build_t *b, const prof_report_t *r, int from, int to, bool callers, int per_col)
+{
+	graph_cand_t *c  = NULL;
+	int           nc = 0, cc = 0;
+	const int     nb = b->g.nboxes; // only the boxes there before this step
+	for (int i = 0; i < nb && !b->oom; i++) {
+		const prof_gbox_t *x = &b->g.boxes[i];
+		if (x->col != from || x->row < 0)
+			continue; // the top of the tree has no callers
+		prof_routine_view_t v;
+		if (!prof_report_routine_view(r, x->row, &v))
+			continue;
+		const prof_edge_t *e = callers ? v.callers : v.callees;
+		const int          n = callers ? v.ncallers : v.ncallees;
+		for (int k = 0; k < n; k++) {
+			if (nc == cc) {
+				cc               = cc ? cc * 2 : 32;
+				graph_cand_t *gr = realloc(c, sizeof *c * (size_t)cc);
+				if (!gr) {
+					b->oom = true;
+					break;
+				}
+				c = gr;
+			}
+			c[nc++] = (graph_cand_t){i, e[k].row, e[k].node, e[k].cycles, e[k].calls};
+		}
+		prof_routine_view_free(&v);
+	}
+	qsort(c, (size_t)nc, sizeof *c, cmp_cand);
+	int placed = 0;
+	// Distinct neighbours that did not fit, counted once each.
+	int *left = calloc((size_t)(nc ? nc : 1), sizeof *left), nleft = 0;
+	for (int k = 0; k < nc && !b->oom; k++) {
+		int at = graph_find(b, c[k].row, c[k].node);
+		if (at < 0 && placed < per_col) {
+			at = graph_add_box(b, c[k].row, c[k].node, to, c[k].cycles);
+			placed++;
+		}
+		if (at < 0) {
+			const int id = c[k].row >= 0 ? c[k].row : -2 - c[k].node;
+			bool      seen = false;
+			for (int j = 0; j < nleft && !seen; j++)
+				seen = left[j] == id;
+			if (!seen && left)
+				left[nleft++] = id;
+			continue;
+		}
+		if (callers)
+			graph_add_edge(b, at, c[k].box, c[k].cycles, c[k].calls);
+		else
+			graph_add_edge(b, c[k].box, at, c[k].cycles, c[k].calls);
+	}
+	b->g.hidden[to] += nleft;
+	free(left);
+	free(c);
+}
+
+bool
+prof_report_graph(const prof_report_t *r, int row, int per_col, prof_graph_t *out)
+{
+	memset(out, 0, sizeof *out);
+	if (!r || !r->nodes || r->node_count <= 2 || row < 0 || row >= r->count)
+		return false;
+	if (per_col < 1)
+		per_col = 1;
+	graph_build_t b;
+	memset(&b, 0, sizeof b);
+	graph_add_box(&b, row, -1, PROF_GRAPH_CENTRE, r->rows[row].incl_cycles);
+	// Out one step, then two, on each side.
+	graph_step(&b, r, PROF_GRAPH_CENTRE, PROF_GRAPH_CENTRE - 1, true, per_col);
+	graph_step(&b, r, PROF_GRAPH_CENTRE, PROF_GRAPH_CENTRE + 1, false, per_col);
+	graph_step(&b, r, PROF_GRAPH_CENTRE - 1, PROF_GRAPH_CENTRE - 2, true, per_col);
+	graph_step(&b, r, PROF_GRAPH_CENTRE + 1, PROF_GRAPH_CENTRE + 2, false, per_col);
+	if (b.oom) {
+		prof_graph_free(&b.g);
+		return false;
+	}
+	*out = b.g;
+	return true;
+}
+
+void
+prof_graph_free(prof_graph_t *g)
+{
+	if (!g)
+		return;
+	free(g->boxes);
+	free(g->edges);
+	memset(g, 0, sizeof *g);
+}
+
 void
 prof_routine_view_free(prof_routine_view_t *v)
 {

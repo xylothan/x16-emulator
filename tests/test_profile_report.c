@@ -51,6 +51,25 @@ row_named(const prof_report_t *r, const char *name)
 	return NULL;
 }
 
+// A graph's box for a row (or, for a root, its node), or -1.
+static int
+graph_box_of(const prof_graph_t *g, int row, int node)
+{
+	for (int i = 0; i < g->nboxes; i++)
+		if (row >= 0 ? g->boxes[i].row == row : (g->boxes[i].row < 0 && g->boxes[i].node == node))
+			return i;
+	return -1;
+}
+
+static const prof_gedge_t *
+graph_edge(const prof_graph_t *g, int from, int to)
+{
+	for (int i = 0; i < g->nedges; i++)
+		if (g->edges[i].from == from && g->edges[i].to == to)
+			return &g->edges[i];
+	return NULL;
+}
+
 int
 main(void)
 {
@@ -206,6 +225,40 @@ main(void)
 		prof_routine_view_free(&v);
 
 		check(!prof_report_routine_view(&r, -1, &v), "no view for a row that is not there");
+
+		// ── The neighbourhood graph, from the same views ────────────────────
+		// Find an edge between two boxes, by their rows (-1: a root, by node).
+		#define BOX(g, rw, nd) graph_box_of(&(g), (rw), (nd))
+		prof_graph_t g;
+		check(prof_report_graph(&r, init_row, 8, &g), "init's graph builds");
+		check(g.boxes[0].row == init_row && g.boxes[0].col == PROF_GRAPH_CENTRE, "init is the centre");
+		const int b_main = BOX(g, -1, 0), b_upd = BOX(g, upd_row, -1), b_draw = BOX(g, draw_row, -1);
+		check_eq((uint32_t)g.nboxes, 4, "four boxes: init, [main], update, draw64");
+		check(b_main >= 0 && g.boxes[b_main].col == 1, "[main] calls it: one column left");
+		check(b_upd >= 0 && g.boxes[b_upd].col == 3 && b_draw >= 0 && g.boxes[b_draw].col == 3,
+		      "update and draw64 are its callees: one column right");
+		const prof_gedge_t *e1 = graph_edge(&g, b_main, 0), *e2 = graph_edge(&g, 0, b_upd),
+		                   *e3 = graph_edge(&g, 0, b_draw), *e4 = graph_edge(&g, b_upd, 0);
+		check(e1 && e1->cycles == 100, "[main] -> init: 100");
+		check(e2 && e2->cycles == 30 && e3 && e3->cycles == 20 && e3->calls == 5,
+		      "init -> update 30, init -> draw64 20 over 5 calls, as in the view");
+		check(e4 && e4->cycles == 10, "update calls init back: an arrow to the centre, not a second box");
+		check_eq((uint32_t)g.nedges, 4, "and no other arrows");
+		prof_graph_free(&g);
+
+		check(prof_report_graph(&r, upd_row, 2, &g), "update's graph, two per column");
+		check_eq((uint32_t)g.hidden[1], 1, "three callers, two shown: one left out");
+		const int u_main = BOX(g, -1, 0), u_init = BOX(g, init_row, -1);
+		check(u_main >= 0 && u_init >= 0 && g.boxes[u_main].col == 1 && g.boxes[u_init].col == 1,
+		      "the heaviest two callers: [main] 50 and init 30");
+		check(BOX(g, -1, 1) < 0, "[IRQ] (7) is the one left out");
+		check(graph_edge(&g, 0, u_init) && graph_edge(&g, 0, u_init)->cycles == 10,
+		      "update -> init: init already has a box, so the arrow goes back to it");
+		check(graph_edge(&g, u_main, u_init) && graph_edge(&g, u_main, u_init)->cycles == 100,
+		      "and [main] -> init, a step further out, joins boxes already there");
+		prof_graph_free(&g);
+		check(!prof_report_graph(&r, -1, 8, &g), "no graph for a row that is not there");
+		#undef BOX
 	}
 
 	prof_report_free(&r);

@@ -1196,9 +1196,24 @@ anything. In order:
    - **Tested:** unit tests check both invariants (callers sum to the total;
      own plus callees sum to the total) on a tree with mutual recursion,
      direct recursion and an interrupt caller.
-3. **Neighbourhood call graph.** Boxes and arrows two levels each way around the
-   selected routine. Box size is own time; arrow width is time or calls along
-   that edge. Click a box to re-centre on it.
+3. **Neighbourhood call graph (done, 2026-10-25).** A Graph mode in the
+   Callers & callees tab, sharing its selection, history and picker.
+   - **Layout:** five columns, left to right: callers of its callers, its
+     callers, the routine, its callees, and their callees. Each column shows
+     its six heaviest, with "+N more" for the rest.
+   - **Boxes:** a box's size is its own time (the square root, so small ones
+     stay visible). Its colour follows the routine.
+   - **Arrows:** width is the time spent in those calls. A routine reached a
+     second time, by recursion or a callee calling back, keeps one box; the
+     arrow loops back to it underneath.
+   - **Navigation:** click a box to centre on it; back and forward work as in
+     the lists. Double-click the centre to open its source.
+   - **Tooltips:** boxes give total and own time, calls and source line.
+     Arrows, hovered at their middle, give the calls and their time.
+   - **Built from** `prof_report_routine_view()` of the routine and of each
+     neighbour (`prof_report_graph()` in `profile_report.c`), so the numbers
+     match the lists. Unit-tested on the recursion fixture: placement, arrow
+     weights, back-arrows, and the per-column limit.
 4. **Source annotations (Phase 5c).** A gutter with each line's share of time,
    and a "called from" list on each routine's first line.
 
