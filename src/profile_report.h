@@ -138,6 +138,38 @@ typedef struct {
 bool prof_report_routine_view(const prof_report_t *r, int row, prof_routine_view_t *out);
 void prof_routine_view_free(prof_routine_view_t *v);
 
+// A routine's neighbourhood, two calls each way, for drawing as boxes and
+// arrows. Built from prof_report_routine_view() of the routine and of each
+// neighbour, so its numbers are the Callers & callees tab's.
+//
+// Columns, left to right: callers of its callers, its callers, the routine,
+// its callees, their callees. A routine appears once, in the first column that
+// reaches it; meeting it again (recursion, a callee that also calls back)
+// draws an arrow to that box instead of a second one. Each column keeps its
+// `per_col` heaviest, and counts the rest in `hidden`.
+#define PROF_GRAPH_COLS   5
+#define PROF_GRAPH_CENTRE 2
+typedef struct {
+	int      row;    // report row; -1 for the top of the tree ([main], [IRQ])
+	int      node;   // a node of it, for naming and jumping
+	int      col;    // 0 .. PROF_GRAPH_COLS-1
+	uint64_t weight; // what placed it: the arrow's time (the routine: its total)
+} prof_gbox_t;
+typedef struct {
+	int      from, to; // boxes: caller -> callee
+	uint64_t cycles;   // the callee's time in the calls the caller made
+	uint32_t calls;
+} prof_gedge_t;
+typedef struct {
+	prof_gbox_t  *boxes; // boxes[0] is the routine
+	int           nboxes;
+	prof_gedge_t *edges;
+	int           nedges;
+	int           hidden[PROF_GRAPH_COLS];
+} prof_graph_t;
+bool prof_report_graph(const prof_report_t *r, int row, int per_col, prof_graph_t *out);
+void prof_graph_free(prof_graph_t *g);
+
 #ifdef __cplusplus
 }
 #endif
