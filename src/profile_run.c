@@ -1,5 +1,12 @@
 // Commander X16 Emulator — a saved profile run. See profile_run.h.
 
+// fseeko/ftello are POSIX, hidden by -std=c11 without this; 64-bit offsets so
+// a run over 2 GB still works on 32-bit Linux.
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#define _FILE_OFFSET_BITS 64
+#endif
+
 #include "profile_run.h"
 #include "bytes_io.h"
 
