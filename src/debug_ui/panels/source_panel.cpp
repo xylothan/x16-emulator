@@ -245,7 +245,7 @@ src_render_open_popup(void)
         ImGui::TextDisabled("Load another .dbg module (for not-yet-loaded code):");
         for (int i = 0; i < np; i++) {
             char lbl[DBG_INFO_PATH_MAX + 24];
-            snprintf(lbl, sizeof lbl, "Load %s##loaddbg%d", src_basename(paths[i]), i);
+            snprintf(lbl, sizeof lbl, "Load %.200s##loaddbg%d", src_basename(paths[i]), i);
             if (ImGui::Selectable(lbl)) {
                 if (dbg_info_load(paths[i]) == 0)
                     source_view_invalidate();
@@ -411,9 +411,12 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
         }
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputTextWithHint("##srcwhere", "C:\\path\\to\\your\\project", where, sizeof where);
+        ImGui::BeginDisabled(source_folders_search_busy());
         if (ImGui::Button("Find it under this folder")) {
-            source_folders_find_under(where, file, result, sizeof result);
+            source_folders_search_start(where, file);
+            result[0] = 0;
         }
+        ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Search this folder and its subfolders for %s, and add the folder\n"
                               "it is in to the search list (saved for next time).",
@@ -426,8 +429,15 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
         ImGui::SameLine();
         if (ImGui::Button("All source folders..."))
             debug_ui_open_source_folders();
+        if (source_folders_search_busy()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel##srcfind"))
+                source_folders_search_cancel();
+        }
         if (result[0])
             ImGui::TextDisabled("%s", result);
+        else if (source_folders_search_status()[0])
+            ImGui::TextDisabled("%s", source_folders_search_status());
         return;
     }
 
@@ -520,7 +530,7 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
             // Right-click a line: run-to / toggle breakpoint (works before the
             // PC ever reaches this file, so breakpoints can be pre-armed).
             if (ImGui::BeginPopupContextItem("srcctx")) {
-                uint16_t addr;
+                uint16_t addr = 0;
                 bool     mappable = debug_ui_source_to_addr(file, lineNo, &addr);
                 ImGui::BeginDisabled(!mappable || !DEBUGIsPaused());
                 if (ImGui::MenuItem("Run to here"))

@@ -18,5 +18,15 @@ void source_folders_add(const char *dir, bool remember);
 
 // Look under `root` for source files the debug info names but that are not
 // found yet -- just `only` when it is non-NULL -- and add each folder they turn
-// up in. Writes a one-line summary into `msg`. Returns how many were found.
-int source_folders_find_under(const char *root, const char *only, char *msg, int msg_size);
+// up in. The search runs a few milliseconds per debugger frame, so the UI and
+// the machine keep running while a big tree is read. Starting one cancels any
+// still running. False (with the reason in the status) when there is nothing
+// to search for.
+bool source_folders_search_start(const char *root, const char *only);
+void source_folders_search_cancel(void);
+bool source_folders_search_busy(void);
+// Progress while it runs, then what it found; "" before the first search.
+const char *source_folders_search_status(void);
+// Advance the search. Once per debugger frame, whether or not anything
+// showing it is open.
+void source_folders_search_tick(void);

@@ -11,8 +11,13 @@
 #include <errno.h>
 #include <string.h>
 
+#define DT_UNKNOWN 0
+#define DT_DIR     4
+#define DT_REG     8
+
 struct dirent {
-	char d_name[MAX_PATH];
+	char          d_name[MAX_PATH];
+	unsigned char d_type; // DT_DIR or DT_REG: the find data already says
 };
 
 typedef struct {
@@ -65,6 +70,7 @@ static inline struct dirent *readdir(DIR *dir)
 
 	strncpy(dir->entry.d_name, dir->fdata.cFileName, MAX_PATH);
 	dir->entry.d_name[MAX_PATH - 1] = '\0';
+	dir->entry.d_type = (dir->fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? DT_DIR : DT_REG;
 	return &dir->entry;
 }
 

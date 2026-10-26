@@ -11,6 +11,7 @@
 #include "../source_view.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -46,10 +47,10 @@ refresh_missing(bool force)
 	s_checked_at = now;
 }
 
-// Folders searched when looking under a root: deep enough for a project tree,
-// small enough that a click never stalls the debugger for long.
-constexpr int SEARCH_DEPTH = 10;
-constexpr int SEARCH_DIRS  = 5000;
+// Folders searched when looking under a root. The search runs a little each
+// frame, so these bound how long it can take, not how long the UI stalls.
+constexpr int SEARCH_DEPTH = 16;
+constexpr int SEARCH_DIRS  = 50000;
 
 bool
 saved(const char *dir)
@@ -92,12 +93,49 @@ source_folders_add(const char *dir, bool remember)
 	}
 }
 
-int
-source_folders_find_under(const char *root, const char *only, char *msg, int msg_size)
+namespace {
+
+source_search_t *s_search = nullptr;
+std::string      s_status;
+std::string      s_search_root;
+int              s_ticked_frame = -1;
+
+void
+search_summary(void)
 {
+	const int found = source_search_found(s_search), want = source_search_count(s_search);
+	// Each folder a file turned up in, once.
+	std::vector<std::string> dirs;
+	for (int i = 0; i < want; i++) {
+		const char *d = source_search_dir_of(s_search, i);
+		if (d && std::find(dirs.begin(), dirs.end(), std::string(d)) == dirs.end())
+			dirs.push_back(d);
+	}
+	for (const std::string &d : dirs)
+		source_folders_add(d.c_str(), true);
+	char msg[700];
+	if (found == 0)
+		snprintf(msg, sizeof msg, "Not found under %s (read %d folders%s).", s_search_root.c_str(),
+		         source_search_dirs_read(s_search), source_search_limited(s_search) ? ", the most it reads" : "");
+	else
+		snprintf(msg, sizeof msg, "Found %d of %d file%s in %d folders read; added %d folder%s.%s", found, want,
+		         want == 1 ? "" : "s", source_search_dirs_read(s_search), (int)dirs.size(),
+		         dirs.size() == 1 ? "" : "s",
+		         source_search_limited(s_search) ? " Stopped at the folder limit: point it at a smaller tree for the rest." : "");
+	s_status = msg;
+	source_search_end(s_search);
+	s_search = nullptr;
+}
+
+} // namespace
+
+bool
+source_folders_search_start(const char *root, const char *only)
+{
+	source_folders_search_cancel();
 	if (!root || !root[0]) {
-		snprintf(msg, (size_t)msg_size, "Type a folder to search first.");
-		return 0;
+		s_status = "Type a folder to search first.";
+		return false;
 	}
 	// The files to look for: the one asked about, or every file the debug info
 	// names that is not found yet.
@@ -112,30 +150,67 @@ source_folders_find_under(const char *root, const char *only, char *msg, int msg
 		}
 	}
 	if (want.empty()) {
-		snprintf(msg, (size_t)msg_size, "Nothing is missing: every source file is already found.");
-		return 0;
+		s_status = "Nothing is missing: every source file is already found.";
+		return false;
 	}
-	int found = 0, added = 0;
-	for (const std::string &nm : want) {
-		// An earlier hit's folder may already have brought this one in.
-		if (source_view_can_find(nm.c_str())) {
-			found++;
-			continue;
-		}
-		char dir[1024];
-		if (source_view_find_under(root, nm.c_str(), SEARCH_DEPTH, SEARCH_DIRS, dir, sizeof dir)) {
-			source_folders_add(dir, true);
-			added++;
-			found++;
-		}
+	std::vector<const char *> names;
+	for (const std::string &w : want)
+		names.push_back(w.c_str());
+	s_search = source_search_begin(root, names.data(), (int)names.size(), SEARCH_DEPTH, SEARCH_DIRS);
+	if (!s_search) {
+		s_status = "Could not start the search (out of memory?).";
+		return false;
 	}
-	if (found == 0)
-		snprintf(msg, (size_t)msg_size, "Not found under %s (searched %d folders deep, up to %d folders).",
-		         root, SEARCH_DEPTH, SEARCH_DIRS);
-	else
-		snprintf(msg, (size_t)msg_size, "Found %d of %d file%s; added %d folder%s.", found, (int)want.size(),
-		         want.size() == 1 ? "" : "s", added, added == 1 ? "" : "s");
-	return found;
+	s_search_root = root;
+	s_status      = "Searching...";
+	return true;
+}
+
+void
+source_folders_search_cancel(void)
+{
+	if (!s_search)
+		return;
+	char msg[200];
+	snprintf(msg, sizeof msg, "Search cancelled after %d folders.", source_search_dirs_read(s_search));
+	source_search_end(s_search);
+	s_search = nullptr;
+	s_status = msg;
+}
+
+bool
+source_folders_search_busy(void)
+{
+	return s_search != nullptr;
+}
+
+const char *
+source_folders_search_status(void)
+{
+	return s_status.c_str();
+}
+
+void
+source_folders_search_tick(void)
+{
+	if (!s_search || ImGui::GetFrameCount() == s_ticked_frame)
+		return;
+	s_ticked_frame = ImGui::GetFrameCount();
+	// A few milliseconds a frame: the debugger stays responsive and the
+	// machine keeps its speed however big the tree.
+	using clock    = std::chrono::steady_clock;
+	const auto end = clock::now() + std::chrono::milliseconds(6);
+	bool       more = true;
+	while (more && clock::now() < end)
+		more = source_search_step(s_search, 1);
+	if (!more) {
+		search_summary();
+		return;
+	}
+	char msg[200];
+	snprintf(msg, sizeof msg, "Searching: %d folders read, %d of %d found...", source_search_dirs_read(s_search),
+	         source_search_found(s_search), source_search_count(s_search));
+	s_status = msg;
 }
 
 void
@@ -209,15 +284,21 @@ source_folders_draw_page(void)
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Search this exact folder for source files (not its subfolders).");
 	ImGui::SameLine();
-	if (ImGui::Button("Find missing files under this folder")) {
-		char msg[600];
-		source_folders_find_under(s_folder, nullptr, msg, sizeof msg);
-		s_msg = msg;
-	}
+	ImGui::BeginDisabled(source_folders_search_busy());
+	if (ImGui::Button("Find missing files under this folder"))
+		source_folders_search_start(s_folder, nullptr);
+	ImGui::EndDisabled();
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Look through this folder and its subfolders for every source file the\n"
 		                  "debug info names that has not been found yet, and add the folders\n"
 		                  "they are in. Point it at your project's top folder.");
+	if (source_folders_search_busy()) {
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel##srcsearch"))
+			source_folders_search_cancel();
+	}
+	if (source_folders_search_status()[0])
+		ImGui::TextDisabled("%s", source_folders_search_status());
 	if (!s_msg.empty())
 		ImGui::TextDisabled("%s", s_msg.c_str());
 

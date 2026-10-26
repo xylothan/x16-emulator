@@ -1124,6 +1124,8 @@ debug_ui_render(void)
     // During a capture it was not, so the panel's own recorders stand down; a
     // capture that wants them arms them under its own owner.
     debug_ui_perf_recorders_tick();
+    // A source-folder search in progress reads a few more folders.
+    source_folders_search_tick();
 
     if (!quiet) {
         // Optional vendored demo window (Help → Show ImGui Demo).
