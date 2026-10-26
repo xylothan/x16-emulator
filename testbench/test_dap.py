@@ -873,6 +873,21 @@ if rep:
                    any(e.get("ph") == "i" and e.get("tid", 0) >= 10 for e in ev))
             expect("and interrupt spans on the IRQ track",
                    any(e.get("ph") == "B" and e.get("tid") == 1 for e in ev))
+        # A saved run, opened again, shows what the live one did: the same
+        # report and, event for event, the same trace.
+        import json as _json
+        runp = os.path.join(tmp, "cap.x16prof")
+        r = capture(411, {"top": 0, "export": {"run": runp}})
+        ex = r.get("body", {}).get("exported", {}) if r and r.get("success") else {}
+        expect("x16/capture saves a run", ex.get("run", -1) == 0 and os.path.exists(runp))
+        tr2 = os.path.join(tmp, "loaded.trace.json")
+        r = capture(412, {"load": runp, "top": 10, "export": {"trace": tr2}})
+        lb = r.get("body", {}) if r and r.get("success") else {}
+        expect("and loads it back", lb.get("loadedRun") == runp)
+        expect("whose report is the one it saved", lb.get("report") == wrep.get("report"))
+        if os.path.exists(tr) and os.path.exists(tr2):
+            expect("and whose trace is the same, event for event",
+                   _json.load(open(tr)) == _json.load(open(tr2)))
     if os.path.exists(js):
         import json as _json
         data = _json.load(open(js))

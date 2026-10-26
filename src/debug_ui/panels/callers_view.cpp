@@ -16,6 +16,15 @@
 #include <string.h>
 #include <vector>
 
+// Open code from the Profile panel, unless a saved run is shown: its addresses
+// describe the program as it was, and memory now may hold something else.
+static inline void
+profile_goto(uint16_t addr, uint8_t bank)
+{
+	if (!profile_session_run_loaded())
+		debug_ui_request_goto(addr, bank);
+}
+
 namespace {
 
 int              g_row      = -1;   // selected report row
@@ -92,7 +101,7 @@ goto_node(const prof_report_t *r, int node)
 	uint8_t  region, bank;
 	uint16_t pc;
 	perf_hist_key_decode(n.key, &region, &bank, &pc);
-	debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+	profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 }
 
 const char *
@@ -314,7 +323,7 @@ profile_callers_draw(const prof_report_t *r)
 	ImGui::TextUnformatted(row.name);
 	ImGui::SameLine();
 	if (ImGui::SmallButton("Open source"))
-		debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+		profile_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
 	ImGui::TextDisabled("Total time %s of the recording.  Own time %s.  Called %u times.", tot, own, v->calls);
 
 	// Callers left, callees right.

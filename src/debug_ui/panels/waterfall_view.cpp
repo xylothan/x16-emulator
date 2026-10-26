@@ -23,6 +23,15 @@
 #include <string.h>
 #include <vector>
 
+// Open code from the Profile panel, unless a saved run is shown: its addresses
+// describe the program as it was, and memory now may hold something else.
+static inline void
+profile_goto(uint16_t addr, uint8_t bank)
+{
+	if (!profile_session_run_loaded())
+		debug_ui_request_goto(addr, bank);
+}
+
 namespace {
 
 // VGA: 525 lines a frame. Composite would be 262.5, but the axis is a guide,
@@ -275,7 +284,7 @@ goto_key(uint32_t key)
 	uint8_t  region, bank;
 	uint16_t pc;
 	perf_hist_key_decode(key, &region, &bank, &pc);
-	debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+	profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 }
 
 void

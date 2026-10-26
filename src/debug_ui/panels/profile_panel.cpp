@@ -15,6 +15,7 @@
 #include "../perf_hist.h"
 #include "../profile_session.h"
 #include "../export_paths.h"
+#include "../profile_run.h"
 #include "waterfall_view.h"
 #include "flame_view.h"
 #include "callers_view.h"
@@ -25,7 +26,18 @@
 #include <time.h>
 
 #include <algorithm>
+#include <string>
+#include <sys/stat.h>
 #include <vector>
+
+// Open code from the Profile panel, unless a saved run is shown: its addresses
+// describe the program as it was, and memory now may hold something else.
+static inline void
+profile_goto(uint16_t addr, uint8_t bank)
+{
+	if (!profile_session_run_loaded())
+		debug_ui_request_goto(addr, bank);
+}
 
 namespace {
 
@@ -41,6 +53,112 @@ char  g_export[260] = "";  // seeded from Settings on first draw
 
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
+
+// Saved runs: the recording shown, to a file; a file, shown again.
+char g_run_msg[1400] = "";
+
+void
+draw_open_run_popup(void)
+{
+	if (!ImGui::BeginPopup("open_run"))
+		return;
+	// The runs in the export folder, newest first, read when the list opens.
+	struct Found {
+		std::string path;
+		time_t      mtime;
+		long long   size;
+	};
+	static std::vector<Found> found;
+	if (ImGui::IsWindowAppearing()) {
+		static char list[64][1024];
+		const int   n = export_list(export_dir(EXPORT_PROFILE), PROF_RUN_EXT, &list[0][0], sizeof list[0], 64);
+		found.clear();
+		for (int i = 0; i < n; i++) {
+			Found f{list[i], 0, -1};
+#ifdef _WIN32
+			struct _stat64 sb;
+			if (_stat64(list[i], &sb) == 0) {
+#else
+			struct stat sb;
+			if (stat(list[i], &sb) == 0) {
+#endif
+				f.mtime = (time_t)sb.st_mtime;
+				f.size  = (long long)sb.st_size;
+			}
+			found.push_back(f);
+		}
+		std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) { return a.mtime > b.mtime; });
+	}
+	ImGui::TextDisabled("Saved runs in %s:", export_dir(EXPORT_PROFILE)[0] ? export_dir(EXPORT_PROFILE)
+	                                                                       : "the working directory");
+	ImGui::Separator();
+	if (found.empty())
+		ImGui::TextDisabled("  (none yet)");
+	for (size_t i = 0; i < found.size(); i++) {
+		const std::string &p    = found[i].path;
+		const size_t       cut  = p.find_last_of("/\\");
+		const char        *base = cut == std::string::npos ? p.c_str() : p.c_str() + cut + 1;
+		char               line[600];
+		snprintf(line, sizeof line, "%s   (%.1f MB)", base, found[i].size >= 0 ? found[i].size / 1048576.0 : 0.0);
+		ImGui::PushID((int)i);
+		if (ImGui::Selectable(line)) {
+			profile_session_load_run(p.c_str(), g_run_msg, sizeof g_run_msg);
+			ImGui::CloseCurrentPopup();
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", p.c_str());
+		ImGui::PopID();
+	}
+	ImGui::Separator();
+	static char path[1024] = "";
+	ImGui::SetNextItemWidth(dbgui_text_width("wwwwwwwwwwwwwwwwwwwwwwwwwwwwww"));
+	ImGui::InputTextWithHint("##runpath", "or a path to a" PROF_RUN_EXT " file", path, sizeof path);
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!path[0]);
+	if (ImGui::Button("Open")) {
+		profile_session_load_run(path, g_run_msg, sizeof g_run_msg);
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndDisabled();
+	ImGui::EndPopup();
+}
+
+void
+draw_runs(void)
+{
+	DebugUiSettings &st = debug_ui_settings();
+	ImGui::BeginDisabled(!profile_session_report());
+	if (ImGui::Button("Save run")) {
+		char name[400], path[1100];
+		const time_t now = time(nullptr);
+		char         stamp[32];
+		strftime(stamp, sizeof stamp, "-%Y%m%d-%H%M%S", localtime(&now));
+		// Always stamped: a run is a record of one recording, never replaced.
+		snprintf(name, sizeof name, "%s%s" PROF_RUN_EXT, st.profile_export_name.empty() ? "profile"
+		                                                                               : st.profile_export_name.c_str(),
+		         stamp);
+		if (export_path(EXPORT_PROFILE, name, path, sizeof path))
+			profile_session_save_run(path, g_run_msg, sizeof g_run_msg);
+		else
+			snprintf(g_run_msg, sizeof g_run_msg, "Could not make the folder %s", export_dir(EXPORT_PROFILE));
+	}
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("Save this recording -- report, call tree, frame timeline, and the names and\n"
+		                  "source lines shown -- as one" PROF_RUN_EXT " file in the profile export folder,\n"
+		                  "to open again later, even with a different program or debug info loaded.\n"
+		                  "With a long frame timeline it can be large (up to about 128 MB).");
+	ImGui::SameLine();
+	if (ImGui::Button("Open run..."))
+		ImGui::OpenPopup("open_run");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Show a saved run in place of the last recording.");
+	draw_open_run_popup();
+	if (g_run_msg[0]) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", g_run_msg);
+	}
+}
 
 void
 draw_controls(void)
@@ -136,6 +254,7 @@ draw_controls(void)
 	}
 	ImGui::SameLine();
 	ImGui::TextDisabled("The debugger stops updating while it records, so the measurement is clean.");
+	draw_runs();
 	if (st == CAP_DONE && cap_end_reason() == CAP_END_FAILED)
 		ImGui::TextColored(COL_AMBIG, "The last recording could not start: a recorder failed to set up.");
 }
@@ -346,7 +465,7 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 			                      ImGuiSelectableFlags_SpanAllColumns |
 			                          ImGuiSelectableFlags_AllowDoubleClick)) {
 				if (ImGui::IsMouseDoubleClicked(0))
-					debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+					profile_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
 				else
 					profile_select_routine(view[v], false);
 			}
@@ -354,7 +473,7 @@ draw_rows(const prof_report_t *r, uint64_t total, uint32_t frames)
 				if (ImGui::MenuItem("Callers & callees", nullptr, false, tree && row.calls))
 					profile_select_routine(view[v], true);
 				if (ImGui::MenuItem("Open source"))
-					debug_ui_request_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
+					profile_goto(row.addr, row.region == PH_REGION_LOW ? 0 : row.bank);
 				ImGui::EndPopup();
 			}
 			if (ImGui::IsItemHovered()) {
@@ -415,7 +534,7 @@ draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t fra
 			uint8_t  region, bank;
 			uint16_t pc;
 			perf_hist_key_decode(n.key, &region, &bank, &pc);
-			debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+			profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 		}
 		ImGui::EndPopup();
 	}
@@ -435,7 +554,7 @@ draw_node(const prof_report_t *r, int i, int depth, uint64_t total, uint32_t fra
 		uint8_t  region, bank;
 		uint16_t pc;
 		perf_hist_key_decode(n.key, &region, &bank, &pc);
-		debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+		profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 	}
 	ImGui::TableSetColumnIndex(1);
 	ImGui::Text("%.2f", total ? 100.0 * (double)n.incl / (double)total : 0.0);
@@ -508,8 +627,27 @@ draw_report(void)
 	}
 	const uint64_t total  = r->main_cycles + r->irq_cycles;
 	const uint32_t frames = profile_session_report_frames() ? profile_session_report_frames() : 1;
-	ImGui::Text("Last recording: %u frames, %.1f s (%s).", frames, cap_elapsed_s(),
-	            cap_end_name(cap_end_reason()));
+	if (const prof_run_meta_t *m = profile_session_run_meta()) {
+		const char *p    = profile_session_run_path();
+		const char *base = strrchr(p, '/');
+		const char *b2   = strrchr(p, '\\');
+		if (b2 && (!base || b2 > base))
+			base = b2;
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextColored(COL_WAIT,
+		                   "Saved run: %s, saved %s, %u frames%s%s. Start a recording to replace it. Clicking "
+		                   "opens no code while a saved run is shown: what is in memory now may differ.",
+		                   base ? base + 1 : p, m->captured, m->frames, m->program[0] ? ", of " : "",
+		                   m->program[0] ? m->program : "");
+		ImGui::PopTextWrapPos();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s" "\n" "Debug info: %s" "\n" "Recorded by build %s at %.2f MHz.", p,
+			                  m->dbg[0] ? m->dbg : "(none)", m->revision, m->mhz);
+		ImGui::Text("Recording: %u frames, %.1f s (%s).", frames, m->elapsed_s, m->end_reason);
+	} else {
+		ImGui::Text("Last recording: %u frames, %.1f s (%s).", frames, cap_elapsed_s(),
+		            cap_end_name(cap_end_reason()));
+	}
 	ImGui::TextDisabled("%llu CPU cycles per frame, %.1f%% of them in interrupt handlers. "
 	                    "%d routines, %d of them named.",
 	                    (unsigned long long)(total / frames),

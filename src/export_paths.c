@@ -10,6 +10,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #endif
+#include "dirent_win32.h" // portable opendir/readdir; needs <stdio.h> first
 
 #define DIR_MAX 1024
 
@@ -101,4 +102,46 @@ export_path(export_kind_t kind, const char *name, char *out, size_t out_size)
 	if (n < 0 || (size_t)n >= out_size)
 		return false;
 	return export_name_has_folder(name) || export_make_dir(dir);
+}
+
+static bool
+ends_with_ci(const char *s, const char *ext)
+{
+	const size_t a = strlen(s), b = strlen(ext);
+	if (b > a)
+		return false;
+	for (size_t i = 0; i < b; i++) {
+		char x = s[a - b + i], y = ext[i];
+		if (x >= 'A' && x <= 'Z')
+			x = (char)(x - 'A' + 'a');
+		if (y >= 'A' && y <= 'Z')
+			y = (char)(y - 'A' + 'a');
+		if (x != y)
+			return false;
+	}
+	return true;
+}
+
+int
+export_list(const char *dir, const char *ext, char *out, size_t each, int max)
+{
+	const char *d  = dir && dir[0] ? dir : ".";
+	DIR        *dp = opendir(d);
+	if (!dp)
+		return 0;
+	const size_t len  = strlen(d);
+	const char   sep  = strchr(d, '\\') ? '\\' : '/';
+	const bool   join = len && d[len - 1] != '/' && d[len - 1] != '\\';
+	int          n    = 0;
+	struct dirent *de;
+	while (n < max && (de = readdir(dp)) != NULL) {
+		if (!ends_with_ci(de->d_name, ext) || strlen(de->d_name) <= strlen(ext))
+			continue;
+		const int w = dir && dir[0] ? snprintf(out + (size_t)n * each, each, "%s%s%s", d, join ? (sep == '/' ? "/" : "\\") : "", de->d_name)
+		                            : snprintf(out + (size_t)n * each, each, "%s", de->d_name);
+		if (w > 0 && (size_t)w < each)
+			n++;
+	}
+	closedir(dp);
+	return n;
 }

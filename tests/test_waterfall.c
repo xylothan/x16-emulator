@@ -325,6 +325,95 @@ main(void)
 		check(w.balanced && w.events == 0 && w.marks == 6, "the walk hands marks out as marks");
 	}
 
+	// ── Saved and loaded: the same frames, picks and aggregates ─────────────
+	{
+		// Room for half the frames' detail, so some summaries have none.
+		check(wf_init(64, sizeof(wf_event_t) * 3 * 40), "init for the round trip");
+		for (int i = 0; i < 80; i++) {
+			for (int k = 0; k < 1 + i % 3; k++) {
+				wf_note(k ? WF_LANE_PSG : WF_LANE_VIA1, (uint16_t)(i * 7 + k), (uint8_t)k, 0);
+				wf_flush(0x1000u + (uint32_t)k, (i % 5) == 0, (uint64_t)i * 1000 + (uint64_t)k);
+			}
+			if (i % 9 == 0) {
+				wf_irq_line(true, (uint64_t)i * 1000 + 50, (uint32_t)i * 100);
+				wf_irq_line(false, (uint64_t)i * 1000 + 90, (uint32_t)i * 100 + 1);
+			}
+			wf_frame_set_video_mode((uint8_t)(i % 4 == 3 ? 2 : 1));
+			wf_frame_end((uint64_t)(i + 1) * 1000, (uint64_t)((i * 37) % 80), (uint16_t)(i % 4));
+		}
+		const int  n0 = wf_frame_count(), d0 = wf_detail_count();
+		int        picks0[6][2][80], np0[6][2];
+		for (int pk = 0; pk < 6; pk++)
+			for (int m = 0; m < 2; m++)
+				np0[pk][m] = wf_pick(pk, m, picks0[pk][m], 80);
+		int             na0;
+		const wf_agg_t *a0 = wf_aggregates(&na0);
+		wf_agg_t        agg0[64];
+		for (int i = 0; i < na0 && i < 64; i++)
+			agg0[i] = a0[i];
+		// A copy of every frame, events included.
+		static wf_frame_t f0[80];
+		static wf_event_t e0[80][16];
+		for (int i = 0; i < n0; i++) {
+			f0[i] = *wf_frame(i);
+			if (f0[i].events)
+				memcpy(e0[i], f0[i].events, sizeof(wf_event_t) * (size_t)f0[i].count);
+		}
+
+		FILE *f = fopen("wf_roundtrip.bin", "wb");
+		check(f && wf_write(f), "written");
+		const long len = f ? ftell(f) : 0;
+		if (f)
+			fclose(f);
+		static uint8_t buf[1 << 16];
+		f = fopen("wf_roundtrip.bin", "rb");
+		const size_t got = f ? fread(buf, 1, sizeof buf, f) : 0;
+		if (f)
+			fclose(f);
+		remove("wf_roundtrip.bin");
+		check(len > 0 && got == (size_t)len, "and read back whole");
+
+		wf_reset();
+		check_eq((uint32_t)wf_frame_count(), 0, "cleared before loading");
+		check(wf_read(buf, got - 1) == NULL, "a file cut short is refused");
+		uint8_t bad = buf[0];
+		buf[0]      = 99;
+		check(wf_read(buf, got) == NULL, "a version it does not know is refused");
+		buf[0] = bad;
+		check(wf_install(wf_read(buf, got)), "a whole one loads");
+
+		check(wf_frame_count() == n0 && wf_detail_count() == d0, "the same frames, the same detail kept");
+		bool same_frames = true;
+		for (int i = 0; i < n0; i++) {
+			const wf_frame_t *g = wf_frame(i);
+			same_frames = same_frames && g->number == f0[i].number && g->start == f0[i].start &&
+			              g->work == f0[i].work && g->writes == f0[i].writes && g->length == f0[i].length &&
+			              g->start_node == f0[i].start_node && g->video_mode == f0[i].video_mode &&
+			              g->truncated == f0[i].truncated && g->count == f0[i].count &&
+			              (g->events != NULL) == (f0[i].events != NULL) &&
+			              (!g->events || memcmp(g->events, e0[i], sizeof(wf_event_t) * (size_t)g->count) == 0);
+		}
+		check(same_frames, "every frame's summary and events are as saved");
+		bool same_picks = true;
+		for (int pk = 0; pk < 6; pk++)
+			for (int m = 0; m < 2; m++) {
+				int       p1[80];
+				const int np = wf_pick(pk, m, p1, 80);
+				same_picks   = same_picks && np == np0[pk][m] &&
+				             memcmp(p1, picks0[pk][m], sizeof(int) * (size_t)np) == 0;
+			}
+		check(same_picks, "every pick, by both measures, is as before");
+		int             na1;
+		const wf_agg_t *a1 = wf_aggregates(&na1);
+		bool            same_agg = na1 == na0;
+		for (int i = 0; same_agg && i < na1; i++)
+			same_agg = a1[i].key == agg0[i].key && a1[i].lane == agg0[i].lane && a1[i].writes == agg0[i].writes;
+		check(same_agg, "and the aggregates");
+		check(wf_frames_seen() == (uint32_t)n0, "frames seen restored");
+
+		check(wf_init(64, 1 << 20), "init again");
+	}
+
 	// ── The walk: nested spans, two threads, balanced ───────────────────────
 	{
 		wf_reset();
