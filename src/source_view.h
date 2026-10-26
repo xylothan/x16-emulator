@@ -59,6 +59,30 @@ bool source_view_can_find(const char *name);
 bool source_view_find_under(const char *root, const char *name, int max_depth, int max_dirs,
                             char *dir, int dir_size);
 
+// The same search for many files at once, in steps, so a UI can keep drawing
+// while a big tree is read. Each folder is read once, whatever the number of
+// names; matching is by base name, ignoring case. Found folders are written
+// with the root's own separator (a root with a backslash in it is all
+// backslashes), never a mix.
+//
+// With more than one name the whole tree is read, and a name found in several
+// folders goes to the one holding the most of the names: a project's real
+// sources, not a stale copy in a build or work folder. Results are there once
+// a step has returned false.
+typedef struct source_search source_search_t;
+source_search_t *source_search_begin(const char *root, const char *const *names, int count, int max_depth,
+                                     int max_dirs);
+// Read up to `dirs` more folders. False once there is nothing left to do:
+// every name found, the tree read, or `max_dirs` reached.
+bool        source_search_step(source_search_t *s, int dirs);
+int         source_search_dirs_read(const source_search_t *s);
+int         source_search_count(const source_search_t *s);   // names asked for
+int         source_search_found(const source_search_t *s);   // of which found
+const char *source_search_dir_of(const source_search_t *s, int i); // NULL if not found
+int         source_search_places(const source_search_t *s, int i); // folders it was in
+bool        source_search_limited(const source_search_t *s); // stopped at max_dirs
+void        source_search_end(source_search_t *s);
+
 // Free everything (cached files and registered paths). Call on shutdown.
 void source_view_free(void);
 
