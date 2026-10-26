@@ -2453,6 +2453,13 @@ static int handle_x16_capture(int seq, cJSON *args) {
     cJSON *stop = args ? cJSON_GetObjectItemCaseSensitive(args, "stop") : NULL;
     if (cJSON_IsTrue(stop))
         cap_stop();
+    // load: path -- show a saved run (profile_run.h) in place of the last one.
+    char   run_msg[1200] = "";
+    cJSON *ld = args ? cJSON_GetObjectItemCaseSensitive(args, "load") : NULL;
+    if (cJSON_IsString(ld) && profile_session_load_run(ld->valuestring, run_msg, sizeof run_msg) != 0) {
+        send_dap_error_response(seq, "x16/capture", run_msg);
+        return 0;
+    }
     int top = 50;
     cJSON *t = args ? cJSON_GetObjectItemCaseSensitive(args, "top") : NULL;
     if (cJSON_IsNumber(t) && t->valuedouble >= 0)
@@ -2471,8 +2478,10 @@ static int handle_x16_capture(int seq, cJSON *args) {
             cJSON_AddItemToArray(recs, cJSON_CreateString(profile_session_recorder_name(bit)));
     cJSON_AddItemToObject(body, "recorders", recs);
 
+    if (profile_session_run_loaded())
+        cJSON_AddStringToObject(body, "loadedRun", profile_session_run_path());
     const prof_report_t *r = profile_session_report();
-    if (r && cap_state() == CAP_DONE) {
+    if (r && (cap_state() == CAP_DONE || profile_session_run_loaded())) {
         cJSON *rep = cJSON_CreateObject();
         const uint64_t total  = r->main_cycles + r->irq_cycles;
         const uint32_t frames = profile_session_report_frames();
@@ -2573,6 +2582,13 @@ static int handle_x16_capture(int seq, cJSON *args) {
             cJSON *tp = cJSON_GetObjectItemCaseSensitive(ex, "trace");
             if (cJSON_IsString(tp))
                 cJSON_AddNumberToObject(done, "trace", profile_session_export_trace(tp->valuestring));
+            // run: a saved run, to open again later (0 written, -1 failed).
+            cJSON *rp = cJSON_GetObjectItemCaseSensitive(ex, "run");
+            if (cJSON_IsString(rp)) {
+                char m[1200];
+                cJSON_AddNumberToObject(done, "run", profile_session_save_run(rp->valuestring, m, sizeof m));
+                cJSON_AddStringToObject(done, "runMessage", m);
+            }
             cJSON_AddItemToObject(body, "exported", done);
         }
     }

@@ -1115,6 +1115,48 @@ Tested:
 - the tab drawn in a Debug build on that program, with the tooltips forced on;
 - GCC on every touched file.
 
+### Phase 5f: saved runs (2026-10-25)
+
+A recording can be saved and opened again later, with the program, its debug
+info or the emulator's speed changed in between.
+
+- **Save run** in the Profile panel writes one `.x16prof` file to the profile
+  export folder (Settings > Files > Export folders), named from the export
+  file name plus the date and time. **Open run...** lists the runs there,
+  newest first, with their sizes, or opens a typed path.
+- **The file** (`src/profile_run.c`, pure, unit-tested):
+  - `X16PROF`, a version, then tagged sections that each give their length.
+    A reader skips sections it does not know.
+  - Metadata is text: when it was saved, the build, the program, the `.dbg`
+    files, the clock rate, frames, recorders, and the work-against-waiting
+    summary.
+  - Then the report rows, the call tree, and every key the panel can ask
+    about (call targets and writing instructions), each with its row and
+    source line.
+  - Then the waterfall: every frame's summary and kept detail, and the
+    aggregates (`wf_write()` / `wf_read()` in `waterfall.c`).
+  - Numbers are little-endian and written field by field.
+- **Loading is all or nothing.** The whole file is read and checked, every
+  count against the bytes present, before anything is replaced. A file that
+  is cut short or damaged leaves the current report as it was.
+- **While a run is shown,** names, source lines and the clock rate come from
+  the run, not from the emulator as it is now. A banner says which run it is.
+  Clicking opens no code, because memory may now hold something else. The
+  next recording replaces it.
+- **DAP:** `x16/capture` takes `export.run` to save and `load` to open; the
+  response then carries `loadedRun`.
+
+Tested:
+- unit tests: the file round trip, damage, a newer writer's sections, and
+  the waterfall's own round trip (every pick in every mode, events and
+  aggregates identical);
+- the DAP testbench saves a run and loads it back. The report must equal the
+  live one, and a trace exported from the loaded run must match the live
+  trace event for event;
+- every Profile tab and the Open run list drawn in a Debug build from a
+  loaded run;
+- GCC on every touched file.
+
 ## Phase 6: seeing who calls what
 
 Every view here is a different summary of the call tree that Phase 3 already

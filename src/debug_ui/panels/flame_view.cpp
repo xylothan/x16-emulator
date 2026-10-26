@@ -24,6 +24,15 @@
 #include <string.h>
 #include <vector>
 
+// Open code from the Profile panel, unless a saved run is shown: its addresses
+// describe the program as it was, and memory now may hold something else.
+static inline void
+profile_goto(uint16_t addr, uint8_t bank)
+{
+	if (!profile_session_run_loaded())
+		debug_ui_request_goto(addr, bank);
+}
+
 namespace {
 
 // Children of each node, heaviest first, rebuilt per report.
@@ -252,7 +261,7 @@ profile_flame_draw(const prof_report_t *r)
 			uint8_t  region, bank;
 			uint16_t pc;
 			perf_hist_key_decode(n.key, &region, &bank, &pc);
-			debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+			profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 		} else if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 			g_focus = c.hover;
 		}
@@ -272,7 +281,7 @@ profile_flame_draw(const prof_report_t *r)
 				uint8_t  region, bank;
 				uint16_t pc;
 				perf_hist_key_decode(n.key, &region, &bank, &pc);
-				debug_ui_request_goto(pc, region == PH_REGION_LOW ? 0 : bank);
+				profile_goto(pc, region == PH_REGION_LOW ? 0 : bank);
 			}
 		}
 		ImGui::EndPopup();

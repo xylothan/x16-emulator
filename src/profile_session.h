@@ -14,6 +14,7 @@
 #include "profile_capture.h"
 #include "profile_report.h"
 #include "waterfall.h"
+#include "profile_run.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,6 +94,18 @@ bool profile_session_key_source(uint32_t key, char *buf, int size);
 // Whether the tree's self cycles matched the histogram's totals exactly, for
 // the last report (true when there was no tree).
 bool profile_session_tree_consistent(void);
+
+// Saved runs (profile_run.h): the last recording -- report, call tree,
+// waterfall, and the names and source lines it was shown with -- in one file,
+// to be opened again later. Loading one shows it in place of the last
+// recording until the next recording starts; neither works while one runs.
+// Both return 0, or -1 with the reason in `msg`.
+int  profile_session_save_run(const char *path, char *msg, size_t msg_size);
+int  profile_session_load_run(const char *path, char *msg, size_t msg_size);
+// Whether a saved run is what is shown, and what it says about itself.
+bool                   profile_session_run_loaded(void);
+const prof_run_meta_t *profile_session_run_meta(void);
+const char            *profile_session_run_path(void);
 
 // Recorder names for DAP and the command line ("hist", "budget", "vram",
 // "tree").

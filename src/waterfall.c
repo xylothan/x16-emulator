@@ -1,6 +1,7 @@
 // Commander X16 Emulator — frame waterfall recorder. See waterfall.h.
 
 #include "waterfall.h"
+#include "bytes_io.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -513,6 +514,202 @@ wf_aggregates(int *count)
 	qsort(agg_sorted, (size_t)n, sizeof *agg_sorted, cmp_agg);
 	*count = n;
 	return agg_sorted;
+}
+
+// ─── Saving and loading ─────────────────────────────────────────────────────
+
+#define WF_SAVE_VERSION 1
+
+bool
+wf_write(FILE *f)
+{
+	bio_w32(f, WF_SAVE_VERSION);
+	bio_w32(f, frames_seen);
+	bio_w32(f, dropped);
+	bio_w32(f, (uint32_t)frame_n);
+	for (int i = 0; i < frame_n; i++) {
+		const wf_frame_t *fr = &frames[i];
+		bio_w32(f, fr->number);
+		bio_w64(f, fr->start);
+		bio_w64(f, fr->work);
+		bio_w32(f, fr->writes);
+		bio_w32(f, fr->length);
+		bio_w16(f, fr->start_node);
+		bio_w8(f, fr->video_mode);
+		bio_w8(f, fr->truncated ? 1 : 0);
+		bio_w32(f, (uint32_t)fr->count);
+		bio_w8(f, fr->events ? 1 : 0);
+		for (int e = 0; fr->events && e < fr->count; e++) {
+			const wf_event_t *ev = &fr->events[e];
+			bio_w32(f, ev->cycle);
+			bio_w32(f, ev->key_lane);
+			bio_w16(f, ev->target);
+			bio_w8(f, ev->value);
+			bio_w8(f, ev->flags);
+		}
+	}
+	uint32_t na = 0;
+	for (int i = 0; agg && i < AGG_SIZE; i++)
+		na += agg[i].writes != 0;
+	bio_w32(f, na);
+	for (int i = 0; agg && i < AGG_SIZE; i++)
+		if (agg[i].writes) {
+			bio_w32(f, agg[i].key_lane);
+			bio_w32(f, agg[i].writes);
+		}
+	return !ferror(f);
+}
+
+struct wf_staged {
+	uint32_t    seen, dropped;
+	wf_frame_t *frames;
+	int         n;
+	uint32_t   *agg_kl, *agg_w;
+	uint32_t    nagg;
+};
+
+void
+wf_staged_free(wf_staged_t *s)
+{
+	if (!s)
+		return;
+	for (int i = 0; s->frames && i < s->n; i++)
+		free(s->frames[i].events);
+	free(s->frames);
+	free(s->agg_kl);
+	free(s->agg_w);
+	free(s);
+}
+
+wf_staged_t *
+wf_read(const uint8_t *buf, size_t len)
+{
+	bio_reader_t r = {buf, buf + len, false};
+	if (bio_r32(&r) != WF_SAVE_VERSION)
+		return NULL;
+	wf_staged_t *s = calloc(1, sizeof *s);
+	if (!s)
+		return NULL;
+	s->seen          = bio_r32(&r);
+	s->dropped       = bio_r32(&r);
+	const uint32_t n = bio_r32(&r);
+	// A frame's summary is 36 bytes: no more frames than that allows.
+	if (!bio_room_for(&r, n, 36) || n > 0x7FFFFFFF)
+		goto bad;
+	s->frames = calloc(n ? n : 1, sizeof *s->frames);
+	if (!s->frames)
+		goto bad;
+	for (uint32_t i = 0; i < n && !r.bad; i++) {
+		wf_frame_t *fr = &s->frames[i];
+		s->n           = (int)i + 1;
+		fr->number     = bio_r32(&r);
+		fr->start      = bio_r64(&r);
+		fr->work       = bio_r64(&r);
+		fr->writes     = bio_r32(&r);
+		fr->length     = bio_r32(&r);
+		fr->start_node = bio_r16(&r);
+		fr->video_mode = bio_r8(&r);
+		fr->truncated  = bio_r8(&r) != 0;
+		const uint32_t count = bio_r32(&r);
+		const bool     has   = bio_r8(&r) != 0;
+		if (count > 0x7FFFFFFF)
+			goto bad;
+		fr->count = (int)count;
+		if (!has)
+			continue;
+		if (!bio_room_for(&r, count, 12))
+			goto bad;
+		fr->events = malloc(sizeof *fr->events * (size_t)(count ? count : 1));
+		if (!fr->events)
+			goto bad;
+		for (uint32_t e = 0; e < count; e++) {
+			wf_event_t *ev = &fr->events[e];
+			ev->cycle      = bio_r32(&r);
+			ev->key_lane   = bio_r32(&r);
+			ev->target     = bio_r16(&r);
+			ev->value      = bio_r8(&r);
+			ev->flags      = bio_r8(&r);
+		}
+	}
+	s->nagg = bio_r32(&r);
+	if (!bio_room_for(&r, s->nagg, 8) || s->nagg > AGG_SIZE)
+		goto bad;
+	s->agg_kl = malloc(sizeof *s->agg_kl * (size_t)(s->nagg ? s->nagg : 1));
+	s->agg_w  = malloc(sizeof *s->agg_w * (size_t)(s->nagg ? s->nagg : 1));
+	if (!s->agg_kl || !s->agg_w)
+		goto bad;
+	for (uint32_t i = 0; i < s->nagg; i++) {
+		s->agg_kl[i] = bio_r32(&r);
+		s->agg_w[i]  = bio_r32(&r);
+	}
+	if (r.bad)
+		goto bad;
+	return s;
+bad:
+	wf_staged_free(s);
+	return NULL;
+}
+
+// Put one aggregate back with its count.
+static void
+agg_put(uint32_t key_lane, uint32_t writes)
+{
+	uint32_t h = (key_lane * 0x9E3779B1u) >> 16;
+	for (int probe = 0; probe < AGG_SIZE; probe++, h = (h + 1) & (AGG_SIZE - 1)) {
+		if (!agg[h].writes || agg[h].key_lane == key_lane) {
+			agg[h].key_lane = key_lane;
+			agg[h].writes += writes;
+			return;
+		}
+	}
+	dropped += writes;
+}
+
+bool
+wf_install(wf_staged_t *s)
+{
+	if (!s || !agg) {
+		wf_staged_free(s);
+		return false;
+	}
+	free_frames();
+	free(frames);
+	frames        = s->frames;
+	frame_n       = s->n;
+	frame_alloc_n = s->n;
+	s->frames     = NULL;
+	detail_bytes  = 0;
+	detail_n      = 0;
+	for (int i = 0; i < frame_n; i++)
+		if (frames[i].events) {
+			detail_bytes += detail_size(&frames[i]);
+			detail_n++;
+		}
+	// Every frame kept is wanted: rebuild the extremes as they were recorded.
+	stride = 1;
+	memset(ext_n, 0, sizeof ext_n);
+	for (int i = 0; i < frame_n; i++)
+		place_extremes(i);
+
+	memset(agg, 0, sizeof *agg * AGG_SIZE);
+	dropped = 0;
+	for (uint32_t i = 0; i < s->nagg; i++)
+		agg_put(s->agg_kl[i], s->agg_w[i]);
+	frames_seen = s->seen;
+	dropped += s->dropped;
+
+	// Nothing is being recorded on top of it.
+	cur.count      = 0;
+	cur.writes     = 0;
+	cur.truncated  = false;
+	cur.number     = frames_seen;
+	cur.start      = frame_n ? frames[frame_n - 1].start + frames[frame_n - 1].length : 0;
+	cur.start_node = 0;
+	cur_start      = cur.start;
+	held_open      = false;
+	wf_pending     = 0;
+	wf_staged_free(s);
+	return true;
 }
 
 // ─── Ranges ─────────────────────────────────────────────────────────────────

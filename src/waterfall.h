@@ -36,6 +36,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -174,6 +175,20 @@ uint64_t wf_metric_of(const wf_frame_t *f, int metric);
 int      wf_pick(int pick, int metric, int *out, int max);
 // The nearest frame to `i` whose detail is kept (i itself if it is), or -1.
 int      wf_nearest_detail(int i);
+
+// ─── Saving and loading (a saved profile run) ───────────────────────────────
+// Write everything the recorder holds: every frame's summary and kept detail,
+// and the aggregates. False on a write error.
+bool wf_write(FILE *f);
+// Read what wf_write() wrote, from a buffer holding exactly that, into a copy
+// nothing uses yet; NULL if it is malformed. wf_install() then replaces the
+// recorder's state with it and frees it -- the memory budget is not applied,
+// the run is shown as it was saved. wf_staged_free() discards it instead.
+// wf_init() must have succeeded before wf_install().
+typedef struct wf_staged wf_staged_t;
+wf_staged_t *wf_read(const uint8_t *buf, size_t len);
+bool         wf_install(wf_staged_t *s);
+void         wf_staged_free(wf_staged_t *s);
 
 // Aggregates, heaviest first. The returned array lives until the next call
 // or wf_reset(). `*count` is set to its length.

@@ -46,6 +46,23 @@ main(void)
 	      "a name with a folder is used as given");
 	check(!export_dir_exists("elsewhere"), "and nothing is created for it");
 
+	// ── Listing a folder's files of one kind ────────────────────────────────
+	{
+		FILE *f = fopen("exp_test_out/profiles/a.X16PROF", "wb");
+		if (f)
+			fclose(f);
+		f = fopen("exp_test_out/profiles/b.txt", "wb");
+		if (f)
+			fclose(f);
+		char list[4][256];
+		const int n = export_list("exp_test_out/profiles", ".x16prof", &list[0][0], sizeof list[0], 4);
+		check(n == 1 && strstr(list[0], "a.X16PROF") && strstr(list[0], "exp_test_out/profiles"),
+		      "lists only that kind, ignoring case, as paths");
+		check(export_list("exp_no_such", ".x16prof", &list[0][0], sizeof list[0], 4) == 0, "a missing folder has none");
+		remove("exp_test_out/profiles/a.X16PROF");
+		remove("exp_test_out/profiles/b.txt");
+	}
+
 	// ── Too long is refused, not cut ────────────────────────────────────────
 	char tiny[8];
 	check(!export_path(EXPORT_PROFILE, "run.json", tiny, sizeof tiny), "a path that does not fit fails");

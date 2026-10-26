@@ -40,6 +40,11 @@ bool export_name_has_folder(const char *name);
 bool export_make_dir(const char *dir);
 bool export_dir_exists(const char *dir);
 
+// The files in `dir` ("" for the working directory) whose names end in `ext`,
+// ignoring case, as paths into `out`: `max` slots of `each` bytes. Returns
+// how many; a missing folder has none.
+int export_list(const char *dir, const char *ext, char *out, size_t each, int max);
+
 #ifdef __cplusplus
 }
 #endif

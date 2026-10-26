@@ -16,15 +16,52 @@
 #include "memory.h"
 #include "cpu/irq_ctx.h"
 #include "vera_bandwidth.h"
+#include "profile_run.h"
+#include "dbg_load.h"
+#include "git_rev.h"
 
 #include <SDL.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static prof_report_t report;
 static bool          have_report;
 static uint32_t      report_frames;
 static uint32_t      report_generation;
+
+// A saved run being shown in place of the last capture (profile_run.h). While
+// one is, names, source lines and the clock come from it, not from the
+// emulator as it is now.
+static bool            run_loaded;
+static prof_run_meta_t run_meta;
+static prof_run_key_t *run_keys;
+static int             run_nkeys;
+static char            run_path[1024];
+
+static void
+unload_run(void)
+{
+	for (int i = 0; run_keys && i < run_nkeys; i++)
+		free(run_keys[i].source);
+	free(run_keys);
+	run_keys   = NULL;
+	run_nkeys  = 0;
+	run_loaded = false;
+}
+
+// The report row a key belongs to, from the run when one is shown.
+static int
+row_of(uint32_t key)
+{
+	if (!have_report)
+		return -1;
+	if (run_loaded) {
+		const prof_run_key_t *k = prof_run_find_key(run_keys, run_nkeys, key);
+		return k ? k->row : -1;
+	}
+	return prof_report_row_of_key(&report, key);
+}
 
 // Whether perf_hist was armed by someone else (a DAP client) before the
 // capture, so ending the capture leaves it as it was found.
@@ -181,6 +218,7 @@ static bool
 arm(uint32_t mask)
 {
 	bool ok = true;
+	unload_run();
 	if (mask & CAP_REC_HIST) {
 		hist_was_enabled = perf_hist_enabled;
 		ok = perf_hist_arm(true) && ok;
@@ -451,7 +489,7 @@ json_str(FILE *f, const char *s)
 static void
 key_name(uint32_t key, char *buf, int size)
 {
-	const int r = have_report ? prof_report_row_of_key(&report, key) : -1;
+	const int r = row_of(key);
 	if (r >= 0) {
 		snprintf(buf, (size_t)size, "%s", report.rows[r].name);
 		return;
@@ -516,7 +554,7 @@ profile_session_writes_by_routine(int *count)
 	if (!out)
 		return NULL;
 	for (int i = 0; i < na; i++)
-		out[i] = (prof_writes_t){have_report ? prof_report_row_of_key(&report, a[i].key) : -1,
+		out[i] = (prof_writes_t){row_of(a[i].key),
 		                         a[i].lane, a[i].key, a[i].writes};
 	// Merge entries for the same (row, lane): many instructions, one routine.
 	qsort(out, (size_t)na, sizeof *out, cmp_writes_row);
@@ -544,6 +582,10 @@ typedef struct {
 static const char *
 key_source(src_entry_t *cache, uint32_t key)
 {
+	if (run_loaded) {
+		const prof_run_key_t *k = prof_run_find_key(run_keys, run_nkeys, key);
+		return k && k->source ? k->source : "";
+	}
 	uint32_t h = (key * 0x9E3779B1u) & (SRC_CACHE - 1);
 	for (int probe = 0; probe < SRC_CACHE; probe++, h = (h + 1) & (SRC_CACHE - 1)) {
 		if (cache[h].used && cache[h].key == key)
@@ -684,6 +726,8 @@ trace_frames(int *out, int max)
 double
 profile_session_mhz(void)
 {
+	if (run_loaded && run_meta.mhz > 0)
+		return run_meta.mhz;
 	return MHZ ? (double)MHZ : 8.0;
 }
 
@@ -702,6 +746,11 @@ profile_session_key_where(uint32_t key, char *buf, int size)
 bool
 profile_session_key_source(uint32_t key, char *buf, int size)
 {
+	if (run_loaded) {
+		const prof_run_key_t *k = prof_run_find_key(run_keys, run_nkeys, key);
+		snprintf(buf, (size_t)size, "%s", k && k->source ? k->source : "");
+		return buf[0] != 0;
+	}
 	uint8_t  region, bank;
 	uint16_t pc;
 	perf_hist_key_decode(key, &region, &bank, &pc);
@@ -750,7 +799,7 @@ profile_session_export_trace(const char *path)
 		           ",\n{\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"name\":\"thread_sort_index\",\"args\":{\"sort_index\":%d}}",
 		        10 + l, wf_lane_name(l), 10 + l, 10 + l);
 
-	trace_ctx_t c = {f, NULL, 1.0 / (double)(MHZ ? MHZ : 8), cache, 0};
+	trace_ctx_t c = {f, NULL, 1.0 / profile_session_mhz(), cache, 0};
 	for (int i = 0; i < n; i++) {
 		c.frame = frames[i];
 		fprintf(f, ",\n{\"ph\":\"X\",\"pid\":1,\"tid\":2,\"ts\":%.3f,\"dur\":%.3f,\"name\":\"frame %u\","
@@ -902,6 +951,175 @@ bool
 profile_session_has_waterfall(void)
 {
 	return wf_recorded && wf_ready && wf_frames_seen() > 0;
+}
+
+// ─── Saved runs ─────────────────────────────────────────────────────────────
+
+static int
+cmp_u32(const void *a, const void *b)
+{
+	const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+	return (x > y) - (x < y);
+}
+
+int
+profile_session_save_run(const char *path, char *msg, size_t msg_size)
+{
+	if (!have_report) {
+		snprintf(msg, msg_size, "There is no recording to save.");
+		return -1;
+	}
+	if (cap_running()) {
+		snprintf(msg, msg_size, "A recording is running; save once it has stopped.");
+		return -1;
+	}
+	// What it was recorded with.
+	prof_run_meta_t m;
+	if (run_loaded) {
+		m = run_meta; // saving a run that was loaded keeps its own story
+	} else {
+		memset(&m, 0, sizeof m);
+		snprintf(m.revision, sizeof m.revision, "%s", GIT_REV);
+		snprintf(m.program, sizeof m.program, "%s", dbg_load_prg_path());
+		size_t at = 0;
+		for (int i = 0; i < dbg_info_loaded_count() && at < sizeof m.dbg; i++)
+			at += (size_t)snprintf(m.dbg + at, sizeof m.dbg - at, "%s%s", i ? "; " : "", dbg_info_loaded_at(i));
+		snprintf(m.end_reason, sizeof m.end_reason, "%s", cap_end_name(cap_end_reason()));
+		m.mhz             = profile_session_mhz();
+		m.elapsed_s       = cap_elapsed_s();
+		m.frames          = report_frames;
+		m.recorders       = cap_recorders();
+		m.tree_consistent = tree_consistent;
+		m.b_have          = budget_summary.have;
+		m.b_frames        = budget_summary.frames;
+		m.b_total         = budget_summary.total;
+		m.b_idle          = budget_summary.idle;
+		m.b_work_max      = budget_summary.work_max;
+		m.b_overruns      = budget_summary.overruns;
+		m.b_budget        = budget_summary.budget;
+	}
+	const time_t now = time(NULL);
+	strftime(m.captured, sizeof m.captured, "%Y-%m-%d %H:%M:%S", localtime(&now));
+
+	// Every key the panel can ask about: call targets, writing instructions.
+	const bool wf   = profile_session_has_waterfall();
+	size_t     cap  = (size_t)(report.nodes ? report.node_count : 0) + 1024, n = 0;
+	uint32_t  *list = malloc(sizeof *list * cap);
+	if (!list) {
+		snprintf(msg, msg_size, "Out of memory.");
+		return -1;
+	}
+#define PUSH(k)                                                                  	do {                                                                         		if (n == cap) {                                                          			uint32_t *g = realloc(list, sizeof *list * cap * 2);                 			if (!g)                                                              				break;                                                           			list = g;                                                            			cap *= 2;                                                            		}                                                                        		list[n++] = (k);                                                         	} while (0)
+	for (int i = 0; report.nodes && i < report.node_count; i++)
+		if (report.nodes[i].key < PH_KEYS)
+			PUSH(report.nodes[i].key);
+	if (wf) {
+		for (int i = 0; i < wf_frame_count(); i++) {
+			const wf_frame_t *fr = wf_frame(i);
+			for (int e = 0; fr->events && e < fr->count; e++)
+				if (wf_event_lane(&fr->events[e]) != WF_LANE_CPU && !wf_event_is_mark(&fr->events[e]))
+					PUSH(wf_event_key(&fr->events[e]));
+		}
+		int             na;
+		const wf_agg_t *a = wf_aggregates(&na);
+		for (int i = 0; a && i < na; i++)
+			PUSH(a[i].key);
+	}
+#undef PUSH
+	qsort(list, n, sizeof *list, cmp_u32);
+	size_t u = 0;
+	for (size_t i = 0; i < n; i++)
+		if (!u || list[u - 1] != list[i])
+			list[u++] = list[i];
+
+	prof_run_key_t *keys = calloc(u ? u : 1, sizeof *keys);
+	char           *text = malloc(u ? u * 300 : 1);
+	int             rc   = -1;
+	if (keys && text) {
+		for (size_t i = 0; i < u; i++) {
+			keys[i].key    = list[i];
+			keys[i].row    = row_of(list[i]);
+			keys[i].source = text + i * 300;
+			profile_session_key_source(list[i], keys[i].source, 300);
+		}
+		rc = prof_run_write(path, &m, &report, keys, (int)u, wf, msg, msg_size);
+	} else {
+		snprintf(msg, msg_size, "Out of memory.");
+	}
+	free(text);
+	free(keys);
+	free(list);
+	return rc;
+}
+
+int
+profile_session_load_run(const char *path, char *msg, size_t msg_size)
+{
+	if (cap_running()) {
+		snprintf(msg, msg_size, "A recording is running; open a saved run once it has stopped.");
+		return -1;
+	}
+	prof_run_t run;
+	if (prof_run_read(path, &run, msg, msg_size) != 0)
+		return -1;
+	if (run.wf && !wf_ready)
+		wf_ready = wf_init(WF_FRAME_CAP, WF_BUDGET);
+	if (run.wf && !wf_ready) {
+		prof_run_free(&run);
+		snprintf(msg, msg_size, "Out of memory for the run's frames; nothing was loaded.");
+		return -1;
+	}
+
+	// Everything is read: now it replaces what was shown.
+	if (have_report)
+		prof_report_free(&report);
+	unload_run();
+	report          = run.report;
+	have_report     = true;
+	report_frames   = run.meta.frames;
+	tree_consistent = run.meta.tree_consistent;
+	memset(&budget_summary, 0, sizeof budget_summary);
+	budget_summary.have     = run.meta.b_have;
+	budget_summary.frames   = run.meta.b_frames;
+	budget_summary.total    = run.meta.b_total;
+	budget_summary.idle     = run.meta.b_idle;
+	budget_summary.work_max = run.meta.b_work_max;
+	budget_summary.overruns = run.meta.b_overruns;
+	budget_summary.budget   = run.meta.b_budget;
+	if (run.wf) {
+		wf_install(run.wf);
+		wf_recorded = true;
+	} else {
+		if (wf_ready)
+			wf_reset();
+		wf_recorded = false;
+	}
+	run_keys   = run.keys;
+	run_nkeys  = run.nkeys;
+	run_meta   = run.meta;
+	run_loaded = true;
+	snprintf(run_path, sizeof run_path, "%s", path);
+	report_generation++;
+	snprintf(msg, msg_size, "Showing %s, saved %s: %u frames.", path, run_meta.captured, run_meta.frames);
+	return 0;
+}
+
+bool
+profile_session_run_loaded(void)
+{
+	return run_loaded;
+}
+
+const prof_run_meta_t *
+profile_session_run_meta(void)
+{
+	return run_loaded ? &run_meta : NULL;
+}
+
+const char *
+profile_session_run_path(void)
+{
+	return run_loaded ? run_path : "";
 }
 
 const prof_report_t *

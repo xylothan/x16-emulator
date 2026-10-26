@@ -336,6 +336,7 @@ set(X16_SOURCES
     src/sdcard_fat.c
     src/main.c
     src/export_paths.c
+    src/profile_run.c
     src/debugger.c
     src/dbg_info.c
     src/dbg_load.c
@@ -765,6 +766,11 @@ x16_add_test(rom_syms
 # The waterfall's frames, worst list, aggregates and export walk, by hand.
 x16_add_test(waterfall
     SOURCES tests/test_waterfall.c tests/support/harness.c src/waterfall.c)
+
+# A saved profile run: written, read back, damaged, and from a newer writer.
+x16_add_test(profile_run
+    SOURCES tests/test_profile_run.c tests/support/harness.c src/profile_run.c src/profile_report.c
+            src/perf_hist.c src/profile_cct.c src/waterfall.c)
 
 x16_add_test(input_script
     SOURCES tests/test_input_script.c tests/support/harness.c src/input_script.c)
