@@ -420,6 +420,7 @@ if(USE_IMGUI)
         src/debug_ui/debug_info_page.cpp
         src/debug_ui/export_page.cpp
         src/debug_ui/file_dialog.cpp
+        src/debug_ui/profile_files.cpp
         src/debug_ui/panels/waterfall_view.cpp
         src/debug_ui/panels/flame_view.cpp
         src/debug_ui/panels/callers_view.cpp

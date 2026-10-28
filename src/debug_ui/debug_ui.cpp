@@ -9,6 +9,7 @@
 #include "debug_ui_bridge.h" // regs + execution-control (DEBUGContinue/…/DEBUGIsRunning)
 #include "debug_ui_settings.h" // user preferences (System → Settings...)
 #include "source_folders.h"    // where to look for source files (Settings > Source folders)
+#include "profile_files.h"     // File menu: profile runs and exports
 #include "debug_ui_image.h"  // panel image textures (SDL_Texture or shared DX12)
 #include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
 #include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
@@ -657,6 +658,70 @@ debug_ui_draw_control_bar(void)
     // panel after its window has been closed (the [x]), so it doubles as the
     // panel visibility manager. Iterates the self-registered registry, so new
     // panels appear here automatically.
+    // File: what is read from and written to disk -- profile recordings and
+    // the program's debug info.
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Open profile run...", nullptr, false, profile_files_can_open()))
+            profile_files_open_run();
+        ImGui::SetItemTooltip("Show a saved profile run in the Profile panel, in place of the last\n"
+                              "recording. No program or debug info needs to be loaded.");
+        if (ImGui::BeginMenu("Recent profile runs", profile_files_can_open())) {
+            // Read the folder when the submenu opens, not every frame.
+            static int n = 0;
+            if (ImGui::IsWindowAppearing())
+                n = profile_files_recent(10);
+            if (n == 0)
+                ImGui::TextDisabled("None in the profile export folder yet.");
+            for (int i = 0; i < n; i++) {
+                const char *path = profile_files_recent_at(i);
+                const char *base = path;
+                for (const char *c = path; *c; c++)
+                    if (*c == '/' || *c == '\\')
+                        base = c + 1;
+                ImGui::PushID(i);
+                if (ImGui::MenuItem(base))
+                    profile_files_open_path(path);
+                ImGui::SetItemTooltip("%s", path);
+                ImGui::PopID();
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save profile run", nullptr, false, profile_files_can_save()))
+            profile_files_save_run();
+        ImGui::SetItemTooltip("Save the recording shown -- report, call tree, frame timeline, names and\n"
+                              "source lines -- as one .x16prof file in the profile export folder, to\n"
+                              "open again later. With a long frame timeline it can be large (up to\n"
+                              "about 128 MB).");
+        if (ImGui::MenuItem("Save profile run as...", nullptr, false, profile_files_can_save()))
+            profile_files_save_run_as();
+        if (ImGui::BeginMenu("Export profile", profile_files_can_save())) {
+            if (ImGui::MenuItem("Flame graph (.folded)", nullptr, false, profile_files_can_export(PROFILE_EXPORT_FOLDED)))
+                profile_files_export(PROFILE_EXPORT_FOLDED);
+            ImGui::SetItemTooltip("One line per call path with its own time, for speedscope.app or\n"
+                                  "flamegraph.pl. Needs 'Who called what'.");
+            if (ImGui::MenuItem("Everything (.json)", nullptr, false, profile_files_can_export(PROFILE_EXPORT_JSON)))
+                profile_files_export(PROFILE_EXPORT_JSON);
+            ImGui::SetItemTooltip("Every routine and the whole call tree, for scripts.");
+            if (ImGui::MenuItem("Timeline (.trace.json)", nullptr, false, profile_files_can_export(PROFILE_EXPORT_TRACE)))
+                profile_files_export(PROFILE_EXPORT_TRACE);
+            ImGui::SetItemTooltip("The Waterfall's frames as a Chrome trace, for ui.perfetto.dev or\n"
+                                  "chrome://tracing. Needs 'Frame timeline'.");
+            ImGui::EndMenu();
+        }
+        ImGui::SetItemTooltip("For other tools. Files go in the profile export folder.");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Load debug info..."))
+            debug_ui_open_settings("Debug info");
+        ImGui::SetItemTooltip("Load or replace the program's .dbg file (Settings > Debug info).");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Export folders..."))
+            debug_ui_open_settings("Export folders");
+        ImGui::SetItemTooltip("Where profiles, screenshots and dumps are written, and how exports\n"
+                              "are named (Settings > Export folders).");
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("View")) {
         for (DebugPanel &panel : debug_ui_panels()) {
             ImGui::MenuItem(panel.name, nullptr, &panel.open);
@@ -692,10 +757,6 @@ debug_ui_draw_control_bar(void)
         ImGui::Separator();
 
         // Behavioural toggles live in Settings, not scattered through menus.
-        if (ImGui::MenuItem("Load debug info..."))
-            debug_ui_open_settings("Debug info");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Load or replace the program's .dbg file (Settings > Debug info).");
         if (ImGui::MenuItem("Settings...", nullptr, debug_ui_settings_is_open())) {
             debug_ui_open_settings(nullptr);
         }
@@ -1131,6 +1192,8 @@ debug_ui_render(void)
     debug_ui_perf_recorders_tick();
     // A source-folder search in progress reads a few more folders.
     source_folders_search_tick();
+    // File > Open profile run's window, where there is no file dialog.
+    profile_files_draw();
     // Debug info replaced (Settings > Debug info), even with the machine
     // stopped: the profile is named again, and the next frame shows it.
     profile_session_sync_names();
