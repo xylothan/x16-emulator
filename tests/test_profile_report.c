@@ -261,6 +261,49 @@ main(void)
 		#undef BOX
 	}
 
+	// ── Named again from other debug info: the counts kept, not the live ones ──
+	{
+		check_eq((uint32_t)r.hist_count, 8, "the report keeps the 8 keys that ran");
+		const uint64_t main_was = r.main_cycles, irq_was = r.irq_cycles;
+		const int      nodes_was = r.node_count;
+		// The histogram moves on after the capture; the rename must not see it.
+		perf_hist_reset();
+		run(0x5000, 0, 0, 99, 3, false);
+
+		// Another build's labels: init's address is now inside `setup`, and
+		// `update` became `tick`; one label now covers all of the first page.
+		const prof_sym_t other[] = {
+			{"setup", 0x0800, -1}, {"tick", 0x0900, -1},
+			{"blit64", 0xA000, 64}, {"draw65", 0xA000, 65}, {"mystery", 0xA100, -1},
+		};
+		check(prof_report_rename(&r, other, 5, covered), "renames");
+		check(row_named(&r, "init") == NULL && row_named(&r, "update") == NULL && row_named(&r, "draw64") == NULL,
+		      "the old names are gone");
+		const prof_row_t *x2 = row_named(&r, "setup");
+		check(x2 && x2->main_cycles == 40 && x2->instructions == 10, "init's time is setup's");
+		x2 = row_named(&r, "tick");
+		check(x2 && x2->main_cycles == 3 && x2->irq_cycles == 2, "update's is tick's, main and IRQ apart");
+		x2 = row_named(&r, "blit64");
+		check(x2 && x2->main_cycles == 14 && x2->bank == 64, "banked labels follow too");
+		check(r.main_cycles == main_was && r.irq_cycles == irq_was,
+		      "same totals: the kept counts, not the histogram since");
+		check(row_named(&r, "$50xx") == NULL, "nothing from after the capture");
+		check_eq((uint32_t)r.node_count, (uint32_t)nodes_was, "the tree is kept");
+		check_eq((uint32_t)row_named(&r, "setup")->incl_cycles, 100, "and re-attached to the new rows");
+		check_eq((uint32_t)r.nodes[3].row, (uint32_t)(row_named(&r, "tick") - r.rows), "nodes carry the new rows");
+
+		// Fewer labels: two routines become one row.
+		const prof_sym_t one[] = {{"all", 0x0800, -1}};
+		check(prof_report_rename(&r, one, 1, covered), "renames again");
+		x2 = row_named(&r, "all");
+		check(x2 && x2->main_cycles == 43 && x2->irq_cycles == 2, "setup and tick regroup into one row");
+		check(r.main_cycles == main_was, "still the same totals");
+
+		prof_report_t none;
+		memset(&none, 0, sizeof none);
+		check(!prof_report_rename(&none, one, 1, covered), "a report with no kept counts cannot be renamed");
+	}
+
 	prof_report_free(&r);
 	check(r.rows == NULL && r.count == 0, "free empties it");
 

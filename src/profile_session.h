@@ -32,6 +32,19 @@ uint32_t             profile_session_report_frames(void); // frames it covered
 // Bumped for every new report. A new report can reuse the old one's
 // allocations and counts, so this is what tells a cache it is stale.
 uint32_t             profile_session_report_generation(void);
+// Bumped only for a new recording or a saved run opened -- not when the same
+// one is named again -- so a view can tell "start over" from "redraw".
+uint32_t             profile_session_recording_generation(void);
+
+// Name the report again if the debug info changed since it was built: a .dbg
+// replaced, reloaded or added. Rows are regrouped under the new labels and the
+// report generation bumps. A saved run keeps the names it was saved with (it
+// has no per-address counts to regroup). Call once a frame, before anything
+// reads the report -- the debugger does, whether or not the machine runs.
+void profile_session_sync_names(void);
+// Whether the debug info changed since a saved run was opened, so what it
+// shows was named by debug info that is no longer loaded.
+bool profile_session_run_names_stale(void);
 
 // Write the report as a table: totals, then the top `top` rows.
 void profile_session_print(FILE *f, int top);

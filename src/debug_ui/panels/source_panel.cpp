@@ -20,6 +20,7 @@
 #include "debug_ui_widgets.h" // dbgui_value_lines
 #include "debug_ui_insn_tooltip.h" // dbgui_instruction_tooltip_body
 #include "../source_folders.h"      // add folders / search a tree for missing files
+#include "../debug_ui_settings.h"   // debug_ui_open_settings
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -637,7 +638,13 @@ source_panel_render(bool *p_open)
             "The Source view needs cc65 debug info (a .dbg file) that maps "
             "addresses to source lines.");
         ImGui::Spacing();
-        ImGui::BulletText("Start the emulator with:  -dbgfile <program.dbg>");
+        if (ImGui::Button("Load a .dbg file..."))
+            debug_ui_open_settings("Debug info");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Settings > Debug info: pick a .dbg and load it now. Source files\n"
+                              "beside it are found without setting up source folders.");
+        ImGui::Spacing();
+        ImGui::BulletText("Or start the emulator with:  -dbgfile <program.dbg>");
         ImGui::BulletText("If the .s/.c files aren't beside the .dbg:  -srcpath <dir>");
         ImGui::BulletText("A LOADed program's matching .dbg is picked up automatically.");
         dbgui_window_end();

@@ -13,6 +13,7 @@
 #include "debug_ui_dx12.h"   // native DX12 debugger renderer (HAS_DX12 builds)
 #include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
 #include "../profile_capture.h" // capture mode: the debugger goes quiet while it records
+#include "../profile_session.h" // profile_session_sync_names
 
 // How often the debugger repaints its menu bar while a capture records.
 static const Uint32 CAPTURE_UI_INTERVAL_MS = 250;
@@ -691,6 +692,10 @@ debug_ui_draw_control_bar(void)
         ImGui::Separator();
 
         // Behavioural toggles live in Settings, not scattered through menus.
+        if (ImGui::MenuItem("Load debug info..."))
+            debug_ui_open_settings("Debug info");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Load or replace the program's .dbg file (Settings > Debug info).");
         if (ImGui::MenuItem("Settings...", nullptr, debug_ui_settings_is_open())) {
             debug_ui_open_settings(nullptr);
         }
@@ -1126,6 +1131,9 @@ debug_ui_render(void)
     debug_ui_perf_recorders_tick();
     // A source-folder search in progress reads a few more folders.
     source_folders_search_tick();
+    // Debug info replaced (Settings > Debug info), even with the machine
+    // stopped: the profile is named again, and the next frame shows it.
+    profile_session_sync_names();
 
     if (!quiet) {
         // Optional vendored demo window (Help → Show ImGui Demo).

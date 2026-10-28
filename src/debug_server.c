@@ -2480,6 +2480,8 @@ static int handle_x16_capture(int seq, cJSON *args) {
 
     if (profile_session_run_loaded())
         cJSON_AddStringToObject(body, "loadedRun", profile_session_run_path());
+    // A .dbg loaded while the machine was stopped: name the report from it.
+    profile_session_sync_names();
     const prof_report_t *r = profile_session_report();
     if (r && (cap_state() == CAP_DONE || profile_session_run_loaded())) {
         cJSON *rep = cJSON_CreateObject();

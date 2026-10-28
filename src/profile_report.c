@@ -162,12 +162,12 @@ lookup_free(lookup_t *L)
 	free(L);
 }
 
-bool
-prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_covered_fn covered)
+// The rows, from the histogram's non-zero keys in key order.
+static bool
+build_from(prof_report_t *out, const prof_key_count_t *hist, int nhist, const prof_sym_t *syms, int nsyms,
+           prof_covered_fn covered)
 {
 	memset(out, 0, sizeof *out);
-	if (!perf_hist_key_counts(0, NULL, NULL, NULL))
-		return false;
 
 	// Split and sort the symbol table.
 	lookup_t *L = calloc(1, sizeof *L);
@@ -214,11 +214,8 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 	bank_run(L->ram, L->nram, -1, &L->unk_lo, &L->unk_hi);
 
 	int n = 0;
-	for (uint32_t k = 0; k < PH_KEYS; k++) {
-		uint32_t m, q, c;
-		perf_hist_key_counts(k, &m, &q, &c);
-		if (!m && !q && !c)
-			continue;
+	for (int h = 0; h < nhist; h++) {
+		const uint32_t k = hist[h].key, m = hist[h].main, q = hist[h].irq, c = hist[h].count;
 		out->main_cycles  += m;
 		out->irq_cycles   += q;
 		out->instructions += c;
@@ -314,6 +311,61 @@ prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_co
 	out->rows   = rows;
 	out->count  = n;
 	out->lookup = L;
+	return true;
+}
+
+bool
+prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms, prof_covered_fn covered)
+{
+	memset(out, 0, sizeof *out);
+	if (!perf_hist_key_counts(0, NULL, NULL, NULL))
+		return false;
+	// The keys that ran, copied out: the report can then be named again
+	// (prof_report_rename) from what was recorded, whatever the histogram
+	// goes on to count.
+	int nhist = 0;
+	for (uint32_t k = 0; k < PH_KEYS; k++) {
+		uint32_t m, q, c;
+		perf_hist_key_counts(k, &m, &q, &c);
+		nhist += (m || q || c);
+	}
+	prof_key_count_t *hist = malloc(sizeof *hist * (size_t)(nhist > 0 ? nhist : 1));
+	if (!hist)
+		return false;
+	int h = 0;
+	for (uint32_t k = 0; k < PH_KEYS && h < nhist; k++) {
+		uint32_t m, q, c;
+		perf_hist_key_counts(k, &m, &q, &c);
+		if (m || q || c)
+			hist[h++] = (prof_key_count_t){k, m, q, c};
+	}
+	if (!build_from(out, hist, h, syms, nsyms, covered)) {
+		free(hist);
+		return false;
+	}
+	out->hist       = hist;
+	out->hist_count = h;
+	return true;
+}
+
+bool
+prof_report_rename(prof_report_t *r, const prof_sym_t *syms, int nsyms, prof_covered_fn covered)
+{
+	if (!r || !r->hist)
+		return false;
+	prof_report_t t;
+	if (!build_from(&t, r->hist, r->hist_count, syms, nsyms, covered))
+		return false;
+	if (r->nodes && !prof_report_add_tree(&t, r->nodes, r->node_count)) {
+		prof_report_free(&t);
+		return false;
+	}
+	// Built: only now does it replace the old one.
+	t.hist       = r->hist;
+	t.hist_count = r->hist_count;
+	r->hist      = NULL;
+	prof_report_free(r);
+	*r = t;
 	return true;
 }
 
@@ -656,6 +708,7 @@ prof_report_free(prof_report_t *r)
 		return;
 	free(r->rows);
 	free(r->nodes);
+	free(r->hist);
 	lookup_free(r->lookup);
 	memset(r, 0, sizeof *r);
 }

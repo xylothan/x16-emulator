@@ -5,6 +5,7 @@
 
 #include "imgui.h"
 #include "debug_ui_widgets.h" // dbgui_text_width
+#include "file_dialog.h"
 
 #include <algorithm>
 #include <ctype.h>
@@ -158,6 +159,20 @@ replace_with(const char *path)
     rescan(true);
 }
 
+// Where a file dialog starts: beside the loaded .dbg, else the program, else
+// the host folder.
+std::string
+browse_from(void)
+{
+    if (dbg_info_loaded_count() > 0 && dbg_info_loaded_at(0))
+        return folder_of(dbg_info_loaded_at(0));
+    if (dbg_load_prg_path()[0])
+        return folder_of(dbg_load_prg_path());
+    if (fsroot_path && fsroot_path[0])
+        return (const char *)fsroot_path;
+    return std::string();
+}
+
 } // namespace
 
 void
@@ -169,6 +184,10 @@ debug_info_draw_page(void)
     const int nl = dbg_info_loaded_count();
     if (!dbg_info_is_loaded() || nl == 0) {
         ImGui::TextDisabled("No debug info is loaded.");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("Load a .dbg below. Its folder becomes a source folder, so source files beside "
+                            "it are found with nothing else to set up.");
+        ImGui::PopTextWrapPos();
     } else {
         ImGui::Text("Loaded: %d source files, %d symbols, from", dbg_info_file_count(), dbg_info_symbol_count());
         for (int i = 0; i < nl; i++) {
@@ -205,10 +224,12 @@ debug_info_draw_page(void)
     }
 
     // Others found on disk.
-    ImGui::SeparatorText("Replace with");
-    ImGui::TextWrapped("Replacing throws away all the debug info loaded now and loads only the file "
-                       "chosen. Use it when the wrong build's .dbg was loaded: names, source lines and "
-                       "source breakpoints all come from it.");
+    const bool any = dbg_info_is_loaded() && nl > 0;
+    ImGui::SeparatorText(any ? "Replace with" : "Load");
+    if (any)
+        ImGui::TextWrapped("Replacing throws away all the debug info loaded now and loads only the file "
+                           "chosen. Use it when the wrong build's .dbg was loaded: names, source lines and "
+                           "source breakpoints all come from it.");
     if (s_found.empty()) {
         ImGui::TextDisabled("No other .dbg files beside the loaded one, the program, or the host folder.");
     } else if (ImGui::BeginTable("dbgfiles", 4,
@@ -250,15 +271,29 @@ debug_info_draw_page(void)
         ImGui::SetTooltip("Search the folders again for .dbg files.");
 
     ImGui::Spacing();
+    if (file_dialog_available()) {
+        if (ImGui::Button("Browse for a .dbg file...")) {
+            char              picked[1024];
+            const std::string from = browse_from();
+            if (file_dialog_open("Load debug info", "cc65 debug info (*.dbg)", "*.dbg", from.c_str(), picked,
+                                 sizeof picked)) {
+                snprintf(s_path, sizeof s_path, "%s", picked);
+                replace_with(picked);
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pick a file and load it in place of what is loaded now.");
+    }
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Other file");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-dbgui_text_width("Use this file") - ImGui::GetStyle().FramePadding.x * 2 -
                             ImGui::GetStyle().ItemSpacing.x);
-    ImGui::InputTextWithHint("##dbgpath", "C:\\path\\to\\program.dbg", s_path, sizeof s_path);
+    const bool enter = ImGui::InputTextWithHint("##dbgpath", "C:\\path\\to\\program.dbg", s_path, sizeof s_path,
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
     ImGui::BeginDisabled(!s_path[0]);
-    if (ImGui::Button("Use this file"))
+    if (ImGui::Button("Use this file") || (enter && s_path[0]))
         replace_with(s_path);
     ImGui::EndDisabled();
 
@@ -272,7 +307,8 @@ debug_info_draw_page(void)
     ImGui::Spacing();
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("After a replace, breakpoints set by clicking a source line stay at their addresses; "
-                        "a debug adapter's source breakpoints are resolved again. A profile already captured "
-                        "keeps the names it was built with: capture again to use the new names.");
+                        "a debug adapter's source breakpoints are resolved again. The last profile recording "
+                        "is named again from the new file, waterfall included; a saved run that was opened "
+                        "keeps the names it was saved with.");
     ImGui::PopTextWrapPos();
 }
