@@ -10,11 +10,10 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"  // debug_ui_request_goto
 #include "debug_ui_widgets.h" // dbgui_window_zoom/end, dbgui_col_width
-#include "debug_ui_settings.h" // the export file name and folder
+#include "../profile_files.h"  // File menu: save, open, export
 
 #include "../perf_hist.h"
 #include "../profile_session.h"
-#include "../export_paths.h"
 #include "../profile_run.h"
 #include "waterfall_view.h"
 #include "flame_view.h"
@@ -49,116 +48,9 @@ bool  g_rec_vram   = false;
 bool  g_rec_tree   = true;
 bool  g_rec_wf     = false;
 char  g_filter[64] = "";
-char  g_export[260] = "";  // seeded from Settings on first draw
 
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
-
-// Saved runs: the recording shown, to a file; a file, shown again.
-char g_run_msg[1400] = "";
-
-void
-draw_open_run_popup(void)
-{
-	if (!ImGui::BeginPopup("open_run"))
-		return;
-	// The runs in the export folder, newest first, read when the list opens.
-	struct Found {
-		std::string path;
-		time_t      mtime;
-		long long   size;
-	};
-	static std::vector<Found> found;
-	if (ImGui::IsWindowAppearing()) {
-		static char list[64][1024];
-		const int   n = export_list(export_dir(EXPORT_PROFILE), PROF_RUN_EXT, &list[0][0], sizeof list[0], 64);
-		found.clear();
-		for (int i = 0; i < n; i++) {
-			Found f{list[i], 0, -1};
-#ifdef _WIN32
-			struct _stat64 sb;
-			if (_stat64(list[i], &sb) == 0) {
-#else
-			struct stat sb;
-			if (stat(list[i], &sb) == 0) {
-#endif
-				f.mtime = (time_t)sb.st_mtime;
-				f.size  = (long long)sb.st_size;
-			}
-			found.push_back(f);
-		}
-		std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) { return a.mtime > b.mtime; });
-	}
-	ImGui::TextDisabled("Saved runs in %s:", export_dir(EXPORT_PROFILE)[0] ? export_dir(EXPORT_PROFILE)
-	                                                                       : "the working directory");
-	ImGui::Separator();
-	if (found.empty())
-		ImGui::TextDisabled("  (none yet)");
-	for (size_t i = 0; i < found.size(); i++) {
-		const std::string &p    = found[i].path;
-		const size_t       cut  = p.find_last_of("/\\");
-		const char        *base = cut == std::string::npos ? p.c_str() : p.c_str() + cut + 1;
-		char               line[600];
-		snprintf(line, sizeof line, "%s   (%.1f MB)", base, found[i].size >= 0 ? found[i].size / 1048576.0 : 0.0);
-		ImGui::PushID((int)i);
-		if (ImGui::Selectable(line)) {
-			profile_session_load_run(p.c_str(), g_run_msg, sizeof g_run_msg);
-			ImGui::CloseCurrentPopup();
-		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s", p.c_str());
-		ImGui::PopID();
-	}
-	ImGui::Separator();
-	static char path[1024] = "";
-	ImGui::SetNextItemWidth(dbgui_text_width("wwwwwwwwwwwwwwwwwwwwwwwwwwwwww"));
-	ImGui::InputTextWithHint("##runpath", "or a path to a" PROF_RUN_EXT " file", path, sizeof path);
-	ImGui::SameLine();
-	ImGui::BeginDisabled(!path[0]);
-	if (ImGui::Button("Open")) {
-		profile_session_load_run(path, g_run_msg, sizeof g_run_msg);
-		ImGui::CloseCurrentPopup();
-	}
-	ImGui::EndDisabled();
-	ImGui::EndPopup();
-}
-
-void
-draw_runs(void)
-{
-	DebugUiSettings &st = debug_ui_settings();
-	ImGui::BeginDisabled(!profile_session_report());
-	if (ImGui::Button("Save run")) {
-		char name[400], path[1100];
-		const time_t now = time(nullptr);
-		char         stamp[32];
-		strftime(stamp, sizeof stamp, "-%Y%m%d-%H%M%S", localtime(&now));
-		// Always stamped: a run is a record of one recording, never replaced.
-		snprintf(name, sizeof name, "%s%s" PROF_RUN_EXT, st.profile_export_name.empty() ? "profile"
-		                                                                               : st.profile_export_name.c_str(),
-		         stamp);
-		if (export_path(EXPORT_PROFILE, name, path, sizeof path))
-			profile_session_save_run(path, g_run_msg, sizeof g_run_msg);
-		else
-			snprintf(g_run_msg, sizeof g_run_msg, "Could not make the folder %s", export_dir(EXPORT_PROFILE));
-	}
-	ImGui::EndDisabled();
-	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-		ImGui::SetTooltip("Save this recording -- report, call tree, frame timeline, and the names and\n"
-		                  "source lines shown -- as one" PROF_RUN_EXT " file in the profile export folder,\n"
-		                  "to open again later, even with a different program or debug info loaded.\n"
-		                  "With a long frame timeline it can be large (up to about 128 MB).");
-	ImGui::SameLine();
-	if (ImGui::Button("Open run..."))
-		ImGui::OpenPopup("open_run");
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Show a saved run in place of the last recording.");
-	draw_open_run_popup();
-	if (g_run_msg[0]) {
-		ImGui::SameLine();
-		ImGui::TextDisabled("%s", g_run_msg);
-	}
-}
 
 void
 draw_controls(void)
@@ -254,7 +146,12 @@ draw_controls(void)
 	}
 	ImGui::SameLine();
 	ImGui::TextDisabled("The debugger stops updating while it records, so the measurement is clean.");
-	draw_runs();
+	// Save, open and export are in the File menu; what the last one did shows here.
+	if (profile_files_status()[0]) {
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextDisabled("%s", profile_files_status());
+		ImGui::PopTextWrapPos();
+	}
 	if (st == CAP_DONE && cap_end_reason() == CAP_END_FAILED)
 		ImGui::TextColored(COL_AMBIG, "The last recording could not start: a recorder failed to set up.");
 }
@@ -688,81 +585,6 @@ draw_report(void)
 			ImGui::SetTooltip("Waiting is time in WAI or in a loop polling for vsync: cycles the\n"
 			                  "program could have used. A frame is over budget when its work\n"
 			                  "alone needed more cycles than the frame has, so it ran late.");
-	}
-
-	// Exports, for other tools. Collapsed: nothing in the panel needs them.
-	if (ImGui::TreeNode("Export for other tools")) {
-		DebugUiSettings &st = debug_ui_settings();
-		static char export_msg[1200] = "";
-		static bool editing = false; // the box was being typed in last frame
-		if (!editing && st.profile_export_name != g_export)
-			snprintf(g_export, sizeof g_export, "%s", st.profile_export_name.c_str());
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("File name");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(dbgui_field_width("wwwwwwwwwwwwwwwwwwww"));
-		if (ImGui::InputText("##profexport", g_export, sizeof g_export)) {
-			st.profile_export_name = g_export;
-			debug_ui_settings_mark_dirty();
-		}
-		editing = ImGui::IsItemActive();
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Without a folder, files go in the profile export folder:\n"
-			                  "%s\n"
-			                  "(System > Settings > Files > Export folders). The extension is added for you.",
-			                  export_dir(EXPORT_PROFILE)[0] ? export_dir(EXPORT_PROFILE)
-			                                                : "the emulator's working directory");
-		// The path for one export: the name, the date and time if asked for,
-		// the extension, in the export folder.
-		auto path_for = [&](const char *ext, char *out, size_t n) {
-			char name[sizeof g_export + 48];
-			if (st.profile_export_stamp) {
-				char         stamp[32];
-				const time_t now = time(nullptr);
-				strftime(stamp, sizeof stamp, "-%Y%m%d-%H%M%S", localtime(&now));
-				snprintf(name, sizeof name, "%s%s%s", g_export, stamp, ext);
-			} else {
-				snprintf(name, sizeof name, "%s%s", g_export, ext);
-			}
-			if (!export_path(EXPORT_PROFILE, name, out, n)) {
-				snprintf(export_msg, sizeof export_msg, "Could not make the folder %s", export_dir(EXPORT_PROFILE));
-				return false;
-			}
-			return true;
-		};
-		auto report = [&](int n, const char *path) {
-			snprintf(export_msg, sizeof export_msg, "%s %s", n < 0 ? "Could not write" : "Wrote", path);
-		};
-		char path[1100];
-		if (r->node_count > 2) {
-			ImGui::SameLine();
-			if (ImGui::Button("Flame graph (.folded)") && path_for(".folded", path, sizeof path))
-				report(profile_session_export_folded(path), path);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("One line per call path with its own time. Open it in\n"
-				                  "speedscope.app or pass it to flamegraph.pl.");
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Everything (.json)") && path_for(".json", path, sizeof path))
-			report(profile_session_export_json(path), path);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Every routine and the whole call tree, for scripts.");
-		if (profile_session_has_waterfall()) {
-			ImGui::SameLine();
-			if (ImGui::Button("Timeline (.trace.json)") && path_for(".trace.json", path, sizeof path))
-				report(profile_session_export_trace(path), path);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("The Waterfall's frames as a Chrome trace: opens in\n"
-				                  "ui.perfetto.dev or chrome://tracing.");
-		}
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Folder..."))
-			debug_ui_open_settings("Export folders");
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Choose where exports go, and whether to add the date and time.");
-		if (export_msg[0])
-			ImGui::TextDisabled("%s", export_msg);
-		ImGui::TreePop();
 	}
 
 	if (r->node_count <= 2 && !profile_session_has_waterfall()) {

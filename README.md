@@ -433,6 +433,9 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 
 #### Menus
 
+* **File** — open, save and export profile recordings (*Open profile run…*, *Recent profile runs*,
+  *Save profile run*, *Save profile run as…*, *Export profile*), *Load debug info…*, and
+  *Export folders…*.
 * **View** — show or hide any panel.
 * **Layout** — *Reset to Default Layout* reopens everything and rebuilds the default docking arrangement.
 * **System** — *Reset* (`Ctrl+Shift+F5`, keeps your breakpoints), *Trigger IRQ*, *Trigger NMI*, and *Settings…*.
@@ -867,7 +870,7 @@ x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 There are three ways a `.dbg` gets loaded:
 
 * `-dbgfile <file.dbg>` loads one explicitly at start-up.
-* **System → Load debug info...** (Settings → Debug info) loads or replaces one while the emulator
+* **File → Load debug info...** (Settings → Debug info) loads or replaces one while the emulator
   runs, from a file browser on Windows or a typed path. The `.dbg`'s own folder becomes a source
   folder, so sources beside it need no further setup. A profile recording already made is named
   again from the new file.

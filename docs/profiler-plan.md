@@ -1120,10 +1120,13 @@ Tested:
 A recording can be saved and opened again later, with the program, its debug
 info or the emulator's speed changed in between.
 
-- **Save run** in the Profile panel writes one `.x16prof` file to the profile
+- **File > Save profile run** writes one `.x16prof` file to the profile
   export folder (Settings > Files > Export folders), named from the export
-  file name plus the date and time. **Open run...** lists the runs there,
-  newest first, with their sizes, or opens a typed path.
+  file name plus the date and time; **Save profile run as...** asks where
+  (Windows). **File > Open profile run...** opens one from a file dialog
+  (Windows) or a list of the runs there with a path box (elsewhere), and
+  **Recent profile runs** lists the newest ten. Exports for other tools are
+  under **File > Export profile**.
 - **The file** (`src/profile_run.c`, pure, unit-tested):
   - `X16PROF`, a version, then tagged sections that each give their length.
     A reader skips sections it does not know.
