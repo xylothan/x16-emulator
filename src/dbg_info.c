@@ -1133,8 +1133,17 @@ static char *read_line(FILE *f, char **buf, size_t *cap)
 	}
 }
 
+/* Bumped by everything that changes what is loaded (dbg_info_changes()). */
+static unsigned changes;
+
+unsigned dbg_info_changes(void)
+{
+	return changes;
+}
+
 int dbg_info_load(const char *path)
 {
+	changes++;
 	FILE  *f;
 	char  *buf = NULL;
 	size_t cap = 0;
@@ -2088,6 +2097,7 @@ bool dbg_info_is_span_start(dbg_addr_t addr)
 void dbg_info_unload_range(dbg_addr_t start, dbg_addr_t end)
 {
 	if (!loaded) return;
+	changes++;
 
 	// Drop the RAW line records that map into this range FIRST. build_addr_map()
 	// regenerates addr_map from lines[] on every load, so pruning only the
@@ -2310,6 +2320,7 @@ const char *dbg_info_loaded_at(int index)
 
 void dbg_info_free(void)
 {
+	changes++;
 	for (int i = 0; i < owner_count; i++)
 		free(owners[i]);
 	free(owners);

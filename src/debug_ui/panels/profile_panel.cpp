@@ -643,6 +643,13 @@ draw_report(void)
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%s" "\n" "Debug info: %s" "\n" "Recorded by build %s at %.2f MHz.", p,
 			                  m->dbg[0] ? m->dbg : "(none)", m->revision, m->mhz);
+		if (profile_session_run_names_stale()) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextDisabled("The debug info changed since this run was opened, but a saved run keeps the "
+			                    "names it was saved with: it holds no per-address counts to regroup. Record "
+			                    "again to name it from the debug info loaded now.");
+			ImGui::PopTextWrapPos();
+		}
 		ImGui::Text("Recording: %u frames, %.1f s (%s).", frames, m->elapsed_s, m->end_reason);
 	} else {
 		ImGui::Text("Last recording: %u frames, %.1f s (%s).", frames, cap_elapsed_s(),

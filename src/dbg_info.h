@@ -122,6 +122,10 @@ void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_ba
 // Free all loaded debug info
 void dbg_info_free(void);
 
+// A count that moves whenever what is loaded changes -- a load, an unload, a
+// free -- so something built from the debug info can tell it is stale.
+unsigned dbg_info_changes(void);
+
 // The .dbg files merged since the last dbg_info_free(), in the order first
 // read, as the paths they were loaded by. A module a later load displaced
 // stays listed: this is what has been read, not what still covers memory.

@@ -490,8 +490,9 @@ profile_waterfall_draw(const prof_report_t *r)
 	}
 	const double mhz = profile_session_mhz();
 
-	// A new report: show its worst frame by work, and fit it.
-	const uint32_t gen = profile_session_report_generation();
+	// A new recording: show its worst frame by work, and fit it. Not when the
+	// same one is only named again (a .dbg replaced): the frame stays put.
+	const uint32_t gen = profile_session_recording_generation();
 	if (gen != g_fv.gen) {
 		g_fv.gen    = gen;
 		g_fv.number = ~0u;

@@ -864,9 +864,13 @@ Run:
 x16emu -imgui -prg myprog.prg -run -dbgfile myprog.dbg -srcpath ./src
 ```
 
-There are two ways a `.dbg` gets loaded:
+There are three ways a `.dbg` gets loaded:
 
 * `-dbgfile <file.dbg>` loads one explicitly at start-up.
+* **System → Load debug info...** (Settings → Debug info) loads or replaces one while the emulator
+  runs, from a file browser on Windows or a typed path. The `.dbg`'s own folder becomes a source
+  folder, so sources beside it need no further setup. A profile recording already made is named
+  again from the new file.
 * Whenever the machine loads a program from the host filesystem — `-prg`, a BASIC `LOAD`, or a DOS
   shortcut like `/PROG.PRG` — the `.dbg` sitting beside it is merged automatically. The rule is
   simply to swap the extension: `myprog.prg` → `myprog.dbg`. Debug info describing the address

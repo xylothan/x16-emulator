@@ -88,6 +88,11 @@ typedef struct {
 	uint32_t calls, call_max, frame_max;
 } prof_node_t;
 
+// One histogram key that ran, and what it counted.
+typedef struct {
+	uint32_t key, main, irq, count;
+} prof_key_count_t;
+
 typedef struct {
 	prof_row_t  *rows;    // worst first, by main + irq cycles
 	int          count;
@@ -96,6 +101,10 @@ typedef struct {
 	prof_node_t *nodes;   // the call tree, parents before children; or NULL
 	int          node_count;
 	void        *lookup;  // private: the symbol tables, kept for add_tree
+	// The histogram's keys that ran, in key order, as they were when built;
+	// NULL for a report read back from a saved run, which has no counts.
+	prof_key_count_t *hist;
+	int               hist_count;
 } prof_report_t;
 
 // Build from the armed perf_hist histogram. `syms` need not be sorted.
@@ -103,6 +112,13 @@ typedef struct {
 bool prof_report_build(prof_report_t *out, const prof_sym_t *syms, int nsyms,
                        prof_covered_fn covered);
 void prof_report_free(prof_report_t *r);
+
+// Build the rows again from the counts kept at build time, with other
+// symbols -- after the debug info was replaced -- and re-attach the tree.
+// Rows are regrouped and re-sorted, so a row index from before means nothing
+// after. The report is unchanged on failure. False without kept counts
+// (`hist` is NULL) or out of memory.
+bool prof_report_rename(prof_report_t *r, const prof_sym_t *syms, int nsyms, prof_covered_fn covered);
 
 // Attach a call tree: copies `nodes` (row is filled in here; parents must
 // precede children), and fills each row's incl_cycles, calls, call_max and

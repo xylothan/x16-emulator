@@ -29,6 +29,9 @@ static prof_report_t report;
 static bool          have_report;
 static uint32_t      report_frames;
 static uint32_t      report_generation;
+static uint32_t      recording_generation;
+// dbg_info_changes() when the report was last named.
+static unsigned      report_dbg_changes;
 
 // A saved run being shown in place of the last capture (profile_run.h). While
 // one is, names, source lines and the clock come from it, not from the
@@ -303,39 +306,12 @@ covered(uint16_t pc, int ram_bank)
 	}
 }
 
-static void
-finished(cap_end_t why)
+// The labels a report is named from: the program's debug info and the ROM's
+// symbols. Names point into those; free() the array only. NULL (and *count 0)
+// when there are none.
+static prof_sym_t *
+symbol_table(int *count)
 {
-	(void)why;
-	if (have_report)
-		prof_report_free(&report);
-	have_report = false;
-	report_generation++;
-
-	// Work against waiting, from the budget recorder's ring, newest first:
-	// the capture's frames are the most recent ones.
-	memset(&budget_summary, 0, sizeof budget_summary);
-	if (cap_recorders() & CAP_REC_BUDGET) {
-		const int want = (int)cap_frames();
-		budget_summary.budget = perf_budget_budget_cycles();
-		for (int i = 0; i < want && i < perf_budget_frame_count(); i++) {
-			perf_frame_t fr;
-			if (!perf_budget_frame_at(i, &fr))
-				break;
-			const uint32_t work = perf_frame_work(&fr);
-			budget_summary.frames++;
-			budget_summary.total += fr.total;
-			budget_summary.idle += fr.idle;
-			if (work > budget_summary.work_max)
-				budget_summary.work_max = work;
-			if (budget_summary.budget && fr.period_work > budget_summary.budget)
-				budget_summary.overruns++;
-		}
-		budget_summary.have = budget_summary.frames > 0;
-	}
-	if (!(cap_recorders() & CAP_REC_HIST))
-		return;
-
 	const int   n    = dbg_info_symbol_count();
 	const int   nrom = rom_syms_count();
 	prof_sym_t *syms = n + nrom > 0 ? calloc((size_t)(n + nrom), sizeof *syms) : NULL;
@@ -362,6 +338,47 @@ finished(cap_end_t why)
 		const rom_sym_t *r = rom_syms_at(i);
 		syms[ns++] = (prof_sym_t){r->name, r->addr, r->bank, true};
 	}
+	*count = ns;
+	return syms;
+}
+
+static void
+finished(cap_end_t why)
+{
+	(void)why;
+	if (have_report)
+		prof_report_free(&report);
+	have_report = false;
+	report_generation++;
+	recording_generation++;
+	report_dbg_changes = dbg_info_changes();
+
+	// Work against waiting, from the budget recorder's ring, newest first:
+	// the capture's frames are the most recent ones.
+	memset(&budget_summary, 0, sizeof budget_summary);
+	if (cap_recorders() & CAP_REC_BUDGET) {
+		const int want = (int)cap_frames();
+		budget_summary.budget = perf_budget_budget_cycles();
+		for (int i = 0; i < want && i < perf_budget_frame_count(); i++) {
+			perf_frame_t fr;
+			if (!perf_budget_frame_at(i, &fr))
+				break;
+			const uint32_t work = perf_frame_work(&fr);
+			budget_summary.frames++;
+			budget_summary.total += fr.total;
+			budget_summary.idle += fr.idle;
+			if (work > budget_summary.work_max)
+				budget_summary.work_max = work;
+			if (budget_summary.budget && fr.period_work > budget_summary.budget)
+				budget_summary.overruns++;
+		}
+		budget_summary.have = budget_summary.frames > 0;
+	}
+	if (!(cap_recorders() & CAP_REC_HIST))
+		return;
+
+	int         ns;
+	prof_sym_t *syms = symbol_table(&ns);
 	have_report   = prof_report_build(&report, syms, ns, covered);
 	report_frames = cap_frames();
 	free(syms);
@@ -945,6 +962,9 @@ profile_session_frame_end(void)
 		             (uint16_t)((cap_recorders() & CAP_REC_TREE) ? cct_current() : 0));
 	}
 	cap_frame_end();
+	// A program that LOADs its own .dbg (auto-load) or a DAP client's launch
+	// changes the names without the debugger ever being drawn.
+	profile_session_sync_names();
 }
 
 bool
@@ -1100,6 +1120,8 @@ profile_session_load_run(const char *path, char *msg, size_t msg_size)
 	run_loaded = true;
 	snprintf(run_path, sizeof run_path, "%s", path);
 	report_generation++;
+	recording_generation++;
+	report_dbg_changes = dbg_info_changes();
 	snprintf(msg, msg_size, "Showing %s, saved %s: %u frames.", path, run_meta.captured, run_meta.frames);
 	return 0;
 }
@@ -1132,6 +1154,33 @@ uint32_t
 profile_session_report_generation(void)
 {
 	return report_generation;
+}
+
+uint32_t
+profile_session_recording_generation(void)
+{
+	return recording_generation;
+}
+
+void
+profile_session_sync_names(void)
+{
+	// Only a report built from this run's own counts can be regrouped; a
+	// saved run's stays as saved, and says so (run_names_stale).
+	if (!have_report || run_loaded || !report.hist || dbg_info_changes() == report_dbg_changes)
+		return;
+	report_dbg_changes = dbg_info_changes();
+	int         ns;
+	prof_sym_t *syms = symbol_table(&ns);
+	if (prof_report_rename(&report, syms, ns, covered))
+		report_generation++;
+	free(syms);
+}
+
+bool
+profile_session_run_names_stale(void)
+{
+	return run_loaded && dbg_info_changes() != report_dbg_changes;
 }
 
 uint32_t

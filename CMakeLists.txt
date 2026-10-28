@@ -419,6 +419,7 @@ if(USE_IMGUI)
         src/debug_ui/source_folders.cpp
         src/debug_ui/debug_info_page.cpp
         src/debug_ui/export_page.cpp
+        src/debug_ui/file_dialog.cpp
         src/debug_ui/panels/waterfall_view.cpp
         src/debug_ui/panels/flame_view.cpp
         src/debug_ui/panels/callers_view.cpp
@@ -536,7 +537,8 @@ if(WIN32)
     if(MSVC)
         target_link_options(x16emu PRIVATE /SUBSYSTEM:CONSOLE)
     endif()
-    target_link_libraries(x16emu PRIVATE dwmapi)
+    # comdlg32: the debugger's "open a file" dialog (src/debug_ui/file_dialog.cpp).
+    target_link_libraries(x16emu PRIVATE dwmapi comdlg32)
     if(USE_DX12)
         target_link_libraries(x16emu PRIVATE d3d12 dxgi dxguid)
     endif()
