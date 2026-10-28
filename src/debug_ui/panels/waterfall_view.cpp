@@ -718,8 +718,14 @@ profile_waterfall_draw(const prof_report_t *r)
 	const ImVec2 mouse = ImGui::GetIO().MousePos;
 	const double mouse_c = c_of(mouse.x);
 
-	// Zoom about the cursor; pan with the right button.
-	if (hovered && ImGui::GetIO().MouseWheel != 0.0f && mouse.x >= x0) {
+	// Zoom about the cursor; pan with the right button. Over the plot the
+	// wheel is the timeline's alone: claiming it stops the panel scrolling at
+	// the same time. Over the lane labels it still scrolls the panel, and
+	// Ctrl+wheel stays the panel's text zoom.
+	const bool zoom_here = hovered && mouse.x >= x0 && !ImGui::GetIO().KeyCtrl;
+	if (zoom_here)
+		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+	if (zoom_here && ImGui::GetIO().MouseWheel != 0.0f) {
 		const double factor = ImGui::GetIO().MouseWheel > 0 ? 0.8 : 1.25;
 		const double nl     = std::max(32.0, std::min(length, g_view_len * factor));
 		g_view_c0           = mouse_c - (mouse_c - g_view_c0) * (nl / g_view_len);
