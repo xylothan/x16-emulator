@@ -4,7 +4,9 @@
 // CPU PC -> source file+line via the cc65 .dbg info and shows the source with
 // the current line highlighted, following the PC as you step.
 //
-// Multiple source files can be open at once as TABS along the top: the file the
+// Multiple source files can be open at once, listed down the LEFT side with the
+// selected one's source on the right (a scrolling list copes with many files
+// where a row of tabs shrinks to unreadable slivers): the file the
 // PC is in is added + selected automatically (in Follow mode), and you can open
 // any other file the debug info knows about via "Open..." to set breakpoints /
 // run-to before the PC ever gets there. "Open..." can also load another .dbg
@@ -54,6 +56,20 @@ dbgui_stricmp(const char *a, const char *b)
     }
 }
 
+// Case-insensitive substring test, for the file list filter.
+static bool
+dbgui_icontains(const char *hay, const char *needle)
+{
+    for (; *hay; hay++) {
+        const char *h = hay, *n = needle;
+        while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n))
+            h++, n++;
+        if (!*n)
+            return true;
+    }
+    return !*needle;
+}
+
 // --- Panel state --------------------------------------------------------------
 static std::vector<std::string> s_tabs;          // open source-file tabs (by .dbg name)
 static std::string              s_pcFile;         // file the PC currently maps to
@@ -85,6 +101,8 @@ static int  s_scrollAge     = 0;  // frames the request has waited for its tab
 static std::string s_selectFile;  // force-select this tab next frame (cross-panel goto)
 static int  s_gotoLine      = 0;
 static std::string s_activeFile;  // file whose body rendered last frame (the visible tab)
+static std::string s_curFile;     // file selected in the file list (shown on the right)
+static char        s_fileFilter[64] = ""; // file list filter text
 
 // Destination of the most recent deliberate navigation, highlighted on arrival
 // so you can see where you were sent, then faded out so it does not linger as a
@@ -140,6 +158,7 @@ src_ensure_tab(const char *file)
         if (t == file)
             return;
     s_tabs.push_back(file);
+    s_selectFile = file; // a newly opened file becomes the one shown
 }
 
 // Find a user breakpoint at (addr, bank 0). Returns index or -1.
@@ -832,44 +851,96 @@ source_panel_render(bool *p_open)
         return;
     }
 
-    // --- Tabs: one per open source file ---
-    int closeIdx = -1;
-    if (ImGui::BeginTabBar("src_tabs",
-                           ImGuiTabBarFlags_AutoSelectNewTabs |
-                               ImGuiTabBarFlags_Reorderable |
-                               ImGuiTabBarFlags_DrawSelectedOverline |
-                               ImGuiTabBarFlags_TabListPopupButton)) {
+    // --- Pick which open file is shown ---
+    const bool pcHasFile = (mapping || viaCaller) && !s_pcFile.empty();
+    auto       is_open   = [](const std::string &f) {
+        for (const std::string &t : s_tabs)
+            if (t == f)
+                return true;
+        return false;
+    };
+    if (s_followNow && pcMoved && pcHasFile && is_open(s_pcFile))
+        s_curFile = s_pcFile; // snap to PC while following
+    if (!s_selectFile.empty() && is_open(s_selectFile))
+        s_curFile = s_selectFile; // goto target / newly opened file
+    s_selectFile.clear();         // one-shot
+    if (!is_open(s_curFile))
+        s_curFile = s_tabs.front();
+
+    // --- File list on the left, source on the right ---
+    // A two-column table gives a draggable divider whose width ImGui saves in
+    // its .ini, so the list keeps its size between sessions.
+    int  closeIdx    = -1;
+    bool closeOthers = false, closeAll = false;
+    if (ImGui::BeginTable("src_split", 2,
+                          ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV,
+                          ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+        ImGui::TableSetupColumn("files", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+        ImGui::TableSetupColumn("source", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextRow();
+
+        // Left: filter box and a scrolling list of open files.
+        ImGui::TableSetColumnIndex(0);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##srcfilter", "Filter files", s_fileFilter,
+                                 sizeof s_fileFilter);
+        ImGui::BeginChild("srcfiles", ImVec2(0, 0), 0, ImGuiWindowFlags_HorizontalScrollbar);
         for (int i = 0; i < (int)s_tabs.size(); i++) {
             const std::string &f    = s_tabs[i];
-            bool               isPc = (mapping || viaCaller) && (f == s_pcFile);
+            const char        *base = src_basename(f.c_str());
+            if (s_fileFilter[0] && !dbgui_icontains(base, s_fileFilter))
+                continue;
+            const bool isPc = pcHasFile && f == s_pcFile;
+            const bool sel  = f == s_curFile;
 
-            ImGuiTabItemFlags flags = 0;
-            if (s_followNow && isPc && pcMoved)
-                flags |= ImGuiTabItemFlags_SetSelected; // snap to PC while following
-            if (!s_selectFile.empty() && f == s_selectFile)
-                flags |= ImGuiTabItemFlags_SetSelected; // cross-panel goto target
-
-            // Display shows a "> " marker on the PC's file; the ID (after ###)
-            // is the stable full name so toggling the marker never recreates it.
+            // "> " marks the PC's file; the ID after ### is the full name so
+            // toggling the marker never changes the item's identity.
             char label[300];
-            snprintf(label, sizeof label, "%s%s###srctab%s", isPc ? "> " : "",
-                     src_basename(f.c_str()), f.c_str());
-
-            bool open = true;
-            ImGui::PushID(f.c_str());
-            if (ImGui::BeginTabItem(label, &open, flags)) {
-                src_render_body(f.c_str(), isPc, s_pcLine, pcMoved);
-                ImGui::EndTabItem();
-            }
-            ImGui::PopID();
-            if (!open)
+            snprintf(label, sizeof label, "%s%s###srcfile%s", isPc ? "> " : "  ", base,
+                     f.c_str());
+            if (isPc)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+            if (ImGui::Selectable(label, sel))
+                s_curFile = f;
+            if (isPc)
+                ImGui::PopStyleColor();
+            if (sel && pcMoved && s_followNow)
+                ImGui::SetScrollHereY(); // keep the followed file in view
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
                 closeIdx = i;
+            if (ImGui::IsItemHovered() && strcmp(base, f.c_str()) != 0)
+                ImGui::SetTooltip("%s", f.c_str());
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Close"))
+                    closeIdx = i;
+                if (ImGui::MenuItem("Close others")) {
+                    s_curFile   = f;
+                    closeOthers = true;
+                }
+                if (ImGui::MenuItem("Close all"))
+                    closeAll = true;
+                ImGui::EndPopup();
+            }
         }
-        ImGui::EndTabBar();
+        ImGui::EndChild();
+
+        // Right: the selected file's source. PushID keeps a separate scroll
+        // position per file, as each tab had before.
+        ImGui::TableSetColumnIndex(1);
+        ImGui::PushID(s_curFile.c_str());
+        src_render_body(s_curFile.c_str(), pcHasFile && s_curFile == s_pcFile, s_pcLine,
+                        pcMoved);
+        ImGui::PopID();
+
+        ImGui::EndTable();
     }
-    s_selectFile.clear(); // one-shot: only force tab selection for this frame
-    if (closeIdx >= 0)
+    if (closeAll) {
+        s_tabs.clear();
+    } else if (closeOthers) {
+        s_tabs.assign(1, s_curFile);
+    } else if (closeIdx >= 0) {
         s_tabs.erase(s_tabs.begin() + closeIdx);
+    }
 
     // Drop a scroll request whose target tab never rendered (closed, or never
     // opened) instead of letting it fire later against an unrelated file.
