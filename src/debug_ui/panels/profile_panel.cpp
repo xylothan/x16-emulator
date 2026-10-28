@@ -204,26 +204,32 @@ const char *const TREE_TIPS[] = {
 	"up even when the average looks fine.",
 };
 
+// How to read the panel: a "(?)" on the line before it, explained on hover,
+// so it takes no room.
 void
 draw_help(void)
 {
-	if (!ImGui::CollapsingHeader("How to read this"))
+	ImGui::SameLine();
+	ImGui::TextDisabled("(?)");
+	if (!ImGui::IsItemHovered())
 		return;
-	ImGui::Indent();
-	ImGui::TextWrapped("Own time is time spent in a routine's own instructions. Total time also "
-	                   "counts everything it calls, from the moment it is entered until it "
-	                   "returns.");
-	ImGui::TextWrapped("Example: UpdateEnemies calls DrawSprite for each enemy. UpdateEnemies' own "
-	                   "time is just its loop; its total time includes all the DrawSprite calls. "
-	                   "High own time means the slow code is in that routine. High total time with "
-	                   "low own time means the cost is in something it calls: open the Call tree "
-	                   "tab to see what.");
-	ImGui::TextWrapped("Routines: every routine, heaviest first (click a column to sort). "
-	                   "Call tree: the same time, split by who called whom. Waterfall: one frame "
-	                   "as a timeline, with every device write.");
-	ImGui::TextWrapped("Hover any column title or number for what it means. Double-click a "
-	                   "routine to open it in Source or Disassembly.");
-	ImGui::Unindent();
+	ImGui::BeginTooltip();
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34.0f);
+	ImGui::TextUnformatted("Own time is time spent in a routine's own instructions. Total time also "
+	                       "counts everything it calls, from the moment it is entered until it returns.");
+	ImGui::Spacing();
+	ImGui::TextUnformatted("High own time means the slow code is in that routine. High total time with "
+	                       "low own time means the cost is in something it calls: open the Call tree "
+	                       "tab to see what.");
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Routines: every routine, heaviest first (click a column to sort). Call tree: "
+	                       "the same time, split by who called whom. Waterfall: one frame as a timeline, "
+	                       "with every device write.");
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Hover any column title or number for what it means. Double-click a routine "
+	                       "to open it in Source or Disassembly.");
+	ImGui::PopTextWrapPos();
+	ImGui::EndTooltip();
 }
 
 void

@@ -156,7 +156,7 @@ profile_files_save_run_as(void)
     const std::string name = export_name() + stamp() + PROF_RUN_EXT;
     char              path[1100];
     if (file_dialog_save("Save profile run", "Profile runs (*" PROF_RUN_EXT ")", "*" PROF_RUN_EXT,
-                         PROF_RUN_EXT + 1, export_dir(EXPORT_PROFILE), name.c_str(), path, sizeof path))
+                         &PROF_RUN_EXT[1], export_dir(EXPORT_PROFILE), name.c_str(), path, sizeof path))
         save_to(path);
 }
 
