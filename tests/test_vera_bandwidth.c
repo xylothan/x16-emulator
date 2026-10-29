@@ -83,8 +83,9 @@ main(void)
 		         "a scanline is 800 clocks: video_vga.v:27-31, 640+16+96+48");
 		check_eq(VERA_BW_BYTES_PER_ACCESS, 4,
 		         "VRAM is 32 bits wide, so an access is four bytes: main_ram.v:7-10");
-		check_eq(VERA_BW_ACCESS_CLOCKS, 2,
-		         "an access costs strobe plus ack: layer_renderer.v:250-271");
+		check_eq(VERA_BW_ACCESS_CLOCKS, 1,
+		         "an access holds the bus one clock: the strobe is gated by its "
+		         "own ack, layer_renderer.v:203");
 		check_eq(VERA_BW_LAYER_PIXELS, 640,
 		         "the layer renderer always fills 640 pixels: layer_renderer.v:488");
 	}
@@ -202,16 +203,23 @@ main(void)
 		         "and a null layer is not a crash");
 	}
 
-	// ── The worst case really does fill the scanline ────────────────────────
+	// ── A heavy line still leaves half the scanline ─────────────────────────
 	//
-	// This is the number that justifies reporting per-scanline pressure at all:
-	// two 8bpp bitmap layers plus a full sprite line come to exactly H_TOTAL.
+	// Pinned because an earlier version charged two clocks per access, and
+	// this same sum then came to exactly H_TOTAL: every ordinary two-layer
+	// game read as over budget on every line.
 	{
 		const uint32_t two_layers = 2u * bitmap_fetches(BPP8, 1) * VERA_BW_ACCESS_CLOCKS;
-		check_eq(two_layers, 640,
-		         "two 8bpp bitmap layers take 640 of the 800 clocks");
-		check_eq(two_layers + 160, VERA_BW_LINE_CLOCKS,
-		         "and 160 clocks of 4bpp sprites fills the scanline exactly");
+		check_eq(two_layers, 320,
+		         "two 8bpp bitmap layers take 320 of the 800 clocks");
+		check_eq(two_layers + vera_bandwidth_sprite_bus_clocks(640, 0), VERA_BW_LINE_CLOCKS / 2,
+		         "and a full line of 4bpp sprites brings it to half the scanline");
+
+		// Two scrolled 8bpp 8px tile layers, the usual full-screen game setup.
+		const vera_bw_layer_t tiles = tile_layer(BPP8, 0, true);
+		const uint32_t        both  = 2u * vera_bandwidth_layer_line_fetches(&tiles) * VERA_BW_ACCESS_CLOCKS;
+		check(both < VERA_BW_LINE_CLOCKS,
+		      "two scrolled 8bpp tile layers fit in one scanline");
 	}
 
 	// ── Accumulation over a frame ───────────────────────────────────────────
@@ -233,9 +241,9 @@ main(void)
 		check_eq(f.layer_bytes[0], 160u * 480u * 4u,
 		         "and bytes are just fetches times four");
 		check_eq(f.peak_clocks, (160u + 120u) * VERA_BW_ACCESS_CLOCKS,
-		         "the busiest line wanted 560 of its 800 clocks");
-		check_eq(f.mean_clocks, 560, "and every line was the same, so the mean matches");
-		check_eq(f.p95_clocks, 560, "as does the 95th percentile");
+		         "the busiest line wanted 280 of its 800 clocks");
+		check_eq(f.mean_clocks, 280, "and every line was the same, so the mean matches");
+		check_eq(f.p95_clocks, 280, "as does the 95th percentile");
 		check_eq(f.lines_over, 0, "nothing exceeded the scanline window");
 		check_eq(f.layer_peak_fetches[0], 160, "layer 0's peak line is a full one");
 	}
@@ -286,7 +294,7 @@ main(void)
 		         "program blasting VRAM through $9F23 is using the bus, "
 		         "whatever the display is doing");
 		check_eq(f.peak_clocks, 130u * VERA_BW_ACCESS_CLOCKS,
-		         "costing two clocks an access like any other client");
+		         "costing one clock an access like any other client");
 	}
 
 	// ── VERA FX, where one store is not one byte ────────────────────────────
@@ -325,10 +333,12 @@ main(void)
 	// ── Lines over the window are counted, not clamped away ─────────────────
 	{
 		begin();
-		const vera_bw_layer_t l0 = bitmap_layer(BPP8, 1); // 160 -> 320 clocks
-		const vera_bw_layer_t l1 = bitmap_layer(BPP8, 1); // 160 -> 320 clocks
+		const vera_bw_layer_t l0 = bitmap_layer(BPP8, 1); // 160 clocks
+		const vera_bw_layer_t l1 = bitmap_layer(BPP8, 1); // 160 clocks
 		vera_bandwidth_line(7, &l0, &l1);
-		for (int i = 0; i < 100; i++) // 100 more accesses -> 200 more clocks
+		// More port traffic than one scanline can take: a test of the
+		// accounting, not a pace an 8 MHz CPU could reach on its own.
+		for (int i = 0; i < 520; i++)
 			vera_bandwidth_note_port(true, 1, 7);
 		vera_bandwidth_frame_end(6);
 
@@ -347,8 +357,8 @@ main(void)
 		begin();
 		vera_bw_layer_t none = bitmap_layer(BPP1, 0);
 		none.enabled         = false;
-		const vera_bw_layer_t light = bitmap_layer(BPP1, 0); // 20 -> 40 clocks
-		const vera_bw_layer_t heavy = bitmap_layer(BPP8, 1); // 160 -> 320 clocks
+		const vera_bw_layer_t light = bitmap_layer(BPP1, 0); // 20 clocks
+		const vera_bw_layer_t heavy = bitmap_layer(BPP8, 1); // 160 clocks
 
 		// 99 quiet lines and one loud one: the peak must show it and the mean
 		// must not drown it.
@@ -360,12 +370,12 @@ main(void)
 		vera_bw_frame_t f;
 		check(vera_bandwidth_last_frame(&f), "the frame published");
 		check_eq(f.lines_active, 100, "a hundred lines rendered");
-		check_eq(f.peak_clocks, 320, "the loud line is the peak");
+		check_eq(f.peak_clocks, 160, "the loud line is the peak");
 		check_eq(f.peak_line, 99, "and is identified");
-		check_eq(f.p95_clocks, 40,
+		check_eq(f.p95_clocks, 20,
 		         "the 95th percentile ignores a single outlier, which is why "
 		         "the peak is reported next to it and not instead of it");
-		check(f.mean_clocks < 50, "and the mean stays near the quiet lines");
+		check(f.mean_clocks < 25, "and the mean stays near the quiet lines");
 	}
 
 	// ── Per-line detail is available for drawing ────────────────────────────
@@ -425,29 +435,30 @@ main(void)
 	// painting the line buffer with the bus idle; everything here is bus
 	// occupancy. Subtracting one from the other is wrong by the duty cycle.
 	{
-		// 4bpp: one 32-bit word per 8 pixels, two clocks a fetch.
-		check_eq(vera_bandwidth_sprite_bus_clocks(64, 0), 16,
-		         "a 64-wide 4bpp sprite fetches 8 words: 16 bus clocks");
-		check_eq(vera_bandwidth_sprite_bus_clocks(8, 0), 2,
+		// 4bpp: one 32-bit word per 8 pixels, one bus clock a fetch.
+		check_eq(vera_bandwidth_sprite_bus_clocks(64, 0), 8,
+		         "a 64-wide 4bpp sprite fetches 8 words: 8 bus clocks");
+		check_eq(vera_bandwidth_sprite_bus_clocks(8, 0), 1,
 		         "an 8-wide 4bpp sprite is one word");
 		// 8bpp: one word per 4 pixels, so twice the bus for the same width.
-		check_eq(vera_bandwidth_sprite_bus_clocks(64, 1), 32,
+		check_eq(vera_bandwidth_sprite_bus_clocks(64, 1), 16,
 		         "the same sprite at 8bpp costs twice the bus");
-		check_eq(vera_bandwidth_sprite_bus_clocks(8, 1), 4, "and an 8-wide one is two words");
+		check_eq(vera_bandwidth_sprite_bus_clocks(8, 1), 2, "and an 8-wide one is two words");
 		// A width that is not a whole number of words still fetches the last
 		// partial one.
-		check_eq(vera_bandwidth_sprite_bus_clocks(12, 0), 4,
+		check_eq(vera_bandwidth_sprite_bus_clocks(12, 0), 2,
 		         "a 12-wide 4bpp sprite still pays for its partial last word");
 
 		// The relationship that makes the conversion necessary. A 4bpp sprite
-		// spends 2 bus clocks and 8 render clocks per word, so its render time
-		// is five times its bus time. SPRITE_TRACE_LINE_BUDGET is 798 RENDER
+		// spends about 2 clocks fetching and 8 rendering per word, but holds the
+		// bus for only 1 of them, so its render time is about ten times its
+		// bus time. SPRITE_TRACE_LINE_BUDGET is 798 RENDER
 		// clocks; the bus cost of filling a line with 4bpp sprites is nothing
 		// like that number.
-		const uint16_t words_in_a_full_line = 798 / 10; // 2 bus + 8 render
+		const uint16_t words_in_a_full_line = 798 / 10; // ~2 fetching + 8 rendering
 		const uint32_t bus = (uint32_t)words_in_a_full_line * VERA_BW_ACCESS_CLOCKS;
-		check_eq(bus, 158,
-		         "a full 4bpp sprite line is about 158 bus clocks, not 798 -- "
+		check_eq(bus, 79,
+		         "a full 4bpp sprite line is about 79 bus clocks, not 798 -- "
 		         "which is why the two numbers must never be subtracted");
 		check(bus < VERA_BW_LINE_CLOCKS / 4,
 		      "sprite bus time is a small share of the scanline, however close "

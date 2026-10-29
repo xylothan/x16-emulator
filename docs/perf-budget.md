@@ -215,7 +215,7 @@ commit `tests/fetch_vera_rtl.py` fetches, so every line below can be checked.
 | --- | --- |
 | A scanline is 800 clocks (640 + 16 + 96 + 48), 525 lines a frame | `video_vga.v:27-37` |
 | VRAM is 32 bits wide, so **an access is four bytes** | `main_ram.v:7-10` |
-| An access costs **two clocks**: strobe, then ack | `layer_renderer.v:250-271` |
+| An access holds the bus **one clock**: each client's strobe is gated by its own ack | `layer_renderer.v:203`, `sprite_renderer.v:265`, `addr_data.v:462` |
 | One bus, **fixed priority: CPU > layer 0 > layer 1 > sprites** | `vram_if.v:142-157`, wired at `top.v:680-713` |
 | A tile map word holds **two** 16-bit entries, so a map fetch every two tiles | `layer_renderer.v:113`, `:305` |
 | The layer renderer always fills **640 pixels**, then stops | `layer_renderer.v:488` |
@@ -226,16 +226,21 @@ VERA's peak is 25 MHz × 4 bytes = 100 MB/s, and a real program uses perhaps a
 fifth of it. "Percent of total bandwidth" would therefore sit near 20% forever
 and say nothing — the same trap as raw cycles-per-frame always being 100%.
 
-The **800 clocks of one scanline** is the window that genuinely runs out, and at
-full load it exactly does:
+The **800 clocks of one scanline** is the window a line's fetches must fit in.
+Even a heavy configuration leaves room in it:
 
 ```
-layer 0, 8bpp bitmap    160 fetches x 2 = 320 clocks
-layer 1, 8bpp bitmap    160 fetches x 2 = 320 clocks
-sprites, 4bpp, full line                = 160 clocks
-                                          ----
-                                           800   = one scanline
+layer 0, 8bpp bitmap    160 fetches = 160 clocks
+layer 1, 8bpp bitmap    160 fetches = 160 clocks
+sprites, 4bpp, full line            =  80 clocks
+                                      ----
+                                       400   of 800
 ```
+
+A line goes over only when heavy CPU port traffic lands on top of heavy layers.
+A client still spends about three clocks of its own time per access (strobe,
+wait, take the data), but only one of them holds the bus. An earlier version
+charged two bus clocks per access and so reported every line at double.
 
 So the panel reports peak, p95 and mean **clocks per scanline**, and names the
 line the peak fell on.
@@ -292,10 +297,11 @@ none.
   the way the hardware does. Counting those calls would measure the emulator's
   inner loop rather than VERA's bus. The cost is that a bug in the emulator's
   renderer will not show up here.
-* **Clocks are a lower bound; accesses are exact.** Two clocks per access is the
-  uncontended cost. Under contention a lower-priority client holds its strobe and
-  waits, burning more. Trust the access counts; read the clock totals as "at
-  least this bad".
+* **Bus clocks are exact; a client's own time is not modelled.** Each access is
+  one bus clock however the clients contend, because a waiting client holds its
+  strobe without being granted. What contention changes is how long a
+  low-priority client (sprites) takes to finish its line, and that is not
+  measured here.
 * **The scroll tile is an assumption.** Which tile is "every other" for the map
   fetch depends on the scrolled tile counter's parity, so the count can be one
   out at the margin.
@@ -317,12 +323,12 @@ are measured in **different clocks**.
 `SPRITE_TRACE_LINE_BUDGET` (798) is **wall clock**: `render_time_r` increments
 every clock (`sprite_renderer.v:43-56`), including the `STATE_RENDER` clocks when
 the renderer is painting and holding no strobe at all. Everything in the
-Bandwidth section is **bus occupancy**. A sprite spends 2 clocks fetching a word
-and then 8 rendering it at 4 bpp, so its render time runs about five times its
-bus time — and a full 4 bpp sprite line is roughly 158 bus clocks, nowhere near
-798.
+Bandwidth section is **bus occupancy**. A sprite holds the bus 1 clock per word
+and then spends 8 rendering it at 4 bpp, so its render time runs about ten times
+its bus time — and a full 4 bpp sprite line is roughly 79 bus clocks, nowhere
+near 798.
 
-Subtracting one from the other therefore overstates sprite pressure fivefold and
+Subtracting one from the other therefore overstates sprite pressure tenfold and
 warns about lines that comfortably fit, which is worse than not reporting it at
 all. `vera_bandwidth_sprite_bus_clocks()` does the conversion, and the per-line
 tooltip shows both figures with their units named. Every clock in the

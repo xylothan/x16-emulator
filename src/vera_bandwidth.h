@@ -21,22 +21,29 @@
 //     if/else-if chain, if0 > if1 > if2 > if3. top.v:680-713 wires those to
 //     the CPU-and-FX port ("Interface 0 - 8-bit (highest priority)"), layer 0,
 //     layer 1 and the sprite renderer, in that order. SPRITES COME LAST.
-//   * An access costs TWO clocks: the FETCH state raises the strobe and the
-//     WAIT_FETCH state takes the ack one clock later
-//     (layer_renderer.v:250-271).
+//   * An access holds the bus for ONE clock. Every client gates its strobe
+//     with its own ack -- `bus_strobe = bus_strobe_r && !bus_ack`
+//     (layer_renderer.v:203, sprite_renderer.v:265) -- so the request drops
+//     on the clock the ack arrives and the bus is free for the next client.
+//     The CPU port's strobe, ib_do_access (addr_data.v:462), is a one-clock
+//     pulse. A client still spends about three clocks of its OWN time per
+//     access (strobe, wait, take the data), but only one of them is bus time.
 //
 // WHY THE HEADLINE IS PER-SCANLINE AND NOT "PERCENT OF PEAK": 25 MHz x 4 bytes
-// is 100 MB/s, and a real program uses perhaps a fifth of it. Reporting that
-// would produce a number that is always low and always useless -- the same
-// mistake as reporting raw cycles-per-frame, which is always 100%. The 800
-// clocks of ONE SCANLINE is the window that can genuinely run out, and at full
-// load it exactly does:
+// is 100 MB/s, and a frame's average says nothing about whether a given line
+// fit. The 800 clocks of ONE SCANLINE is the window a line's fetches must fit
+// in. Even a heavy configuration leaves room in it:
 //
-//     layer 0, 8bpp bitmap 640   160 fetches x 2 = 320 clocks
-//     layer 1, 8bpp bitmap 640   160 fetches x 2 = 320 clocks
-//     sprites, 4bpp, full line                   = 160 clocks
-//                                                  ----
-//                                                   800  = H_TOTAL
+//     layer 0, 8bpp bitmap 640   160 fetches = 160 clocks
+//     layer 1, 8bpp bitmap 640   160 fetches = 160 clocks
+//     sprites, 4bpp, full line                =  80 clocks
+//                                                ----
+//                                                 400  of H_TOTAL 800
+//
+// So a line goes over only when heavy CPU port traffic lands on top of heavy
+// layers. The limits that usually bite first are each client's own pace and
+// the sprite renderer's render time (the VERA panel's Multiplex view), not the
+// shared bus.
 //
 // ─── Why this models the registers instead of counting reads ────────────────
 //
@@ -63,10 +70,11 @@
 //      emulator's convenience code do" -- but it means a bug in the emulator's
 //      renderer will NOT show up here.
 //
-//   2. CLOCKS ARE A LOWER BOUND; ACCESSES ARE EXACT. Two clocks per access is
-//      the uncontended cost. Under real contention a lower-priority client
-//      holds its strobe and waits, so it burns MORE clocks than this charges.
-//      Trust the access counts; treat the clock totals as "at least this bad".
+//   2. BUS CLOCKS ARE EXACT; A CLIENT'S OWN TIME IS NOT MODELLED. Each access
+//      is one bus clock however the clients contend, because a client that is
+//      waiting holds its strobe without being granted. What contention does
+//      change is how long a low-priority client (sprites) takes to finish its
+//      line, and that is not measured here.
 //
 //   3. THE SCROLL TILE IS AN ASSUMPTION. A layer scrolled mid-tile needs one
 //      more tile than the arithmetic gives. This charges that extra tile
@@ -126,10 +134,9 @@ extern "C" {
 // is always four bytes even when the client wanted one.
 #define VERA_BW_BYTES_PER_ACCESS 4
 
-// Clocks one access occupies the bus for: FETCH raises the strobe, WAIT_FETCH
-// takes the ack on the next clock (layer_renderer.v:250-271). Uncontended --
-// see limit 2 in the header comment.
-#define VERA_BW_ACCESS_CLOCKS 2
+// Clocks one access occupies the bus for. The strobe is gated by the ack
+// (layer_renderer.v:203, sprite_renderer.v:265), so a grant lasts one clock.
+#define VERA_BW_ACCESS_CLOCKS 1
 
 // Active display lines, and the ceiling on lines we keep per-frame detail for.
 // VERA scans 525 (video_vga.v:33-37) but only 480 of them fetch.
@@ -235,7 +242,7 @@ uint8_t vera_bandwidth_words_per_tile_line(bool bitmap_mode, uint8_t color_depth
 // (sprite_renderer.v:43-56), which ticks EVERY clock -- including the
 // STATE_RENDER clocks when the renderer is painting the line buffer and holding
 // no bus strobe at all. Everything this module reports is BUS OCCUPANCY. The
-// two differ by the sprite renderer's duty cycle, roughly five to one at 4 bpp,
+// two differ by the sprite renderer's duty cycle, roughly ten to one at 4 bpp,
 // so subtracting one from the other overstates contention badly enough to warn
 // about lines that comfortably fit -- and a false alarm in a diagnostic is
 // worse than no diagnostic. Convert with this before comparing.
