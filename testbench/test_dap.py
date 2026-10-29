@@ -1225,6 +1225,43 @@ if os.path.exists(dump_path):
 bk_req("pause", {"threadId": 1})
 bk_wait_stop(3)
 
+# A VRAM region. VRAM is not in the CPU map, so the bytes have to come from
+# VERA's video space: plant a pattern in the sprite attribute area, dump it,
+# and every record must carry exactly that pattern after its 4-byte index.
+def bk_vram(addr, n):
+    r = bk_req("readMemory", {"memoryReference": "vram:%05X" % addr, "count": n})
+    return base64.b64decode(r["body"]["data"])
+
+def bk_vram_wr(addr, data):
+    bk_req("writeMemory", {"memoryReference": "vram:%05X" % addr,
+                           "data": base64.b64encode(bytes(data)).decode()})
+
+vram_saved = bk_vram(0x1F9C0, 4)
+bk_vram_wr(0x1F9C0, [0xDE, 0xAD, 0xBE, 0xEF])
+bk_run_free()
+r = bk_instr_bp({"instructionReference": "$A000",
+                 "x16Dump": {"file": dump_path, "regions": [{"addr": "vram:1F9C0", "len": 4}]}})
+time.sleep(0.3)
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+time.sleep(0.2)
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+blob = open(dump_path, "rb").read() if os.path.exists(dump_path) else b""
+recs = [blob[i:i + 8] for i in range(0, len(blob), 8)]
+bk_case("x16Dump reads a vram: region from video space (%d records)" % len(recs),
+        r.get("x16Dump") is True and len(recs) > 0 and len(blob) % 8 == 0
+        and all(rec[4:] == b"\xde\xad\xbe\xef" for rec in recs))
+if os.path.exists(dump_path):
+    os.remove(dump_path)
+bk_vram_wr(0x1F9C0, vram_saved)
+
+r = bk_instr_bp({"instructionReference": "$A000",
+                 "x16Dump": {"file": dump_path, "regions": [{"addr": "vram:1F9C0", "len": 4, "bank": 1}]}})
+bk_case("x16Dump refuses a RAM bank on a vram: region", not r.get("verified") and "x16Dump" not in r)
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+if os.path.exists(dump_path):
+    os.remove(dump_path)
+
 for bp, why in (
         ({"instructionReference": "$A000", "condition": "A == banana"}, "an unreadable condition"),
         ({"instructionReference": "$A000", "condition": "A == 1 && X == 0"}, "two value tests"),
