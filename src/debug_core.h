@@ -267,8 +267,10 @@ void     debug_bp_forget(int pc, uint8_t bank, int x16Bank);
 
 // DUMP breakpoints (x16Dump over DAP): a firing appends memory to a file and
 // does not stop.  Regions are 24-bit addresses with an x16 bank pin each
-// (USE_CURRENT_X16_BANK = -1 for the live mapping).  The reader is installed
-// by the emulator proper; debug_core.c itself touches no memory.
+// (USE_CURRENT_X16_BANK = -1 for the live mapping), or DEBUG_DUMP_VRAM for a
+// region in VERA's 17-bit video space, which is not in the CPU map.  The reader
+// is installed by the emulator proper; debug_core.c itself touches no memory.
+#define DEBUG_DUMP_VRAM (-2)
 bool     debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
                            const uint32_t *addr, const uint32_t *len, const int *regBank);
 void     debug_bp_clear_dump(int pc, uint8_t bank, int x16Bank);

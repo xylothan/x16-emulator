@@ -3472,8 +3472,12 @@ static bool dap_check_hit_condition(const char *h) {
 // x16Dump on an instruction breakpoint makes it a DUMP breakpoint: it does not
 // stop; each firing appends memory to a file (debug_core.c).
 //   "x16Dump": {"file": path, "regions": [{"addr": n, "len": n, "bank": n?}]}
-// addr is a 24-bit CPU address; bank pins an x16 RAM bank for $A000-$BFFF.
+// addr is a 24-bit CPU address, or a memoryReference string as readMemory takes
+// it ("0xC000", "vram:1B000"); bank pins an x16 RAM bank for $A000-$BFFF and
+// means nothing for VRAM.  A VRAM region wraps at the top of the 17-bit space.
 static uint8_t dap_dump_read(uint32_t addr, int x16Bank) {
+    if (x16Bank == DEBUG_DUMP_VRAM)
+        return video_space_read(addr & 0x1FFFF);
     return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), x16Bank);
 }
 
@@ -3489,11 +3493,18 @@ static bool dap_apply_dump(const struct breakpoint *bp, cJSON *dump) {
         cJSON *a = cJSON_GetObjectItemCaseSensitive(r, "addr");
         cJSON *l = cJSON_GetObjectItemCaseSensitive(r, "len");
         cJSON *b = cJSON_GetObjectItemCaseSensitive(r, "bank");
-        if (n >= 16 || !a || !l || !cJSON_IsNumber(a) || !cJSON_IsNumber(l))
+        if (n >= 16 || !a || !l || !cJSON_IsNumber(l))
             return false;
-        addr[n] = (uint32_t)a->valuedouble;
+        bool is_vram = false;
+        if (cJSON_IsNumber(a))
+            addr[n] = (uint32_t)a->valuedouble;
+        else if (!cJSON_IsString(a) || !dap_parse_mem_ref(a->valuestring, &is_vram, &addr[n]))
+            return false;
+        if (is_vram && b)
+            return false;   // a RAM bank pin on VRAM is a mistake, not a no-op
         len[n]  = (uint32_t)l->valuedouble;
-        bank[n] = (b && cJSON_IsNumber(b)) ? (int)b->valuedouble : USE_CURRENT_X16_BANK;
+        bank[n] = is_vram ? DEBUG_DUMP_VRAM
+                : (b && cJSON_IsNumber(b)) ? (int)b->valuedouble : USE_CURRENT_X16_BANK;
         n++;
     }
     debug_bp_dump_read = dap_dump_read;
@@ -3610,7 +3621,8 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
                         num_instr_bps--;
                         verified = false;
                         snprintf(why, sizeof why,
-                                 "x16Dump needs {file, regions: [{addr, len, bank?}]}, at most 16 "
+                                 "x16Dump needs {file, regions: [{addr, len, bank?}]} (addr a number "
+                                 "or a reference like \"vram:1B000\", no bank on VRAM), at most 16 "
                                  "regions, and a file that can be opened");
                     }
                 } else {
