@@ -98,42 +98,56 @@ static perf_overrun_report_t pending_overruns;
 
 // ────────────────────────────────────────────────────────────────────────────
 
+perf_period_t
+perf_budget_period(uint32_t machine_khz, uint32_t cycles_per_frame, float target_fps)
+{
+	perf_period_t p;
+	if (cycles_per_frame == 0)
+		cycles_per_frame = 1;
+	const float vsync = (float)machine_khz * 1000.0f / (float)cycles_per_frame;
+
+	if (target_fps <= 0.0f || vsync <= 0.0f) {
+		p.frames = 1;
+		p.cycles = cycles_per_frame;
+	} else {
+		// Vsyncs per unit of work. Above 1 the work may span several frames;
+		// below 1 the caller is asking for a routine to fit inside part of one.
+		const float ratio = vsync / target_fps;
+		int         n     = (int)round_pos(ratio);
+
+		if (n >= 1 && abs_f(ratio - (float)n) <= 0.05f * (float)n) {
+			// Close enough to a whole number of vsyncs to be what was meant.
+			if (n > PERF_PERIOD_MAX)
+				n = PERF_PERIOD_MAX;
+			p.frames = n;
+			p.cycles = cycles_per_frame * (uint32_t)n;
+		} else {
+			// A fraction of a frame, or an awkward multiple of one. Sum over as
+			// many whole frames as the ratio covers, and scale the budget
+			// exactly.
+			if (n < 1)
+				n = 1;
+			if (n > PERF_PERIOD_MAX)
+				n = PERF_PERIOD_MAX;
+			p.frames = n;
+			p.cycles = round_pos((float)cycles_per_frame * ratio);
+			if (p.cycles == 0)
+				p.cycles = 1;
+		}
+	}
+	// The boundary granularity described at PERF_BOUNDARY_SLACK.
+	p.threshold = p.cycles + (uint32_t)p.frames * PERF_BOUNDARY_SLACK;
+	return p;
+}
+
 static void
 recompute_budget(void)
 {
 	if (cfg_cycles_per_frame == 0)
 		cfg_cycles_per_frame = 1;
-
-	const float vsync = perf_budget_vsync_hz();
-	if (cfg_target_fps <= 0.0f || vsync <= 0.0f) {
-		budget_frames = 1;
-		budget_cycles = cfg_cycles_per_frame;
-		return;
-	}
-
-	// Vsyncs per unit of work. Above 1 the work may span several frames; below
-	// 1 the caller is asking for a routine to fit inside part of one.
-	const float ratio = vsync / cfg_target_fps;
-	int         n     = (int)round_pos(ratio);
-
-	if (n >= 1 && abs_f(ratio - (float)n) <= 0.05f * (float)n) {
-		// Close enough to a whole number of vsyncs to be what was meant.
-		if (n > PERF_PERIOD_MAX)
-			n = PERF_PERIOD_MAX;
-		budget_frames = n;
-		budget_cycles = cfg_cycles_per_frame * (uint32_t)n;
-	} else {
-		// A fraction of a frame, or an awkward multiple of one. Sum over as
-		// many whole frames as the ratio covers, and scale the budget exactly.
-		if (n < 1)
-			n = 1;
-		if (n > PERF_PERIOD_MAX)
-			n = PERF_PERIOD_MAX;
-		budget_frames = n;
-		budget_cycles = round_pos((float)cfg_cycles_per_frame * ratio);
-		if (budget_cycles == 0)
-			budget_cycles = 1;
-	}
+	const perf_period_t p = perf_budget_period(cfg_machine_khz, cfg_cycles_per_frame, cfg_target_fps);
+	budget_frames         = p.frames;
+	budget_cycles         = p.cycles;
 }
 
 // What a period's work is actually compared against: the budget, plus the

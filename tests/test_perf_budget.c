@@ -99,6 +99,28 @@ main(void)
 		check_eq((uint32_t)perf_budget_frames_per_budget(), 1, "and 60 fps is back to one");
 	}
 
+	// ── The same rule, for work recorded elsewhere ──────────────────────────
+	//
+	// perf_budget_period() is what a saved profile run is judged with, so it
+	// must agree with what the live machine does for the same target.
+	{
+		configure();
+		const float targets[] = {60.0f, 59.0f, 30.0f, 20.0f, 120.0f, 45.0f};
+		for (size_t i = 0; i < sizeof targets / sizeof targets[0]; i++) {
+			perf_budget_set_target_fps(targets[i]);
+			const perf_period_t p = perf_budget_period(KHZ, CYCLES_PER_FRAME, targets[i]);
+			check_eq((uint32_t)p.frames, (uint32_t)perf_budget_frames_per_budget(),
+			         "the period spans the same vsyncs as the live budget");
+			check_eq(p.cycles, perf_budget_budget_cycles(), "and has the same cycles");
+			check_eq(p.threshold, p.cycles + (uint32_t)p.frames * PERF_BOUNDARY_SLACK,
+			         "and is over at the same point");
+		}
+		const perf_period_t thirty = perf_budget_period(KHZ, CYCLES_PER_FRAME, 30.0f);
+		check_eq((uint32_t)thirty.frames, 2, "30 fps: a game frame is two vsyncs");
+		check_eq(thirty.cycles, CYCLES_PER_FRAME * 2, "worth two vsyncs' cycles");
+		perf_budget_set_target_fps(60.0f);
+	}
+
 	// ── Nothing is idle until something says so ─────────────────────────────
 	{
 		configure();

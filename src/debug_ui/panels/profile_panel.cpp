@@ -10,8 +10,10 @@
 #include "debug_ui_panels.h"
 #include "debug_ui_bridge.h"  // debug_ui_request_goto
 #include "debug_ui_widgets.h" // dbgui_window_zoom/end, dbgui_col_width
+#include "debug_ui_settings.h" // the target frame rate, shared with Performance
 #include "../profile_files.h"  // File menu: save, open, export
 
+#include "../perf_budget.h"
 #include "../perf_hist.h"
 #include "../profile_session.h"
 #include "../profile_run.h"
@@ -51,6 +53,56 @@ char  g_filter[64] = "";
 
 const ImVec4 COL_WAIT(0.55f, 0.75f, 1.00f, 1.0f);
 const ImVec4 COL_AMBIG(1.00f, 0.75f, 0.35f, 1.0f);
+
+void
+set_target_fps(float fps)
+{
+	DebugUiSettings &s = debug_ui_settings();
+	s.perf_target_fps  = fps < 1.0f ? 1.0f : fps > 1000.0f ? 1000.0f : fps;
+	perf_budget_set_target_fps(s.perf_target_fps);
+	debug_ui_settings_mark_dirty();
+}
+
+// The frame rate the program aims for, which decides how many vsyncs one game
+// frame may take. The same setting as the Performance panel's: one program
+// has one target.
+void
+draw_target_fps(const prof_budget_summary_t *bs)
+{
+	DebugUiSettings &s = debug_ui_settings();
+	ImGui::SetNextItemWidth(dbgui_field_width("000.0"));
+	float fps = s.perf_target_fps;
+	if (ImGui::InputFloat("Target FPS", &fps, 0.0f, 0.0f, "%.4g"))
+		set_target_fps(fps);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("The frame rate your program aims for. A game frame may take as\n"
+		                  "many vsyncs as that allows -- two at 30 fps, three at 20 -- so its\n"
+		                  "budget is that many vsyncs' cycles. VERA's own frame does not\n"
+		                  "change: vblank still comes every vsync.\n\n"
+		                  "Shared with the Performance panel. Changing it judges this\n"
+		                  "recording again; there is no need to record it again.");
+	static const float presets[3] = {60.0f, 30.0f, 20.0f};
+	for (float p : presets) {
+		char label[16];
+		snprintf(label, sizeof label, "%g", (double)p);
+		ImGui::SameLine();
+		if (ImGui::SmallButton(label))
+			set_target_fps(p);
+	}
+	const int span = bs->have && bs->rejudged ? bs->span : perf_budget_frames_per_budget();
+	ImGui::SameLine();
+	ImGui::TextDisabled("game frame = %d vsync%s", span, span == 1 ? "" : "s");
+
+	const float rec = profile_session_recorded_target_fps();
+	if (bs->have && !bs->rejudged) {
+		ImGui::TextColored(COL_AMBIG, "This run was saved before each vsync's work was kept, so it keeps the "
+		                              "verdict it was saved with%s.",
+		                   rec > 0.0f ? "" : " (target not recorded)");
+	} else if (rec > 0.0f && (rec - s.perf_target_fps > 0.01f || s.perf_target_fps - rec > 0.01f)) {
+		ImGui::TextDisabled("Recorded at a %.4g fps target; judged here at %.4g.", (double)rec,
+		                    (double)s.perf_target_fps);
+	}
+}
 
 void
 draw_controls(void)
@@ -574,17 +626,27 @@ draw_report(void)
 		ImGui::TextColored(COL_AMBIG, "%d rows marked * name code whose RAM bank the debug info "
 		                              "did not establish.", r->ambiguous_rows);
 	const prof_budget_summary_t *bs = profile_session_budget_summary();
+	if (bs->have || profile_session_has_waterfall())
+		draw_target_fps(bs);
 	if (bs->have) {
-		ImGui::TextDisabled("The program worked %.1f%% of the time and waited %.1f%%. Busiest frame: "
-		                    "%u of %u cycles. Frames over budget: %u.",
-		                    bs->total ? 100.0 * (double)(bs->total - bs->idle) / (double)bs->total
-		                              : 0.0,
-		                    bs->total ? 100.0 * (double)bs->idle / (double)bs->total : 0.0,
-		                    bs->work_max, bs->budget, bs->overruns);
+		const double worked = bs->total ? 100.0 * (double)(bs->total - bs->idle) / (double)bs->total : 0.0;
+		const double waited = bs->total ? 100.0 * (double)bs->idle / (double)bs->total : 0.0;
+		if (bs->rejudged && bs->span > 1)
+			ImGui::TextDisabled("The program worked %.1f%% of the time and waited %.1f%%. Busiest game frame "
+			                    "(%d vsyncs): %u of %u cycles. Game frames over budget: %u.",
+			                    worked, waited, bs->span, bs->frame_max, bs->budget, bs->overruns);
+		else
+			ImGui::TextDisabled("The program worked %.1f%% of the time and waited %.1f%%. Busiest frame: "
+			                    "%u of %u cycles. Frames over budget: %u.",
+			                    worked, waited, bs->rejudged ? bs->frame_max : bs->work_max, bs->budget,
+			                    bs->overruns);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Waiting is time in WAI or in a loop polling for vsync: cycles the\n"
-			                  "program could have used. A frame is over budget when its work\n"
-			                  "alone needed more cycles than the frame has, so it ran late.");
+			                  "program could have used. A game frame is the vsyncs the target\n"
+			                  "frame rate allows, and it is over budget when its work alone\n"
+			                  "needed more cycles than those vsyncs have, so it ran late.\n\n"
+			                  "Counted over every run of consecutive vsyncs, as the Performance\n"
+			                  "panel does, so it does not depend on where your loop's frame starts.");
 	}
 
 	if (r->node_count <= 2 && !profile_session_has_waterfall()) {

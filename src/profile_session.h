@@ -55,16 +55,31 @@ void profile_session_node_name(const prof_report_t *r, int node, char *buf, int 
 
 // Work against waiting over the capture, from perf_budget's classifier --
 // only when the capture ran the budget recorder.
+//
+// Judged against the target frame rate (perf_budget_get_target_fps(), the
+// setting the Performance panel shares): a game frame is `span` vsyncs, and
+// its work is the sum over them, the same rolling sum the Performance panel
+// uses. Changing the target judges the same recording again, because each
+// vsync's work is kept -- except in runs saved before that was, which keep
+// the verdict they were saved with (`rejudged` false).
 typedef struct {
 	bool     have;
-	uint32_t frames;     // frames it covers
+	uint32_t frames;     // vsyncs it covers
 	uint64_t total;      // cycles
 	uint64_t idle;       // of which classified as waiting (WAI, spin loops)
-	uint32_t work_max;   // worst frame's work
-	uint32_t overruns;   // frames whose work exceeded the budget
-	uint32_t budget;     // the per-frame budget, in cycles
+	uint32_t work_max;   // busiest single vsync's work
+	uint32_t frame_max;  // busiest game frame's work: `span` vsyncs summed
+	uint32_t overruns;   // game frames whose work exceeded the budget
+	uint32_t budget;     // a game frame's budget, in cycles
+	int      span;       // vsyncs in a game frame
+	float    target_fps; // what it was judged against
+	bool     rejudged;   // judged against the current target, not as saved
 } prof_budget_summary_t;
 const prof_budget_summary_t *profile_session_budget_summary(void);
+
+// The target frame rate a saved run was judged against when it was saved; 0
+// for a live recording or a run too old to say.
+float profile_session_recorded_target_fps(void);
 
 // Write the last report to a file. Both return the number of records written,
 // or -1 if there is no report or the file cannot be written.

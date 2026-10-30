@@ -72,6 +72,62 @@ static bool hist_was_enabled;
 
 static prof_budget_summary_t budget_summary;
 
+// Each vsync's CPU work over the capture, oldest first, so the summary can be
+// judged again when the target frame rate changes. Owned here; from a saved
+// run when one is shown.
+static uint32_t *vsync_work;
+static uint32_t  vsync_n;
+static uint32_t  vsync_cycles; // one vsync's cycles when it was recorded
+static float     judged_fps = -1.0f;
+
+// Judge the kept work against the current target: a game frame is `span`
+// vsyncs and its work their sum -- the rolling sum perf_budget keeps -- and
+// it is over when that passes perf_budget's own threshold, so this and the
+// Performance panel agree about the same frames.
+static void
+judge(void)
+{
+	const float fps = perf_budget_get_target_fps();
+	judged_fps      = fps;
+	if (!budget_summary.have || !vsync_work || !vsync_n)
+		return;
+	const uint32_t      khz = (uint32_t)(profile_session_mhz() * 1000.0 + 0.5);
+	const perf_period_t p   = perf_budget_period(khz, vsync_cycles ? vsync_cycles : perf_budget_cycles_per_frame(), fps);
+	const uint32_t      n   = (uint32_t)p.frames;
+
+	budget_summary.span       = p.frames;
+	budget_summary.budget     = p.cycles;
+	budget_summary.target_fps = fps;
+	budget_summary.rejudged   = true;
+	budget_summary.frame_max  = 0;
+	budget_summary.overruns   = 0;
+	uint64_t sum = 0;
+	for (uint32_t i = 0; i < vsync_n; i++) {
+		sum += vsync_work[i];
+		if (i >= n)
+			sum -= vsync_work[i - n];
+		// A window is a whole game frame once it holds `n` vsyncs; a capture
+		// shorter than one game frame is judged on what it has.
+		if (i + 1 < n && i + 1 < vsync_n)
+			continue;
+		const uint32_t w = sum > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)sum;
+		if (w > budget_summary.frame_max)
+			budget_summary.frame_max = w;
+		if (w > p.threshold)
+			budget_summary.overruns++;
+	}
+}
+
+static void
+forget_vsync_work(void)
+{
+	free(vsync_work);
+	vsync_work   = NULL;
+	vsync_n      = 0;
+	vsync_cycles = 0;
+	judged_fps   = -1.0f;
+}
+
 static bool cct_ready;      // pool allocated (once; reused by every capture)
 static bool wf_ready;       // likewise, the waterfall's frame buffers
 static bool wf_recorded;    // the last capture ran the waterfall
@@ -356,10 +412,14 @@ finished(cap_end_t why)
 	// Work against waiting, from the budget recorder's ring, newest first:
 	// the capture's frames are the most recent ones.
 	memset(&budget_summary, 0, sizeof budget_summary);
+	forget_vsync_work();
 	if (cap_recorders() & CAP_REC_BUDGET) {
-		const int want = (int)cap_frames();
-		budget_summary.budget = perf_budget_budget_cycles();
-		for (int i = 0; i < want && i < perf_budget_frame_count(); i++) {
+		int want = (int)cap_frames();
+		if (want > perf_budget_frame_count())
+			want = perf_budget_frame_count();
+		vsync_work   = want > 0 ? malloc(sizeof *vsync_work * (size_t)want) : NULL;
+		vsync_cycles = perf_budget_cycles_per_frame();
+		for (int i = 0; i < want; i++) {
 			perf_frame_t fr;
 			if (!perf_budget_frame_at(i, &fr))
 				break;
@@ -369,10 +429,18 @@ finished(cap_end_t why)
 			budget_summary.idle += fr.idle;
 			if (work > budget_summary.work_max)
 				budget_summary.work_max = work;
-			if (budget_summary.budget && fr.period_work > budget_summary.budget)
-				budget_summary.overruns++;
+			// The ring is newest first; kept oldest first.
+			if (vsync_work)
+				vsync_work[want - 1 - i] = work;
+		}
+		if (vsync_work && budget_summary.frames == (uint32_t)want) {
+			vsync_n = (uint32_t)want;
+		} else {
+			free(vsync_work);
+			vsync_work = NULL;
 		}
 		budget_summary.have = budget_summary.frames > 0;
+		judge();
 	}
 	if (!(cap_recorders() & CAP_REC_HIST))
 		return;
@@ -447,7 +515,15 @@ profile_session_tree_consistent(void)
 const prof_budget_summary_t *
 profile_session_budget_summary(void)
 {
+	if (judged_fps != perf_budget_get_target_fps())
+		judge();
 	return &budget_summary;
+}
+
+float
+profile_session_recorded_target_fps(void)
+{
+	return run_loaded ? run_meta.b_target_fps : 0.0f;
 }
 
 int
@@ -856,12 +932,13 @@ profile_session_export_json(const char *path)
 	           "  \"instructions\": %llu,\n",
 	        report_frames, (unsigned long long)r->main_cycles, (unsigned long long)r->irq_cycles,
 	        (unsigned long long)r->instructions);
-	if (budget_summary.have)
+	const prof_budget_summary_t *bs = profile_session_budget_summary();
+	if (bs->have)
 		fprintf(f, "  \"budget\": {\"frames\": %u, \"totalCycles\": %llu, \"idleCycles\": %llu, "
-		           "\"workMax\": %u, \"overruns\": %u, \"budgetCycles\": %u},\n",
-		        budget_summary.frames, (unsigned long long)budget_summary.total,
-		        (unsigned long long)budget_summary.idle, budget_summary.work_max,
-		        budget_summary.overruns, budget_summary.budget);
+		           "\"workMax\": %u, \"overruns\": %u, \"budgetCycles\": %u, \"targetFps\": %.4g, "
+		           "\"vsyncsPerFrame\": %d, \"frameMax\": %u},\n",
+		        bs->frames, (unsigned long long)bs->total, (unsigned long long)bs->idle, bs->work_max,
+		        bs->overruns, bs->budget, (double)bs->target_fps, bs->span, bs->frame_max);
 	fprintf(f, "  \"rows\": [\n");
 	for (int i = 0; i < r->count; i++) {
 		const prof_row_t *row = &r->rows[i];
@@ -1017,6 +1094,8 @@ profile_session_save_run(const char *path, char *msg, size_t msg_size)
 		m.b_work_max      = budget_summary.work_max;
 		m.b_overruns      = budget_summary.overruns;
 		m.b_budget        = budget_summary.budget;
+		m.b_target_fps    = budget_summary.target_fps;
+		m.b_vsync_cycles  = vsync_cycles;
 	}
 	const time_t now = time(NULL);
 	strftime(m.captured, sizeof m.captured, "%Y-%m-%d %H:%M:%S", localtime(&now));
@@ -1062,7 +1141,7 @@ profile_session_save_run(const char *path, char *msg, size_t msg_size)
 			keys[i].source = text + i * 300;
 			profile_session_key_source(list[i], keys[i].source, 300);
 		}
-		rc = prof_run_write(path, &m, &report, keys, (int)u, wf, msg, msg_size);
+		rc = prof_run_write(path, &m, &report, keys, (int)u, wf, vsync_work, vsync_n, msg, msg_size);
 	} else {
 		snprintf(msg, msg_size, "Out of memory.");
 	}
@@ -1106,6 +1185,13 @@ profile_session_load_run(const char *path, char *msg, size_t msg_size)
 	budget_summary.work_max = run.meta.b_work_max;
 	budget_summary.overruns = run.meta.b_overruns;
 	budget_summary.budget   = run.meta.b_budget;
+	budget_summary.target_fps = run.meta.b_target_fps;
+	budget_summary.frame_max  = 0;
+	budget_summary.span       = 0; // not known until judged again
+	forget_vsync_work();
+	vsync_work   = run.work; // handed on: judged against the current target
+	vsync_n      = run.work ? run.nwork : 0;
+	vsync_cycles = run.meta.b_vsync_cycles;
 	if (run.wf) {
 		wf_install(run.wf);
 		wf_recorded = true;
@@ -1207,17 +1293,13 @@ profile_session_print(FILE *f, int top)
 	        (unsigned long long)r->instructions);
 	fprintf(f, "%d routines/pages, %d named by label, %d with an unestablished bank (*)\n", r->count,
 	        r->named_rows, r->ambiguous_rows);
-	if (budget_summary.have)
+	const prof_budget_summary_t *bs = profile_session_budget_summary();
+	if (bs->have)
 		fprintf(f, "work %.1f%%, waiting %.1f%% (cycle budget); worst frame %u of %u cycles, "
 		           "%u over budget\n",
-		        budget_summary.total
-		            ? 100.0 * (double)(budget_summary.total - budget_summary.idle) /
-		                  (double)budget_summary.total
-		            : 0.0,
-		        budget_summary.total
-		            ? 100.0 * (double)budget_summary.idle / (double)budget_summary.total
-		            : 0.0,
-		        budget_summary.work_max, budget_summary.budget, budget_summary.overruns);
+		        bs->total ? 100.0 * (double)(bs->total - bs->idle) / (double)bs->total : 0.0,
+		        bs->total ? 100.0 * (double)bs->idle / (double)bs->total : 0.0,
+		        bs->rejudged ? bs->frame_max : bs->work_max, bs->budget, bs->overruns);
 	// cyc/ins: no 6502 instruction takes fewer than 2 cycles, so a figure near
 	// 1 means the CPU sat in WAI there, ticking one cycle per step -- waiting,
 	// not working.

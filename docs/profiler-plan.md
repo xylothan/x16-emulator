@@ -781,7 +781,13 @@ Tested:
 - **Summary:** when the capture ran the `budget` recorder, it reports work
   against waiting from `perf_budget`'s classifier, the worst frame's work, and
   frames over budget. This appears in the printed report, the panel and the
-  JSON.
+  JSON. It is judged against the target frame rate, which the Profile panel
+  shares with the Performance panel: a game frame is as many vsyncs as the
+  target allows, summed the way `perf_budget` sums them, and over budget past
+  the same threshold (`perf_budget_period()`). Each vsync's work is kept, and
+  saved in a run's `WORK` section, so a new target judges the same recording
+  again. The JSON adds `targetFps`, `vsyncsPerFrame` and `frameMax`; `workMax`
+  is still the busiest single vsync.
 - **Panel:** the Routines table sorts by any column.
 - **`x16dbg profile <frames> [top n] [folded path] [json path] [rec list]`**
   starts a capture, waits for it, and prints the top routines and heaviest call
