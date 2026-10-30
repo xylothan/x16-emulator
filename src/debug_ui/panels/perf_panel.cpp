@@ -915,14 +915,53 @@ draw_bandwidth(void)
 		                  "(a 4-cycle sta is 12.5 VERA clocks), so about 33 KB a\n"
 		                  "frame is the ceiling no program can push past.");
 	}
-	if (f.fx_cache_writes || f.fx_affine_fetches) {
-		const double amp = moved ? (double)f.port_vram_bytes / (double)moved : 0.0;
-		ImGui::Text("VERA FX: %u cache write(s), %u affine fetch(es) — %.2fx amplification",
-		            (unsigned)f.fx_cache_writes, (unsigned)f.fx_affine_fetches, amp);
+	// VERA FX over the last second rather than the last frame. A program that
+	// uses FX on some frames and not others made a per-frame line appear and
+	// vanish as the panel redrew. Once FX has been seen the line stays, greyed
+	// when the window holds none.
+	struct FxFrame {
+		uint32_t cache, affine, moved, vram;
+	};
+	constexpr int   FX_WINDOW = 60;
+	static FxFrame  fx_ring[FX_WINDOW];
+	static int      fx_head = 0, fx_count = 0;
+	static uint32_t fx_last_frame = 0;
+	static bool     fx_seen = false;
+	if (f.frame < fx_last_frame || fx_count == 0) {
+		// A reset or the first frame: start the window again.
+		fx_head = fx_count = 0;
+		fx_seen = false;
+	}
+	if (fx_count == 0 || f.frame != fx_last_frame) {
+		fx_ring[fx_head] = {f.fx_cache_writes, f.fx_affine_fetches, moved, f.port_vram_bytes};
+		fx_head          = (fx_head + 1) % FX_WINDOW;
+		fx_count         = fx_count < FX_WINDOW ? fx_count + 1 : fx_count;
+		fx_last_frame    = f.frame;
+	}
+	FxFrame sum = {0, 0, 0, 0};
+	for (int i = 0; i < fx_count; i++) {
+		sum.cache += fx_ring[i].cache;
+		sum.affine += fx_ring[i].affine;
+		sum.moved += fx_ring[i].moved;
+		sum.vram += fx_ring[i].vram;
+	}
+	fx_seen = fx_seen || sum.cache || sum.affine;
+	if (fx_seen) {
+		const double amp = sum.moved ? (double)sum.vram / (double)sum.moved : 0.0;
+		char         line[160];
+		snprintf(line, sizeof line,
+		         "VERA FX, last %d frames: %u cache write(s), %u affine fetch(es) — %.2fx amplification",
+		         fx_count, (unsigned)sum.cache, (unsigned)sum.affine, amp);
+		if (sum.cache || sum.affine)
+			ImGui::TextUnformatted(line);
+		else
+			ImGui::TextDisabled("%s", line);
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Bytes that reached VRAM per byte the CPU pushed.\n"
-			                  "An FX cache write moves four bytes for one store,\n"
-			                  "which is the whole reason to use it.");
+			ImGui::SetTooltip("Bytes that reached VRAM per byte the CPU pushed, over the\n"
+			                  "last second. An FX cache write moves four bytes for one\n"
+			                  "store, which is the whole reason to use it.\n\n"
+			                  "This frame: %u cache write(s), %u affine fetch(es).",
+			                  (unsigned)f.fx_cache_writes, (unsigned)f.fx_affine_fetches);
 		}
 	}
 
@@ -997,7 +1036,7 @@ draw_bandwidth(void)
 		// render time -- render_time_r ticks every clock, including the ones
 		// painting the line buffer with the bus idle -- while everything here
 		// is bus occupancy. Comparing the two directly overstates sprite
-		// pressure about fivefold at 4 bpp and would warn about lines that
+		// pressure about tenfold at 4 bpp and would warn about lines that
 		// comfortably fit.
 		const uint32_t taken = layer_clocks + port_clocks;
 		const uint32_t left  = taken < VERA_BW_LINE_CLOCKS ? VERA_BW_LINE_CLOCKS - taken : 0;
@@ -1045,7 +1084,7 @@ draw_bandwidth(void)
 		    "Two different clocks, and they must not be subtracted from each\n"
 		    "other: everything here is BUS OCCUPANCY, while the Render time\n"
 		    "view measures WALL CLOCK -- render_time_r ticks even while the\n"
-		    "renderer paints with the bus idle, so it runs about five times\n"
+		    "renderer paints with the bus idle, so it runs about ten times\n"
 		    "higher at 4 bpp. The tooltip above converts before comparing.");
 	}
 }

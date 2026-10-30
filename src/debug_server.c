@@ -2328,7 +2328,7 @@ static cJSON *vera_bandwidth_json(void) {
     //
     // Named "bus" deliberately. Every clock figure in this object is BUS
     // OCCUPANCY, which is not the clock the sprite views report: sprite render
-    // time is wall clock and runs about five times higher, so a client that
+    // time is wall clock and runs about ten times higher, so a client that
     // subtracted one from the other would conclude a comfortable line was
     // oversubscribed. Convert sprite width and colour depth to fetches first.
     cJSON_AddNumberToObject(o, "spriteBusHeadroomClocksAtPeak",
