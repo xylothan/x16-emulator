@@ -107,7 +107,7 @@ void via1_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA1, reg, value)
 void via2_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA2, reg, value); }
 void video_write(uint8_t reg, uint8_t value) { note_write(FAKE_VERA, reg, value); }
 void midi_serial_write(uint8_t reg, uint8_t value) { note_write(FAKE_MIDI, reg, value); }
-void YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value); }
+bool YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value); return true; }
 
 // memory.c brackets its VERA writes with this so the bandwidth accounting can
 // tell a debugger's poke from a store the guest made. There is no accounting
