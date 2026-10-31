@@ -364,6 +364,19 @@ public class X16DebugClient : IDisposable
         return SendRequestAsync("x16/joystick", args);
     }
 
+    /// <summary>
+    /// SD card state, the filesystem index of the attached image and the block
+    /// access history. files is "touched", "all" or "none".
+    /// </summary>
+    public Task<JsonNode> SdCardAsync(string files = "touched", int? history = null,
+                                      bool reindex = false)
+    {
+        var args = new JsonObject { ["files"] = files };
+        if (history.HasValue) args["history"] = history.Value;
+        if (reindex) args["reindex"] = true;
+        return SendRequestAsync("x16/sdcard", args);
+    }
+
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject
         {

@@ -634,6 +634,136 @@ test_stale(void)
 	remove(path);
 }
 
+// A file saved while the card is attached: its data is written before its
+// directory entry exists, so the index has to catch up and still credit it.
+static void
+test_saved_file_is_credited(void)
+{
+	printf("\n--- File saved after indexing ---\n");
+
+	disk_t      d    = build_fat32_image();
+	const char *path = write_temp_disk(&d, "saved.img");
+	disk_free(&d);
+	if (!path) { return; }
+
+	struct x16file *img = x16open(path, "rb");
+	check(img != NULL, "saved test: image opened");
+	if (!img) { remove(path); return; }
+	check(sdcard_fat_build(img), "saved test: build succeeds");
+
+	// Something the machine read before the save.
+	sdcard_fat_note_access(F32_DATA_LBA + 2u, false, 512); // FILE1.PRG
+
+	// The save, in the order a FAT driver does it: data, FAT, directory.
+	const uint32_t new_cluster = 8u;
+	const uint32_t new_lba     = F32_DATA_LBA + (new_cluster - 2u);
+	sdcard_fat_note_access(new_lba, true, 512);
+	check(find_file("/NEW.PRG") == NULL, "new file not indexed before its entry exists");
+
+	FILE *fp = fopen(path, "r+b");
+	check(fp != NULL, "saved test: image reopened for writing");
+	if (fp) {
+		uint8_t sec[512];
+		// FAT1: cluster 8 is a one-cluster chain.
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "saved test: sector read");
+		wle32(sec + new_cluster * 4u, 0x0FFFFFFFu);
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "saved test: sector written");
+		// Root directory: the first free slot.
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "saved test: sector read");
+		int slot = 0;
+		while (slot < 16 && sec[slot * 32] != 0x00) {
+			slot++;
+		}
+		check(slot < 16, "saved test: root has a free slot");
+		write_dirent_83(sec + slot * 32, "NEW     PRG", 0x20, new_cluster, 300);
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "saved test: sector written");
+		fclose(fp);
+	}
+	sdcard_fat_note_access(FAT1_LBA, true, 512);
+	sdcard_fat_note_access(F32_DATA_LBA, true, 512);
+	check(sdcard_fat_is_stale(), "stale after the directory write");
+
+	// Loading it back reads its data: the index rebuilds first.
+	sdcard_fat_note_access(new_lba, false, 512);
+	check(!sdcard_fat_is_stale(), "rebuilt on the next file-data read");
+
+	const sdcard_fat_file_t *nf = find_file("/NEW.PRG");
+	check(nf != NULL, "new file is in the index after the rebuild");
+	if (nf) {
+		check_eq((unsigned)nf->bytes_read, 512u, "new file's read is credited");
+		check_eq((unsigned)nf->bytes_written, 512u, "write made before its entry is credited");
+	}
+	const sdcard_fat_file_t *f1 = find_file("/FILE1.PRG");
+	if (f1) {
+		check_eq((unsigned)f1->bytes_read, 512u, "earlier counts survive the rebuild");
+	}
+
+	sdcard_fat_free();
+	x16close(img);
+	remove(path);
+}
+
+// The image changed on the host while attached (a build script copying a PRG
+// in): the machine never writes metadata, so only the read can notice.
+static void
+test_host_edit_is_noticed(void)
+{
+	printf("\n--- Image changed on the host ---\n");
+
+	disk_t      d    = build_fat32_image();
+	const char *path = write_temp_disk(&d, "hostedit.img");
+	disk_free(&d);
+	if (!path) { return; }
+
+	struct x16file *img = x16open(path, "rb");
+	check(img != NULL, "host edit: image opened");
+	if (!img) { remove(path); return; }
+	check(sdcard_fat_build(img), "host edit: build succeeds");
+
+	const uint32_t new_cluster = 8u;
+	const uint32_t new_lba     = F32_DATA_LBA + (new_cluster - 2u);
+
+	// A truly free block costs a FAT read and changes nothing.
+	sdcard_fat_note_access(new_lba, false, 512);
+	check(!sdcard_fat_is_stale(), "read of a free block does not mark stale");
+
+	FILE *fp = fopen(path, "r+b");
+	check(fp != NULL, "host edit: image reopened for writing");
+	if (fp) {
+		uint8_t sec[512];
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "host edit: FAT read");
+		wle32(sec + new_cluster * 4u, 0x0FFFFFFFu);
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "host edit: FAT written");
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "host edit: root read");
+		int slot = 0;
+		while (slot < 16 && sec[slot * 32] != 0x00) {
+			slot++;
+		}
+		write_dirent_83(sec + slot * 32, "HOST    PRG", 0x20, new_cluster, 100);
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "host edit: root written");
+		fclose(fp);
+	}
+
+	sdcard_fat_note_access(new_lba, false, 512);
+	const sdcard_fat_file_t *hf = find_file("/HOST.PRG");
+	check(hf != NULL, "file copied in on the host is indexed on its first read");
+	if (hf) {
+		check_eq((unsigned)hf->bytes_read, 512u, "and that read is credited to it");
+	}
+
+	sdcard_fat_free();
+	x16close(img);
+	remove(path);
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int
@@ -643,6 +773,8 @@ main(void)
 	test_fat16();
 	test_garbage_image();
 	test_stale();
+	test_saved_file_is_credited();
+	test_host_edit_is_noticed();
 
 	return x16_test_summary("sdcard_fat");
 }

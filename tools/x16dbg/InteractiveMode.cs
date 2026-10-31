@@ -116,6 +116,9 @@ public static class InteractiveMode
                 case "bp":
                     await Commands.RunOneShotAsync(client, "bp", args);
                     break;
+                case "sd":
+                    await Commands.RunOneShotAsync(client, "sd", args);
+                    break;
                 case "profile":
                     await Commands.RunOneShotAsync(client, "profile", args);
                     break;
@@ -318,6 +321,7 @@ public static class InteractiveMode
         Console.WriteLine("  joy 1 start          Hold only Start; Right and A let go");
         Console.WriteLine("  joy 1 none           Connected with nothing held (JOY(1) = $00)");
         Console.WriteLine("  joy 1 release        Empty the port again (JOY(1) = $FF)");
+        Console.WriteLine("  sd [all] [history n] SD card state, touched files, block history");
         Console.WriteLine("  buttons: up down left right a b x y start select l r");
         Console.WriteLine();
     }

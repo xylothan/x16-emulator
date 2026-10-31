@@ -409,7 +409,7 @@ Every panel is dockable, closable and reopenable from the **View** menu. Each on
 | [**PSG**](#psg--veras-16-voice-sound-generator) | VERA PSG voices with live register values, plus scope traces. |
 | [**YM2151**](#ym2151--the-fm-chip) | FM channel state and scope traces. |
 | [**PCM**](#pcm--the-audio-fifo) | VERA PCM state and scope traces. |
-| [**I/O**](#watching-io-and-file-access) | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, each row naming and explaining the register it touched; **SD Card** command, block and status state; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. |
+| [**I/O**](#watching-io-and-file-access) | What the machine is doing to its ports. An **Activity** log of register accesses and decoded device events, sortable by any column, each row naming and explaining the register it touched; **SD Card** command, block and status state, with a history of block reads and writes; **Files** — every file the machine has opened, by name, on either file path; **Joysticks** with buttons decoded and lit live; **VIA**, **I2C** (with the SMC and RTC behind it) and **Serial**, each annotated with what the bits are wired to. |
 | [**Performance**](#performance-budgets) | How much of a frame your code actually uses. Work / interrupt / waiting split against a 60, 30 or arbitrary fps budget, a per-frame history graph with the budget drawn across it, rolling min/mean/p50/p95/p99/max with budget overruns, and a per-routine breakdown by address zone or guest marker. |
 
 While the machine is paused, the audio panels keep drawing their scope traces by projecting from
@@ -795,15 +795,19 @@ when it completes, so a list of *currently open* channels is empty almost all th
 directory listing or a failed open would otherwise flash past unseen. The history is kept whether
 or not capture is on, because file operations are rare enough to record for free.
 
-For the SD image, ADD closes the gap by parsing the filesystem *itself*: **Build index** reads the
-image's partition table, BPB, FATs and directory tree — including long filenames — and maps every
-cluster back to a path. Block traffic then resolves to `/GAMES/FOO.PRG + 2048`, and the file list
-shows how many bytes of each file the machine has actually read or written this session, listing
-the files it touched first so they stand out from the ones that merely exist.
+For the SD image, ADD closes the gap by parsing the filesystem *itself*: when the card is attached
+it reads the image's partition table, BPB, FATs and directory tree — including long filenames — and
+maps every cluster back to a path. Block traffic then resolves to `/GAMES/FOO.PRG + 2048`, and the
+file list (**Storage**) shows how many bytes of each file the machine has actually read or written
+this session, listing the files it touched first so they stand out from the ones that merely exist.
+The **SD Card** tab keeps an always-on history of block reads and writes, merged per file.
 
-The index is a snapshot, not a live view. If the machine writes to a FAT or a directory the index
-is marked **STALE** and you rebuild it by hand. That is deliberate: quietly serving a filename
-that has since become wrong would be worse than admitting the index has aged.
+The index follows changes to the image. When the machine writes to a FAT or a directory, or reads
+a block the index thinks is free but the FAT says is allocated (the image was changed on the host),
+the index is rebuilt before the next file read is credited. Per-file counts survive a rebuild, and
+blocks a save wrote before its directory entry existed are credited to the file once it appears.
+With *Index the filesystem* turned off in Settings, a changed index is marked **STALE** instead
+and rebuilt by hand.
 
 #### Performance budgets
 
@@ -969,8 +973,9 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats` and
-`x16/perfConfig`. The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
+Custom requests: `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
+`x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
+and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
 
 Four scopes are exposed on every stack frame: **Registers** (including the 65C816 extras and the

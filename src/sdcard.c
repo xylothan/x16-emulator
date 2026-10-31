@@ -72,6 +72,66 @@ static uint64_t stat_bytes_read     = 0;
 static uint64_t stat_bytes_written  = 0;
 static uint32_t stat_commands       = 0;
 
+static sdcard_history_entry_t history[SDCARD_HISTORY_SIZE];
+static int                    history_head  = 0; // next slot to write
+static int                    history_count = 0;
+
+void
+sdcard_history_clear(void)
+{
+	history_head  = 0;
+	history_count = 0;
+}
+
+int
+sdcard_history_count(void)
+{
+	return history_count;
+}
+
+const sdcard_history_entry_t *
+sdcard_history_at(int i)
+{
+	if (i < 0 || i >= history_count) {
+		return NULL;
+	}
+	int slot = (history_head - 1 - i + SDCARD_HISTORY_SIZE) % SDCARD_HISTORY_SIZE;
+	return &history[slot];
+}
+
+static void
+history_note(uint32_t lba_val, bool is_write)
+{
+	const sdcard_fat_file_t *f   = NULL;
+	uint64_t                 off = 0;
+	sdcard_fat_region_t      reg = sdcard_fat_lookup(lba_val, &f, &off);
+	const char              *p   = (f != NULL && f->path != NULL) ? f->path : "";
+	uint32_t                 cmd = last_cmd & 0x3F;
+
+	if (history_count > 0) {
+		sdcard_history_entry_t *last = &history[(history_head - 1 + SDCARD_HISTORY_SIZE) % SDCARD_HISTORY_SIZE];
+		if (last->is_write == is_write && last->region == (uint8_t)reg &&
+		    lba_val == last->first_lba + last->blocks && strcmp(last->path, p) == 0) {
+			last->blocks++;
+			return;
+		}
+	}
+
+	sdcard_history_entry_t *e = &history[history_head];
+	e->is_write  = is_write;
+	e->first_lba = lba_val;
+	e->blocks    = 1;
+	e->region    = (uint8_t)reg;
+	e->offset    = off;
+	e->command   = cmd;
+	snprintf(e->path, sizeof(e->path), "%s", p);
+
+	history_head = (history_head + 1) % SDCARD_HISTORY_SIZE;
+	if (history_count < SDCARD_HISTORY_SIZE) {
+		history_count++;
+	}
+}
+
 void
 sdcard_set_path(char const *path)
 {
@@ -115,6 +175,7 @@ sdcard_attach()
 		stat_bytes_read     = 0;
 		stat_bytes_written  = 0;
 		stat_commands       = 0;
+		sdcard_history_clear();
 
 		// Build the FAT index (best-effort; failure is non-fatal).
 		if (sdcard_fat_autoindex) {
@@ -132,6 +193,9 @@ sdcard_reindex()
 {
 	if (!sdcard_attached || sdcard_file == NULL) {
 		return false;
+	}
+	if (sdcard_fat_ready() && sdcard_fat_rebuild()) {
+		return true;
 	}
 	sdcard_fat_free();
 	return sdcard_fat_build(sdcard_file);
@@ -154,6 +218,7 @@ sdcard_detach()
 		stat_bytes_read     = 0;
 		stat_bytes_written  = 0;
 		stat_commands       = 0;
+		sdcard_history_clear();
 	}
 }
 
@@ -349,6 +414,7 @@ static int loadBlock(uint8_t *dest)
 		stat_blocks_read++;
 		stat_bytes_read += 512;
 		sdcard_fat_note_access(lba, false, 512);
+		history_note(lba, false);
 		trace_block(lba, false);
 		response_length = 1 + 512 + 2;
 	}
@@ -539,6 +605,7 @@ sdcard_handle(uint8_t inbyte)
 						stat_blocks_written++;
 						stat_bytes_written += 512;
 						sdcard_fat_note_access(lba, true, 512);
+						history_note(lba, true);
 						trace_block(lba, true);
 					}
 			}

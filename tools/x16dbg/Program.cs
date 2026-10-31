@@ -134,6 +134,8 @@ class Program
         Console.WriteLine("  vram <addr> <len>       Read VRAM by length (e.g., vram 1B000 20)");
         Console.WriteLine("  setvram <addr> <hex>    Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  joy <port> [buttons]    Drive a SNES controller port (1-4)");
+        Console.WriteLine("  sd [all|nofiles] [history <n>] [reindex]");
+        Console.WriteLine("                          SD card state, files read/written, block history");
         Console.WriteLine("  profile <frames> [...]  Capture, then print routines and call paths");
         Console.WriteLine("  bp add <addr>           Add breakpoint");
         Console.WriteLine("  bp remove <addr>        Remove breakpoint");

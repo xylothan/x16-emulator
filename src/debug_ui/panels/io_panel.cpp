@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
@@ -283,6 +284,89 @@ refresh_rows()
     s_rows_valid  = newest != nullptr;
 }
 
+// The Activity rows in the order the table is sorted by. Equal to s_rows when
+// sorted by Seq ascending (the default); otherwise a sorted copy, redone only
+// when the rows or the sort order change.
+std::vector<uint32_t> s_sorted;
+int                   s_sort_col  = 0;
+bool                  s_sort_desc = false;
+uint32_t              s_sorted_last_seq = 0;
+size_t                s_sorted_size     = 0;
+bool                  s_sorted_valid    = false;
+double                s_sorted_time     = 0.0;
+
+// Compare two events by an Activity column. Ties fall back to sequence so the
+// order stays stable from frame to frame.
+int
+compare_events(const io_event_t &a, const io_event_t &b, int col)
+{
+    auto cmp = [](uint32_t p, uint32_t q) { return p < q ? -1 : p > q ? 1 : 0; };
+    int c = 0;
+    switch (col) {
+        case 1: c = cmp(((uint32_t)a.pc_bank << 16) | a.pc, ((uint32_t)b.pc_bank << 16) | b.pc); break;
+        case 2: c = strcmp(io_trace_device_name((io_device_t)a.device),
+                           io_trace_device_name((io_device_t)b.device)); break;
+        case 3: c = cmp(a.has_addr ? a.addr : 0x10000u, b.has_addr ? b.addr : 0x10000u); break;
+        case 4: c = strcmp(a.has_addr ? io_reg_name(a.addr) : "",
+                           b.has_addr ? io_reg_name(b.addr) : ""); break;
+        case 5: c = cmp(a.is_write ? 1u : 0u, b.is_write ? 1u : 0u); break;
+        case 6: {
+            // Register values sort numerically, decoded events by their text,
+            // and values before text.
+            const bool da = a.kind == IO_EVENT_DECODED, db = b.kind == IO_EVENT_DECODED;
+            if (da != db) {
+                c = da ? 1 : -1;
+            } else if (da) {
+                c = strcmp(a.text, b.text);
+            } else {
+                c = cmp(a.value, b.value);
+            }
+            break;
+        }
+        default: break;
+    }
+    return c != 0 ? c : cmp(a.seq, b.seq);
+}
+
+void
+refresh_sorted(bool specs_dirty)
+{
+    if (s_sort_col == 0 && !s_sort_desc) {
+        s_sorted_valid = false;  // s_rows is already in this order
+        return;
+    }
+    const uint32_t last = s_rows.empty() ? 0 : s_rows.back();
+    if (!specs_dirty && s_sorted_valid &&
+        ((s_sorted_size == s_rows.size() && s_sorted_last_seq == last) ||
+         // While capture is running the rows change every frame; a full sort
+         // of the ring four times a second is plenty for a view nobody can
+         // read faster than that. Rows that age out meanwhile draw blank.
+         ImGui::GetTime() - s_sorted_time < 0.25)) {
+        return;
+    }
+    s_sorted = s_rows;
+    const int         count  = io_trace_count();
+    const io_event_t *oldest = count > 0 ? io_trace_at(0) : nullptr;
+    if (oldest != nullptr) {
+        const uint32_t base = oldest->seq;
+        const int      col  = s_sort_col;
+        const bool     desc = s_sort_desc;
+        std::sort(s_sorted.begin(), s_sorted.end(), [base, col, desc](uint32_t x, uint32_t y) {
+            const io_event_t *a = io_trace_at((int)(x - base));
+            const io_event_t *b = io_trace_at((int)(y - base));
+            if (a == nullptr || b == nullptr) {
+                return false;
+            }
+            const int c = compare_events(*a, *b, col);
+            return desc ? c > 0 : c < 0;
+        });
+    }
+    s_sorted_size     = s_rows.size();
+    s_sorted_last_seq = last;
+    s_sorted_valid    = true;
+    s_sorted_time     = ImGui::GetTime();
+}
+
 struct DeviceToggle {
     const char *label;
     bool DebugUiSettings::*field;
@@ -445,9 +529,12 @@ draw_activity_tab()
 
     if (ImGui::BeginTable("io_activity", 7,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                              ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE)) {
+                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable |
+                              DBGUI_TABLE_FLAGS_RESIZABLE)) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Seq", ImGuiTableColumnFlags_WidthFixed,
+        ImGui::TableSetupColumn("Seq",
+                                ImGuiTableColumnFlags_WidthFixed |
+                                    ImGuiTableColumnFlags_DefaultSort,
                                 dbgui_col_width("Seq", "8888888"));
         ImGui::TableSetupColumn("PC", ImGuiTableColumnFlags_WidthFixed,
                                 dbgui_col_width("PC", "88:8888"));
@@ -469,14 +556,27 @@ draw_activity_tab()
         // and filtering every row every frame cost 1.6 ms of the emulator's
         // own thread (docs/profiler-plan.md).
         refresh_rows();
+        bool specs_dirty = false;
+        if (ImGuiTableSortSpecs *sp = ImGui::TableGetSortSpecs()) {
+            if (sp->SpecsDirty) {
+                s_sort_col  = sp->SpecsCount > 0 ? sp->Specs[0].ColumnIndex : 0;
+                s_sort_desc = sp->SpecsCount > 0 &&
+                              sp->Specs[0].SortDirection == ImGuiSortDirection_Descending;
+                sp->SpecsDirty = false;
+                specs_dirty    = true;
+            }
+        }
+        refresh_sorted(specs_dirty);
+        const std::vector<uint32_t> &rows = s_sorted_valid ? s_sorted : s_rows;
+
         const int count = io_trace_count();
         const io_event_t *oldest = count > 0 ? io_trace_at(0) : nullptr;
 
         ImGuiListClipper clipper;
-        clipper.Begin((int)s_rows.size());
+        clipper.Begin((int)rows.size());
         while (clipper.Step()) {
         for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; r++) {
-            const int i = oldest ? (int)(s_rows[(size_t)r] - oldest->seq) : -1;
+            const int i = oldest ? (int)(rows[(size_t)r] - oldest->seq) : -1;
             const io_event_t *evp = io_trace_at(i);
             if (evp == nullptr) {
                 // Cannot happen after refresh_rows(); keep the row so the
@@ -535,7 +635,7 @@ draw_activity_tab()
         }
         }
 
-        if (s_autoscroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
+        if (s_autoscroll && !s_sorted_valid && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
             ImGui::SetScrollHereY(1.0f);
         }
         ImGui::EndTable();
@@ -575,23 +675,109 @@ sd_command_name(uint8_t cmd, bool is_acmd)
 void
 explain_no_sdcard()
 {
-    ImGui::TextColored(COL_DIM, "No SD card image is attached.");
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Attach one with:");
-    ImGui::Indent();
-    ImGui::TextColored(COL_DECODED, "x16emu -sdcard mycard.img");
-    ImGui::Unindent();
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "-fsroot does NOT attach a card. It sets the host directory the machine sees "
-        "when it is using host-filesystem access, which is a different path entirely -- "
-        "see the Files tab.");
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "The two are mutually exclusive by default: passing -sdcard turns host-filesystem "
-        "access off unless you also pass -hostfsdev to keep it. So a machine either has a "
-        "card and talks to it in 512-byte blocks, or has no card and gets its files by "
-        "name from the host.");
+    ImGui::TextColored(COL_DIM, "No SD card image attached \xc2\xb7");
+    ImGui::SameLine();
+    ImGui::TextColored(COL_DECODED, "x16emu -sdcard <image>");
+    tip("-fsroot does not attach a card: it sets the host directory used for "
+        "host-filesystem access, a different path (see Files > Host filesystem).\n\n"
+        "The two are exclusive by default -- -sdcard turns host access off unless "
+        "-hostfsdev keeps it.");
+}
+
+const char *
+sd_region_label(uint8_t region)
+{
+    switch ((sdcard_fat_region_t)region) {
+        case SDCARD_FAT_REGION_MBR: return "<MBR>";
+        case SDCARD_FAT_REGION_RESERVED: return "<boot/reserved>";
+        case SDCARD_FAT_REGION_FAT: return "<FAT>";
+        case SDCARD_FAT_REGION_ROOTDIR: return "<root directory>";
+        case SDCARD_FAT_REGION_FREE: return "<unallocated>";
+        case SDCARD_FAT_REGION_FILE:
+        case SDCARD_FAT_REGION_DIR: return "(unnamed)";
+        default: return "<not indexed>";
+    }
+}
+
+void
+draw_sd_history()
+{
+    const int n = sdcard_history_count();
+    if (n == 0) {
+        ImGui::TextColored(COL_DIM, "Nothing yet.");
+        return;
+    }
+
+    if (!ImGui::BeginTable("sd_hist", 6,
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                               ImGuiTableFlags_BordersInnerV | DBGUI_TABLE_FLAGS_RESIZABLE,
+                           ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 11))) {
+        return;
+    }
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("What", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("What", "write"));
+    ImGui::TableSetupColumn("Cmd", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Cmd", "CMD18"));
+    ImGui::TableSetupColumn("LBA", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("LBA", "88888888-88888888"));
+    ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Bytes", "88888888"));
+    ImGui::TableSetupColumn("File / region", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed,
+                            dbgui_col_width("Offset", "88888888"));
+    ImGui::TableHeadersRow();
+
+    ImGuiListClipper clipper;
+    clipper.Begin(n);
+    while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+            const sdcard_history_entry_t *h = sdcard_history_at(i);
+            ImGui::TableNextRow();
+            if (h == nullptr) {
+                continue;
+            }
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextColored(h->is_write ? COL_WRITE : COL_READ, "%s",
+                               h->is_write ? "write" : "read");
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextColored(COL_DIM, "CMD%u", h->command);
+
+            ImGui::TableSetColumnIndex(2);
+            if (h->blocks > 1) {
+                ImGui::Text("%u-%u", h->first_lba, h->first_lba + h->blocks - 1);
+            } else {
+                ImGui::Text("%u", h->first_lba);
+            }
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%llu", (unsigned long long)h->blocks * 512ull);
+
+            ImGui::TableSetColumnIndex(4);
+            if (h->path[0] != '\0') {
+                ImGui::TextColored(COL_DECODED, "%s", h->path);
+            } else {
+                // Blocks written before their file was in the index (a save in
+                // progress) belong to it now; name the current owner, dimmed.
+                const sdcard_fat_file_t *f = nullptr;
+                if (h->region == SDCARD_FAT_REGION_FREE &&
+                    sdcard_fat_lookup(h->first_lba, &f, nullptr) == SDCARD_FAT_REGION_FILE &&
+                    f != nullptr) {
+                    ImGui::TextColored(COL_DIM, "%s", f->path);
+                    tip("Unallocated when this happened; this file owns the block now.");
+                } else {
+                    ImGui::TextColored(COL_DIM, "%s", sd_region_label(h->region));
+                }
+            }
+
+            ImGui::TableSetColumnIndex(5);
+            if (h->path[0] != '\0') {
+                ImGui::Text("%llu", (unsigned long long)h->offset);
+            }
+        }
+    }
+    ImGui::EndTable();
 }
 
 void
@@ -708,9 +894,12 @@ draw_sdcard_tab()
                 spi.busy ? 1 : 0, spi.autotx ? 1 : 0, spi.sending_byte, spi.received_byte);
     tip("The VERA SPI port at $9F3E/$9F3F -- the only wire to the card.");
 
-    ImGui::Spacing();
-    ImGui::TextColored(COL_DIM, "This tab is the card as a device -- commands, blocks and "
-                                "status. For the files inside the image, see Files > SD image.");
+    ImGui::Separator();
+    heading("Recent activity",
+            "Block reads and writes, newest first. Consecutive blocks in the same direction "
+            "that belong to the same file or region are one row. Kept whether or not I/O "
+            "capture is on.");
+    draw_sd_history();
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,29 +1206,27 @@ draw_sd_files()
         return;
     }
 
-    ImGui::TextWrapped(
-        "The emulator only ever sees 512-byte blocks here -- the filesystem inside the "
-        "image is parsed by the ROM running on the emulated machine, not by us. To put "
-        "names to that traffic the emulator parses the image itself:");
-    ImGui::TextColored(COL_DIM, "This sub-tab is the files inside the image. The SD Card tab "
-                                "is the same card as a device -- commands, blocks and status.");
+    // Pick up files the machine created or changed since the last build.
+    sdcard_fat_refresh();
 
-    if (ImGui::SmallButton(sdcard_fat_ready() ? "Rebuild index" : "Build index")) {
-        sdcard_reindex();
-    }
-    tip("Read the image's partition table, boot sector, FATs and directory tree, and map "
-        "every cluster back to a path.");
-
+    heading("Storage",
+            "The filesystem inside the image, parsed by the emulator so block traffic can "
+            "be named. The emulated machine's own ROM does the real parsing; this is a "
+            "read-only copy. Read and Written are the bytes the machine moved through each "
+            "file this session.");
+    ImGui::SameLine();
     if (!sdcard_fat_ready()) {
-        ImGui::SameLine();
         ImGui::TextColored(COL_DIM, "not indexed");
-        ImGui::Spacing();
-        ImGui::TextWrapped("Only FAT16 and FAT32 images can be indexed. If the button leaves "
-                           "this saying \"not indexed\", the image is neither.");
+        tip("Only FAT16 and FAT32 images can be indexed.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Build index")) {
+            sdcard_reindex();
+        }
+        tip("Read the image's partition table, boot sector, FATs and directory tree, and "
+            "map every cluster back to a path.");
         return;
     }
 
-    ImGui::SameLine();
     ImGui::TextColored(COL_DIM, "%s \xc2\xb7 %u bytes/cluster \xc2\xb7 %d entries",
                        sdcard_fat_type_name(), sdcard_fat_bytes_per_cluster(),
                        sdcard_fat_file_count());
@@ -1047,11 +1234,14 @@ draw_sd_files()
     if (sdcard_fat_is_stale()) {
         ImGui::SameLine();
         ImGui::TextColored(COL_WRITE, "\xc2\xb7 STALE");
-        tip("The machine wrote to the FAT or a directory since this index was built, so "
-            "names and extents may no longer be right. Rebuild to refresh.\n\n"
-            "The index is never refreshed automatically: quietly serving a filename that "
-            "had since become wrong would be worse than saying so.");
+        tip("The machine wrote to the FAT or a directory since this index was built, and "
+            "auto-indexing is off (System > Settings > I/O trace). Rebuild to refresh.");
     }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rebuild")) {
+        sdcard_reindex();
+    }
+    tip("Re-read the filesystem. Per-file counts are kept.");
     if (sdcard_fat_truncated()) {
         ImGui::SameLine();
         ImGui::TextColored(COL_WRITE, "\xc2\xb7 TRUNCATED");
@@ -1061,9 +1251,8 @@ draw_sd_files()
 
     ImGui::SetNextItemWidth(dbgui_field_width("wwwwwwwwwwwwwwww"));
     ImGui::InputTextWithHint("##sdfilter", "filter", s_file_filter, sizeof(s_file_filter));
-    tip("Show only paths containing this text.");
-    ImGui::SameLine();
-    ImGui::TextColored(COL_DIM, "files the machine has touched are listed first, in green");
+    tip("Show only paths containing this text. Files the machine has read or written are "
+        "listed first, in green.");
 
     if (ImGui::BeginTable("sd_files", 4,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
