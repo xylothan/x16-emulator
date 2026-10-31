@@ -11,7 +11,9 @@ extern "C" {
 	void YM_Create(int clock);
 	void YM_init(int sample_rate, int frame_rate);
 	void YM_stream_update(uint16_t* output, uint32_t numsamples);
-	void YM_write_reg(uint8_t reg, uint8_t val);
+	// Returns false if the chip was busy and the write was dropped, as the
+	// real YM2151 does. The caller reports it, since it knows who wrote.
+	bool YM_write_reg(uint8_t reg, uint8_t val);
 	bool YM_irq(void);
 
 	// ─── Debugger accessors ─────────────────────────────────────────────────

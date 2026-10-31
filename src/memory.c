@@ -174,21 +174,24 @@ static const char *format_addr(uint16_t address, uint8_t bank, uint8_t x16Bank) 
 	return buffer;
 }
 
+// The X16 RAM/ROM bank that the code at `address` (bank 0) is running from.
+static uint8_t x16_bank_of(uint16_t address) {
+	if (address < 0xa000) {
+		return 0;
+	} else if (address < 0xc000) {
+		return memory_get_ram_bank();
+	} else {
+		return memory_get_rom_bank();
+	}
+}
+
 uint8_t
 read6502(uint16_t address, uint8_t bank) {
 	if (!is_gen2) bank = 0;
 	// Report access to uninitialized RAM (if option selected)
 	if (reportUninitializedAccess) {
 		if (bank == 0) {
-			uint8_t pc_x16_bank;
-
-			if (opcode_addr < 0xa000) {
-				pc_x16_bank = 0;
-			} else if (opcode_addr < 0xc000) {
-				pc_x16_bank = memory_get_ram_bank();
-			} else {
-				pc_x16_bank = memory_get_rom_bank();
-			}
+			uint8_t pc_x16_bank = x16_bank_of(opcode_addr);
 
 			if (address >= 0xa000 && address < 0xc000) {
 				if (memory_get_ram_bank() < num_ram_banks && BRAM_access_flags[(memory_get_ram_bank() << 13) + address - 0xa000] == false){
@@ -454,7 +457,17 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 				addr_ym = value;
 			} else {                       // YM data (partially decoded)
 				audio_render();
-				YM_write_reg(addr_ym, value);
+				if (!YM_write_reg(addr_ym, value)) {
+					// The chip drops it, as the real one would. Say where it came
+					// from: the usual cause is a sound driver that does not wait
+					// for bit 7 of $9F41 to clear before writing.
+					if (debugOn) {
+						printf("YM2151 write received while busy: reg $%02X = $%02X dropped (debugger write)\n", addr_ym, value);
+					} else {
+						printf("YM2151 write received while busy: reg $%02X = $%02X dropped at PC %s\n",
+						       addr_ym, value, format_addr(opcode_addr, regs.k, x16_bank_of(opcode_addr)));
+					}
+				}
 			}
 		} else if (address >= 0x9fb0 && address < 0x9fc0) {
 			// emulator state

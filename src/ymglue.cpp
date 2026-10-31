@@ -68,19 +68,20 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}	
 		}
 
-		void write(uint8_t addr, uint8_t value) {
-			if (!ymfm_is_busy()) {
-				m_chip.write_address(addr);
-				m_chip.write_data(value);
-				// Shadow only accepted writes, so the debugger's register view
-				// matches what the chip actually holds.
-				m_regs[addr] = value;
-				if (addr == 0x08) {
-					latch_keyon(value);
-				}
-			} else {
-				printf("YM2151 write received while busy.\n");
+		// Returns false when the write was dropped because the chip was busy.
+		bool write(uint8_t addr, uint8_t value) {
+			if (ymfm_is_busy()) {
+				return false;
 			}
+			m_chip.write_address(addr);
+			m_chip.write_data(value);
+			// Shadow only accepted writes, so the debugger's register view
+			// matches what the chip actually holds.
+			m_regs[addr] = value;
+			if (addr == 0x08) {
+				latch_keyon(value);
+			}
+			return true;
 		}
 
 		void generate(int16_t* output, uint32_t numsamples) {
@@ -304,8 +305,8 @@ extern "C" {
 		if (initialized) opm_iface.generate((int16_t*)output, numsamples);
 	}
 
-	void YM_write_reg(uint8_t reg, uint8_t val) {
-		if (initialized) opm_iface.write(reg, val);
+	bool YM_write_reg(uint8_t reg, uint8_t val) {
+		return initialized ? opm_iface.write(reg, val) : true;
 	}
 
 	uint8_t YM_read_status() {
