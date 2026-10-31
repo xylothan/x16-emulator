@@ -11,6 +11,7 @@
 #include "debug_ui_bridge.h"  // debug_ui_request_goto
 #include "debug_ui_widgets.h" // dbgui_text_width, DBGUI_TABLE_FLAGS_RESIZABLE
 
+#include "../perf_budget.h"
 #include "../perf_hist.h"
 #include "../profile_cct.h"
 #include "../profile_session.h"
@@ -154,6 +155,46 @@ describe_frame(int i, double mhz, char *buf, size_t n)
 	const wf_frame_t *f = wf_frame(i);
 	snprintf(buf, n, "frame %u  %.2f ms work  %u writes%s%s", f->number, (double)f->work / (mhz * 1000.0),
 	         f->writes, f->events ? "" : "  (summary only)", f->truncated ? "  TRUNCATED" : "");
+}
+
+// The game frame that ends at vsync `i`, when the target frame rate gives a
+// game frame more than one vsync. The waterfall still draws one vsync at a
+// time -- VERA's frame, with its vblank -- so this says how that vsync's game
+// frame stood against its budget: the same rolling sum the Performance panel
+// and the summary above use.
+void
+draw_game_frame(int i, double mhz)
+{
+	const wf_frame_t *f = wf_frame(i);
+	if (!f->length || !f->work)
+		return; // CPU work was not measured
+	const perf_period_t p =
+	    perf_budget_period((uint32_t)(mhz * 1000.0 + 0.5), f->length, perf_budget_get_target_fps());
+	if (p.frames < 2)
+		return;
+	if (i + 1 < p.frames) {
+		ImGui::TextDisabled("Game frame: %d vsyncs at the target frame rate; this is vsync %u of the "
+		                    "capture, too early for a whole one.",
+		                    p.frames, f->number + 1);
+		return;
+	}
+	uint64_t work = 0;
+	for (int k = 0; k < p.frames; k++) {
+		const wf_frame_t *g = wf_frame(i - k);
+		if (g->number + (uint32_t)k != f->number)
+			return; // not consecutive vsyncs
+		work += g->work;
+	}
+	const double pct = p.cycles ? 100.0 * (double)work / (double)p.cycles : 0.0;
+	const ImVec4 col = work > p.threshold ? ImVec4(1.0f, 0.45f, 0.35f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+	ImGui::TextColored(col, "Game frame ending here (frames %u-%u, %d vsyncs): %llu of %u cycles of work (%.0f%%)%s",
+	                   f->number + 1 - (uint32_t)p.frames, f->number, p.frames, (unsigned long long)work, p.cycles,
+	                   pct, work > p.threshold ? ", over budget" : "");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("The target frame rate lets one game frame take %d vsyncs. This sums the\n"
+		                  "CPU work of this vsync and the %d before it. Below, the waterfall shows\n"
+		                  "this vsync alone, with its vblank: VERA's frame does not change.",
+		                  p.frames, p.frames - 1);
 }
 
 // ─── Building ───────────────────────────────────────────────────────────────
@@ -679,6 +720,7 @@ profile_waterfall_draw(const prof_report_t *r)
 		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
 		                   "This frame overflowed its buffer: events after the first %d are missing.",
 		                   f->count);
+	draw_game_frame(drawn, mhz);
 
 	const double length = f->length ? (double)f->length : 1.0;
 	if (g_view_len <= 0 || g_view_len > length) {

@@ -23,6 +23,7 @@ static const char MAGIC[8] = {'X', '1', '6', 'P', 'R', 'O', 'F', 0};
 #define T_NODE TAG('N', 'O', 'D', 'E')
 #define T_KEYS TAG('K', 'E', 'Y', 'S')
 #define T_WFAL TAG('W', 'F', 'A', 'L')
+#define T_WORK TAG('W', 'O', 'R', 'K') // each vsync's CPU work
 #define T_END  TAG('E', 'N', 'D', ' ')
 
 #ifdef _WIN32
@@ -63,7 +64,7 @@ cmp_key(const void *a, const void *b)
 
 int
 prof_run_write(const char *path, const prof_run_meta_t *m, const prof_report_t *r, const prof_run_key_t *keys,
-               int nkeys, bool with_waterfall, char *msg, size_t msg_size)
+               int nkeys, bool with_waterfall, const uint32_t *work, uint32_t nwork, char *msg, size_t msg_size)
 {
 	if (!path || !m || !r) {
 		snprintf(msg, msg_size, "Nothing to save.");
@@ -87,7 +88,18 @@ prof_run_write(const char *path, const prof_run_meta_t *m, const prof_report_t *
 	fprintf(f, "budget=%d %u %llu %llu %u %u %u\n", m->b_have ? 1 : 0, m->b_frames,
 	        (unsigned long long)m->b_total, (unsigned long long)m->b_idle, m->b_work_max, m->b_overruns,
 	        m->b_budget);
+	// Separate lines rather than more fields on budget=, which older readers
+	// parse with a fixed count.
+	fprintf(f, "target_fps=%.4f\nvsync_cycles=%u\n", (double)m->b_target_fps, m->b_vsync_cycles);
 	section_end(f, s);
+
+	if (work && nwork) {
+		s = section_begin(f, T_WORK);
+		bio_w32(f, nwork);
+		for (uint32_t i = 0; i < nwork; i++)
+			bio_w32(f, work[i]);
+		section_end(f, s);
+	}
 
 	s = section_begin(f, T_ROWS);
 	bio_w64(f, r->main_cycles);
@@ -181,6 +193,10 @@ meta_line(prof_run_meta_t *m, const char *k, const char *v)
 		m->recorders = (uint32_t)strtoul(v, NULL, 10);
 	else if (!strcmp(k, "tree_consistent"))
 		m->tree_consistent = atoi(v) != 0;
+	else if (!strcmp(k, "target_fps"))
+		m->b_target_fps = (float)atof(v);
+	else if (!strcmp(k, "vsync_cycles"))
+		m->b_vsync_cycles = (uint32_t)strtoul(v, NULL, 10);
 	else if (!strcmp(k, "budget")) {
 		int                have = 0;
 		unsigned long long tot = 0, idle = 0;
@@ -310,6 +326,22 @@ read_keys(const uint8_t *p, size_t n, prof_run_t *out)
 	return !rd.bad;
 }
 
+static bool
+read_work(const uint8_t *p, size_t n, prof_run_t *out)
+{
+	bio_reader_t   rd    = {p, p + n, false};
+	const uint32_t count = bio_r32(&rd);
+	if (!bio_room_for(&rd, count, 4) || count > 0x7FFFFFFF)
+		return false;
+	out->work = malloc(count ? sizeof *out->work * count : 1);
+	if (!out->work)
+		return false;
+	for (uint32_t i = 0; i < count; i++)
+		out->work[i] = bio_r32(&rd);
+	out->nwork = count;
+	return !rd.bad;
+}
+
 void
 prof_run_free(prof_run_t *run)
 {
@@ -320,6 +352,7 @@ prof_run_free(prof_run_t *run)
 		free(run->keys[i].source);
 	free(run->keys);
 	wf_staged_free(run->wf);
+	free(run->work);
 	memset(run, 0, sizeof *run);
 }
 
@@ -370,7 +403,8 @@ prof_run_read(const char *path, prof_run_t *out, char *msg, size_t msg_size)
 			seen_end = true;
 			break;
 		}
-		if (tag != T_META && tag != T_ROWS && tag != T_NODE && tag != T_KEYS && tag != T_WFAL) {
+		if (tag != T_META && tag != T_ROWS && tag != T_NODE && tag != T_KEYS && tag != T_WFAL &&
+		    tag != T_WORK) {
 			FSEEK64(f, (int64_t)len, SEEK_CUR); // from a newer writer: not ours to read
 			continue;
 		}
@@ -392,6 +426,7 @@ prof_run_read(const char *path, prof_run_t *out, char *msg, size_t msg_size)
 				out->wf = wf_read(buf, (size_t)len);
 				bad     = out->wf == NULL;
 				break;
+			case T_WORK: bad = out->work != NULL || !read_work(buf, (size_t)len, out); break;
 		}
 		free(buf);
 	}

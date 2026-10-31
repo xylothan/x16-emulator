@@ -262,6 +262,16 @@ uint32_t perf_budget_cycles_per_scanline(void);
 uint32_t perf_budget_budget_cycles(void);  // what work is measured against
 int      perf_budget_frames_per_budget(void); // vsyncs the budget spans
 
+// The budget a target frame rate gives, for any machine: the rule
+// perf_budget_set_target_fps() applies to the live one, for judging work
+// recorded elsewhere (a saved profile run) the same way. Pure.
+typedef struct {
+	int      frames;    // vsyncs one unit of work may span
+	uint32_t cycles;    // the budget for those vsyncs
+	uint32_t threshold; // what counts as over: cycles plus PERF_BOUNDARY_SLACK a vsync
+} perf_period_t;
+perf_period_t perf_budget_period(uint32_t machine_khz, uint32_t cycles_per_frame, float target_fps);
+
 void             perf_budget_set_idle_mode(perf_idle_mode_t mode);
 perf_idle_mode_t perf_budget_get_idle_mode(void);
 

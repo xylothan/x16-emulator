@@ -40,6 +40,10 @@ typedef struct {
 	bool     b_have;
 	uint32_t b_frames, b_work_max, b_overruns, b_budget;
 	uint64_t b_total, b_idle;
+	// The target the run was judged against when it was saved, and one
+	// vsync's cycles. 0 in runs saved before these were recorded.
+	float    b_target_fps;
+	uint32_t b_vsync_cycles;
 } prof_run_meta_t;
 
 // What one perf_hist key was shown as: the report row it belongs to (-1 for
@@ -56,13 +60,17 @@ typedef struct {
 	prof_run_key_t *keys;   // sorted by key
 	int             nkeys;
 	wf_staged_t    *wf;     // the waterfall, for wf_install(); NULL without one
+	uint32_t       *work;   // each vsync's CPU work, oldest first; NULL in older runs
+	uint32_t        nwork;
 } prof_run_t;
 
 // Write a run. `keys` need not be sorted. With `with_waterfall`, the
-// waterfall recorder's current state goes in too. Returns 0, or -1 with the
-// reason in `msg`.
+// waterfall recorder's current state goes in too. `work` is each vsync's CPU
+// work, oldest first, so the run can be judged again against another target
+// frame rate; NULL for none. Returns 0, or -1 with the reason in `msg`.
 int prof_run_write(const char *path, const prof_run_meta_t *meta, const prof_report_t *report,
-                   const prof_run_key_t *keys, int nkeys, bool with_waterfall, char *msg, size_t msg_size);
+                   const prof_run_key_t *keys, int nkeys, bool with_waterfall, const uint32_t *work,
+                   uint32_t nwork, char *msg, size_t msg_size);
 
 // Read a whole run into `out`. Nothing outside `out` changes, so a bad file
 // costs nothing. Returns 0, or -1 with the reason in `msg` (out is then

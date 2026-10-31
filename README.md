@@ -823,6 +823,12 @@ asking for 30 fps does not make frames longer — it means the work may take two
 budget doubles. A target faster than the machine scans is the opposite question ("must this fit in
 half a frame?") and gets a fractional budget.
 
+The Profile panel has the same `Target FPS` control, and it is the same setting. A recording that
+measured work against waiting keeps each vsync's work, so changing the target judges it again
+without recording it again, including a saved run reopened later. At 30 fps the summary reports the
+busiest *game frame* (two vsyncs summed) against two vsyncs' budget, and the waterfall, which still
+shows one vsync with its vblank, notes the game frame that ends at the vsync on screen.
+
 Below that: a per-frame history graph with the budget drawn across it and overruns in red; rolling
 statistics over 1s / 10s / 30s / 60s / session with min, mean, p50, p95, p99, max and budget
 overruns; and a **breakdown** attributing cycles to named routines. Zones can be drawn by address

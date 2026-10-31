@@ -81,6 +81,8 @@ main(void)
 	meta.mhz = 8.0; meta.elapsed_s = 2.5; meta.frames = 3; meta.recorders = 0x1D; meta.tree_consistent = true;
 	meta.b_have = true; meta.b_frames = 3; meta.b_total = 403200; meta.b_idle = 100000;
 	meta.b_work_max = 120000; meta.b_overruns = 1; meta.b_budget = 134400;
+	meta.b_target_fps = 30.0f; meta.b_vsync_cycles = 134400;
+	const uint32_t work[3] = {90000, 120000, 100000};
 
 	check(wf_init(64, 1 << 20), "waterfall ready");
 	for (int i = 0; i < 3; i++) {
@@ -89,7 +91,12 @@ main(void)
 		wf_frame_end((uint64_t)(i + 1) * 100, 50u + (uint64_t)i, 1);
 	}
 
-	check(prof_run_write("run_test" PROF_RUN_EXT, &meta, &rep, keys, 2, true, msg, sizeof msg) == 0, "written");
+	check(prof_run_write("run_test" PROF_RUN_EXT, &meta, &rep, keys, 2, true, work, 3, msg, sizeof msg) == 0,
+	      "written");
+	// The same run as a writer from before each vsync's work was kept.
+	meta.b_target_fps = 0.0f; meta.b_vsync_cycles = 0;
+	check(prof_run_write("run_old" PROF_RUN_EXT, &meta, &rep, keys, 2, false, NULL, 0, msg, sizeof msg) == 0,
+	      "written without the work section");
 
 	// ── Read back: every field as written ───────────────────────────────────
 	wf_reset();
@@ -107,6 +114,10 @@ main(void)
 	check(run.meta.b_have && run.meta.b_frames == 3 && run.meta.b_total == 403200 && run.meta.b_idle == 100000 &&
 	          run.meta.b_work_max == 120000 && run.meta.b_overruns == 1 && run.meta.b_budget == 134400,
 	      "the work-against-waiting summary");
+	check(run.meta.b_target_fps == 30.0f && run.meta.b_vsync_cycles == 134400,
+	      "the target it was judged against, and one vsync's cycles");
+	check(run.nwork == 3 && run.work && run.work[0] == 90000 && run.work[1] == 120000 && run.work[2] == 100000,
+	      "each vsync's work, in order, so the run can be judged again");
 	const prof_report_t *r = &run.report;
 	check(r->count == 2 && r->main_cycles == 977 && r->irq_cycles == 10 && r->instructions == 400 &&
 	          r->named_rows == 1 && r->ambiguous_rows == 1 && r->lookup == NULL,
@@ -136,6 +147,13 @@ main(void)
 	check(run.wf != NULL && wf_install(run.wf), "the waterfall installs");
 	run.wf = NULL;
 	check(wf_frame_count() == 3 && wf_frame(2)->work == 52 && wf_frame(1)->writes == 1, "with its frames");
+	prof_run_free(&run);
+
+	// ── An older run: no work section, still loads ──────────────────────────
+	check(prof_run_read("run_old" PROF_RUN_EXT, &run, msg, sizeof msg) == 0 && run.report.count == 2,
+	      "a run without the work section loads");
+	check(run.work == NULL && run.nwork == 0 && run.meta.b_target_fps == 0.0f && run.meta.b_budget == 134400,
+	      "with no per-vsync work and the verdict it was saved with");
 	prof_run_free(&run);
 
 	// ── Damage: nothing loads, and says why ─────────────────────────────────
@@ -168,6 +186,7 @@ main(void)
 	remove("run_cut" PROF_RUN_EXT);
 	remove("run_junk" PROF_RUN_EXT);
 	remove("run_newer" PROF_RUN_EXT);
+	remove("run_old" PROF_RUN_EXT);
 	wf_free();
 	return x16_test_summary("profile_run");
 }
