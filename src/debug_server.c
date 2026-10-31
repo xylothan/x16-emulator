@@ -26,6 +26,8 @@
 #include "video.h"
 #include "keyboard.h"
 #include "joystick.h"
+#include "sdcard.h"
+#include "sdcard_fat.h"
 
 #include "cpu/fake6502.h"
 
@@ -3037,6 +3039,155 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/sdcard: card state, filesystem index and block history ─────────────
+//
+// What the I/O panel's SD Card tab and Files > SD image show, as JSON.
+// Arguments (all optional):
+//   files:   "touched" (default) | "all" | "none" -- which index entries to list
+//   history: max history rows, newest first (default: all held)
+//   reindex: true to re-read the filesystem first (per-file counts are kept)
+
+static const char *sd_region_name(sdcard_fat_region_t r) {
+    switch (r) {
+        case SDCARD_FAT_REGION_MBR:      return "mbr";
+        case SDCARD_FAT_REGION_RESERVED: return "reserved";
+        case SDCARD_FAT_REGION_FAT:      return "fat";
+        case SDCARD_FAT_REGION_ROOTDIR:  return "rootdir";
+        case SDCARD_FAT_REGION_FILE:     return "file";
+        case SDCARD_FAT_REGION_DIR:      return "dir";
+        case SDCARD_FAT_REGION_FREE:     return "free";
+        default:                         return "unknown";
+    }
+}
+
+static int handle_x16_sdcard(int seq, cJSON *args) {
+    const char *files_mode = "touched";
+    int         hist_max   = SDCARD_HISTORY_SIZE;
+    if (args) {
+        cJSON *f = cJSON_GetObjectItemCaseSensitive(args, "files");
+        if (cJSON_IsString(f)) {
+            if (strcmp(f->valuestring, "touched") && strcmp(f->valuestring, "all") &&
+                strcmp(f->valuestring, "none")) {
+                send_dap_error_response(seq, "x16/sdcard",
+                                        "'files' must be \"touched\", \"all\" or \"none\"");
+                return 0;
+            }
+            files_mode = f->valuestring;
+        }
+        cJSON *h = cJSON_GetObjectItemCaseSensitive(args, "history");
+        if (cJSON_IsNumber(h)) {
+            hist_max = h->valueint < 0 ? 0 : h->valueint;
+        }
+        cJSON *r = cJSON_GetObjectItemCaseSensitive(args, "reindex");
+        if (cJSON_IsTrue(r)) {
+            sdcard_reindex();
+        }
+    }
+    sdcard_fat_refresh();
+
+    sdcard_debug_state_t sd;
+    sdcard_debug_get_state(&sd);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "attached", sd.attached);
+    if (!sd.attached) {
+        send_dap_response(seq, "x16/sdcard", true, body);
+        return 0;
+    }
+
+    cJSON *card = cJSON_CreateObject();
+    cJSON_AddStringToObject(card, "image", sd.image_path ? sd.image_path : "");
+    cJSON_AddNumberToObject(card, "imageSize", (double)sd.image_size);
+    cJSON_AddBoolToObject(card, "selected", sd.selected);
+    cJSON_AddNumberToObject(card, "lastCommand", sd.last_cmd);
+    cJSON_AddBoolToObject(card, "lastCommandIsAcmd", sd.last_cmd_is_acmd);
+    cJSON_AddNumberToObject(card, "lastLba", sd.last_lba);
+    cJSON_AddBoolToObject(card, "idle", sd.is_idle);
+    cJSON_AddBoolToObject(card, "initialized", sd.is_initialized);
+    cJSON_AddBoolToObject(card, "multiblockRead", sd.ongoing_multiblock_read);
+    cJSON_AddNumberToObject(card, "responseLength", sd.response_length);
+    cJSON_AddNumberToObject(card, "responseCounter", sd.response_counter);
+    cJSON_AddNumberToObject(card, "commands", sd.commands);
+    cJSON_AddNumberToObject(card, "blocksRead", (double)sd.blocks_read);
+    cJSON_AddNumberToObject(card, "blocksWritten", (double)sd.blocks_written);
+    cJSON_AddNumberToObject(card, "bytesRead", (double)sd.bytes_read);
+    cJSON_AddNumberToObject(card, "bytesWritten", (double)sd.bytes_written);
+    {
+        const sdcard_fat_file_t *lf  = NULL;
+        uint64_t                 off = 0;
+        sdcard_fat_region_t      reg = sdcard_fat_lookup(sd.last_lba, &lf, &off);
+        cJSON_AddStringToObject(card, "lastRegion", sd_region_name(reg));
+        if (lf != NULL) {
+            cJSON_AddStringToObject(card, "lastPath", lf->path);
+            cJSON_AddNumberToObject(card, "lastOffset", (double)off);
+        }
+    }
+    cJSON_AddItemToObject(body, "card", card);
+
+    cJSON *index = cJSON_CreateObject();
+    cJSON_AddBoolToObject(index, "ready", sdcard_fat_ready());
+    if (sdcard_fat_ready()) {
+        cJSON_AddStringToObject(index, "type", sdcard_fat_type_name());
+        cJSON_AddNumberToObject(index, "bytesPerCluster", sdcard_fat_bytes_per_cluster());
+        cJSON_AddNumberToObject(index, "entries", sdcard_fat_file_count());
+        cJSON_AddBoolToObject(index, "stale", sdcard_fat_is_stale());
+        cJSON_AddBoolToObject(index, "truncated", sdcard_fat_truncated());
+        if (strcmp(files_mode, "none") != 0) {
+            const bool touched_only = strcmp(files_mode, "touched") == 0;
+            cJSON     *files        = cJSON_CreateArray();
+            for (int i = 0; i < sdcard_fat_file_count(); i++) {
+                const sdcard_fat_file_t *f = sdcard_fat_file_at(i);
+                if (f == NULL || f->path == NULL) {
+                    continue;
+                }
+                if (touched_only && f->bytes_read == 0 && f->bytes_written == 0) {
+                    continue;
+                }
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddStringToObject(o, "path", f->path);
+                cJSON_AddBoolToObject(o, "dir", f->is_dir);
+                cJSON_AddNumberToObject(o, "size", f->size);
+                cJSON_AddNumberToObject(o, "bytesRead", (double)f->bytes_read);
+                cJSON_AddNumberToObject(o, "bytesWritten", (double)f->bytes_written);
+                cJSON_AddItemToArray(files, o);
+            }
+            cJSON_AddItemToObject(index, "files", files);
+        }
+    }
+    cJSON_AddItemToObject(body, "index", index);
+
+    cJSON *hist = cJSON_CreateArray();
+    const int hn = sdcard_history_count();
+    for (int i = 0; i < hn && i < hist_max; i++) {
+        const sdcard_history_entry_t *h = sdcard_history_at(i);
+        if (h == NULL) {
+            break;
+        }
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "op", h->is_write ? "write" : "read");
+        cJSON_AddNumberToObject(o, "command", h->command);
+        cJSON_AddNumberToObject(o, "firstLba", h->first_lba);
+        cJSON_AddNumberToObject(o, "blocks", h->blocks);
+        cJSON_AddNumberToObject(o, "bytes", (double)h->blocks * 512.0);
+        cJSON_AddStringToObject(o, "region", sd_region_name((sdcard_fat_region_t)h->region));
+        if (h->path[0] != '\0') {
+            cJSON_AddStringToObject(o, "path", h->path);
+            cJSON_AddNumberToObject(o, "offset", (double)h->offset);
+        } else if (h->region == SDCARD_FAT_REGION_FREE) {
+            // Written before its file was indexed; name the block's owner now.
+            const sdcard_fat_file_t *f = NULL;
+            if (sdcard_fat_lookup(h->first_lba, &f, NULL) == SDCARD_FAT_REGION_FILE && f != NULL) {
+                cJSON_AddStringToObject(o, "ownerNow", f->path);
+            }
+        }
+        cJSON_AddItemToArray(hist, o);
+    }
+    cJSON_AddItemToObject(body, "history", hist);
+
+    send_dap_response(seq, "x16/sdcard", true, body);
+    return 0;
+}
+
 // ─── x16/spriteMuxStats, x16/spriteMuxConfig: per-frame sprite multiplexing ─
 //
 // Structural twin of x16/perfStats/x16/perfConfig above -- same self-arming
@@ -3876,6 +4027,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/hostPerf")) result = handle_x16_host_perf(seq, args);
     else if (!strcmp(cmd, "x16/capture")) result = handle_x16_capture(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
+    else if (!strcmp(cmd, "x16/sdcard"))    result = handle_x16_sdcard(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);
 

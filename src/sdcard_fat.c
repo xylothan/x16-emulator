@@ -106,6 +106,17 @@ static int               g_file_count = 0;
 static fat_extent_t      g_extents[SDCARD_FAT_MAX_EXTENTS];
 static int               g_extent_count = 0;
 
+// Writes that landed in unallocated space. Saving a file writes its data
+// before its directory entry, so at the moment of writing those blocks belong
+// to nobody; once the index is rebuilt they are credited to whoever owns them.
+#define SDCARD_FAT_MAX_PENDING 256
+typedef struct {
+	uint32_t first_lba;
+	uint32_t blocks;
+} fat_pending_t;
+static fat_pending_t     g_pending[SDCARD_FAT_MAX_PENDING];
+static int               g_pending_count = 0;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 static uint16_t le16(const uint8_t *p)
@@ -805,6 +816,112 @@ void
 sdcard_fat_free(void)
 {
 	free_state();
+	g_pending_count = 0;
+}
+
+// Rebuild over the same image, keeping each file's counters by path. The
+// machine changing its filesystem must not wipe what the panel has learned
+// about which files it touched.
+bool
+sdcard_fat_rebuild(void)
+{
+	struct x16file *img = g_img;
+	if (img == NULL) {
+		return false;
+	}
+
+	typedef struct {
+		char    *path;
+		uint64_t bytes_read;
+		uint64_t bytes_written;
+	} saved_t;
+
+	const int n     = g_file_count;
+	saved_t  *saved = NULL;
+	if (n > 0) {
+		saved = (saved_t *)malloc((size_t)n * sizeof(saved_t));
+		if (saved == NULL) {
+			return false;
+		}
+		for (int i = 0; i < n; i++) {
+			// Take the path over so free_state() leaves it alone.
+			saved[i].path          = g_files[i].path;
+			saved[i].bytes_read    = g_files[i].bytes_read;
+			saved[i].bytes_written = g_files[i].bytes_written;
+			g_files[i].path        = NULL;
+		}
+	}
+
+	const bool ok = sdcard_fat_build(img);
+
+	if (ok && saved != NULL) {
+		for (int i = 0; i < g_file_count; i++) {
+			// Entries usually keep their position, so try that one first.
+			int match = -1;
+			if (i < n && saved[i].path != NULL && strcmp(saved[i].path, g_files[i].path) == 0) {
+				match = i;
+			} else {
+				for (int j = 0; j < n; j++) {
+					if (saved[j].path != NULL && strcmp(saved[j].path, g_files[i].path) == 0) {
+						match = j;
+						break;
+					}
+				}
+			}
+			if (match >= 0) {
+				g_files[i].bytes_read    = saved[match].bytes_read;
+				g_files[i].bytes_written = saved[match].bytes_written;
+			}
+		}
+	}
+
+	if (saved != NULL) {
+		for (int i = 0; i < n; i++) {
+			free(saved[i].path);
+		}
+		free(saved);
+	}
+
+	if (ok) {
+		// Credit writes made before their file existed in the index.
+		for (int p = 0; p < g_pending_count; p++) {
+			for (uint32_t b = 0; b < g_pending[p].blocks; b++) {
+				const sdcard_fat_file_t *f = NULL;
+				sdcard_fat_lookup(g_pending[p].first_lba + b, &f, NULL);
+				if (f != NULL) {
+					((fat_file_entry_t *)(uintptr_t)f)->bytes_written += 512;
+				}
+			}
+		}
+	}
+	g_pending_count = 0;
+	return ok;
+}
+
+bool
+sdcard_fat_refresh(void)
+{
+	if (!g_ready || !g_stale || !sdcard_fat_autoindex) {
+		return false;
+	}
+	return sdcard_fat_rebuild();
+}
+
+static void
+note_pending_write(uint32_t lba)
+{
+	if (g_pending_count > 0) {
+		fat_pending_t *last = &g_pending[g_pending_count - 1];
+		if (lba == last->first_lba + last->blocks) {
+			last->blocks++;
+			return;
+		}
+	}
+	if (g_pending_count < SDCARD_FAT_MAX_PENDING) {
+		g_pending[g_pending_count].first_lba = lba;
+		g_pending[g_pending_count].blocks    = 1;
+		g_pending_count++;
+	}
 }
 
 bool
@@ -952,12 +1069,26 @@ sdcard_fat_note_access(uint32_t lba, bool is_write, uint32_t bytes)
 	uint64_t                 off = 0;
 	sdcard_fat_region_t      reg = sdcard_fat_lookup(lba, &f, &off);
 
+	// A stale index is rebuilt before a read of file data is credited, so a
+	// file saved this session is found when it is loaded again. Metadata reads
+	// do not trigger it: a save reads the FAT and directories between every
+	// write, and rebuilding on each of those would cost a full walk apiece.
+	if (g_stale && !is_write &&
+	    (reg == SDCARD_FAT_REGION_FILE || reg == SDCARD_FAT_REGION_FREE ||
+	     reg == SDCARD_FAT_REGION_UNKNOWN) &&
+	    sdcard_fat_refresh()) {
+		reg = sdcard_fat_lookup(lba, &f, &off);
+	}
+
 	if (is_write) {
 		// A write to FAT or directory metadata makes the index stale.
 		if (reg == SDCARD_FAT_REGION_FAT     ||
 		    reg == SDCARD_FAT_REGION_ROOTDIR ||
 		    reg == SDCARD_FAT_REGION_DIR) {
 			g_stale = true;
+		}
+		if (reg == SDCARD_FAT_REGION_FREE) {
+			note_pending_write(lba);
 		}
 	}
 

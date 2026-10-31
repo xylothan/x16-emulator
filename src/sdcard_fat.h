@@ -54,6 +54,16 @@ bool sdcard_fat_build(struct x16file *img);
 // Release all index memory.  Safe to call when not built.
 void sdcard_fat_free(void);
 
+// Rebuild over the image the index was built from, keeping each file's
+// counters by path and crediting earlier writes to unallocated blocks to the
+// file that now owns them.  Returns false when there is no index to rebuild.
+bool sdcard_fat_rebuild(void);
+
+// Rebuild if the machine has written filesystem metadata since the last build
+// (and auto-indexing is on).  Cheap when nothing changed.  Returns true when
+// it rebuilt.
+bool sdcard_fat_refresh(void);
+
 // ── Global flag ──────────────────────────────────────────────────────────────
 
 // When false, sdcard_attach() will not build the index.  Owned by the debugger

@@ -54,6 +54,8 @@ public static class Commands
                     return await DoBp(client, args);
                 case "profile":
                     return await DoProfile(client, args);
+                case "sd":
+                    return await DoSd(client, args);
                 default:
                     Console.Error.WriteLine($"Unknown command: {cmd}");
                     return 1;
@@ -462,6 +464,94 @@ public static class Commands
             Console.WriteLine($"{folded}: {done?["folded"]?.GetValue<double>() ?? -1} call paths");
         if (json != null)
             Console.WriteLine($"{json}: {done?["json"]?.GetValue<double>() ?? -1} records");
+        return 0;
+    }
+
+    static async Task<int> DoSd(X16DebugClient client, string[] args)
+    {
+        // sd [files|all] [history <n>] [reindex]
+        string files = "touched";
+        int? history = null;
+        bool reindex = false;
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i].ToLowerInvariant())
+            {
+                case "files": files = "touched"; break;
+                case "all": files = "all"; break;
+                case "nofiles": files = "none"; break;
+                case "reindex": reindex = true; break;
+                case "history":
+                    if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out int n))
+                    {
+                        Console.Error.WriteLine("Usage: sd [all|nofiles] [history <n>] [reindex]");
+                        return 1;
+                    }
+                    history = n; i++;
+                    break;
+                default:
+                    Console.Error.WriteLine("Usage: sd [all|nofiles] [history <n>] [reindex]");
+                    return 1;
+            }
+        }
+
+        var r = await client.SdCardAsync(files, history, reindex);
+        if (!DapSuccess(r)) { PrintDapError(r); return 1; }
+        var b = r["body"];
+        if (b?["attached"]?.GetValue<bool>() != true)
+        {
+            Console.WriteLine("No SD card attached.");
+            return 0;
+        }
+
+        var c = b["card"];
+        Console.WriteLine($"Image   {c?["image"]} ({c?["imageSize"]} bytes)");
+        Console.WriteLine($"Card    select={(c?["selected"]?.GetValue<bool>() == true ? 1 : 0)}  " +
+                          $"last={(c?["lastCommandIsAcmd"]?.GetValue<bool>() == true ? "A" : "")}CMD{c?["lastCommand"]}  " +
+                          $"lba={c?["lastLba"]} ({c?["lastPath"] ?? c?["lastRegion"]})  " +
+                          $"idle={(c?["idle"]?.GetValue<bool>() == true ? 1 : 0)}  " +
+                          $"init={(c?["initialized"]?.GetValue<bool>() == true ? 1 : 0)}");
+        Console.WriteLine($"Traffic {c?["commands"]} commands, {c?["blocksRead"]} blocks read, " +
+                          $"{c?["blocksWritten"]} written");
+
+        var ix = b["index"];
+        if (ix?["ready"]?.GetValue<bool>() == true)
+        {
+            Console.WriteLine($"Storage {ix["type"]}, {ix["bytesPerCluster"]} bytes/cluster, " +
+                              $"{ix["entries"]} entries" +
+                              (ix["stale"]?.GetValue<bool>() == true ? ", STALE" : "") +
+                              (ix["truncated"]?.GetValue<bool>() == true ? ", TRUNCATED" : ""));
+            var fl = ix["files"]?.AsArray();
+            if (fl != null && fl.Count > 0)
+            {
+                Console.WriteLine($"  {"Read",10} {"Written",10} {"Size",10}  Path");
+                foreach (var f in fl)
+                {
+                    string size = f?["dir"]?.GetValue<bool>() == true ? "<dir>" : f?["size"]?.ToString() ?? "";
+                    Console.WriteLine($"  {f?["bytesRead"],10} {f?["bytesWritten"],10} {size,10}  {f?["path"]}");
+                }
+            }
+        }
+        else
+        {
+            Console.WriteLine("Storage not indexed");
+        }
+
+        var h = b["history"]?.AsArray();
+        if (h != null && h.Count > 0)
+        {
+            Console.WriteLine("History (newest first):");
+            foreach (var e in h)
+            {
+                long first = e?["firstLba"]?.GetValue<long>() ?? 0;
+                long blocks = e?["blocks"]?.GetValue<long>() ?? 1;
+                string lba = blocks > 1 ? $"{first}-{first + blocks - 1}" : $"{first}";
+                string what = e?["path"] != null ? $"{e["path"]}+{e["offset"]}"
+                            : e?["ownerNow"] != null ? $"<{e["region"]}> now {e["ownerNow"]}"
+                            : $"<{e?["region"]}>";
+                Console.WriteLine($"  {e?["op"],-5} CMD{e?["command"],-3} {lba,-18} {e?["bytes"],8}  {what}");
+            }
+        }
         return 0;
     }
 
