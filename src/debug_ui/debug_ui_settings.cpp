@@ -355,8 +355,10 @@ page_io_capture()
     pref_checkbox("Index the filesystem in an SD card image", &s.io_fat_autoindex,
                   "Parse the FAT inside an attached image when it is attached, so\n"
                   "block traffic resolves to filenames. The emulator itself never\n"
-                  "does this - to it an SD card is 512-byte blocks and nothing more.\n\n"
-                  "Off means the SD tab still works, it just reports raw LBAs.");
+                  "does this - to it an SD card is 512-byte blocks and nothing more.\n"
+                  "While on, the index is rebuilt whenever the filesystem changes.\n\n"
+                  "Off means the SD tab still works, it just reports raw LBAs, and\n"
+                  "an index built by hand is marked STALE instead of refreshing.");
 }
 
 void

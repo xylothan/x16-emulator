@@ -293,6 +293,7 @@ bool                  s_sort_desc = false;
 uint32_t              s_sorted_last_seq = 0;
 size_t                s_sorted_size     = 0;
 bool                  s_sorted_valid    = false;
+double                s_sorted_time     = 0.0;
 
 // Compare two events by an Activity column. Ties fall back to sequence so the
 // order stays stable from frame to frame.
@@ -335,8 +336,12 @@ refresh_sorted(bool specs_dirty)
         return;
     }
     const uint32_t last = s_rows.empty() ? 0 : s_rows.back();
-    if (!specs_dirty && s_sorted_valid && s_sorted_size == s_rows.size() &&
-        s_sorted_last_seq == last) {
+    if (!specs_dirty && s_sorted_valid &&
+        ((s_sorted_size == s_rows.size() && s_sorted_last_seq == last) ||
+         // While capture is running the rows change every frame; a full sort
+         // of the ring four times a second is plenty for a view nobody can
+         // read faster than that. Rows that age out meanwhile draw blank.
+         ImGui::GetTime() - s_sorted_time < 0.25)) {
         return;
     }
     s_sorted = s_rows;
@@ -359,6 +364,7 @@ refresh_sorted(bool specs_dirty)
     s_sorted_size     = s_rows.size();
     s_sorted_last_seq = last;
     s_sorted_valid    = true;
+    s_sorted_time     = ImGui::GetTime();
 }
 
 struct DeviceToggle {
@@ -669,23 +675,13 @@ sd_command_name(uint8_t cmd, bool is_acmd)
 void
 explain_no_sdcard()
 {
-    ImGui::TextColored(COL_DIM, "No SD card image is attached.");
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Attach one with:");
-    ImGui::Indent();
-    ImGui::TextColored(COL_DECODED, "x16emu -sdcard mycard.img");
-    ImGui::Unindent();
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "-fsroot does NOT attach a card. It sets the host directory the machine sees "
-        "when it is using host-filesystem access, which is a different path entirely -- "
-        "see the Files tab.");
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "The two are mutually exclusive by default: passing -sdcard turns host-filesystem "
-        "access off unless you also pass -hostfsdev to keep it. So a machine either has a "
-        "card and talks to it in 512-byte blocks, or has no card and gets its files by "
-        "name from the host.");
+    ImGui::TextColored(COL_DIM, "No SD card image attached \xc2\xb7");
+    ImGui::SameLine();
+    ImGui::TextColored(COL_DECODED, "x16emu -sdcard <image>");
+    tip("-fsroot does not attach a card: it sets the host directory used for "
+        "host-filesystem access, a different path (see Files > Host filesystem).\n\n"
+        "The two are exclusive by default -- -sdcard turns host access off unless "
+        "-hostfsdev keeps it.");
 }
 
 const char *

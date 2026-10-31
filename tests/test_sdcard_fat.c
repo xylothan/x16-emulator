@@ -707,6 +707,63 @@ test_saved_file_is_credited(void)
 	remove(path);
 }
 
+// The image changed on the host while attached (a build script copying a PRG
+// in): the machine never writes metadata, so only the read can notice.
+static void
+test_host_edit_is_noticed(void)
+{
+	printf("\n--- Image changed on the host ---\n");
+
+	disk_t      d    = build_fat32_image();
+	const char *path = write_temp_disk(&d, "hostedit.img");
+	disk_free(&d);
+	if (!path) { return; }
+
+	struct x16file *img = x16open(path, "rb");
+	check(img != NULL, "host edit: image opened");
+	if (!img) { remove(path); return; }
+	check(sdcard_fat_build(img), "host edit: build succeeds");
+
+	const uint32_t new_cluster = 8u;
+	const uint32_t new_lba     = F32_DATA_LBA + (new_cluster - 2u);
+
+	// A truly free block costs a FAT read and changes nothing.
+	sdcard_fat_note_access(new_lba, false, 512);
+	check(!sdcard_fat_is_stale(), "read of a free block does not mark stale");
+
+	FILE *fp = fopen(path, "r+b");
+	check(fp != NULL, "host edit: image reopened for writing");
+	if (fp) {
+		uint8_t sec[512];
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "host edit: FAT read");
+		wle32(sec + new_cluster * 4u, 0x0FFFFFFFu);
+		fseek(fp, (long)FAT1_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "host edit: FAT written");
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fread(sec, 1, 512, fp) == 512, "host edit: root read");
+		int slot = 0;
+		while (slot < 16 && sec[slot * 32] != 0x00) {
+			slot++;
+		}
+		write_dirent_83(sec + slot * 32, "HOST    PRG", 0x20, new_cluster, 100);
+		fseek(fp, (long)F32_DATA_LBA * 512, SEEK_SET);
+		check(fwrite(sec, 1, 512, fp) == 512, "host edit: root written");
+		fclose(fp);
+	}
+
+	sdcard_fat_note_access(new_lba, false, 512);
+	const sdcard_fat_file_t *hf = find_file("/HOST.PRG");
+	check(hf != NULL, "file copied in on the host is indexed on its first read");
+	if (hf) {
+		check_eq((unsigned)hf->bytes_read, 512u, "and that read is credited to it");
+	}
+
+	sdcard_fat_free();
+	x16close(img);
+	remove(path);
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int
@@ -717,6 +774,7 @@ main(void)
 	test_garbage_image();
 	test_stale();
 	test_saved_file_is_credited();
+	test_host_edit_is_noticed();
 
 	return x16_test_summary("sdcard_fat");
 }

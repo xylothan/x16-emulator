@@ -249,6 +249,28 @@ static bool add_extent(uint32_t first_lba, uint32_t last_lba,
 
 // ── FAT chain walking ─────────────────────────────────────────────────────────
 
+// The last FAT sector read. A chain walk reads the same sector for up to 128
+// clusters in a row, so this turns a rebuild from one seek-and-read per
+// cluster into one per FAT sector. Invalidated whenever the index is rebuilt,
+// since the image may have changed underneath it.
+static uint8_t  g_fat_cache[512];
+static uint32_t g_fat_cache_lba   = 0;
+static bool     g_fat_cache_valid = false;
+
+static bool read_fat_sector(uint32_t lba, uint8_t buf[512])
+{
+	if (!g_fat_cache_valid || g_fat_cache_lba != lba) {
+		if (!read_sector(lba, g_fat_cache)) {
+			g_fat_cache_valid = false;
+			return false;
+		}
+		g_fat_cache_lba   = lba;
+		g_fat_cache_valid = true;
+	}
+	memcpy(buf, g_fat_cache, 512);
+	return true;
+}
+
 // Read FAT entry for cluster N. Returns 0xFFFFFFFF on I/O error.
 static uint32_t fat_next(uint32_t cluster)
 {
@@ -260,7 +282,7 @@ static uint32_t fat_next(uint32_t cluster)
 		byte_offset = cluster * 4;
 		fat_lba = g_fat_lba + byte_offset / 512;
 		uint32_t idx = byte_offset % 512;
-		if (!read_sector(fat_lba, buf)) {
+		if (!read_fat_sector(fat_lba, buf)) {
 			return 0xFFFFFFFF;
 		}
 		return le32(buf + idx) & 0x0FFFFFFF;
@@ -269,7 +291,7 @@ static uint32_t fat_next(uint32_t cluster)
 		byte_offset = cluster * 2;
 		fat_lba = g_fat_lba + byte_offset / 512;
 		uint32_t idx = byte_offset % 512;
-		if (!read_sector(fat_lba, buf)) {
+		if (!read_fat_sector(fat_lba, buf)) {
 			return 0xFFFFFFFF;
 		}
 		uint16_t val = le16(buf + idx);
@@ -580,6 +602,7 @@ static int extent_cmp(const void *a, const void *b)
 
 static void free_state(void)
 {
+	g_fat_cache_valid = false;
 	for (int i = 0; i < g_file_count; i++) {
 		free(g_files[i].path);
 		g_files[i].path = NULL;
@@ -1073,6 +1096,20 @@ sdcard_fat_note_access(uint32_t lba, bool is_write, uint32_t bytes)
 	// file saved this session is found when it is loaded again. Metadata reads
 	// do not trigger it: a save reads the FAT and directories between every
 	// write, and rebuilding on each of those would cost a full walk apiece.
+	// A read of a block the index calls free, from a cluster the FAT says is
+	// allocated, means the image changed without the machine writing it -- a
+	// host-side copy into the image, say. Treat that as stale too. A truly
+	// free block reads as 0 and costs one sector read.
+	if (!g_stale && !is_write && reg == SDCARD_FAT_REGION_FREE && g_spc > 0 &&
+	    lba >= g_first_data_lba) {
+		uint32_t cluster = (lba - g_first_data_lba) / g_spc + 2u;
+		g_fat_cache_valid = false;
+		uint32_t next     = fat_next(cluster);
+		if (next != 0 && next != 0xFFFFFFFFu) {
+			g_stale = true;
+		}
+	}
+
 	if (g_stale && !is_write &&
 	    (reg == SDCARD_FAT_REGION_FILE || reg == SDCARD_FAT_REGION_FREE ||
 	     reg == SDCARD_FAT_REGION_UNKNOWN) &&
