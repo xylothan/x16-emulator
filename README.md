@@ -234,6 +234,12 @@ Useful extras: `-Target <name>` for a single CMake target, `-Rom <path>` to poin
 open, and `-EmuArgs '-prg','A.PRG','-run'` to pass arguments through to the emulator.
 `Get-Help .\build.ps1 -Full` lists them all.
 
+> [!IMPORTANT]
+> The Debug build is for debugging the emulator itself. It is unoptimised and does not keep up with
+> real time under load, especially with `-midline-effects`, which redraws the current scanline on
+> every VRAM write. When it falls behind, audio crackles and timing figures are wrong. Run and
+> measure programs, including with the ImGui debugger, on the Release build.
+
 Two things it exists to save you from: the CMake on `PATH` is often older than the installed
 Visual Studio and does not know its generator, which fails with a wall of generator names that
 never mentions the real problem; and a running emulator holds its own `.exe` open, so the link step
