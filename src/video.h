@@ -78,6 +78,7 @@ uint16_t video_get_scanline_count(void);
 // to VSYNC actually gets.
 uint32_t video_frame_dot_clocks(void);
 uint16_t video_frame_scanlines(void);
+uint64_t video_screen_hash(void);
 
 // Size in layer pixels of the image the composer is actually displaying: the
 // active window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled by DC_HSCALE/VSCALE.

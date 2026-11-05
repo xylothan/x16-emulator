@@ -1476,7 +1476,7 @@ for _ in range(N):
 ms = (time.perf_counter() - t0) * 1000.0 / N
 print("  (x16/step frames:1 round trip: %.3f ms average over %d)" % (ms, N))
 
-# 19. x16/saveState / x16/loadState: in-memory save states.
+# 19. x16/saveState / x16/loadState: save states, in memory and in files.
 #
 # The thorough check -- every device busy, a program that scribbles over them,
 # frame-by-frame comparison -- is testbench/test_savestate.py. This covers the
@@ -1506,9 +1506,39 @@ r = bk_req("x16/loadState", {"slot": "no such slot"})
 bk_case("x16/loadState refuses a slot never saved (%s)" % r.get("message"),
         not r.get("success") and bk_req("x16/status").get("body", {}).get("frame") == svb.get("frame"))
 r = bk_req("x16/saveState", {})
-bk_case("x16/saveState needs a slot name (%s)" % r.get("message"), not r.get("success"))
+bk_case("x16/saveState needs a slot or a path (%s)" % r.get("message"), not r.get("success"))
+r = bk_req("x16/saveState", {"slot": "t3", "path": "x.x16s"})
+bk_case("x16/saveState refuses a slot and a path together (%s)" % r.get("message"), not r.get("success"))
 r = bk_req("x16/saveState", {"slot": "x" * 65})
 bk_case("x16/saveState refuses an overlong slot name (%s)" % r.get("message"), not r.get("success"))
+
+# The same state through a file.
+ss_dir = tempfile.mkdtemp(prefix="x16dap_")
+ss_path = os.path.join(ss_dir, "t.x16s")
+bk_req("x16/loadState", {"slot": "t"})
+fv = bk_req("x16/saveState", {"path": ss_path, "hash": True})
+fvb = fv.get("body", {})
+bk_case("x16/saveState to a file answers path, size and the same hash as the slot",
+        fv.get("success") and fvb.get("path") == ss_path and fvb.get("hash") == svb.get("hash")
+        and os.path.getsize(ss_path) == svb.get("size"))
+bk_wr(0x0400, bytes(range(0xC0, 0xD0)))
+bk_step({"frames": 2})
+fl = bk_req("x16/loadState", {"path": ss_path, "hash": True})
+flb = fl.get("body", {})
+bk_case("x16/loadState from the file puts the machine back (frame %s)" % flb.get("frame"),
+        fl.get("success") and flb.get("path") == ss_path and flb.get("hash") == svb.get("hash")
+        and bk_rd(0x0400, 16) == orig)
+r = bk_req("x16/loadState", {"path": os.path.join(ss_dir, "none.x16s")})
+bk_case("x16/loadState refuses a file that is not there (%s)" % r.get("message"), not r.get("success"))
+with open(os.path.join(ss_dir, "bad.x16s"), "wb") as f:
+    f.write(b"not a state")
+r = bk_req("x16/loadState", {"path": os.path.join(ss_dir, "bad.x16s")})
+bk_case("x16/loadState refuses a file that is not a state (%s)" % r.get("message"), not r.get("success"))
+for fn in os.listdir(ss_dir):
+    os.remove(os.path.join(ss_dir, fn))
+os.rmdir(ss_dir)
+st = bk_req("x16/status", {"screenHash": True}).get("body", {})
+bk_case("x16/status answers screenHash on request", len(st.get("screenHash") or "") == 16)
 
 del bk_events[:]
 bk_req("stepIn", {"threadId": 1})

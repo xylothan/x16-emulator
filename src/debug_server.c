@@ -2202,11 +2202,14 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // A hash of the whole machine: exactly the bytes a save state of it would hold
 // (savestate.c), so two machines with the same hash would save the same state.
 // Sent as a hex string, since a JSON number cannot carry 64 bits exactly.
-static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
-    const uint64_t h = x16_hash_bytes(X16_HASH_INIT, data, len);
+static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
     char hex[24];
     snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
-    cJSON_AddStringToObject(body, "hash", hex);
+    cJSON_AddStringToObject(body, key, hex);
+}
+
+static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
+    dap_add_hex64(body, "hash", x16_hash_bytes(X16_HASH_INIT, data, len));
 }
 
 static void dap_add_state_hash(cJSON *body) {
@@ -2247,25 +2250,36 @@ static int handle_x16_status(int seq, cJSON *args) {
     if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
     else                 cJSON_AddNullToObject(body, "seed");
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
+    // The picture is output, not machine state, so it has its own hash.
+    if (dap_arg_true(args, "screenHash")) dap_add_hex64(body, "screenHash", video_screen_hash());
     send_dap_response(seq, "x16/status", true, body);
     return 0;
 }
 
-// ─── x16/saveState, x16/loadState: in-memory save states ────────────
+// ─── x16/saveState, x16/loadState: save states ──────────────────────
 //
-// A slot is a name the client picks. Saving is allowed only at a frame
-// boundary, so every state starts a frame and stepping on from one is
-// unambiguous; loading works from any pause, since it replaces everything.
-// Breakpoints, the session and the debugger's settings are configuration and
-// are left alone.
+// A state goes to a slot, a name the client picks, kept in memory; or to a
+// file. Saving is allowed only at a frame boundary, so every state starts a
+// frame and stepping on from one is unambiguous; loading works from any pause,
+// since it replaces everything. Breakpoints, the session and the debugger's
+// settings are configuration and are left alone.
 
 static bool dap_at_frame_boundary(void) {
     return DEBUGIsPaused() && frame_end_seen && clockticks6502 == frame_end_ticks;
 }
 
-static const char *dap_slot_arg(cJSON *args) {
+// Where a request's state goes or comes from: a slot or a file, one of the two.
+static bool dap_state_target(int seq, const char *cmd, cJSON *args,
+                             const char **slot, const char **path) {
     cJSON *s = args ? cJSON_GetObjectItemCaseSensitive(args, "slot") : NULL;
-    return (s && cJSON_IsString(s)) ? s->valuestring : NULL;
+    cJSON *p = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    *slot = (s && cJSON_IsString(s)) ? s->valuestring : NULL;
+    *path = (p && cJSON_IsString(p)) ? p->valuestring : NULL;
+    if ((s && !*slot) || (p && !*path) || (*slot != NULL) == (*path != NULL)) {
+        send_dap_error_response(seq, cmd, "give 'slot' (a name) or 'path' (a file), one of the two");
+        return false;
+    }
+    return true;
 }
 
 static void dap_add_state_position(cJSON *body) {
@@ -2275,9 +2289,8 @@ static void dap_add_state_position(cJSON *body) {
 }
 
 static int handle_x16_save_state(int seq, cJSON *args) {
-    const char *slot = dap_slot_arg(args);
-    if (!slot) {
-        send_dap_error_response(seq, "x16/saveState", "'slot' must be a name");
+    const char *slot, *path;
+    if (!dap_state_target(seq, "x16/saveState", args, &slot, &path)) {
         return 0;
     }
     if (step.pending || !DEBUGIsPaused()) {
@@ -2289,38 +2302,45 @@ static int handle_x16_save_state(int seq, cJSON *args) {
             "the machine is not at a frame boundary; x16/step {frames: 1} gets it to one");
         return 0;
     }
-    char err[192];
-    const size_t size = savestate_slot_save(slot, err, sizeof err);
+    char err[512];
+    const size_t size = slot ? savestate_slot_save(slot, err, sizeof err)
+                             : savestate_file_save(path, err, sizeof err);
     if (size == 0) {
         send_dap_error_response(seq, "x16/saveState", err);
         return 0;
     }
     cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "slot", slot);
+    cJSON_AddStringToObject(body, slot ? "slot" : "path", slot ? slot : path);
     cJSON_AddNumberToObject(body, "size", (double)size);
     dap_add_state_position(body);
     if (dap_arg_true(args, "hash")) {
-        size_t len = 0;
-        const void *data = savestate_slot_data(slot, &len);
-        dap_add_hash_of(body, data, len);
+        if (slot) {
+            size_t len = 0;
+            const void *data = savestate_slot_data(slot, &len);
+            dap_add_hash_of(body, data, len);
+        } else {
+            // Saving changed nothing, so the machine hashes as the file does.
+            dap_add_state_hash(body);
+        }
     }
     send_dap_response(seq, "x16/saveState", true, body);
     return 0;
 }
 
 static int handle_x16_load_state(int seq, cJSON *args) {
-    const char *slot = dap_slot_arg(args);
-    if (!slot) {
-        send_dap_error_response(seq, "x16/loadState", "'slot' must be a name");
+    const char *slot, *path;
+    if (!dap_state_target(seq, "x16/loadState", args, &slot, &path)) {
         return 0;
     }
     if (step.pending || !DEBUGIsPaused()) {
         send_dap_error_response(seq, "x16/loadState", "the machine must be paused");
         return 0;
     }
-    char err[192];
+    char err[512];
     size_t size = 0;
-    if (!savestate_slot_load(slot, &size, err, sizeof err)) {
+    const bool loaded = slot ? savestate_slot_load(slot, &size, err, sizeof err)
+                             : savestate_file_load(path, &size, err, sizeof err);
+    if (!loaded) {
         send_dap_error_response(seq, "x16/loadState", err);
         return 0;
     }
@@ -2330,7 +2350,7 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     DEBUGSetStopReason("restore");
 
     cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "slot", slot);
+    cJSON_AddStringToObject(body, slot ? "slot" : "path", slot ? slot : path);
     cJSON_AddNumberToObject(body, "size", (double)size);
     dap_add_state_position(body);
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);

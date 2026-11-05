@@ -2253,6 +2253,15 @@ video_state_io(ss_writer *w, ss_reader *r)
 #undef SS_BLOCK
 }
 
+// A hash of the picture as last drawn. Output only, so not part of a state:
+// under -warp it is redrawn one frame in 64, on frames the machine's own frame
+// counter picks.
+uint64_t
+video_screen_hash(void)
+{
+	return x16_hash_bytes(X16_HASH_INIT, framebuffer, sizeof framebuffer);
+}
+
 void
 video_state_save(ss_writer *w)
 {

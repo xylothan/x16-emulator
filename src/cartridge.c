@@ -618,3 +618,18 @@ cartridge_state_load(ss_reader *r)
 	}
 	ss_close(r);
 }
+
+uint64_t
+cartridge_rom_hash(void)
+{
+	if (CART == NULL) {
+		return 0;
+	}
+	uint64_t h = x16_hash_bytes(X16_HASH_INIT, Cartridge_info.bank_info, sizeof Cartridge_info.bank_info);
+	for (int t = 0; t < CART_MAX_BANKS; ++t) {
+		if (Cartridge_info.bank_info[t] != CART_BANK_NONE && !cart_bank_writable(t)) {
+			h = x16_hash_bytes(h, CART + (size_t)t * CART_BANK_SIZE, CART_BANK_SIZE);
+		}
+	}
+	return h;
+}
