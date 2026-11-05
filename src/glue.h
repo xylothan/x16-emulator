@@ -89,6 +89,11 @@ extern bool warp_mode;
 // -hidden: create the emulator and debugger windows hidden. Everything still
 // runs and renders; nothing appears on screen.
 extern bool hidden_windows;
+// -deterministic, and the -seed it implies (0 unless one was given).
+extern bool     deterministic_mode;
+extern bool     random_seed_set;
+extern uint32_t random_seed;
+extern bool     no_host_joysticks;
 extern bool grab_mouse;
 extern bool testbench;
 extern bool has_via2;

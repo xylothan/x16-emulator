@@ -43,6 +43,8 @@ struct x16cartridge_header
 struct cartridge_import;
 
 bool cartridge_load(const char *cartridge_file, bool randomize);
+// Fill uninitialised cartridge RAM from a fixed seed. Call before cartridge_load().
+void cartridge_set_random_seed(uint32_t seed);
 void cartridge_unload();
 void cartridge_new();
 

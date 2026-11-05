@@ -36,6 +36,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <cjson/cJSON.h>
+#include "x16_hash.h"
 
 extern bool headless;   // main.c
 
@@ -144,6 +145,7 @@ static struct {
     uint32_t    frames_run;
     bool        by_frames;     // stopped because the count ran out
     bool        events;        // the client wants stopped/continued events
+    bool        hash;          // include the machine state hash in the reply
     int         num_reads;
     step_read_t reads[STEP_MAX_READS];
 } step;
@@ -2196,8 +2198,32 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // Cheap enough to call between every bot decision. JSON numbers are doubles,
 // exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
 // 8 MHz.
+// A hash of the program-visible machine: CPU registers, all RAM and banked RAM,
+// the bank selects, and VERA (video_state_hash). Two runs that agree on it
+// agree on everything a program can read from those. Sent as a hex string,
+// since a JSON number cannot carry 64 bits exactly.
+static void dap_add_state_hash(cJSON *body) {
+    uint64_t h = X16_HASH_INIT;
+    const uint32_t cpu[] = {
+        regs.pc, regs.c, regs.x, regs.y, regs.sp, regs.dp, regs.db, regs.k,
+        regs.status, regs.e, regs.is65c816, waiting,
+        memory_get_ram_bank(), memory_get_rom_bank(),
+    };
+    h = x16_hash_bytes(h, cpu, sizeof cpu);
+    h = x16_hash_bytes(h, RAM, RAM_SIZE);
+    h = x16_hash_bytes(h, BRAM, BRAM_SIZE);
+    h = video_state_hash(h);
+    char hex[24];
+    snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
+    cJSON_AddStringToObject(body, "hash", hex);
+}
+
+static bool dap_arg_true(cJSON *args, const char *name) {
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, name) : NULL;
+    return v && cJSON_IsTrue(v);
+}
+
 static int handle_x16_status(int seq, cJSON *args) {
-    (void)args;
     const uint64_t cycles = emulated_cycles();
     const bool paused = DEBUGIsPaused();
     cJSON *body = cJSON_CreateObject();
@@ -2208,6 +2234,10 @@ static int handle_x16_status(int seq, cJSON *args) {
     // Only meaningful while paused: a running machine is never "at" anything.
     cJSON_AddBoolToObject(body, "atFrameBoundary",
                           paused && frame_end_seen && clockticks6502 == frame_end_ticks);
+    cJSON_AddBoolToObject(body, "deterministic", deterministic_mode);
+    if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
+    else                 cJSON_AddNullToObject(body, "seed");
+    if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     send_dap_response(seq, "x16/status", true, body);
     return 0;
 }
@@ -2271,6 +2301,7 @@ static void step_finish(const char *reason) {
         free(raw);
     }
     cJSON_AddItemToObject(body, "reads", reads);
+    if (step.hash) dap_add_state_hash(body);
     send_dap_response(step.seq, "x16/step", true, body);
 }
 
@@ -2331,7 +2362,7 @@ static bool dap_parse_step_read(cJSON *r, step_read_t *out, char *err, size_t er
 static int handle_x16_step(int seq, cJSON *args) {
     char err[160];
     if (headless) {
-        send_dap_error_response(seq, "x16/step", "-headless has no frames to step; use -hidden instead");
+        send_dap_error_response(seq, "x16/step", "a -testbench run has no video, so no frames to step; use -hidden instead");
         return 0;
     }
     if (step.pending) {
@@ -2430,6 +2461,7 @@ static int handle_x16_step(int seq, cJSON *args) {
     step.frames_run  = 0;
     step.by_frames   = false;
     step.events      = ev && cJSON_IsTrue(ev);
+    step.hash        = dap_arg_true(args, "hash");
     step.num_reads   = num_reads;
     memcpy(step.reads, reads, sizeof(reads[0]) * (size_t)num_reads);
 

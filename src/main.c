@@ -163,6 +163,11 @@ echo_mode_t echo_mode;
 bool save_on_exit = true;
 bool disable_emu_cmd_keys = false;
 bool set_system_time = false;
+// -deterministic, -seed, -nohostjoy: see usage().
+bool     deterministic_mode = false;
+bool     random_seed_set    = false;
+uint32_t random_seed        = 0;
+bool     no_host_joysticks  = false;
 bool has_serial = false;
 bool no_ieee_intercept = false;
 bool has_via2 = false;
@@ -803,6 +808,18 @@ usage()
 	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
+	printf("-seed <n>\n");
+	printf("\tFill uninitialized RAM, VRAM and cartridge RAM from seed <n> (0-4294967295)\n");
+	printf("\tinstead of the clock, so every run starts from the same bytes.\n");
+	printf("-nohostjoy\n");
+	printf("\tNever open a physical game controller; only the debugger's virtual\n");
+	printf("\tjoysticks drive the ports.\n");
+	printf("-deterministic\n");
+	printf("\tTake nothing from the host that could change what the machine does:\n");
+	printf("\t-seed 0 unless a seed is given, -nohostjoy, host keyboard and mouse\n");
+	printf("\tignored, hostfs LOAD/SAVE cost no emulated time, the sound chips run at\n");
+	printf("\ta fixed rate with or without an audio device, and -nvram is never\n");
+	printf("\twritten. -rtc and -midi-in are refused.\n");
 	printf("-zeroram\n");
 	printf("\tSet all RAM to zero instead of uninitialized random values\n");
 	printf("-wuninit\n");
@@ -1477,6 +1494,27 @@ main(int argc, char **argv)
 			source_view_add_path(argv[0]);
 			argc--;
 			argv++;
+		} else if (!strcmp(argv[0], "-seed")) {
+			argc--;
+			argv++;
+			char *end = NULL;
+			const unsigned long long v = argc ? strtoull(argv[0], &end, 0) : 0;
+			if (!argc || !end || *end || end == argv[0] || v > 0xFFFFFFFFULL) {
+				fprintf(stderr, "-seed needs a number from 0 to 4294967295.\n");
+				exit(1);
+			}
+			random_seed = (uint32_t)v;
+			random_seed_set = true;
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-nohostjoy")) {
+			argc--;
+			argv++;
+			no_host_joysticks = true;
+		} else if (!strcmp(argv[0], "-deterministic")) {
+			argc--;
+			argv++;
+			deterministic_mode = true;
 		} else if (!strcmp(argv[0], "-randram")) {
 			/* this operation has no effect anymore, randomizing the Ram is now default */
 			argc--;
@@ -1814,6 +1852,28 @@ main(int argc, char **argv)
 		if (rom_syms_dir && !n)
 			fprintf(stderr, "-romsyms: no ROM .sym files in %s\n", dir);
 	}
+
+	// Before anything initializes, so every fill and device sees the settings.
+	if (deterministic_mode) {
+		if (set_system_time) {
+			fprintf(stderr, "-rtc sets the clock from the host; it cannot be used with -deterministic.\n");
+			exit(1);
+		}
+		if (fs_midi_in_connect) {
+			fprintf(stderr, "-midi-in takes input from the host; it cannot be used with -deterministic.\n");
+			exit(1);
+		}
+		random_seed_set   = true;   // random_seed is 0 unless -seed gave one
+		no_host_joysticks = true;
+	}
+	if (random_seed_set) {
+		memory_set_random_seed(random_seed);
+		video_set_random_seed(random_seed);
+		cartridge_set_random_seed(random_seed);
+	}
+	joystick_set_ignore_host(no_host_joysticks);
+	video_set_ignore_host_input(deterministic_mode);
+	audio_set_deterministic(deterministic_mode);
 
 	if (nvram_path) {
 		SDL_RWops *f = SDL_RWFromFile(nvram_path, "rb");
@@ -2264,9 +2324,15 @@ handle_ieee_intercept()
 	if (handled) {
 		// Add the number CPU cycles equivalent to the amount of time that the operation actually took
 		// to prevent the emu from warping after a hostfs load
-		uint64_t perf_diff = SDL_GetPerformanceCounter() - base_ticks;
-		uint32_t missed_ticks = (uint64_t)(perf_diff * 1000000ULL * MHZ) / SDL_GetPerformanceFrequency();
-		clockticks6502 += missed_ticks;
+		if (deterministic_mode) {
+			// The host's time is not the machine's: charge nothing, and re-base the
+			// pacing so a slow load is not followed by a sprint to catch up.
+			timing_init();
+		} else {
+			uint64_t perf_diff = SDL_GetPerformanceCounter() - base_ticks;
+			uint32_t missed_ticks = (uint64_t)(perf_diff * 1000000ULL * MHZ) / SDL_GetPerformanceFrequency();
+			clockticks6502 += missed_ticks;
+		}
 		if (s >= 0) {
 			if (!set_kernal_status(s)) {
 				printf("Warning: Could not set STATUS!\n");
@@ -3045,7 +3111,8 @@ emulator_loop(void *param)
 		midi_serial_step(clocks);
 
 		if (!headless && new_frame) {
-			if (nvram_dirty && nvram_path) {
+			// Never under -deterministic: instances sharing a path would race.
+			if (nvram_dirty && nvram_path && !deterministic_mode) {
 				SDL_RWops *f = SDL_RWFromFile(nvram_path, "wb");
 				if (f) {
 					SDL_RWwrite(f, nvram, 1, sizeof(nvram));
