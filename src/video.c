@@ -2350,7 +2350,14 @@ video_render_all_body(bool new_frame)
 		}
 	}
 
-	render_backend_texture_update(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
+	// -hidden windows are never shown, so drawing into one is work nobody sees:
+	// the upload and present below are about an eighth of a warped frame, and
+	// their worst spikes. The framebuffer itself, the LED above, a GIF recording
+	// and the debugger window are all kept.
+	const bool draw = !hidden_windows;
+	if (draw) {
+		render_backend_texture_update(sdlTexture, NULL, framebuffer, SCREEN_WIDTH * 4);
+	}
 
 	// Skipped for a repaint that is not a new emulated frame. The throttle
 	// repaints between sleep slices to keep the window alive, and there can be
@@ -2368,15 +2375,17 @@ video_render_all_body(bool new_frame)
 		}
 	}
 
-	video_clear_output();
-	render_backend_copy(renderer, sdlTexture, NULL, NULL);
+	if (draw) {
+		video_clear_output();
+		render_backend_copy(renderer, sdlTexture, NULL, NULL);
 
-	if (debugger_enabled && showDebugOnRender != 0) {
-		DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
+		if (debugger_enabled && showDebugOnRender != 0) {
+			DEBUGRenderDisplay(SCREEN_WIDTH, SCREEN_HEIGHT);
+		}
+
+		render_backend_present(renderer);
+		video_fallback_to_sdl();
 	}
-
-	render_backend_present(renderer);
-	video_fallback_to_sdl();
 
 #ifdef HAS_IMGUI
 	// Rebuild the debugger window's frame. Deliberately decoupled from the

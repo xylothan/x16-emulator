@@ -680,7 +680,9 @@ usage()
 	printf("\tEnable warp mode, run emulator as fast as possible.\n");
 	printf("-hidden\n");
 	printf("\tCreate the emulator (and -imgui debugger) windows hidden.\n");
-	printf("\tEverything still runs and renders; nothing appears on screen.\n");
+	printf("\tEverything still runs and renders; nothing appears on screen,\n");
+	printf("\tand the picture is not copied to the hidden window, which saves\n");
+	printf("\ttime per frame. Screenshots and -gif still see every frame.\n");
 	printf("\tFor scripted runs and benchmarks. Unlike -headless, video,\n");
 	printf("\taudio and the debugger all stay on.\n");
 	printf("-bench <frames> [<warmup frames>]\n");
