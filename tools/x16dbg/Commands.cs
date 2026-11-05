@@ -50,6 +50,9 @@ public static class Commands
                 case "joy":
                 case "j":
                     return await DoJoy(client, args);
+                case "frames":
+                case "f":
+                    return await DoFrames(client, args);
                 case "bp":
                     return await DoBp(client, args);
                 case "profile":
@@ -629,6 +632,48 @@ public static class Commands
 
         if (!DapSuccess(r)) { PrintDapError(r); return 1; }
         PrintJoystick(port, r);
+        return 0;
+    }
+
+    static async Task<int> DoFrames(X16DebugClient client, string[] args)
+    {
+        if (args.Length < 1 || !int.TryParse(args[0], out int frames) || frames < 1)
+        {
+            Console.Error.WriteLine("Usage: frames <n> [<port 1-4> [buttons...|none|release]]");
+            Console.Error.WriteLine("       frames 1           run one frame, then stop at its end");
+            Console.Error.WriteLine("       frames 4 1 right a hold Right and A on port 1 for 4 frames");
+            Console.Error.WriteLine("       The machine must be paused first (break).");
+            return 1;
+        }
+
+        List<(int, IEnumerable<string>?)>? pads = null;
+        if (args.Length >= 2)
+        {
+            if (!int.TryParse(args[1], out int port) || port < 1 || port > 4)
+            {
+                Console.Error.WriteLine("Error: port must be 1, 2, 3 or 4");
+                return 1;
+            }
+            IEnumerable<string>? held;
+            if (args.Length == 2 || args[2].Equals("none", StringComparison.OrdinalIgnoreCase))
+                held = Array.Empty<string>();
+            else if (args[2].Equals("release", StringComparison.OrdinalIgnoreCase) ||
+                     args[2].Equals("off", StringComparison.OrdinalIgnoreCase))
+                held = null;
+            else
+                held = args[2..];
+            pads = new() { (port - 1, held) };
+        }
+
+        var r = await client.StepFramesAsync(frames, pads);
+        if (!DapSuccess(r)) { PrintDapError(r); return 1; }
+        var b = r["body"];
+        long ran = (long)(b?["framesRun"]?.GetValue<double>() ?? 0);
+        long frame = (long)(b?["frame"]?.GetValue<double>() ?? 0);
+        long cycles = (long)(b?["cycles"]?.GetValue<double>() ?? 0);
+        string reason = b?["reason"]?.GetValue<string>() ?? "?";
+        string why = reason == "frames" ? "" : $", stopped early: {reason}";
+        Console.WriteLine($"Ran {ran} frame{(ran == 1 ? "" : "s")}{why}. Frame {frame}, {cycles} cycles");
         return 0;
     }
 

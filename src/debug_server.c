@@ -37,6 +37,8 @@
 #include <ctype.h>
 #include <cjson/cJSON.h>
 
+extern bool headless;   // main.c
+
 // Platform socket abstraction
 #ifdef _WIN32
   #include <winsock2.h>
@@ -115,6 +117,38 @@ static uint64_t emulated_cycles(void) {
     cycles_seen = now;
     return cycles_acc;
 }
+
+// ─── x16/step: run a set number of frames, then answer ──────────────
+//
+// The response is deferred. The request starts the machine; the frame-end hook
+// counts frames down and stops it; and the poll that next sees the machine
+// parked sends the reply. Replying from the hook itself would be too early: the
+// rest of that loop pass can still take an interrupt, which pushes onto the
+// stack, so reads taken there would not match a readMemory sent right after.
+#define STEP_MAX_READS      64
+// Base64 grows data by a third, and the whole reply has to fit the send buffer
+// or the client is dropped. 32K of raw bytes leaves comfortable room.
+#define STEP_MAX_READ_BYTES 32768
+
+typedef struct {
+    uint32_t addr;
+    uint32_t len;
+    int      bank;      // x16 RAM bank for $A000-$BFFF, or USE_CURRENT_X16_BANK
+    bool     vram;
+} step_read_t;
+
+static struct {
+    bool        pending;
+    int         seq;
+    uint32_t    frames_left;
+    uint32_t    frames_run;
+    bool        by_frames;     // stopped because the count ran out
+    bool        events;        // the client wants stopped/continued events
+    int         num_reads;
+    step_read_t reads[STEP_MAX_READS];
+} step;
+
+static void step_finish(const char *reason);
 
 // DAP variable reference IDs
 #define VARREF_REGISTERS  1
@@ -2060,6 +2094,39 @@ static cJSON *dap_joy_buttons_array(uint16_t mask) {
     return arr;
 }
 
+// A pad's button mask from "mask" and/or "buttons", active low: start from
+// nothing pressed, so an absent button is a released one. Shared by
+// x16/joystick and x16/step, so the two cannot drift apart.
+static bool dap_joy_mask_from_args(cJSON *mask_item, cJSON *buttons_item, uint16_t *out,
+                                   char *err, size_t errn) {
+    if (buttons_item && !cJSON_IsArray(buttons_item)) {
+        snprintf(err, errn, "'buttons' must be an array of names");
+        return false;
+    }
+    if (mask_item && !cJSON_IsNumber(mask_item)) {
+        snprintf(err, errn, "'mask' must be a number");
+        return false;
+    }
+    uint16_t mask = 0xFFFF;
+    if (mask_item) {
+        mask = (uint16_t)(unsigned)mask_item->valuedouble;
+    }
+    if (buttons_item) {
+        cJSON *b;
+        cJSON_ArrayForEach(b, buttons_item) {
+            if (!cJSON_IsString(b) || !b->valuestring) continue;
+            uint16_t bit = dap_joy_bit_from_name(b->valuestring);
+            if (bit == 0) {
+                snprintf(err, errn, "unknown button '%.40s'", b->valuestring);
+                return false;
+            }
+            mask &= (uint16_t)~bit;
+        }
+    }
+    *out = mask;
+    return true;
+}
+
 static int handle_x16_joystick(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "x16/joystick", "missing arguments");
@@ -2081,37 +2148,17 @@ static int handle_x16_joystick(int seq, cJSON *args) {
     cJSON *mask_item    = cJSON_GetObjectItemCaseSensitive(args, "mask");
     cJSON *buttons_item = cJSON_GetObjectItemCaseSensitive(args, "buttons");
 
-    if (buttons_item && !cJSON_IsArray(buttons_item)) {
-        send_dap_error_response(seq, "x16/joystick", "'buttons' must be an array of names");
-        return 0;
-    }
-    if (mask_item && !cJSON_IsNumber(mask_item)) {
-        send_dap_error_response(seq, "x16/joystick", "'mask' must be a number");
+    // Validated whatever "enabled" says, so a bad name is never silently ignored.
+    char err[96];
+    uint16_t mask = 0xFFFF;
+    if (!dap_joy_mask_from_args(mask_item, buttons_item, &mask, err, sizeof err)) {
+        send_dap_error_response(seq, "x16/joystick", err);
         return 0;
     }
 
     if (enabled_item && cJSON_IsBool(enabled_item) && !cJSON_IsTrue(enabled_item)) {
         joystick_clear_virtual(index);
     } else if (buttons_item || mask_item) {
-        // Start from "nothing pressed" so an absent button is a released one.
-        uint16_t mask = 0xFFFF;
-        if (mask_item) {
-            mask = (uint16_t)(unsigned)mask_item->valuedouble;
-        }
-        if (buttons_item) {
-            cJSON *b;
-            cJSON_ArrayForEach(b, buttons_item) {
-                if (!cJSON_IsString(b) || !b->valuestring) continue;
-                uint16_t bit = dap_joy_bit_from_name(b->valuestring);
-                if (bit == 0) {
-                    char err[96];
-                    snprintf(err, sizeof(err), "unknown button '%s'", b->valuestring);
-                    send_dap_error_response(seq, "x16/joystick", err);
-                    return 0;
-                }
-                mask &= (uint16_t)~bit;
-            }
-        }
         joystick_set_virtual(index, mask);
     } else if (enabled_item && cJSON_IsBool(enabled_item)) {
         // enabled:true on its own plugs a controller in with nothing held. That
@@ -2163,6 +2210,235 @@ static int handle_x16_status(int seq, cJSON *args) {
                           paused && frame_end_seen && clockticks6502 == frame_end_ticks);
     send_dap_response(seq, "x16/status", true, body);
     return 0;
+}
+
+// Standard base64, NUL-terminated. The caller frees it.
+static char *dap_b64_encode(const uint8_t *raw, int count) {
+    static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char *b64 = (char *)malloc((size_t)((count + 2) / 3) * 4 + 1);
+    if (!b64) return NULL;
+    int n = 0;
+    for (int i = 0; i < count; i += 3) {
+        const int remaining = count - i;
+        unsigned int triplet = (unsigned int)raw[i] << 16;
+        if (remaining > 1) triplet |= (unsigned int)raw[i + 1] << 8;
+        if (remaining > 2) triplet |= raw[i + 2];
+        b64[n++] = b64chars[(triplet >> 18) & 0x3F];
+        b64[n++] = b64chars[(triplet >> 12) & 0x3F];
+        b64[n++] = (remaining > 1) ? b64chars[(triplet >> 6) & 0x3F] : '=';
+        b64[n++] = (remaining > 2) ? b64chars[triplet & 0x3F] : '=';
+    }
+    b64[n] = '\0';
+    return b64;
+}
+
+// x16/step reason names for what stopped the machine before the count ran out.
+static const char *step_reason_for_stop(const char *stop) {
+    if (!stop || !*stop)                     return "pause";
+    if (!strcmp(stop, "user"))               return "pause";
+    if (!strcmp(stop, "data breakpoint"))    return "watchpoint";
+    return stop;   // breakpoint, step, interrupt, ...
+}
+
+// Send the deferred x16/step reply with the machine as it is now.
+static void step_finish(const char *reason) {
+    if (!step.pending) return;
+    step.pending = false;
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "framesRun", step.frames_run);
+    cJSON_AddStringToObject(body, "reason", reason);
+    cJSON_AddNumberToObject(body, "frame", (double)machine_frames);
+    cJSON_AddNumberToObject(body, "framesTotal", (double)process_frames);
+    cJSON_AddNumberToObject(body, "cycles", (double)emulated_cycles());
+
+    cJSON *reads = cJSON_CreateArray();
+    for (int r = 0; r < step.num_reads; r++) {
+        const step_read_t *rd = &step.reads[r];
+        uint8_t *raw = (uint8_t *)malloc(rd->len ? rd->len : 1);
+        char *b64 = NULL;
+        if (raw) {
+            const uint32_t mask = rd->vram ? 0x1FFFF : 0xFFFFFF;
+            for (uint32_t i = 0; i < rd->len; i++) {
+                const uint32_t cur = (rd->addr + i) & mask;
+                raw[i] = rd->vram ? video_space_read(cur)
+                                  : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), rd->bank);
+            }
+            b64 = dap_b64_encode(raw, (int)rd->len);
+        }
+        cJSON_AddItemToArray(reads, cJSON_CreateString(b64 ? b64 : ""));
+        free(b64);
+        free(raw);
+    }
+    cJSON_AddItemToObject(body, "reads", reads);
+    send_dap_response(step.seq, "x16/step", true, body);
+}
+
+// Called from every poll. Completes a step once the machine has parked, for
+// whatever reason: the count ran out, a breakpoint or watchpoint, a pause
+// request, or the user breaking in.
+static void step_poll(void) {
+    if (!step.pending || currentMode != DMODE_STOP) return;
+    const bool by_frames = step.by_frames;
+    const char *reason = by_frames ? "frames" : step_reason_for_stop(DEBUGGetStopReason());
+    if (by_frames) {
+        // Refresh the debugger's idea of where it stopped, then record why. The
+        // first call announces nothing, since the machine is already stopped.
+        DEBUGBreakToDebugger();
+        DEBUGSetStopReason("step");
+        // This is a frame boundary by construction. Recorded here rather than
+        // trusting the hook's clock, which an interrupt taken in the same loop
+        // pass has since moved on.
+        frame_end_ticks = clockticks6502;
+        frame_end_seen  = true;
+    }
+    const bool events = step.events;
+    step_finish(reason);
+    if (by_frames && events) debug_server_notify_stopped("step");
+}
+
+static bool dap_parse_step_read(cJSON *r, step_read_t *out, char *err, size_t errn) {
+    cJSON *a = cJSON_GetObjectItemCaseSensitive(r, "addr");
+    cJSON *l = cJSON_GetObjectItemCaseSensitive(r, "len");
+    cJSON *b = cJSON_GetObjectItemCaseSensitive(r, "bank");
+    if (!a || !l || !cJSON_IsNumber(l) || l->valuedouble < 1) {
+        snprintf(err, errn, "each read needs an 'addr' and a 'len' of at least 1");
+        return false;
+    }
+    out->vram = false;
+    if (cJSON_IsNumber(a)) {
+        out->addr = (uint32_t)a->valuedouble;
+    } else if (!cJSON_IsString(a) || !dap_parse_mem_ref(a->valuestring, &out->vram, &out->addr)) {
+        snprintf(err, errn, "unreadable read 'addr' (expected a CPU address like 0xC000, or vram:1B000)");
+        return false;
+    }
+    if (b && (!cJSON_IsNumber(b) || out->vram)) {
+        snprintf(err, errn, out->vram ? "a read of VRAM takes no 'bank'" : "'bank' must be a number");
+        return false;
+    }
+    if (l->valuedouble > STEP_MAX_READ_BYTES) {
+        snprintf(err, errn, "reads total more than %d bytes", STEP_MAX_READ_BYTES);
+        return false;
+    }
+    out->len  = (uint32_t)l->valuedouble;
+    out->bank = b ? (int)b->valuedouble : USE_CURRENT_X16_BANK;
+    return true;
+}
+
+// Requires a paused machine. Pads apply before the first instruction runs, so
+// at the frame boundary when the machine is sitting on one. A machine paused
+// mid-frame counts the rest of that frame as the first.
+static int handle_x16_step(int seq, cJSON *args) {
+    char err[160];
+    if (headless) {
+        send_dap_error_response(seq, "x16/step", "-headless has no frames to step; use -hidden instead");
+        return 0;
+    }
+    if (step.pending) {
+        send_dap_error_response(seq, "x16/step", "a step is already in progress");
+        return 0;
+    }
+    if (!DEBUGIsPaused()) {
+        send_dap_error_response(seq, "x16/step", "the machine must be paused");
+        return 0;
+    }
+
+    uint32_t frames = 1;
+    cJSON *fr = args ? cJSON_GetObjectItemCaseSensitive(args, "frames") : NULL;
+    if (fr) {
+        if (!cJSON_IsNumber(fr) || fr->valuedouble < 1 || fr->valuedouble > 1e9) {
+            send_dap_error_response(seq, "x16/step", "'frames' must be a number of at least 1");
+            return 0;
+        }
+        frames = (uint32_t)fr->valuedouble;
+    }
+
+    // Check everything before changing anything, so a refused request leaves
+    // the machine exactly as it was.
+    int      pad_index[NUM_JOYSTICKS];
+    uint16_t pad_mask[NUM_JOYSTICKS];
+    bool     pad_off[NUM_JOYSTICKS];
+    int      num_pads = 0;
+    cJSON *pads = args ? cJSON_GetObjectItemCaseSensitive(args, "pads") : NULL;
+    if (pads) {
+        if (!cJSON_IsArray(pads)) {
+            send_dap_error_response(seq, "x16/step", "'pads' must be an array");
+            return 0;
+        }
+        cJSON *p;
+        cJSON_ArrayForEach(p, pads) {
+            cJSON *ix = cJSON_GetObjectItemCaseSensitive(p, "index");
+            bool ok = ix && cJSON_IsNumber(ix) && ix->valuedouble >= 0
+                      && ix->valuedouble < NUM_JOYSTICKS && num_pads < NUM_JOYSTICKS;
+            const int index = ok ? (int)ix->valuedouble : -1;
+            for (int i = 0; ok && i < num_pads; i++) {
+                if (pad_index[i] == index) ok = false;
+            }
+            if (!ok) {
+                send_dap_error_response(seq, "x16/step", "each pad needs an 'index' of 0-3, at most once each");
+                return 0;
+            }
+            cJSON *en = cJSON_GetObjectItemCaseSensitive(p, "enabled");
+            pad_index[num_pads] = index;
+            pad_off[num_pads]   = en && cJSON_IsBool(en) && !cJSON_IsTrue(en);
+            pad_mask[num_pads]  = 0xFFFF;
+            if (!pad_off[num_pads] &&
+                !dap_joy_mask_from_args(cJSON_GetObjectItemCaseSensitive(p, "mask"),
+                                        cJSON_GetObjectItemCaseSensitive(p, "buttons"),
+                                        &pad_mask[num_pads], err, sizeof err)) {
+                send_dap_error_response(seq, "x16/step", err);
+                return 0;
+            }
+            num_pads++;
+        }
+    }
+
+    step_read_t reads[STEP_MAX_READS];
+    int num_reads = 0;
+    uint32_t read_bytes = 0;
+    cJSON *rds = args ? cJSON_GetObjectItemCaseSensitive(args, "read") : NULL;
+    if (rds) {
+        if (!cJSON_IsArray(rds) || cJSON_GetArraySize(rds) > STEP_MAX_READS) {
+            send_dap_error_response(seq, "x16/step", "'read' must be an array of at most 64 regions");
+            return 0;
+        }
+        cJSON *r;
+        cJSON_ArrayForEach(r, rds) {
+            if (!dap_parse_step_read(r, &reads[num_reads], err, sizeof err)) {
+                send_dap_error_response(seq, "x16/step", err);
+                return 0;
+            }
+            read_bytes += reads[num_reads].len;
+            if (read_bytes > STEP_MAX_READ_BYTES) {
+                snprintf(err, sizeof err, "reads total more than %d bytes", STEP_MAX_READ_BYTES);
+                send_dap_error_response(seq, "x16/step", err);
+                return 0;
+            }
+            num_reads++;
+        }
+    }
+    cJSON *ev = args ? cJSON_GetObjectItemCaseSensitive(args, "events") : NULL;
+
+    for (int i = 0; i < num_pads; i++) {
+        if (pad_off[i]) joystick_clear_virtual(pad_index[i]);
+        else            joystick_set_virtual(pad_index[i], pad_mask[i]);
+    }
+
+    step.pending     = true;
+    step.seq         = seq;
+    step.frames_left = frames;
+    step.frames_run  = 0;
+    step.by_frames   = false;
+    step.events      = ev && cJSON_IsTrue(ev);
+    step.num_reads   = num_reads;
+    memcpy(step.reads, reads, sizeof(reads[0]) * (size_t)num_reads);
+
+    // As continue does, but the continued event is optional: a client stepping
+    // many times a second does not want two events per step.
+    dap_stop_announced = false;
+    DEBUGContinue();
+    if (step.events) send_continued_event();
+    return 1;
 }
 
 static int handle_x16_registers(int seq, cJSON *args) {
@@ -4054,6 +4330,15 @@ static int dispatch_dap(const char *json_body) {
 
     printf("[dap] << %s (seq=%d)\n", cmd, seq);
 
+    // Another request taking over execution ends a step in flight. Answer it
+    // now, rather than leave it to complete at some unrelated later stop.
+    if (step.pending &&
+        (!strcmp(cmd, "continue") || !strcmp(cmd, "next") || !strcmp(cmd, "stepIn") ||
+         !strcmp(cmd, "stepOut") || !strcmp(cmd, "restart") || !strcmp(cmd, "goto") ||
+         !strcmp(cmd, "terminate"))) {
+        step_finish("cancelled");
+    }
+
     if (!strcmp(cmd, "initialize"))         result = handle_dap_initialize(seq, args);
     else if (!strcmp(cmd, "launch"))        result = handle_dap_launch(seq, args);
     else if (!strcmp(cmd, "configurationDone")) result = handle_dap_configuration_done(seq);
@@ -4079,6 +4364,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/sendKey"))   result = handle_x16_send_key(seq, args);
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
+    else if (!strcmp(cmd, "x16/step"))      result = handle_x16_step(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);
@@ -4145,6 +4431,9 @@ static void dap_release_session_state(void) {
 
     dap_stop_on_entry = false;
     dap_stop_announced = false;
+    // A step nobody is waiting for must not stop the machine some frames from
+    // now, with no client left to resume it.
+    step.pending = false;
 
     // Let go of anything this session armed for polling, so a client that
     // asked for statistics and then disconnected does not strand the
@@ -4340,6 +4629,8 @@ int debug_server_poll(void) {
     try_accept();
     if (client_sock == SOCKET_INVALID) return 0;
 
+    step_poll();
+
     // Push any budget overruns before reading: a client that never polls still
     // learns that the guest is missing its frame.
     perf_poll_overruns();
@@ -4399,6 +4690,9 @@ int debug_server_poll(void) {
 
     }
 
+    // A pause in this batch can end a step; answer it without waiting a pass.
+    step_poll();
+
     return mode_changed;
 }
 
@@ -4416,6 +4710,9 @@ void debug_server_note_resumed(void) {
 
 void debug_server_notify_stopped(const char *reason) {
     if (!server_enabled || client_sock == SOCKET_INVALID) return;
+    // An x16/step reply says why the step ended; the client asked not to be
+    // sent the event as well. Not announced, so nothing owes a continued later.
+    if (step.pending && !step.events) return;
     dap_stop_announced = true;
 
     cJSON *body = cJSON_CreateObject();
@@ -4467,6 +4764,16 @@ void debug_server_frame_end(void) {
     emulated_cycles();
     frame_end_ticks = clockticks6502;
     frame_end_seen  = true;
+
+    if (step.pending && currentMode != DMODE_STOP) {
+        step.frames_run++;
+        if (--step.frames_left == 0) {
+            // Stop before the next instruction. The reply goes from the poll
+            // once the machine has actually parked (see step_poll).
+            step.by_frames = true;
+            currentMode = DMODE_STOP;
+        }
+    }
 }
 
 bool debug_server_wait(uint32_t timeout_ms) {

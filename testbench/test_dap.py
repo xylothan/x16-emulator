@@ -1314,7 +1314,165 @@ ms = (time.perf_counter() - t0) * 1000.0 / N
 print("  (x16/status round trip to a paused machine: %.3f ms average over %d)" % (ms, N))
 bk_case("a paused machine answers within 3 ms on average (%.3f ms)" % ms, ms < 3.0)
 
+# 18. x16/step: run whole frames, then answer with reads taken where it stopped.
+#
+# The reply is deferred, so a request sent after a step can be answered before
+# it. bk_send/bk_collect keep every response, instead of dropping the ones
+# bk_req is not waiting for.
+bk_replies = {}
+
+def bk_send(cmd, args=None):
+    bk_seq[0] += 1
+    send_dap(bk, {"seq": bk_seq[0], "type": "request", "command": cmd,
+                  "arguments": args or {}})
+    return bk_seq[0]
+
+def bk_collect(seq, timeout=5):
+    end = time.time() + timeout
+    while seq not in bk_replies:
+        left = end - time.time()
+        if left <= 0:
+            return None
+        try:
+            r = bk_read(left)
+        except socket.timeout:
+            return None
+        if r.get("type") == "event":
+            bk_events.append(r)
+        elif "request_seq" in r:
+            bk_replies[r["request_seq"]] = r
+    return bk_replies.pop(seq)
+
+def bk_step(args, timeout=10):
+    return bk_collect(bk_send("x16/step", args), timeout) or {}
+
+def bk_paused():
+    return bk_req("x16/status").get("body", {}).get("paused") is True
+
+st0 = bk_req("x16/status").get("body", {})
+del bk_events[:]
+r1 = bk_step({"frames": 1})
+b1 = r1.get("body", {})
+bk_case("x16/step frames:1 runs one frame (%s -> %s, reason %s)"
+        % (st0.get("frame"), b1.get("frame"), b1.get("reason")),
+        r1.get("success") and b1.get("reason") == "frames" and b1.get("framesRun") == 1
+        and b1.get("frame") == st0.get("frame", 0) + 1)
+bk_case("x16/step sends no stopped/continued events unless asked (%s)"
+        % [e.get("event") for e in bk_events], not bk_events)
+st1 = bk_req("x16/status").get("body", {})
+bk_case("after a step the machine is paused at a frame boundary",
+        st1.get("paused") is True and st1.get("atFrameBoundary") is True
+        and st1.get("frame") == b1.get("frame") and st1.get("cycles") == b1.get("cycles"))
+
+r5 = bk_step({"frames": 5})
+b5 = r5.get("body", {})
+bk_case("x16/step frames:5 runs exactly five (%s -> %s)" % (b1.get("frame"), b5.get("frame")),
+        b5.get("framesRun") == 5 and b5.get("frame") == b1.get("frame", 0) + 5
+        and b5.get("framesTotal", 0) - b1.get("framesTotal", 0) == 5)
+
+# Reads come from the stopped machine: the same bytes a readMemory sent right
+# after returns, including the stack an interrupt may just have pushed.
+regions = [{"addr": "0x0000", "len": 256}, {"addr": "0x0100", "len": 256},
+           {"addr": "vram:1F9C0", "len": 64}, {"addr": 0x0400, "len": 16}]
+rr = bk_step({"frames": 2, "read": regions})
+got = [base64.b64decode(x) for x in rr.get("body", {}).get("reads", [])]
+want = [bk_rd(0x0000, 256), bk_rd(0x0100, 256), bk_vram(0x1F9C0, 64), bk_rd(0x0400, 16)]
+bk_case("x16/step reads match readMemory sent right after (%d regions)" % len(got),
+        len(got) == 4 and got == want)
+
+# Pads apply when the step starts, through the same path as x16/joystick.
+rp = bk_step({"frames": 1, "pads": [{"index": 1, "buttons": ["right", "a"]}]})
+j = bk_req("x16/joystick", {"index": 1}).get("body", {})
+bk_case("x16/step pads set the controller (%s)" % j.get("buttons"),
+        rp.get("success") and j.get("enabled") is True and sorted(j.get("buttons", [])) == ["a", "right"])
+rp = bk_step({"frames": 1, "pads": [{"index": 1, "enabled": False}]})
+j = bk_req("x16/joystick", {"index": 1}).get("body", {})
+bk_case("x16/step pads enabled:false unplugs it", rp.get("success") and j.get("enabled") is False)
+
+# Refused requests change nothing: the machine stays paused where it was.
+for args, why in (({"frames": 0}, "frames 0"),
+                  ({"pads": [{"index": 7}]}, "a pad index out of range"),
+                  ({"pads": [{"index": 0, "buttons": ["turbo"]}]}, "an unknown button"),
+                  ({"read": [{"addr": "vram:0", "len": 4, "bank": 1}]}, "a VRAM read with a bank"),
+                  ({"read": [{"addr": "0x0000", "len": 40000}]}, "more than 32K of reads")):
+    f0 = bk_req("x16/status").get("body", {}).get("frame")
+    r = bk_step(args)
+    st = bk_req("x16/status").get("body", {})
+    bk_case("x16/step refuses %s (%s)" % (why, r.get("message")),
+            r.get("success") is False and st.get("paused") is True and st.get("frame") == f0)
+
+bk_run_free()
+r = bk_step({"frames": 1})
+bk_case("x16/step refuses a running machine (%s)" % r.get("message"), r.get("success") is False)
+del bk_events[:]
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+
+# A breakpoint ends a step early, and says so.
+bk_instr("$A000")
+rb = bk_step({"frames": 50})
+bb = rb.get("body", {})
+bk_case("a breakpoint ends x16/step early (reason %s, framesRun %s)"
+        % (bb.get("reason"), bb.get("framesRun")),
+        bb.get("reason") == "breakpoint" and bb.get("framesRun", 99) < 50 and bk_paused())
+bk_req("setInstructionBreakpoints", {"breakpoints": []})
+
+# A long step: a second one is refused while it runs, and pause ends it.
+s_long = bk_send("x16/step", {"frames": 1000000})
+time.sleep(0.2)
+r2 = bk_step({"frames": 1}, timeout=3)
+bk_case("a second x16/step is refused while one runs (%s)" % r2.get("message"),
+        r2.get("success") is False)
+s_pause = bk_send("pause", {"threadId": 1})
+rl = bk_collect(s_long, 5) or {}
+bk_collect(s_pause, 5)
+bl = rl.get("body", {})
+bk_case("pause ends a long x16/step (reason %s after %s frames)" % (bl.get("reason"), bl.get("framesRun")),
+        bl.get("reason") == "pause" and 0 < bl.get("framesRun", 0) < 1000000 and bk_paused())
+
+s_long = bk_send("x16/step", {"frames": 1000000})
+time.sleep(0.1)
+s_cont = bk_send("continue", {"threadId": 1})
+rl = bk_collect(s_long, 5) or {}
+bk_collect(s_cont, 5)
+bk_case("continue ends a step in flight (reason %s)" % rl.get("body", {}).get("reason"),
+        rl.get("body", {}).get("reason") == "cancelled")
+del bk_events[:]
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+
+# With events:true an IDE client sees the usual continued/stopped pair.
+del bk_events[:]
+re_ = bk_step({"frames": 1, "events": True})
+evs = [e.get("event") for e in bk_events]
+if bk_wait_stop(2):   # sent after the reply, as for next/stepIn
+    evs.append("stopped")
+bk_case("x16/step events:true sends continued then stopped (%s)" % evs,
+        re_.get("success") and evs == ["continued", "stopped"])
+
+# Throughput: one-frame steps back to back.
+N = 100
+t0 = time.perf_counter()
+for _ in range(N):
+    bk_step({"frames": 1})
+ms = (time.perf_counter() - t0) * 1000.0 / N
+print("  (x16/step frames:1 round trip: %.3f ms average over %d)" % (ms, N))
+
+# A disconnect drops a step in flight: the machine runs on rather than stopping
+# later for a client that is gone.
 bk_eval("bp_clear")
+bk_send("x16/step", {"frames": 1000000})
+time.sleep(0.1)
+bk_req("disconnect", {"terminateDebuggee": False})
+bk.close()
+time.sleep(0.5)
+bk = socket.create_connection(('127.0.0.1', PORT))
+bk_buf[0] = b""
+s1 = bk_req("x16/status").get("body", {})
+time.sleep(0.3)
+s2 = bk_req("x16/status").get("body", {})
+bk_case("after a disconnect mid-step the machine runs on (frame %s -> %s)" % (s1.get("frame"), s2.get("frame")),
+        s2.get("paused") is False and s2.get("frame", 0) > s1.get("frame", 0))
 bk_req("disconnect", {"terminateDebuggee": False})
 bk.close()
 

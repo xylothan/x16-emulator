@@ -384,6 +384,38 @@ public class X16DebugClient : IDisposable
     public Task<JsonNode> StatusAsync() =>
         SendRequestAsync("x16/status");
 
+    /// <summary>
+    /// Run a paused machine for a number of frames, then stop it at the frame
+    /// boundary. pads, when given, is applied first: each entry is a port index
+    /// 0-3 and its held buttons, or null to unplug that port.
+    /// </summary>
+    public Task<JsonNode> StepFramesAsync(int frames,
+                                          IEnumerable<(int index, IEnumerable<string>? buttons)>? pads = null)
+    {
+        var args = new JsonObject { ["frames"] = frames };
+        if (pads != null)
+        {
+            var arr = new JsonArray();
+            foreach (var (index, buttons) in pads)
+            {
+                var p = new JsonObject { ["index"] = index };
+                if (buttons == null)
+                    p["enabled"] = false;
+                else
+                {
+                    var b = new JsonArray();
+                    foreach (var name in buttons) b.Add(name);
+                    p["buttons"] = b;
+                }
+                arr.Add(p);
+            }
+            args["pads"] = arr;
+        }
+        // Without -warp a frame takes real time, so allow for it.
+        int timeoutMs = 10000 + (int)Math.Min(frames * 50L, int.MaxValue - 10000);
+        return SendRequestAsync("x16/step", args, timeoutMs);
+    }
+
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject
         {
