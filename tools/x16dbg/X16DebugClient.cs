@@ -386,17 +386,17 @@ public class X16DebugClient : IDisposable
 
     /// <summary>
     /// Run a paused machine for a number of frames, then stop it at the frame
-    /// boundary. pads, when given, is applied first: each entry is a port index
+    /// boundary. joysticks, when given, is applied first: each entry is a port index
     /// 0-3 and its held buttons, or null to unplug that port.
     /// </summary>
     public Task<JsonNode> StepFramesAsync(int frames,
-                                          IEnumerable<(int index, IEnumerable<string>? buttons)>? pads = null)
+                                          IEnumerable<(int index, IEnumerable<string>? buttons)>? joysticks = null)
     {
         var args = new JsonObject { ["frames"] = frames };
-        if (pads != null)
+        if (joysticks != null)
         {
             var arr = new JsonArray();
-            foreach (var (index, buttons) in pads)
+            foreach (var (index, buttons) in joysticks)
             {
                 var p = new JsonObject { ["index"] = index };
                 if (buttons == null)
@@ -409,7 +409,7 @@ public class X16DebugClient : IDisposable
                 }
                 arr.Add(p);
             }
-            args["pads"] = arr;
+            args["joysticks"] = arr;
         }
         // Without -warp a frame takes real time, so allow for it.
         int timeoutMs = 10000 + (int)Math.Min(frames * 50L, int.MaxValue - 10000);

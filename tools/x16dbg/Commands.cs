@@ -646,7 +646,7 @@ public static class Commands
             return 1;
         }
 
-        List<(int, IEnumerable<string>?)>? pads = null;
+        List<(int, IEnumerable<string>?)>? joysticks = null;
         if (args.Length >= 2)
         {
             if (!int.TryParse(args[1], out int port) || port < 1 || port > 4)
@@ -662,10 +662,10 @@ public static class Commands
                 held = null;
             else
                 held = args[2..];
-            pads = new() { (port - 1, held) };
+            joysticks = new() { (port - 1, held) };
         }
 
-        var r = await client.StepFramesAsync(frames, pads);
+        var r = await client.StepFramesAsync(frames, joysticks);
         if (!DapSuccess(r)) { PrintDapError(r); return 1; }
         var b = r["body"];
         long ran = (long)(b?["framesRun"]?.GetValue<double>() ?? 0);

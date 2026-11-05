@@ -1380,19 +1380,19 @@ want = [bk_rd(0x0000, 256), bk_rd(0x0100, 256), bk_vram(0x1F9C0, 64), bk_rd(0x04
 bk_case("x16/step reads match readMemory sent right after (%d regions)" % len(got),
         len(got) == 4 and got == want)
 
-# Pads apply when the step starts, through the same path as x16/joystick.
-rp = bk_step({"frames": 1, "pads": [{"index": 1, "buttons": ["right", "a"]}]})
+# Joysticks apply when the step starts, through the same path as x16/joystick.
+rp = bk_step({"frames": 1, "joysticks": [{"index": 1, "buttons": ["right", "a"]}]})
 j = bk_req("x16/joystick", {"index": 1}).get("body", {})
-bk_case("x16/step pads set the controller (%s)" % j.get("buttons"),
+bk_case("x16/step joysticks set the controller (%s)" % j.get("buttons"),
         rp.get("success") and j.get("enabled") is True and sorted(j.get("buttons", [])) == ["a", "right"])
-rp = bk_step({"frames": 1, "pads": [{"index": 1, "enabled": False}]})
+rp = bk_step({"frames": 1, "joysticks": [{"index": 1, "enabled": False}]})
 j = bk_req("x16/joystick", {"index": 1}).get("body", {})
-bk_case("x16/step pads enabled:false unplugs it", rp.get("success") and j.get("enabled") is False)
+bk_case("x16/step joysticks enabled:false unplugs it", rp.get("success") and j.get("enabled") is False)
 
 # Refused requests change nothing: the machine stays paused where it was.
 for args, why in (({"frames": 0}, "frames 0"),
-                  ({"pads": [{"index": 7}]}, "a pad index out of range"),
-                  ({"pads": [{"index": 0, "buttons": ["turbo"]}]}, "an unknown button"),
+                  ({"joysticks": [{"index": 7}]}, "a joystick index out of range"),
+                  ({"joysticks": [{"index": 0, "buttons": ["turbo"]}]}, "an unknown button"),
                   ({"read": [{"addr": "vram:0", "len": 4, "bank": 1}]}, "a VRAM read with a bank"),
                   ({"read": [{"addr": "0x0000", "len": 40000}]}, "more than 32K of reads")):
     f0 = bk_req("x16/status").get("body", {}).get("frame")

@@ -1096,16 +1096,17 @@ memory read at that point:
 
 ```jsonc
 { "frames": 4,                                          // default 1
-  "pads": [ { "index": 0, "buttons": ["right", "a"] },  // as x16/joystick: buttons, mask, enabled
-            { "index": 1, "enabled": false } ],
+  "joysticks": [ { "index": 0, "buttons": ["right", "a"] },  // as x16/joystick: buttons, mask, enabled
+                 { "index": 1, "enabled": false } ],
   "read": [ { "addr": "0x0400", "len": 64 },
             { "addr": "0xA000", "len": 32, "bank": 5 },  // bank: x16 RAM bank for $A000-$BFFF
             { "addr": "vram:1FC00", "len": 1024 } ],
   "events": false }                                     // stopped/continued events; default off
 ```
 
-The pads are set before anything runs. The machine then stops where the last frame ends, at the
-same point as `-input` script frames, and the reply carries `framesRun`, `reason`, `frame`,
+The joysticks are set before anything runs, and stay as set after the step, as with
+`x16/joystick`. The machine then stops where the last frame ends, at the same point as `-input`
+script frames, and the reply carries `framesRun`, `reason`, `frame`,
 `framesTotal`, `cycles` and `reads` (base64, one per region, at most 32K in all). `reason` is
 `frames` when the count ran out; a breakpoint, watchpoint or `pause` ends the step early and says
 so, and `continue` or another run-control request ends it as `cancelled`. If the machine was

@@ -2325,7 +2325,7 @@ static bool dap_parse_step_read(cJSON *r, step_read_t *out, char *err, size_t er
     return true;
 }
 
-// Requires a paused machine. Pads apply before the first instruction runs, so
+// Requires a paused machine. Joysticks apply before the first instruction runs, so
 // at the frame boundary when the machine is sitting on one. A machine paused
 // mid-frame counts the rest of that frame as the first.
 static int handle_x16_step(int seq, cJSON *args) {
@@ -2355,41 +2355,41 @@ static int handle_x16_step(int seq, cJSON *args) {
 
     // Check everything before changing anything, so a refused request leaves
     // the machine exactly as it was.
-    int      pad_index[NUM_JOYSTICKS];
-    uint16_t pad_mask[NUM_JOYSTICKS];
-    bool     pad_off[NUM_JOYSTICKS];
-    int      num_pads = 0;
-    cJSON *pads = args ? cJSON_GetObjectItemCaseSensitive(args, "pads") : NULL;
-    if (pads) {
-        if (!cJSON_IsArray(pads)) {
-            send_dap_error_response(seq, "x16/step", "'pads' must be an array");
+    int      joy_index[NUM_JOYSTICKS];
+    uint16_t joy_mask[NUM_JOYSTICKS];
+    bool     joy_off[NUM_JOYSTICKS];
+    int      num_joys = 0;
+    cJSON *joys = args ? cJSON_GetObjectItemCaseSensitive(args, "joysticks") : NULL;
+    if (joys) {
+        if (!cJSON_IsArray(joys)) {
+            send_dap_error_response(seq, "x16/step", "'joysticks' must be an array");
             return 0;
         }
         cJSON *p;
-        cJSON_ArrayForEach(p, pads) {
+        cJSON_ArrayForEach(p, joys) {
             cJSON *ix = cJSON_GetObjectItemCaseSensitive(p, "index");
             bool ok = ix && cJSON_IsNumber(ix) && ix->valuedouble >= 0
-                      && ix->valuedouble < NUM_JOYSTICKS && num_pads < NUM_JOYSTICKS;
+                      && ix->valuedouble < NUM_JOYSTICKS && num_joys < NUM_JOYSTICKS;
             const int index = ok ? (int)ix->valuedouble : -1;
-            for (int i = 0; ok && i < num_pads; i++) {
-                if (pad_index[i] == index) ok = false;
+            for (int i = 0; ok && i < num_joys; i++) {
+                if (joy_index[i] == index) ok = false;
             }
             if (!ok) {
-                send_dap_error_response(seq, "x16/step", "each pad needs an 'index' of 0-3, at most once each");
+                send_dap_error_response(seq, "x16/step", "each joystick needs an 'index' of 0-3, at most once each");
                 return 0;
             }
             cJSON *en = cJSON_GetObjectItemCaseSensitive(p, "enabled");
-            pad_index[num_pads] = index;
-            pad_off[num_pads]   = en && cJSON_IsBool(en) && !cJSON_IsTrue(en);
-            pad_mask[num_pads]  = 0xFFFF;
-            if (!pad_off[num_pads] &&
+            joy_index[num_joys] = index;
+            joy_off[num_joys]   = en && cJSON_IsBool(en) && !cJSON_IsTrue(en);
+            joy_mask[num_joys]  = 0xFFFF;
+            if (!joy_off[num_joys] &&
                 !dap_joy_mask_from_args(cJSON_GetObjectItemCaseSensitive(p, "mask"),
                                         cJSON_GetObjectItemCaseSensitive(p, "buttons"),
-                                        &pad_mask[num_pads], err, sizeof err)) {
+                                        &joy_mask[num_joys], err, sizeof err)) {
                 send_dap_error_response(seq, "x16/step", err);
                 return 0;
             }
-            num_pads++;
+            num_joys++;
         }
     }
 
@@ -2419,9 +2419,9 @@ static int handle_x16_step(int seq, cJSON *args) {
     }
     cJSON *ev = args ? cJSON_GetObjectItemCaseSensitive(args, "events") : NULL;
 
-    for (int i = 0; i < num_pads; i++) {
-        if (pad_off[i]) joystick_clear_virtual(pad_index[i]);
-        else            joystick_set_virtual(pad_index[i], pad_mask[i]);
+    for (int i = 0; i < num_joys; i++) {
+        if (joy_off[i]) joystick_clear_virtual(joy_index[i]);
+        else            joystick_set_virtual(joy_index[i], joy_mask[i]);
     }
 
     step.pending     = true;
