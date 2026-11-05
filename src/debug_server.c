@@ -50,6 +50,7 @@
   static bool wsa_initialized = false;
 #else
   #include <sys/socket.h>
+  #include <sys/select.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <fcntl.h>
@@ -79,6 +80,41 @@ static int      server_port = 0;
 
 // DAP sequence counter (for events we send)
 static int dap_seq = 1;
+
+// ─── Emulated time, 64-bit ──────────────────────────────────────────
+//
+// clockticks6502 is 32 bits and wraps after about nine minutes at 8 MHz, and
+// video.c's frame_count is an int. A client measuring a long run needs neither
+// to wrap, so the deltas are accumulated here into 64 bits.
+//
+// machine_frames is the machine's own frame count. A later save state will
+// restore it along with the rest of the machine. process_frames counts every
+// frame this process has emulated and is never restored, which is what a
+// throughput figure wants. Today the two are equal.
+//
+// Both advance in debug_server_frame_end(), which main.c calls at the same point
+// as the -input script's frame tick, so frame N here is frame N there.
+static uint64_t machine_frames = 0;
+static uint64_t process_frames = 0;
+static uint64_t cycles_acc     = 0;
+static uint32_t cycles_seen    = 0;
+// clockticks6502 when the last frame ended. While paused, the machine is at a
+// frame boundary if the clock has not moved since then. Conservative: an IRQ
+// taken on the frame's last instruction charges its entry cycles after this is
+// recorded, so a stop right there reads as mid-frame. It never reads a
+// mid-frame stop as a boundary.
+static uint32_t frame_end_ticks = 0;
+static bool     frame_end_seen  = false;
+
+// Fold the clock's movement since the last call into the 64-bit count. Called
+// at least once per frame and once per poll, far more often than the 32-bit
+// clock can wrap.
+static uint64_t emulated_cycles(void) {
+    const uint32_t now = clockticks6502;
+    cycles_acc += (uint32_t)(now - cycles_seen);
+    cycles_seen = now;
+    return cycles_acc;
+}
 
 // DAP variable reference IDs
 #define VARREF_REGISTERS  1
@@ -2108,6 +2144,27 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 
 // ─── Custom: x16/registers — all CPU + KERNAL + VERA state ─────────
 
+// ─── x16/status: where the machine is in emulated time ──────────────
+//
+// Cheap enough to call between every bot decision. JSON numbers are doubles,
+// exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
+// 8 MHz.
+static int handle_x16_status(int seq, cJSON *args) {
+    (void)args;
+    const uint64_t cycles = emulated_cycles();
+    const bool paused = DEBUGIsPaused();
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "frame", (double)machine_frames);
+    cJSON_AddNumberToObject(body, "framesTotal", (double)process_frames);
+    cJSON_AddNumberToObject(body, "cycles", (double)cycles);
+    cJSON_AddBoolToObject(body, "paused", paused);
+    // Only meaningful while paused: a running machine is never "at" anything.
+    cJSON_AddBoolToObject(body, "atFrameBoundary",
+                          paused && frame_end_seen && clockticks6502 == frame_end_ticks);
+    send_dap_response(seq, "x16/status", true, body);
+    return 0;
+}
+
 static int handle_x16_registers(int seq, cJSON *args) {
     (void)args;
     cJSON *body = cJSON_CreateObject();
@@ -4017,6 +4074,7 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "evaluate"))      result = handle_dap_evaluate(seq, args);
     else if (!strcmp(cmd, "readMemory"))    result = handle_dap_read_memory(seq, args);
     else if (!strcmp(cmd, "writeMemory"))   result = handle_dap_write_memory(seq, args);
+    else if (!strcmp(cmd, "x16/status"))    result = handle_x16_status(seq, args);
     else if (!strcmp(cmd, "x16/registers")) result = handle_x16_registers(seq, args);
     else if (!strcmp(cmd, "x16/sendKey"))   result = handle_x16_send_key(seq, args);
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
@@ -4275,6 +4333,10 @@ static void send_dap_event_thread_started(void) {
 int debug_server_poll(void) {
     if (!server_enabled) return 0;
 
+    // Keep the 64-bit cycle count current even under -headless, which has no
+    // frames to do it.
+    emulated_cycles();
+
     try_accept();
     if (client_sock == SOCKET_INVALID) return 0;
 
@@ -4397,6 +4459,42 @@ bool debug_server_has_client(void) {
 
 bool debug_server_is_enabled(void) {
     return server_enabled;
+}
+
+void debug_server_frame_end(void) {
+    machine_frames++;
+    process_frames++;
+    emulated_cycles();
+    frame_end_ticks = clockticks6502;
+    frame_end_seen  = true;
+}
+
+bool debug_server_wait(uint32_t timeout_ms) {
+    if (!server_enabled) return false;
+
+    // Before a client connects, the listening socket turns readable when one
+    // does. After, only the client matters: try_accept() ignores the listener
+    // while a session is open, so waking for it would just spin.
+    const socket_t s = (client_sock != SOCKET_INVALID) ? client_sock : listen_sock;
+    if (s == SOCKET_INVALID) {
+        SDL_Delay(timeout_ms);
+        return true;
+    }
+
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(s, &rd);
+    struct timeval tv;
+    tv.tv_sec  = (long)(timeout_ms / 1000);
+    tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
+    // The first argument is ignored by Winsock; POSIX wants the highest fd + 1.
+    const int r = select((int)s + 1, &rd, NULL, NULL, &tv);
+    if (r < 0) {
+        // EINTR or a socket that just died. Do not turn the paused loop into a
+        // spin; the next poll will notice a dead socket and drop it.
+        SDL_Delay(timeout_ms);
+    }
+    return true;
 }
 
 void debug_server_shutdown(void) {

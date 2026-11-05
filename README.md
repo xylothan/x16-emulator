@@ -979,7 +979,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1084,6 +1084,12 @@ reports a joystick present — `JOY(1)` reads `$00` with nothing held rather tha
 it with `enabled: false` makes the port read empty again.
 
 There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state as JSON in one call.
+
+`x16/status` reports where the machine is in emulated time: `frame` and `framesTotal` (completed
+frames, counted at the same point as `-input` script frames), `cycles` (emulated CPU cycles, all
+three 64-bit), `paused`, and `atFrameBoundary` (paused where a frame ended, with nothing run
+since; a stop mid-frame, at a breakpoint for instance, reports `false`). `x16dbg status` prints them. A paused machine answers requests as they
+arrive, so a script that pauses and polls pays a round trip, not a sleep, per request.
 
 #### Profiling the guest: how much of a frame is your code using?
 

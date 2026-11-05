@@ -1274,6 +1274,46 @@ for bp, why in (
             not r.get("verified") and r.get("message"))
 bk_req("setInstructionBreakpoints", {"breakpoints": []})
 
+# 17. x16/status: emulated time, and how fast a paused machine answers.
+#
+# A client that drives a paused machine sends it request after request, so
+# what matters is the round trip to a machine that is NOT running. That used to
+# wait out a fixed 10 ms sleep in the pause loop; it now waits on the socket.
+del bk_events[:]
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(1)            # already paused is fine: no event comes then
+
+st = bk_req("x16/status")
+sb = st.get("body", {})
+bk_case("x16/status answers with frame, framesTotal, cycles, paused, atFrameBoundary",
+        st.get("success") and all(k in sb for k in
+                                  ("frame", "framesTotal", "cycles", "paused", "atFrameBoundary")))
+bk_case("x16/status reports the machine paused", sb.get("paused") is True)
+time.sleep(0.3)
+st2 = bk_req("x16/status").get("body", {})
+bk_case("a paused machine's frame and cycle counts hold still",
+        st2.get("frame") == sb.get("frame") and st2.get("cycles") == sb.get("cycles"))
+
+bk_req("continue", {"threadId": 1})
+time.sleep(0.5)
+st3 = bk_req("x16/status").get("body", {})
+bk_case("a running machine's frame count advances (%s -> %s)" % (sb.get("frame"), st3.get("frame")),
+        st3.get("paused") is False and st3.get("frame", 0) > sb.get("frame", 0) + 5
+        and st3.get("cycles", 0) > sb.get("cycles", 0))
+bk_case("framesTotal equals frame while nothing restores state",
+        st3.get("framesTotal") == st3.get("frame"))
+
+del bk_events[:]
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+N = 200
+t0 = time.perf_counter()
+for _ in range(N):
+    bk_req("x16/status")
+ms = (time.perf_counter() - t0) * 1000.0 / N
+print("  (x16/status round trip to a paused machine: %.3f ms average over %d)" % (ms, N))
+bk_case("a paused machine answers within 3 ms on average (%.3f ms)" % ms, ms < 3.0)
+
 bk_eval("bp_clear")
 bk_req("disconnect", {"terminateDebuggee": False})
 bk.close()

@@ -2827,6 +2827,7 @@ emulator_step_during_move(void)
 		profile_session_frame_end();
 		debug_gate_refresh();
 		input_tick();
+		debug_server_frame_end();
 	}
 
 	in_step = false;
@@ -3073,6 +3074,7 @@ emulator_loop(void *param)
 			profile_session_frame_end();
 			debug_gate_refresh();
 			input_tick();
+			debug_server_frame_end();
 			if (!bench_tick() || !capture_cli_tick()) {
 				break;
 			}

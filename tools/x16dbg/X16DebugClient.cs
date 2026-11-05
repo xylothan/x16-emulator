@@ -377,6 +377,13 @@ public class X16DebugClient : IDisposable
         return SendRequestAsync("x16/sdcard", args);
     }
 
+    /// <summary>
+    /// Emulated time: frame (the machine's), framesTotal (this process's),
+    /// cycles, paused and atFrameBoundary.
+    /// </summary>
+    public Task<JsonNode> StatusAsync() =>
+        SendRequestAsync("x16/status");
+
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject
         {

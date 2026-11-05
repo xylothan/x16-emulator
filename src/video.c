@@ -14,6 +14,7 @@
 #include "memory.h"
 #include "glue.h"
 #include "debugger.h"
+#include "debug_server.h"
 #ifdef HAS_IMGUI
 #include "smc.h" // smc_requested_reset (Ctrl+Shift+F5 restart)
 #include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
@@ -2467,7 +2468,12 @@ video_debug_ui_pump_paused(void)
 	// currentMode.
 	video_repaint_only();
 
-	SDL_Delay(16); // ~60fps; don't spin hot while parked
+	// ~60fps; don't spin hot while parked. Waiting on the DAP socket instead
+	// of sleeping, when there is one, answers a request to the halted machine
+	// as soon as it arrives rather than after the rest of the 16 ms.
+	if (!debug_server_wait(16)) {
+		SDL_Delay(16);
+	}
 
 	// If a control action resumed or single-stepped, tell emulator_loop to
 	// execute rather than stay parked. DMODE_STOP is the only mode that keeps
