@@ -535,8 +535,25 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 
 	showDebugOnRender = (currentMode != DMODE_RUN);                         // Do we draw it - only in RUN mode.
 	if (currentMode == DMODE_STOP) {                                        // We're in charge.
-		video_update();
-		SDL_Delay(10);
+		// A hidden window shows nobody anything, so under -hidden the repaint
+		// (which also pumps the window's events, quit included) drops to about
+		// ten a second. It was the bulk of each paused pass, and for a client
+		// that drives a paused machine with many requests a second it is pure
+		// overhead.
+		static Uint32 lastHiddenUpdate = 0;
+		const Uint32 now = SDL_GetTicks();
+		if (!hidden_windows || now - lastHiddenUpdate >= 100) {
+			lastHiddenUpdate = now;
+			video_update();
+		}
+		// Wait on the DAP socket rather than sleeping, so a request is
+		// answered when it arrives. A fixed 10 ms sleep made every request to a
+		// paused machine wait for whatever was left of it -- often longer than
+		// the request itself takes. Still bounded at 10 ms, so the
+		// window and keyboard are serviced as before.
+		if (!debug_server_wait(10)) {
+			SDL_Delay(10);
+		}
 		return 1;
 	}
 

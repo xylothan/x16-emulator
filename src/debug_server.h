@@ -27,6 +27,8 @@ static inline void debug_server_retry_unverified_breakpoints(void) { }
 static inline void debug_server_rebank_breakpoints(void) { }
 static inline void debug_server_note_resumed(void) { }
 static inline void debug_server_shutdown(void) { }
+static inline bool debug_server_wait(uint32_t timeout_ms) { (void)timeout_ms; return false; }
+static inline void debug_server_frame_end(void) { }
 
 #else
 
@@ -82,6 +84,17 @@ void debug_server_note_resumed(void);
 
 // Clean shutdown — close sockets, free resources.
 void debug_server_shutdown(void);
+
+// Wait up to timeout_ms for the DAP socket to have something to read: a request
+// from the client, or a client connecting. Returns as soon as there is, so a
+// paused machine answers a request when it arrives instead of after a fixed
+// sleep. Returns false without waiting when the server is off; the caller then
+// sleeps as it did before.
+bool debug_server_wait(uint32_t timeout_ms);
+
+// Called once per completed emulated frame, at the same point as the -input
+// script's frame tick, so frame numbers agree with input scripts.
+void debug_server_frame_end(void);
 
 #endif // HAS_DAP
 

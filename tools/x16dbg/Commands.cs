@@ -106,6 +106,23 @@ public static class Commands
 
     static async Task<int> DoStatus(X16DebugClient client)
     {
+        // Emulated time. An emulator older than x16/status answers "not
+        // supported"; the rest of the status is still worth printing.
+        var st = await client.StatusAsync();
+        if (DapSuccess(st) && st["body"] is JsonNode b)
+        {
+            // Read as double: cJSON writes every number that way, and a large
+            // cycle count can come back in exponent form.
+            long frame = (long)(b["frame"]?.GetValue<double>() ?? 0);
+            long total = (long)(b["framesTotal"]?.GetValue<double>() ?? 0);
+            long cycles = (long)(b["cycles"]?.GetValue<double>() ?? 0);
+            bool paused = b["paused"]?.GetValue<bool>() ?? false;
+            bool boundary = b["atFrameBoundary"]?.GetValue<bool>() ?? false;
+            string state = paused ? (boundary ? "paused at a frame boundary" : "paused mid-frame")
+                                  : "running";
+            Console.WriteLine($"Frame {frame} ({total} this process), {cycles} cycles, {state}");
+        }
+
         var threads = await client.GetThreadsAsync();
         if (DapSuccess(threads))
         {
