@@ -1116,7 +1116,8 @@ script frames, and the reply carries `framesRun`, `reason`, `frame`,
 so, and `continue` or another run-control request ends it as `cancelled`. If the machine was
 paused mid-frame, the rest of that frame counts as the first. `"hash": true` adds the state
 `hash`. The machine must be paused, and a `-testbench` run is refused because without video it
-has no frames; use `-hidden`. In `x16dbg`'s interactive mode, `break` and then
+has no frames; use `-hidden`, which still draws every frame but skips copying it to the hidden
+window, the fastest way to run frames. In `x16dbg`'s interactive mode, `break` and then
 `frames 4 1 right a` does the same.
 
 `x16/saveState` and `x16/loadState` keep the whole machine in memory under a name the client
