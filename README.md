@@ -1110,8 +1110,8 @@ same point as `-input` script frames, and the reply carries `framesRun`, `reason
 `frames` when the count ran out; a breakpoint, watchpoint or `pause` ends the step early and says
 so, and `continue` or another run-control request ends it as `cancelled`. If the machine was
 paused mid-frame, the rest of that frame counts as the first. The machine must be paused, and
-`-headless` is refused because it has no frames; use `-hidden`. `x16dbg frames 4 1 right a` does
-the same from the command line.
+`-headless` is refused because it has no frames; use `-hidden`. In `x16dbg`'s interactive mode,
+`break` and then `frames 4 1 right a` does the same.
 
 #### Profiling the guest: how much of a frame is your code using?
 

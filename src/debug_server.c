@@ -4688,10 +4688,11 @@ int debug_server_poll(void) {
             mode_changed = 1;
         }
 
+        // After each message, not once per batch: a pause that ends a step is
+        // answered straight after it, and an x16/step queued behind that pause
+        // finds the previous step already complete.
+        step_poll();
     }
-
-    // A pause in this batch can end a step; answer it without waiting a pass.
-    step_poll();
 
     return mode_changed;
 }

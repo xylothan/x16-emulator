@@ -1430,6 +1430,24 @@ bl = rl.get("body", {})
 bk_case("pause ends a long x16/step (reason %s after %s frames)" % (bl.get("reason"), bl.get("framesRun")),
         bl.get("reason") == "pause" and 0 < bl.get("framesRun", 0) < 1000000 and bk_paused())
 
+# A pause and a new step arriving in one write: the pause ends the old step
+# before the new one is looked at, so the new one is accepted.
+def dap_frame(seq, cmd, args):
+    body = json.dumps({"seq": seq, "type": "request", "command": cmd, "arguments": args}).encode()
+    return b"Content-Length: %d\r\n\r\n" % len(body) + body
+s_long = bk_send("x16/step", {"frames": 1000000})
+time.sleep(0.1)
+s_p, s_n = bk_seq[0] + 1, bk_seq[0] + 2
+bk_seq[0] += 2
+bk.sendall(dap_frame(s_p, "pause", {"threadId": 1}) + dap_frame(s_n, "x16/step", {"frames": 1}))
+rl = bk_collect(s_long, 5) or {}
+rp_ = bk_collect(s_p, 5) or {}
+rn = bk_collect(s_n, 5) or {}
+bk_case("pause then x16/step in one write: the old step ends, the new one runs (%s, %s)"
+        % (rl.get("body", {}).get("reason"), rn.get("body", {}).get("reason") or rn.get("message")),
+        rl.get("body", {}).get("reason") == "pause" and rn.get("success") is True
+        and rn.get("body", {}).get("framesRun") == 1)
+
 s_long = bk_send("x16/step", {"frames": 1000000})
 time.sleep(0.1)
 s_cont = bk_send("continue", {"threadId": 1})
