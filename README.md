@@ -979,7 +979,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1090,6 +1090,29 @@ frames, counted at the same point as `-input` script frames), `cycles` (emulated
 three 64-bit), `paused`, and `atFrameBoundary` (paused where a frame ended, with nothing run
 since; a stop mid-frame, at a breakpoint for instance, reports `false`). `x16dbg status` prints them. A paused machine answers requests as they
 arrive, so a script that pauses and polls pays a round trip, not a sleep, per request.
+
+`x16/step` runs a paused machine for a number of whole frames and answers when it stops, with
+memory read at that point:
+
+```jsonc
+{ "frames": 4,                                          // default 1
+  "joysticks": [ { "index": 0, "buttons": ["right", "a"] },  // as x16/joystick: buttons, mask, enabled
+                 { "index": 1, "enabled": false } ],
+  "read": [ { "addr": "0x0400", "len": 64 },
+            { "addr": "0xA000", "len": 32, "bank": 5 },  // bank: x16 RAM bank for $A000-$BFFF
+            { "addr": "vram:1FC00", "len": 1024 } ],
+  "events": false }                                     // stopped/continued events; default off
+```
+
+The joysticks are set before anything runs, and stay as set after the step, as with
+`x16/joystick`. The machine then stops where the last frame ends, at the same point as `-input`
+script frames, and the reply carries `framesRun`, `reason`, `frame`,
+`framesTotal`, `cycles` and `reads` (base64, one per region, at most 32K in all). `reason` is
+`frames` when the count ran out; a breakpoint, watchpoint or `pause` ends the step early and says
+so, and `continue` or another run-control request ends it as `cancelled`. If the machine was
+paused mid-frame, the rest of that frame counts as the first. The machine must be paused, and
+`-headless` is refused because it has no frames; use `-hidden`. In `x16dbg`'s interactive mode,
+`break` and then `frames 4 1 right a` does the same.
 
 #### Profiling the guest: how much of a frame is your code using?
 

@@ -113,6 +113,10 @@ public static class InteractiveMode
                 case "j":
                     await Commands.RunOneShotAsync(client, "joy", args);
                     break;
+                case "frames":
+                case "f":
+                    await Commands.RunOneShotAsync(client, "frames", args);
+                    break;
                 case "bp":
                     await Commands.RunOneShotAsync(client, "bp", args);
                     break;
@@ -300,6 +304,7 @@ public static class InteractiveMode
         Console.WriteLine("  v, vram <range>      Read VERA video RAM (e.g., vram 1B000 20)");
         Console.WriteLine("  setvram <addr> <hex> Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  j, joy <port> [btns] Drive a SNES controller port 1-4");
+        Console.WriteLine("  f, frames <n> [port btns]  Run n frames from a pause, then stop");
         Console.WriteLine("  p, setreg <r> <val>  Set register (e.g., setreg a FF)");
         Console.WriteLine("  profile <frames> ... Capture, then print routines and call paths");
         Console.WriteLine("  bp add <addr>        Add breakpoint");
