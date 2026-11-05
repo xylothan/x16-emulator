@@ -32,6 +32,12 @@ static inline void debug_server_frame_end(void) { }
 
 #else
 
+#include "savestate_io.h"
+
+// The server's part of a save state: the machine's frame and cycle counts.
+void debug_server_state_save(ss_writer *w);
+void debug_server_state_load(ss_reader *r);
+
 // Start listening on the given port. Returns 0 on success, -1 on error.
 int  debug_server_init(int port);
 

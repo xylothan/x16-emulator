@@ -3,6 +3,7 @@
 // All rights reserved. License: 2-clause BSD
 
 #include "vera_psg.h"
+#include "savestate.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -259,4 +260,50 @@ psg_debug_scope_predict(int16_t (*dest)[PSG_SCOPE_SAMPLES], unsigned num_samples
 	noise_state = saved_noise;
 	scope_armed = saved_armed;
 	return n;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// Each voice's registers and oscillator, the shared noise generator, and the
+// register shadow. The debug mirrors (last sample, peak) and the scope capture
+// belong to the debugger and are left as they are.
+
+void
+psg_state_save(ss_writer *w)
+{
+	ss_begin(w, "PSG ", 1);
+	for (int i = 0; i < 16; i++) {
+		const struct channel *ch = &channels[i];
+		ss_put_u16(w, ch->freq);
+		ss_put_u16(w, ch->volume);
+		ss_put_bool(w, ch->left);
+		ss_put_bool(w, ch->right);
+		ss_put_u8(w, ch->pw);
+		ss_put_u8(w, ch->waveform);
+		ss_put_u16(w, ch->noiseval);
+		ss_put_u32(w, ch->phase);
+	}
+	ss_put(w, reg_shadow, sizeof reg_shadow);
+	ss_put_u16(w, noise_state);
+	ss_end(w);
+}
+
+void
+psg_state_load(ss_reader *r)
+{
+	ss_open(r, "PSG ");
+	for (int i = 0; i < 16; i++) {
+		struct channel *ch = &channels[i];
+		ch->freq     = ss_get_u16(r);
+		ch->volume   = ss_get_u16(r);
+		ch->left     = ss_get_bool(r);
+		ch->right    = ss_get_bool(r);
+		ch->pw       = ss_get_u8(r);
+		ch->waveform = ss_get_u8(r);
+		ch->noiseval = ss_get_u16(r);
+		ch->phase    = ss_get_u32(r);
+	}
+	ss_get(r, reg_shadow, sizeof reg_shadow);
+	noise_state = ss_get_u16(r);
+	ss_close(r);
 }

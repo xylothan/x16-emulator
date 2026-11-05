@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include "smc.h"
+#include "savestate.h"
 #include "glue.h"
 #include "i2c.h"
 #ifdef __EMSCRIPTEN__
@@ -190,3 +191,33 @@ smc_debug_get_state(smc_debug_state_t *out)
 	out->mse_fill = i2c_mse_buffer_count();
 }
 
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+
+void
+smc_state_save(ss_writer *w)
+{
+	ss_begin(w, "SMC ", 1);
+	ss_put_u8(w, default_read_op);
+	ss_put_u8(w, default_read_state);
+	ss_put_u8(w, activity_led);
+	ss_put_u8(w, mse_count);
+	ss_put(w, i2c_data, sizeof i2c_data);
+	ss_put_u8(w, i2c_data_pos);
+	ss_put_bool(w, smc_requested_reset);
+	ss_end(w);
+}
+
+void
+smc_state_load(ss_reader *r)
+{
+	ss_open(r, "SMC ");
+	default_read_op     = ss_get_u8(r);
+	default_read_state  = ss_get_u8(r);
+	activity_led        = ss_get_u8(r);
+	mse_count           = ss_get_u8(r);
+	ss_get(r, i2c_data, sizeof i2c_data);
+	i2c_data_pos        = ss_get_u8(r);
+	smc_requested_reset = ss_get_bool(r);
+	ss_close(r);
+}

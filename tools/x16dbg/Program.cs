@@ -135,6 +135,8 @@ class Program
         Console.WriteLine("  setvram <addr> <hex>    Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  joy <port> [buttons]    Drive a SNES controller port (1-4)");
         Console.WriteLine("  frames <n> [port btns]  Run n frames from a pause (interactive mode: break first)");
+        Console.WriteLine("  save <slot>             Save the machine in memory (interactive: break, frames 1)");
+        Console.WriteLine("  load <slot>             Put the machine back to a saved slot (interactive: break)");
         Console.WriteLine("  sd [all|nofiles] [history <n>] [reindex]");
         Console.WriteLine("                          SD card state, files read/written, block history");
         Console.WriteLine("  profile <frames> [...]  Capture, then print routines and call paths");

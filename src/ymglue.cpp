@@ -1,5 +1,6 @@
 #include "ymglue.h"
 #include "ymfm_opm.h"
+#include "savestate.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -14,6 +15,22 @@ class ym2151_debuggable : public ymfm::ym2151 {
 	public:
 		using ymfm::ym2151::ym2151;
 		fm_engine &engine() { return m_fm; }
+};
+
+// ymfm's own save_restore() covers the engine except three fields of its
+// bookkeeping -- which channels are active, which were modified, and how far
+// along the periodic re-prepare sweep is -- and it ends by marking every
+// channel modified. That makes saving a write: the next sample re-prepares
+// every channel, which a machine that was never saved would not do. These
+// pointers reach the three fields so a save can put them back and a load can
+// restore them exactly. Never instantiated: deriving only grants the access
+// needed to name the protected members.
+using ym_engine = ymfm::fm_engine_base<ymfm::opm_registers>;
+struct ym_engine_fields : ym_engine {
+	using field = uint32_t ym_engine::*;
+	static field active()   { return &ym_engine_fields::m_active_channels; }
+	static field modified() { return &ym_engine_fields::m_modified_channels; }
+	static field prepare()  { return &ym_engine_fields::m_prepare_count; }
 };
 
 class ym2151_interface : public ymfm::ymfm_interface {
@@ -141,6 +158,74 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		bool debug_busy() {
 			return ymfm_is_busy();
+		}
+
+		// ─── Save states ────────────────────────────────────────────────
+
+		void state_save(ss_writer *w) {
+			ym_engine &eng = m_chip.engine();
+			const uint32_t active   = (eng.*ym_engine_fields::active());
+			const uint32_t modified = (eng.*ym_engine_fields::modified());
+			const uint32_t prepare  = (eng.*ym_engine_fields::prepare());
+
+			std::vector<uint8_t> blob;
+			{
+				ymfm::ymfm_saved_state saver(blob, true);
+				m_chip.save_restore(saver);
+			}
+			// Undo the invalidation save_restore() did, so saving only reads.
+			(eng.*ym_engine_fields::modified()) = modified;
+
+			ss_put_u32(w, (uint32_t)blob.size());
+			ss_put(w, blob.data(), blob.size());
+			ss_put_u32(w, active);
+			ss_put_u32(w, modified);
+			ss_put_u32(w, prepare);
+			ss_put_u32(w, (uint32_t)m_timers[0]);
+			ss_put_u32(w, (uint32_t)m_timers[1]);
+			ss_put_u32(w, (uint32_t)m_busy_timer);
+			ss_put_bool(w, m_irq_status);
+			ss_put(w, m_regs, sizeof m_regs);
+			ss_put(w, m_keyon, sizeof m_keyon);
+		}
+
+		void state_load(ss_reader *r) {
+			std::vector<uint8_t> blob(ss_get_u32(r));
+			ss_get(r, blob.data(), blob.size());
+			const uint32_t active   = ss_get_u32(r);
+			const uint32_t modified = ss_get_u32(r);
+			const uint32_t prepare  = ss_get_u32(r);
+			m_timers[0]  = (int32_t)ss_get_u32(r);
+			m_timers[1]  = (int32_t)ss_get_u32(r);
+			m_busy_timer = (int32_t)ss_get_u32(r);
+			m_irq_status = ss_get_bool(r);
+			ss_get(r, m_regs, sizeof m_regs);
+			ss_get(r, m_keyon, sizeof m_keyon);
+			if (r->failed) {
+				return;
+			}
+
+			{
+				ymfm::ymfm_saved_state restorer(blob, false);
+				m_chip.save_restore(restorer);
+			}
+			ym_engine &eng = m_chip.engine();
+			(eng.*ym_engine_fields::active())   = active;
+			(eng.*ym_engine_fields::modified()) = modified;
+			(eng.*ym_engine_fields::prepare())  = prepare;
+
+			// Each operator caches values derived from the registers (phase
+			// step, envelope rates, waveform), rebuilt only when its channel is
+			// prepared. A channel the saved chip did not have marked modified
+			// will not be prepared soon, so rebuild every cache now, from the
+			// registers just restored -- which is exactly what the saved chip's
+			// caches were built from.
+			for (uint32_t op = 0; op < YM_NUM_OPERATORS; op++) {
+				auto *fmop = eng.debug_operator(op);
+				if (fmop != nullptr) {
+					fmop->regs().cache_operator_data(fmop->choffs(), fmop->opoffs(), fmop->debug_cache());
+				}
+			}
 		}
 
 		unsigned debug_scope_read(int ch, int16_t* dest, unsigned max_samples) {
@@ -342,6 +427,19 @@ extern "C" {
 		// read_status() has no side effects on the OPM (it just ORs the busy
 		// flag into the engine's status byte), so it is safe to poll.
 		return initialized ? opm_iface.read_status() : 0x00;
+	}
+
+	void YM_state_save(ss_writer *w) {
+		ss_begin(w, "YM  ", 1);
+		ss_put_bool(w, initialized);
+		if (initialized) opm_iface.state_save(w);
+		ss_end(w);
+	}
+
+	void YM_state_load(ss_reader *r) {
+		ss_open(r, "YM  ");
+		if (ss_get_bool(r)) opm_iface.state_load(r);
+		ss_close(r);
 	}
 
 	bool YM_debug_is_busy() {

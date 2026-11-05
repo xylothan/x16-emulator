@@ -1,6 +1,7 @@
 #include "cartridge.h"
 #include "files.h"
 #include "x16_hash.h"
+#include "savestate.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -569,4 +570,51 @@ cartridge_get_bank_type(uint8_t bank)
 	}
 
 	return Cartridge_info.bank_info[bank];
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// Only the banks the machine can write: RAM and NVRAM. ROM banks come from the
+// cartridge file, which is configuration.
+
+static bool
+cart_bank_writable(int t)
+{
+	switch (Cartridge_info.bank_info[t]) {
+		case CART_BANK_UNINITIALIZED_RAM:
+		case CART_BANK_INITIALIZED_RAM:
+		case CART_BANK_UNINITIALIZED_NVRAM:
+		case CART_BANK_INITIALIZED_NVRAM:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void
+cartridge_state_save(ss_writer *w)
+{
+	ss_begin(w, "CART", 1);
+	if (CART != NULL) {
+		for (int t = 0; t < CART_MAX_BANKS; ++t) {
+			if (cart_bank_writable(t)) {
+				ss_put(w, CART + (size_t)t * CART_BANK_SIZE, CART_BANK_SIZE);
+			}
+		}
+	}
+	ss_end(w);
+}
+
+void
+cartridge_state_load(ss_reader *r)
+{
+	ss_open(r, "CART");
+	if (CART != NULL) {
+		for (int t = 0; t < CART_MAX_BANKS; ++t) {
+			if (cart_bank_writable(t)) {
+				ss_get(r, CART + (size_t)t * CART_BANK_SIZE, CART_BANK_SIZE);
+			}
+		}
+	}
+	ss_close(r);
 }

@@ -37,6 +37,7 @@
 #include <ctype.h>
 #include <cjson/cJSON.h>
 #include "x16_hash.h"
+#include "savestate.h"
 
 extern bool headless;   // main.c
 
@@ -90,10 +91,10 @@ static int dap_seq = 1;
 // video.c's frame_count is an int. A client measuring a long run needs neither
 // to wrap, so the deltas are accumulated here into 64 bits.
 //
-// machine_frames is the machine's own frame count. A later save state will
-// restore it along with the rest of the machine. process_frames counts every
-// frame this process has emulated and is never restored, which is what a
-// throughput figure wants. Today the two are equal.
+// machine_frames is the machine's own frame count, and the cycle count is the
+// machine's too: x16/loadState restores both along with the rest of the
+// machine. process_frames counts every frame this process has emulated and is
+// never restored, which is what a throughput figure wants.
 //
 // Both advance in debug_server_frame_end(), which main.c calls at the same point
 // as the -input script's frame tick, so frame N here is frame N there.
@@ -2198,24 +2199,32 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // Cheap enough to call between every bot decision. JSON numbers are doubles,
 // exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
 // 8 MHz.
-// A hash of the program-visible machine: CPU registers, all RAM and banked RAM,
-// the bank selects, and VERA (video_state_hash). Two runs that agree on it
-// agree on everything a program can read from those. Sent as a hex string,
-// since a JSON number cannot carry 64 bits exactly.
-static void dap_add_state_hash(cJSON *body) {
-    uint64_t h = X16_HASH_INIT;
-    const uint32_t cpu[] = {
-        regs.pc, regs.c, regs.x, regs.y, regs.sp, regs.dp, regs.db, regs.k,
-        regs.status, regs.e, regs.is65c816, waiting,
-        memory_get_ram_bank(), memory_get_rom_bank(),
-    };
-    h = x16_hash_bytes(h, cpu, sizeof cpu);
-    h = x16_hash_bytes(h, RAM, RAM_SIZE);
-    h = x16_hash_bytes(h, BRAM, BRAM_SIZE);
-    h = video_state_hash(h);
+// A hash of the whole machine: exactly the bytes a save state of it would hold
+// (savestate.c), so two machines with the same hash would save the same state.
+// Sent as a hex string, since a JSON number cannot carry 64 bits exactly.
+static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
+    const uint64_t h = x16_hash_bytes(X16_HASH_INIT, data, len);
     char hex[24];
     snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
     cJSON_AddStringToObject(body, "hash", hex);
+}
+
+static void dap_add_state_hash(cJSON *body) {
+    // Kept between calls: a client asking for the hash every frame should not
+    // cost an allocation of the whole machine each time.
+    static ss_writer w;
+    static bool w_ready = false;
+    if (!w_ready) {
+        ss_writer_init(&w, false, NULL);
+        w_ready = true;
+    }
+    ss_writer_rewind(&w);
+    savestate_write(&w);
+    if (w.failed) {
+        cJSON_AddNullToObject(body, "hash");
+        return;
+    }
+    dap_add_hash_of(body, w.data, w.len);
 }
 
 static bool dap_arg_true(cJSON *args, const char *name) {
@@ -2240,6 +2249,114 @@ static int handle_x16_status(int seq, cJSON *args) {
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     send_dap_response(seq, "x16/status", true, body);
     return 0;
+}
+
+// ─── x16/saveState, x16/loadState: in-memory save states ────────────
+//
+// A slot is a name the client picks. Saving is allowed only at a frame
+// boundary, so every state starts a frame and stepping on from one is
+// unambiguous; loading works from any pause, since it replaces everything.
+// Breakpoints, the session and the debugger's settings are configuration and
+// are left alone.
+
+static bool dap_at_frame_boundary(void) {
+    return DEBUGIsPaused() && frame_end_seen && clockticks6502 == frame_end_ticks;
+}
+
+static const char *dap_slot_arg(cJSON *args) {
+    cJSON *s = args ? cJSON_GetObjectItemCaseSensitive(args, "slot") : NULL;
+    return (s && cJSON_IsString(s)) ? s->valuestring : NULL;
+}
+
+static void dap_add_state_position(cJSON *body) {
+    cJSON_AddNumberToObject(body, "frame", (double)machine_frames);
+    cJSON_AddNumberToObject(body, "framesTotal", (double)process_frames);
+    cJSON_AddNumberToObject(body, "cycles", (double)emulated_cycles());
+}
+
+static int handle_x16_save_state(int seq, cJSON *args) {
+    const char *slot = dap_slot_arg(args);
+    if (!slot) {
+        send_dap_error_response(seq, "x16/saveState", "'slot' must be a name");
+        return 0;
+    }
+    if (step.pending || !DEBUGIsPaused()) {
+        send_dap_error_response(seq, "x16/saveState", "the machine must be paused");
+        return 0;
+    }
+    if (!dap_at_frame_boundary()) {
+        send_dap_error_response(seq, "x16/saveState",
+            "the machine is not at a frame boundary; x16/step {frames: 1} gets it to one");
+        return 0;
+    }
+    char err[192];
+    const size_t size = savestate_slot_save(slot, err, sizeof err);
+    if (size == 0) {
+        send_dap_error_response(seq, "x16/saveState", err);
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "slot", slot);
+    cJSON_AddNumberToObject(body, "size", (double)size);
+    dap_add_state_position(body);
+    if (dap_arg_true(args, "hash")) {
+        size_t len = 0;
+        const void *data = savestate_slot_data(slot, &len);
+        dap_add_hash_of(body, data, len);
+    }
+    send_dap_response(seq, "x16/saveState", true, body);
+    return 0;
+}
+
+static int handle_x16_load_state(int seq, cJSON *args) {
+    const char *slot = dap_slot_arg(args);
+    if (!slot) {
+        send_dap_error_response(seq, "x16/loadState", "'slot' must be a name");
+        return 0;
+    }
+    if (step.pending || !DEBUGIsPaused()) {
+        send_dap_error_response(seq, "x16/loadState", "the machine must be paused");
+        return 0;
+    }
+    char err[192];
+    size_t size = 0;
+    if (!savestate_slot_load(slot, &size, err, sizeof err)) {
+        send_dap_error_response(seq, "x16/loadState", err);
+        return 0;
+    }
+    // The debugger's idea of where the machine is stopped follows the load.
+    // It is already stopped, so this announces nothing by itself.
+    DEBUGBreakToDebugger();
+    DEBUGSetStopReason("restore");
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "slot", slot);
+    cJSON_AddNumberToObject(body, "size", (double)size);
+    dap_add_state_position(body);
+    if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
+    send_dap_response(seq, "x16/loadState", true, body);
+    if (dap_arg_true(args, "events")) debug_server_notify_stopped("restore");
+    return 0;
+}
+
+// The DAP server's part of a state: the machine's frame and cycle counts.
+void debug_server_state_save(ss_writer *w) {
+    ss_begin(w, "DAP ", 1);
+    ss_put_u64(w, machine_frames);
+    ss_put_u64(w, emulated_cycles());
+    ss_end(w);
+}
+
+void debug_server_state_load(ss_reader *r) {
+    ss_open(r, "DAP ");
+    machine_frames = ss_get_u64(r);
+    cycles_acc     = ss_get_u64(r);
+    ss_close(r);
+    // Measured against the restored clock from here on. A state is taken at a
+    // frame boundary, which is where the loaded machine now stands.
+    cycles_seen     = clockticks6502;
+    frame_end_ticks = clockticks6502;
+    frame_end_seen  = true;
 }
 
 // Standard base64, NUL-terminated. The caller frees it.
@@ -4397,6 +4514,8 @@ static int dispatch_dap(const char *json_body) {
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
     else if (!strcmp(cmd, "x16/step"))      result = handle_x16_step(seq, args);
+    else if (!strcmp(cmd, "x16/saveState")) result = handle_x16_save_state(seq, args);
+    else if (!strcmp(cmd, "x16/loadState")) result = handle_x16_load_state(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);

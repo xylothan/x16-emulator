@@ -3,6 +3,7 @@
 // All rights reserved. License: 2-clause BSD
 
 #include "vera_pcm.h"
+#include "savestate.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -301,4 +302,43 @@ pcm_debug_scope_predict(int16_t *dest_l, int16_t *dest_r, unsigned num_samples)
 	phase       = saved_phase;
 	scope_armed = saved_armed;
 	return n;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The FIFO and its pointers, the control, rate and loop registers, the current
+// output sample and the rate accumulator. The scope capture is the debugger's.
+
+void
+pcm_state_save(ss_writer *w)
+{
+	ss_begin(w, "PCM ", 1);
+	ss_put(w, fifo, sizeof fifo);
+	ss_put_u32(w, fifo_wridx);
+	ss_put_u32(w, fifo_rdidx);
+	ss_put_u32(w, fifo_cnt);
+	ss_put_u8(w, ctrl);
+	ss_put_u8(w, rate);
+	ss_put_u8(w, loop);
+	ss_put_u16(w, (uint16_t)cur_l);
+	ss_put_u16(w, (uint16_t)cur_r);
+	ss_put_u8(w, phase);
+	ss_end(w);
+}
+
+void
+pcm_state_load(ss_reader *r)
+{
+	ss_open(r, "PCM ");
+	ss_get(r, fifo, sizeof fifo);
+	fifo_wridx = ss_get_u32(r);
+	fifo_rdidx = ss_get_u32(r);
+	fifo_cnt   = ss_get_u32(r);
+	ctrl       = ss_get_u8(r);
+	rate       = ss_get_u8(r);
+	loop       = ss_get_u8(r);
+	cur_l      = (int16_t)ss_get_u16(r);
+	cur_r      = (int16_t)ss_get_u16(r);
+	phase      = ss_get_u8(r);
+	ss_close(r);
 }

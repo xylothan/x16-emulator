@@ -416,6 +416,20 @@ public class X16DebugClient : IDisposable
         return SendRequestAsync("x16/step", args, timeoutMs);
     }
 
+    /// <summary>
+    /// Save the machine into a named in-memory slot. The machine must be paused
+    /// at a frame boundary, which is where x16/step stops it.
+    /// </summary>
+    public Task<JsonNode> SaveStateAsync(string slot) =>
+        SendRequestAsync("x16/saveState", new JsonObject { ["slot"] = slot });
+
+    /// <summary>
+    /// Put the machine back to a slot saved earlier in this emulator process.
+    /// Works from any pause; the machine stays paused at the saved frame.
+    /// </summary>
+    public Task<JsonNode> LoadStateAsync(string slot) =>
+        SendRequestAsync("x16/loadState", new JsonObject { ["slot"] = slot });
+
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject
         {

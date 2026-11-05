@@ -353,6 +353,7 @@ set(X16_SOURCES
     src/keyboard.c
     src/icon.c
     src/timing.c
+    src/savestate.c
     src/wav_recorder.c
     src/testbench.c
     src/files.c
@@ -688,6 +689,10 @@ endfunction()
 # dbg_info.c has no dependency on the emulator core, so this links it on its own.
 x16_add_test(dbg_info
     SOURCES tests/test_dbg_info.c src/dbg_info.c)
+
+# The save-state chunk writer and reader are header-only.
+x16_add_test(savestate
+    SOURCES tests/test_savestate.c)
 
 # code_map.c leans on only disasm(), dbg_info and two core symbols, so the test
 # supplies its own memory and register file rather than linking the emulator

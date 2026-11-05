@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include "../savestate.h"
+
 cpu_flow_hook_fn cpu_flow_hook = NULL;
 cpu_irq_line_hook_fn cpu_irq_line_hook = NULL;
 
@@ -174,4 +176,30 @@ cpu_irq_take_entered_flag(void)
 	const bool v = cpu_irq_just_entered;
 	cpu_irq_just_entered = false;
 	return v;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+
+void
+irq_ctx_state_save(ss_writer *w)
+{
+	ss_begin(w, "IRQC", 1);
+	ss_put(w, frames, sizeof frames);
+	ss_put_u32(w, (uint32_t)depth);
+	ss_put_u32(w, taken);
+	ss_put_u8(w, last_vector);
+	ss_put_bool(w, cpu_irq_just_entered);
+	ss_end(w);
+}
+
+void
+irq_ctx_state_load(ss_reader *r)
+{
+	ss_open(r, "IRQC");
+	ss_get(r, frames, sizeof frames);
+	depth                = (int)ss_get_u32(r);
+	taken                = ss_get_u32(r);
+	last_vector          = ss_get_u8(r);
+	cpu_irq_just_entered = ss_get_bool(r);
+	ss_close(r);
 }

@@ -22,9 +22,6 @@ void video_reset(void);
 void video_set_random_seed(uint32_t seed);
 // Drop the host's keyboard, mouse and controller events (quit still works).
 void video_set_ignore_host_input(bool on);
-// A hash of VERA's program-visible state: VRAM, palette, sprites, registers,
-// FX and the scan position. Chained onto h.
-uint64_t video_state_hash(uint64_t h);
 bool video_step(float mhz, float steps, bool midline);
 bool video_update(void);
 void video_present_no_input(void);

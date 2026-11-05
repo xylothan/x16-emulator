@@ -1,4 +1,5 @@
 #include "joystick.h"
+#include "savestate.h"
 
 #include <SDL.h>
 #include <stdio.h>
@@ -365,4 +366,40 @@ joystick_debug_get_state(joystick_debug_state_t *out)
 	}
 	out->latch = Joystick_latch;
 	out->data  = Joystick_data;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The controller ports' shift registers and latch, the data lines, and the
+// virtual pads with what they are holding: whether a port is driven at all is
+// part of what the machine sees (an undriven port reads high forever, which is
+// how the KERNAL tells an empty socket from a pad). Which host controller is
+// bound to a slot is configuration.
+
+void
+joystick_state_save(ss_writer *w)
+{
+	ss_begin(w, "JOY ", 1);
+	for (int i = 0; i < NUM_JOYSTICKS; i++) {
+		ss_put_u16(w, Joystick_virtual_mask[i]);
+		ss_put_bool(w, Joystick_virtual_enabled[i]);
+		ss_put_u16(w, Joystick_slot_shift[i]);
+	}
+	ss_put_bool(w, Joystick_latch);
+	ss_put_u8(w, Joystick_data);
+	ss_end(w);
+}
+
+void
+joystick_state_load(ss_reader *r)
+{
+	ss_open(r, "JOY ");
+	for (int i = 0; i < NUM_JOYSTICKS; i++) {
+		Joystick_virtual_mask[i]    = ss_get_u16(r);
+		Joystick_virtual_enabled[i] = ss_get_bool(r);
+		Joystick_slot_shift[i]      = ss_get_u16(r);
+	}
+	Joystick_latch = ss_get_bool(r);
+	Joystick_data  = ss_get_u8(r);
+	ss_close(r);
 }

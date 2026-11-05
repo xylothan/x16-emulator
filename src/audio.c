@@ -3,6 +3,7 @@
 // All rights reserved. License: 2-clause BSD
 
 #include "audio.h"
+#include "savestate.h"
 #include "glue.h"
 #include "vera_psg.h"
 #include "vera_pcm.h"
@@ -480,4 +481,63 @@ audio_usage(void)
 
 	SDL_Quit();
 	exit(1);
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The sound chips are clocked lazily: audio_step() advances each source's head
+// position with the CPU, and audio_render() catches the chips up and resamples
+// what they produced. The positions and the not-yet-resampled chip output are
+// therefore part of where the machine is, and the limiter is part of what it
+// will output next.
+//
+// The output queue to the host is not: on a load it is emptied, so what plays
+// next comes from the restored machine rather than the one it replaced. The
+// resampling ratios depend on the host's output rate, which is configuration.
+
+void
+audio_state_save(ss_writer *w)
+{
+	ss_begin(w, "AUD ", 1);
+	ss_put_u32(w, vera_samp_pos_rd);
+	ss_put_u32(w, vera_samp_pos_wr);
+	ss_put_u32(w, vera_samp_pos_hd);
+	ss_put_u32(w, ym_samp_pos_rd);
+	ss_put_u32(w, ym_samp_pos_wr);
+	ss_put_u32(w, ym_samp_pos_hd);
+	ss_put_u32(w, fs_samp_pos_rd);
+	ss_put_u32(w, fs_samp_pos_wr);
+	ss_put_u32(w, fs_samp_pos_hd);
+	ss_put_u32(w, limiter_amp);
+	ss_put(w, psg_buf, sizeof psg_buf);
+	ss_put(w, pcm_buf, sizeof pcm_buf);
+	ss_put(w, ym_buf, sizeof ym_buf);
+	ss_put(w, fs_buf, sizeof fs_buf);
+	ss_end(w);
+}
+
+void
+audio_state_load(ss_reader *r)
+{
+	ss_open(r, "AUD ");
+	vera_samp_pos_rd = ss_get_u32(r);
+	vera_samp_pos_wr = ss_get_u32(r);
+	vera_samp_pos_hd = ss_get_u32(r);
+	ym_samp_pos_rd   = ss_get_u32(r);
+	ym_samp_pos_wr   = ss_get_u32(r);
+	ym_samp_pos_hd   = ss_get_u32(r);
+	fs_samp_pos_rd   = ss_get_u32(r);
+	fs_samp_pos_wr   = ss_get_u32(r);
+	fs_samp_pos_hd   = ss_get_u32(r);
+	limiter_amp      = ss_get_u32(r);
+	ss_get(r, psg_buf, sizeof psg_buf);
+	ss_get(r, pcm_buf, sizeof pcm_buf);
+	ss_get(r, ym_buf, sizeof ym_buf);
+	ss_get(r, fs_buf, sizeof fs_buf);
+	ss_close(r);
+
+	if (audio_dev > 0) SDL_LockAudioDevice(audio_dev);
+	rdidx          = wridx;
+	buffer_written = 0;
+	if (audio_dev > 0) SDL_UnlockAudioDevice(audio_dev);
 }
