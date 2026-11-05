@@ -469,6 +469,8 @@ close(proc, d)
 Q_WAV = os.path.join(WORK, "q.wav")
 proc, d = launch_bare(PORT + 3, wav=Q_WAV)
 before = d.status()
+scr_boot = screen(d)
+case("the fresh process shows a different picture before the load", scr_boot and scr_boot != scr0)
 ld = d.req("x16/loadState", {"path": STATE_FILE, "hash": True})
 lb = ld.get("body", {})
 case("a fresh process loads the file (from frame %s to %s)" % (before.get("frame"), lb.get("frame")),

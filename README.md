@@ -1148,7 +1148,8 @@ that saved it:
 * the same **configuration**: CPU, `-mhz`, `-ram`, `-via2`, `-enable-ym2151-irq`,
   `-midline-effects`, hostfs on or off, and an SD card attached or not.
 
-Anything else is refused with what differs, and the machine is left as it was. Options that only
+Anything else is refused with what differs, and the machine is left as it was. Slots are checked
+the same way, so a slot saved before attaching an SD card does not load after it. Options that only
 set what the machine starts with (`-prg`, `-nvram`, `-seed`) or how the host shows and plays it
 (`-warp`, `-sound`, `-scale`) do not matter. To carry on exactly as the saved machine would have,
 start the loading process with `-deterministic` too. Saving to a file replaces it; a save that

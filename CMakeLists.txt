@@ -456,7 +456,11 @@ if(BUILD_EMULATOR)
 file(GLOB_RECURSE X16_ID_INPUTS CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h ${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.inc ${CMAKE_CURRENT_SOURCE_DIR}/src/*.opcodes)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.inc ${CMAKE_CURRENT_SOURCE_DIR}/src/*.opcodes
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.py)
+# The build's own description too: compiler flags are set here.
+list(APPEND X16_ID_INPUTS ${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt
+                          ${CMAKE_CURRENT_SOURCE_DIR}/CMakePresets.json)
 set(X16_ID_LIST "${CMAKE_CURRENT_BINARY_DIR}/source_id_inputs.txt")
 file(WRITE ${X16_ID_LIST} "${X16_ID_INPUTS}")
 set(X16_SOURCE_ID "${GIT_REV_HEADER_DIR}/source_id.c")
