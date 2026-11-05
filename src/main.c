@@ -841,7 +841,8 @@ usage()
 	printf("\thardware behavior.\n");
 	printf("-midline-effects\n");
 	printf("\tApproximate mid-line raster effects when changing tile, sprite,\n");
-	printf("\tand palette data. Requires a fast host CPU.\n");
+	printf("\tand palette data. Requires a fast host CPU and a Release build;\n");
+	printf("\ta Debug build falls behind real time with it.\n");
 	printf("-enable-ym2151-irq\n");
 	printf("\tConnect the YM2151 IRQ source to the emulated CPU. This option increases\n");
 	printf("\tCPU usage as audio render is triggered for every CPU instruction.\n");

@@ -38,6 +38,11 @@ exists to prevent, both of which report something misleading:
   bare `LNK1104` naming the output file and nothing else. `build.ps1` detects
   this and says so; `-Force` stops the emulator first.
 
+**Run games on the Release build.** Debug is for debugging the emulator's own
+code. It does not keep up with real time under load, `-midline-effects` above
+all, so sound crackles and frame timings and profiles come out wrong. The ImGui
+debugger works the same in Release.
+
 ## Tests
 
 `.\build.ps1 -Tests` runs the unit suite.
