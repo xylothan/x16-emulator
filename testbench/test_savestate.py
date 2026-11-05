@@ -19,9 +19,14 @@ Also: a process that never saves runs A identically (saving changes nothing),
 save/load/save gives the same state, and a load works from a stop that is not
 at a frame boundary.
 
+Across processes: a state saved to a file is loaded by a fresh process that
+never ran the program, which then runs A frame for frame as the saver did,
+draws the same picture and plays the same audio. A file is refused by a machine
+with another ROM or another configuration, and when it is damaged.
+
 Local only: it launches emulators and needs a ROM.
 """
-import base64, json, os, socket, subprocess, sys, time
+import base64, json, os, shutil, socket, subprocess, sys, tempfile, time
 
 EXE  = sys.argv[1]
 ROM  = sys.argv[2]
@@ -31,6 +36,9 @@ START_FRAME = 1200   # well past boot
 SETTLE      = 30     # frames for the program to set everything up
 A_FRAMES    = 120
 B_FRAMES    = 60
+
+WORK = tempfile.mkdtemp(prefix="x16ss_")
+STATE_FILE = os.path.join(WORK, "f.x16s")
 
 passed = failed = 0
 
@@ -307,16 +315,24 @@ class Dap:
         return hashes
 
 
-def launch(port):
+def launch_bare(port, rom=ROM, extra=(), wav=None):
+    """A process that boots and is paused at once, wherever it has got to."""
     env = dict(os.environ, SDL_AUDIODRIVER="dummy")
-    proc = subprocess.Popen([EXE, "-rom", ROM, "-debugport", str(port), "-hidden", "-warp",
-                             "-deterministic", "-seed", "1"],
-                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cmd = [EXE, "-rom", rom, "-debugport", str(port), "-hidden", "-warp",
+           "-deterministic", "-seed", "1"] + list(extra)
+    if wav:
+        cmd += ["-wav", wav]
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     d = Dap(port)
     d.req("pause", {"threadId": 1})
     end = time.time() + 5
     while not d.status().get("paused") and time.time() < end:
         time.sleep(0.02)
+    return proc, d
+
+def launch(port, wav=None):
+    """A process stepped to START_FRAME with both programs loaded and A set up."""
+    proc, d = launch_bare(port, wav=wav)
     f0 = int(d.status().get("frame", 0))
     d.req("x16/step", {"frames": START_FRAME - f0}, timeout=120)
     d.poke(0x0400, PROGRAM_A)
@@ -335,6 +351,19 @@ def close(proc, d):
     except subprocess.TimeoutExpired:
         proc.kill()
 
+def wav_tail(path, n_bytes):
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return b""
+    i = data.find(b"data")
+    data = data[i + 8:] if i >= 0 else b""
+    return data[-n_bytes:] if len(data) >= n_bytes else b""
+
+def screen(d):
+    return d.req("x16/status", {"screenHash": True}).get("body", {}).get("screenHash")
+
 def first_difference(a, b):
     if not a or not b or None in a or None in b:
         return "a run failed"
@@ -346,10 +375,12 @@ def first_difference(a, b):
 
 print("Save states (%d frames of A from frame %d, B for %d)" % (A_FRAMES, START_FRAME + SETTLE, B_FRAMES))
 
-# A process that never saves: the reference.
-proc, d = launch(PORT + 1)
+# A process that never saves: the reference. Its recording ends with A.
+REF_WAV = os.path.join(WORK, "ref.wav")
+proc, d = launch(PORT + 1, wav=REF_WAV)
 zp = None
 h0 = d.run(A_FRAMES, joys_a)
+scr0 = screen(d)
 zp = d.req("readMemory", {"memoryReference": "0x0030", "count": 8}).get("body", {}).get("data", "")
 zp = base64.b64decode(zp)
 close(proc, d)
@@ -363,10 +394,17 @@ sb = sv.get("body", {})
 case("x16/saveState at a frame boundary (%s bytes, frame %s)" % (sb.get("size"), sb.get("frame")),
      sv.get("success") and sb.get("size", 0) > 0 and sb.get("hash"))
 print("    (state size %.1f KB)" % (sb.get("size", 0) / 1024.0))
+fv = d.req("x16/saveState", {"path": STATE_FILE, "hash": True})
+fb = fv.get("body", {})
+case("x16/saveState to a file writes the same state (%s bytes)" % fb.get("size"),
+     fv.get("success") and fb.get("path") == STATE_FILE and fb.get("hash") == sb.get("hash")
+     and os.path.exists(STATE_FILE) and os.path.getsize(STATE_FILE) == sb.get("size"))
 
 h1 = d.run(A_FRAMES, joys_a)
+scr1 = screen(d)
 case("saving changes nothing: A after a save matches A without one (%s)" % first_difference(h0, h1),
      h0 == h1 and None not in h1)
+case("  and draws the same picture", scr1 is not None and scr1 == scr0)
 
 d.set_pc(0x0600)
 d.run(B_FRAMES, joys_b)
@@ -387,6 +425,7 @@ case("framesTotal keeps counting across a load (%s, frame %s)" % (st.get("frames
 
 h2 = d.run(A_FRAMES, joys_a)
 case("perturb then restore: A after B and a load matches A (%s)" % first_difference(h1, h2), h1 == h2)
+case("  and draws the same picture", screen(d) == scr1)
 
 # Save, load, save: the same state.
 d.req("x16/loadState", {"slot": "f"})
@@ -421,5 +460,72 @@ print("    (x16/loadState round trip: %.2f ms average over %d; first was %.2f ms
 case("a load round trip takes under 10 ms (%.2f ms)" % per, per < 10.0)
 
 close(proc, d)
+
+# ─── Across processes ────────────────────────────────────────────────────────
+#
+# A fresh process that has only booted loads the file and runs A. Its recording
+# ends with A just as the reference's does, so the two must end alike: those
+# samples come from the restored machine alone.
+Q_WAV = os.path.join(WORK, "q.wav")
+proc, d = launch_bare(PORT + 3, wav=Q_WAV)
+before = d.status()
+ld = d.req("x16/loadState", {"path": STATE_FILE, "hash": True})
+lb = ld.get("body", {})
+case("a fresh process loads the file (from frame %s to %s)" % (before.get("frame"), lb.get("frame")),
+     ld.get("success") and lb.get("frame") == sb.get("frame") and lb.get("hash") == sb.get("hash"))
+hq = d.run(A_FRAMES, joys_a)
+case("cross-process: A after loading the file matches A in the process that saved it (%s)"
+     % first_difference(h1, hq), h1 == hq)
+case("  and draws the same picture", screen(d) == scr0)
+
+# A refused load leaves the machine as it was.
+h_before = d.req("x16/status", {"hash": True}).get("body", {})
+with open(STATE_FILE, "rb") as f:
+    data = f.read()
+short = os.path.join(WORK, "short.x16s")
+with open(short, "wb") as f:
+    f.write(data[:len(data) // 2])
+junk = os.path.join(WORK, "junk.x16s")
+with open(junk, "wb") as f:
+    f.write(bytes((i * 131 + 7) & 0xFF for i in range(len(data))))
+r_short = d.req("x16/loadState", {"path": short})
+r_junk  = d.req("x16/loadState", {"path": junk})
+r_none  = d.req("x16/loadState", {"path": os.path.join(WORK, "missing.x16s")})
+r_both  = d.req("x16/loadState", {"path": STATE_FILE, "slot": "f"})
+h_after = d.req("x16/status", {"hash": True}).get("body", {})
+case("a truncated file is refused (%s)" % r_short.get("message"), not r_short.get("success"))
+case("a file that is not a state is refused (%s)" % r_junk.get("message"), not r_junk.get("success"))
+case("a missing file is refused (%s)" % r_none.get("message"), not r_none.get("success"))
+case("a slot and a path together are refused (%s)" % r_both.get("message"), not r_both.get("success"))
+case("  and after all of those the machine is untouched",
+     h_after.get("hash") == h_before.get("hash") and h_after.get("frame") == h_before.get("frame"))
+close(proc, d)
+
+n = 72000 * 4   # about 1.5 s of 16-bit stereo, inside A's 2 s
+ta, tq = wav_tail(REF_WAV, n), wav_tail(Q_WAV, n)
+case("cross-process: and the same audio as the reference (%d samples compared)" % (len(ta) // 4),
+     len(ta) == n and ta == tq and any(ta))
+
+# Another ROM: one byte changed.
+rom2 = os.path.join(WORK, "rom2.bin")
+with open(ROM, "rb") as f:
+    rb = bytearray(f.read())
+rb[len(rb) // 2] ^= 0xFF
+with open(rom2, "wb") as f:
+    f.write(rb)
+proc, d = launch_bare(PORT + 4, rom=rom2)
+r = d.req("x16/loadState", {"path": STATE_FILE})
+case("a machine with another ROM refuses the file (%s)" % r.get("message"),
+     not r.get("success") and "ROM" in (r.get("message") or ""))
+close(proc, d)
+
+# Another configuration.
+proc, d = launch_bare(PORT + 5, extra=["-ram", "1024"])
+r = d.req("x16/loadState", {"path": STATE_FILE})
+case("a machine with more banked RAM refuses the file (%s)" % r.get("message"),
+     not r.get("success") and "banked RAM" in (r.get("message") or ""))
+close(proc, d)
+
+shutil.rmtree(WORK, ignore_errors=True)
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(0 if failed == 0 else 1)

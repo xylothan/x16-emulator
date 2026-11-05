@@ -311,8 +311,8 @@ public static class InteractiveMode
         Console.WriteLine("  setvram <addr> <hex> Write VRAM (e.g., setvram 1B000 DEADBEEF)");
         Console.WriteLine("  j, joy <port> [btns] Drive a SNES controller port 1-4");
         Console.WriteLine("  f, frames <n> [port btns]  Run n frames from a pause, then stop");
-        Console.WriteLine("  save <slot>          Save the machine in memory (paused at a frame boundary)");
-        Console.WriteLine("  load <slot>          Put the machine back to a saved slot (paused)");
+        Console.WriteLine("  save <slot|file>     Save the machine in memory or to a file (paused at a frame boundary)");
+        Console.WriteLine("  load <slot|file>     Put the machine back to a slot or a state file (paused)");
         Console.WriteLine("  p, setreg <r> <val>  Set register (e.g., setreg a FF)");
         Console.WriteLine("  profile <frames> ... Capture, then print routines and call paths");
         Console.WriteLine("  bp add <addr>        Add breakpoint");

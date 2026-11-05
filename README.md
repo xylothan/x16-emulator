@@ -1089,7 +1089,9 @@ There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state
 frames, counted at the same point as `-input` script frames), `cycles` (emulated CPU cycles, all
 three 64-bit), `paused`, and `atFrameBoundary` (paused where a frame ended, with nothing run
 since; a stop mid-frame, at a breakpoint for instance, reports `false`), `deterministic` and
-`seed` (see below). With `"hash": true` it adds `hash`, described below. `x16dbg status` prints
+`seed` (see below). With `"hash": true` it adds `hash`, described below, and with
+`"screenHash": true`, `screenHash`: a hash of the picture as last drawn, which is output rather
+than machine state (under `-warp` it is redrawn one frame in 64). `x16dbg status` prints
 them. A paused machine answers requests as they arrive, so a script that pauses and polls pays a
 round trip, not a sleep, per request.
 
@@ -1118,22 +1120,39 @@ has no frames; use `-hidden`. In `x16dbg`'s interactive mode, `break` and then
 `frames 4 1 right a` does the same.
 
 `x16/saveState` and `x16/loadState` keep the whole machine in memory under a name the client
-picks:
+picks, or in a file:
 
 ```jsonc
 { "slot": "level3", "hash": false }   // hash: add the state's hash to the reply
+{ "path": "C:/states/level3.x16s" }   // or a file, opened by the emulator
 ```
 
 `x16/saveState` takes the machine as it stands. It must be paused at a frame boundary (after an
 `x16/step`; after a `pause`, `x16/step {frames: 1}` gets there), so every state starts a frame.
 `x16/loadState` works from any pause, a breakpoint mid-frame included, and leaves the machine
-paused at the saved frame. Both reply with `slot`, `size`, `frame`, `framesTotal` and `cycles`;
+paused at the saved frame. Both reply with `slot` or `path`, `size`, `frame`, `framesTotal` and `cycles`;
 `frame` and `cycles` belong to the machine and go back with it, while `framesTotal` keeps counting
 every frame this process has run. Saving the same slot again replaces it; there are 64 slots, and
 they last as long as the emulator process. A state is about 0.7 MB with the default 512 KB of
 banked RAM, and a load takes well under a millisecond. Saving changes nothing: a machine that
 was saved runs on exactly as one that was not. In `x16dbg`'s interactive mode, `save level3` and
-`load level3`.
+`load level3`; an argument with a folder in it or ending in `.x16s` is a file instead.
+
+A state file holds the same bytes as a slot, and loads only into a machine that matches the one
+that saved it:
+
+* the same **build**: any change to the emulator's sources makes a different build, as do another
+  compiler, target or configuration (Debug or Release), since the machine's behaviour down to the
+  last bit depends on them;
+* the same **ROM** and **cartridge**, which a state does not hold;
+* the same **configuration**: CPU, `-mhz`, `-ram`, `-via2`, `-enable-ym2151-irq`,
+  `-midline-effects`, hostfs on or off, and an SD card attached or not.
+
+Anything else is refused with what differs, and the machine is left as it was. Options that only
+set what the machine starts with (`-prg`, `-nvram`, `-seed`) or how the host shows and plays it
+(`-warp`, `-sound`, `-scale`) do not matter. To carry on exactly as the saved machine would have,
+start the loading process with `-deterministic` too. Saving to a file replaces it; a save that
+fails part-way leaves an incomplete file, which a load refuses.
 
 A state holds the CPU, all RAM and banked RAM, cartridge RAM, VERA (with its sound and its
 renderer part-way through a frame), the YM2151, both VIAs, the controller ports and what the
@@ -1179,7 +1198,8 @@ of everything a save state of the machine would hold: two machines with the same
 the same state. Hostfs directory listings with timestamps still show the host's file times, and an SD card
 image is a host file: give each instance its own copy. `testbench/test_determinism.py` checks a
 replay, `-warp` against no warp, a run with an audio device against one without, a hostfs
-`LOAD`, and the recorded audio output.
+`LOAD`, and the recorded audio output. `testbench/test_savestate.py` checks that a restored
+machine, in the same process or a fresh one, carries on frame for frame as the saved one did.
 
 #### Profiling the guest: how much of a frame is your code using?
 

@@ -417,18 +417,20 @@ public class X16DebugClient : IDisposable
     }
 
     /// <summary>
-    /// Save the machine into a named in-memory slot. The machine must be paused
-    /// at a frame boundary, which is where x16/step stops it.
+    /// Save the machine into a named in-memory slot, or to a file when isPath.
+    /// The machine must be paused at a frame boundary, which is where x16/step
+    /// stops it. A path is the emulator's to open, so pass a full one.
     /// </summary>
-    public Task<JsonNode> SaveStateAsync(string slot) =>
-        SendRequestAsync("x16/saveState", new JsonObject { ["slot"] = slot });
+    public Task<JsonNode> SaveStateAsync(string target, bool isPath = false) =>
+        SendRequestAsync("x16/saveState", new JsonObject { [isPath ? "path" : "slot"] = target });
 
     /// <summary>
-    /// Put the machine back to a slot saved earlier in this emulator process.
-    /// Works from any pause; the machine stays paused at the saved frame.
+    /// Put the machine back to a slot saved earlier in this emulator process, or
+    /// to a state file when isPath. Works from any pause; the machine stays
+    /// paused at the saved frame.
     /// </summary>
-    public Task<JsonNode> LoadStateAsync(string slot) =>
-        SendRequestAsync("x16/loadState", new JsonObject { ["slot"] = slot });
+    public Task<JsonNode> LoadStateAsync(string target, bool isPath = false) =>
+        SendRequestAsync("x16/loadState", new JsonObject { [isPath ? "path" : "slot"] = target });
 
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject

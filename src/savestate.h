@@ -49,6 +49,18 @@ bool savestate_slot_load(const char *name, size_t *size, char *err, size_t err_l
 // The bytes a slot holds, or NULL.
 const void *savestate_slot_data(const char *name, size_t *len);
 
+// ─── Files ───────────────────────────────────────────────────────────────────
+//
+// A state file holds the same bytes as a slot, so it loads only into the build
+// that wrote it, with the same machine configuration and ROM.
+
+// Save the machine to a file, replacing it. Returns the state's size, or 0
+// with a reason in err.
+size_t savestate_file_save(const char *path, char *err, size_t err_len);
+
+// Load a file. False with a reason in err; the machine is untouched then.
+bool savestate_file_load(const char *path, size_t *size, char *err, size_t err_len);
+
 // ─── Per-module serializers ──────────────────────────────────────────────────
 //
 // Each lives in its module's own file. A loader reads exactly what its saver
@@ -66,6 +78,9 @@ void memory_state_save(ss_writer *w);
 void memory_state_load(ss_reader *r);
 void cartridge_state_save(ss_writer *w);
 void cartridge_state_load(ss_reader *r);
+// A hash of the cartridge's bank types and ROM banks, which a state does not
+// hold; 0 without a cartridge.
+uint64_t cartridge_rom_hash(void);
 void video_state_save(ss_writer *w);
 void video_state_load(ss_reader *r);
 void psg_state_save(ss_writer *w);

@@ -2535,7 +2535,8 @@ ieee_debug_get_state(ieee_debug_state_t *out)
 //
 // Host files are outside a state: a state that thinks a file is half-read could
 // not be put back. So a state can only be taken while the DOS device is idle,
-// and all it carries is the status a program would read from channel 15 next.
+// and all it carries is the status a program would read from channel 15 next
+// and the device's unit number, which a DOS command (U0>, S-) can change.
 
 bool
 ieee_state_busy(char *why, size_t why_len)
@@ -2560,10 +2561,11 @@ ieee_state_busy(char *why, size_t why_len)
 void
 ieee_state_save(ss_writer *w)
 {
-	ss_begin(w, "DOS ", 1);
+	ss_begin(w, "DOS ", 2);
 	ss_put(w, error, sizeof error);
 	ss_put_u32(w, (uint32_t)error_len);
 	ss_put_u32(w, (uint32_t)error_pos);
+	ss_put_u32(w, (uint32_t)ieee_unit);
 	ss_end(w);
 }
 
@@ -2574,5 +2576,6 @@ ieee_state_load(ss_reader *r)
 	ss_get(r, error, sizeof error);
 	error_len = (int)ss_get_u32(r);
 	error_pos = (int)ss_get_u32(r);
+	ieee_unit = (int)ss_get_u32(r);
 	ss_close(r);
 }
