@@ -33,6 +33,21 @@ struct ym_engine_fields : ym_engine {
 	static field prepare()  { return &ym_engine_fields::m_prepare_count; }
 };
 
+// It also leaves out one table. The OPM's fourth LFO waveform is noise, and
+// ymfm builds that waveform as the chip runs: every clock writes the noise
+// generator's latest bits into the entry just ahead of the LFO. Without it, a
+// load would leave the table as the frames played since the save left it, and
+// any channel with noise LFO pitch or volume modulation would drift from the
+// saved machine. The other three waveforms never change.
+struct ym_register_fields : ymfm::opm_registers {
+	// ymfm keeps its own length private; were it ever to change, the pointer
+	// below would no longer convert and this would stop compiling.
+	static constexpr uint32_t LFO_LENGTH = 256;
+	static constexpr uint32_t NOISE_WAVEFORM = 3;
+	using table = int16_t (ymfm::opm_registers::*)[4][LFO_LENGTH];
+	static table lfo_waveform() { return &ym_register_fields::m_lfo_waveform; }
+};
+
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:
 		ym2151_interface():
@@ -162,6 +177,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		// ─── Save states ────────────────────────────────────────────────
 
+		int16_t (&noise_waveform())[ym_register_fields::LFO_LENGTH] {
+			ymfm::opm_registers &regs = m_chip.engine().regs();
+			return (regs.*ym_register_fields::lfo_waveform())[ym_register_fields::NOISE_WAVEFORM];
+		}
+
 		void state_save(ss_writer *w) {
 			ym_engine &eng = m_chip.engine();
 			const uint32_t active   = (eng.*ym_engine_fields::active());
@@ -187,6 +207,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			ss_put_bool(w, m_irq_status);
 			ss_put(w, m_regs, sizeof m_regs);
 			ss_put(w, m_keyon, sizeof m_keyon);
+			for (int16_t v : noise_waveform()) {
+				ss_put_u16(w, (uint16_t)v);
+			}
 		}
 
 		void state_load(ss_reader *r) {
@@ -201,9 +224,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_irq_status = ss_get_bool(r);
 			ss_get(r, m_regs, sizeof m_regs);
 			ss_get(r, m_keyon, sizeof m_keyon);
+			int16_t noise[ym_register_fields::LFO_LENGTH];
+			for (int16_t &v : noise) {
+				v = (int16_t)ss_get_u16(r);
+			}
 			if (r->failed) {
 				return;
 			}
+			std::copy(std::begin(noise), std::end(noise), std::begin(noise_waveform()));
 
 			{
 				ymfm::ymfm_saved_state restorer(blob, false);
@@ -430,7 +458,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 1);
+		ss_begin(w, "YM  ", 2);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);
