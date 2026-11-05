@@ -18,6 +18,7 @@
 #include "sdcard_fat.h"
 #include "io_trace.h"
 #include "files.h"
+#include "savestate.h"
 
 //#define VERBOSE 1
 
@@ -637,4 +638,67 @@ sdcard_debug_get_state(sdcard_debug_state_t *out)
 	out->bytes_read            = stat_bytes_read;
 	out->bytes_written         = stat_bytes_written;
 	out->commands              = stat_commands;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The card's command state machine: the command being received, the block
+// address, the init/idle state, and a response part-way through being clocked
+// out. The response points into one of several function-local buffers, so its
+// remaining bytes are saved by value and a load replays them from a buffer of
+// its own; the next command points it back at the usual places.
+//
+// The image's contents are not saved. A state restores where the machine was in
+// talking to the card, not what is on it.
+
+static uint8_t loaded_response[2 + 512 + 2];
+
+void
+sdcard_state_save(ss_writer *w)
+{
+	ss_begin(w, "SD  ", 1);
+	ss_put(w, rxbuf, sizeof rxbuf);
+	ss_put_u32(w, (uint32_t)rxbuf_idx);
+	ss_put_u32(w, lba);
+	ss_put_u8(w, last_cmd);
+	ss_put_bool(w, is_acmd);
+	ss_put_bool(w, is_idle);
+	ss_put_bool(w, is_initialized);
+	ss_put_bool(w, ongoing_multiblock_read);
+	ss_put_bool(w, selected);
+	// The response's bytes travel at a fixed size, so the chunk's length does
+	// not depend on whether one is pending.
+	uint8_t resp[sizeof loaded_response];
+	memset(resp, 0, sizeof resp);
+	int resp_len = 0;
+	if (response != NULL && response_length > 0 && response_length <= (int)sizeof resp) {
+		resp_len = response_length;
+		memcpy(resp, response, (size_t)resp_len);
+	}
+	ss_put_bool(w, response != NULL);
+	ss_put_u32(w, (uint32_t)resp_len);
+	ss_put_u32(w, (uint32_t)response_counter);
+	ss_put(w, resp, sizeof resp);
+	ss_end(w);
+}
+
+void
+sdcard_state_load(ss_reader *r)
+{
+	ss_open(r, "SD  ");
+	ss_get(r, rxbuf, sizeof rxbuf);
+	rxbuf_idx               = (int)ss_get_u32(r);
+	lba                     = ss_get_u32(r);
+	last_cmd                = ss_get_u8(r);
+	is_acmd                 = ss_get_bool(r);
+	is_idle                 = ss_get_bool(r);
+	is_initialized          = ss_get_bool(r);
+	ongoing_multiblock_read = ss_get_bool(r);
+	selected                = ss_get_bool(r);
+	const bool has_response = ss_get_bool(r);
+	response_length         = (int)ss_get_u32(r);
+	response_counter        = (int)ss_get_u32(r);
+	ss_get(r, loaded_response, sizeof loaded_response);
+	response = has_response ? loaded_response : NULL;
+	ss_close(r);
 }

@@ -1476,6 +1476,61 @@ for _ in range(N):
 ms = (time.perf_counter() - t0) * 1000.0 / N
 print("  (x16/step frames:1 round trip: %.3f ms average over %d)" % (ms, N))
 
+# 19. x16/saveState / x16/loadState: in-memory save states.
+#
+# The thorough check -- every device busy, a program that scribbles over them,
+# frame-by-frame comparison -- is testbench/test_savestate.py. This covers the
+# requests themselves: what they answer, and what they refuse.
+bk_step({"frames": 1})
+sv = bk_req("x16/saveState", {"slot": "t", "hash": True})
+svb = sv.get("body", {})
+bk_case("x16/saveState at a frame boundary answers slot, size, frame, cycles, hash",
+        sv.get("success") and svb.get("slot") == "t" and svb.get("size", 0) > 0
+        and all(k in svb for k in ("frame", "framesTotal", "cycles", "hash")))
+orig = bk_rd(0x0400, 16)
+bk_wr(0x0400, bytes(range(0xA0, 0xB0)))
+bk_step({"frames": 3})
+ld = bk_req("x16/loadState", {"slot": "t", "hash": True})
+ldb = ld.get("body", {})
+bk_case("x16/loadState puts back the frame, the cycle count and the machine (frame %s)" % ldb.get("frame"),
+        ld.get("success") and ldb.get("frame") == svb.get("frame")
+        and ldb.get("cycles") == svb.get("cycles") and ldb.get("hash") == svb.get("hash"))
+bk_case("and RAM written after the save is as it was", bk_rd(0x0400, 16) == orig)
+st = bk_req("x16/status", {"hash": True}).get("body", {})
+bk_case("after a load: paused at a frame boundary, same hash as the save",
+        st.get("paused") is True and st.get("atFrameBoundary") is True and st.get("hash") == svb.get("hash"))
+sv2 = bk_req("x16/saveState", {"slot": "t2", "hash": True}).get("body", {})
+bk_case("save, load, save: the same state", sv2.get("hash") == svb.get("hash") and sv2.get("size") == svb.get("size"))
+
+r = bk_req("x16/loadState", {"slot": "no such slot"})
+bk_case("x16/loadState refuses a slot never saved (%s)" % r.get("message"),
+        not r.get("success") and bk_req("x16/status").get("body", {}).get("frame") == svb.get("frame"))
+r = bk_req("x16/saveState", {})
+bk_case("x16/saveState needs a slot name (%s)" % r.get("message"), not r.get("success"))
+r = bk_req("x16/saveState", {"slot": "x" * 65})
+bk_case("x16/saveState refuses an overlong slot name (%s)" % r.get("message"), not r.get("success"))
+
+del bk_events[:]
+bk_req("stepIn", {"threadId": 1})
+bk_wait_stop(3)
+r = bk_req("x16/saveState", {"slot": "mid"})
+bk_case("x16/saveState refuses a stop that is not a frame boundary (%s)" % r.get("message"),
+        not r.get("success") and "boundary" in (r.get("message") or ""))
+r = bk_req("x16/loadState", {"slot": "t"})
+st = bk_req("x16/status").get("body", {})
+bk_case("x16/loadState works from there, and lands on the boundary",
+        r.get("success") and st.get("atFrameBoundary") is True and st.get("frame") == svb.get("frame"))
+
+bk_req("continue", {"threadId": 1})
+time.sleep(0.1)
+r1 = bk_req("x16/saveState", {"slot": "run"})
+r2 = bk_req("x16/loadState", {"slot": "t"})
+bk_case("both refuse a running machine (%s / %s)" % (r1.get("message"), r2.get("message")),
+        not r1.get("success") and not r2.get("success"))
+del bk_events[:]
+bk_req("pause", {"threadId": 1})
+bk_wait_stop(3)
+
 # A disconnect drops a step in flight: the machine runs on rather than stopping
 # later for a client that is gone.
 bk_eval("bp_clear")

@@ -25,6 +25,7 @@
 #include "io_trace.h"
 #include "perf_budget.h"
 #include "x16_hash.h"
+#include "savestate.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -757,4 +758,39 @@ emu_read(uint8_t reg, bool debugOn)
 	}
 	if (!debugOn) printf("WARN: Invalid register %x\n", DEVICE_EMULATOR + reg);
 	return -1;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// RAM (low RAM plus, on the 65C816 machine, its extra banks), every banked-RAM
+// bank, both bank selects, the latched YM2151 register address, and the
+// emulator's cycle-counter registers at $9FB8. ROM is not saved: it is part of
+// the machine's configuration, which a state is checked against.
+
+void
+memory_state_save(ss_writer *w)
+{
+	ss_begin(w, "MEM ", 1);
+	ss_put_u8(w, ram_bank);
+	ss_put_u8(w, rom_bank);
+	ss_put_u8(w, addr_ym);
+	ss_put_u32(w, clock_base);
+	ss_put_u32(w, clock_snap);
+	ss_put(w, RAM, RAM_SIZE);
+	ss_put(w, BRAM, BRAM_SIZE);
+	ss_end(w);
+}
+
+void
+memory_state_load(ss_reader *r)
+{
+	ss_open(r, "MEM ");
+	ram_bank   = ss_get_u8(r);
+	rom_bank   = ss_get_u8(r);
+	addr_ym    = ss_get_u8(r);
+	clock_base = ss_get_u32(r);
+	clock_snap = ss_get_u32(r);
+	ss_get(r, RAM, RAM_SIZE);
+	ss_get(r, BRAM, BRAM_SIZE);
+	ss_close(r);
 }

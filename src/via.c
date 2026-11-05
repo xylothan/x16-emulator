@@ -3,6 +3,7 @@
 // All rights reserved. License: 2-clause BSD
 
 #include "via.h"
+#include "savestate.h"
 #include "i2c.h"
 #include "memory.h"
 #include "serial.h"
@@ -386,4 +387,42 @@ via_debug_get_state(int which, via_debug_state_t *out)
 	out->timer_running[1] = v->timer_running[1];
 	out->timer1_m1        = v->timer1_m1;
 	out->pb7_output       = v->pb7_output;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// Both units, saved whether or not VIA2 is fitted: the layout stays the same
+// and an unfitted unit's state is simply never used.
+
+static void
+via_unit_io(via_t *v, ss_writer *w, ss_reader *r)
+{
+	for (int i = 0; i < 2; i++) {
+		if (w) ss_put_u32(w, v->timer_count[i]); else v->timer_count[i] = ss_get_u32(r);
+	}
+	if (w) ss_put_u32(w, v->pb6_pulse_counts); else v->pb6_pulse_counts = ss_get_u32(r);
+	if (w) ss_put(w, v->registers, sizeof v->registers); else ss_get(r, v->registers, sizeof v->registers);
+	if (w) ss_put_bool(w, v->timer1_m1); else v->timer1_m1 = ss_get_bool(r);
+	for (int i = 0; i < 2; i++) {
+		if (w) ss_put_bool(w, v->timer_running[i]); else v->timer_running[i] = ss_get_bool(r);
+	}
+	if (w) ss_put_bool(w, v->pb7_output); else v->pb7_output = ss_get_bool(r);
+}
+
+void
+via_state_save(ss_writer *w)
+{
+	ss_begin(w, "VIA ", 1);
+	via_unit_io(&via[0], w, NULL);
+	via_unit_io(&via[1], w, NULL);
+	ss_end(w);
+}
+
+void
+via_state_load(ss_reader *r)
+{
+	ss_open(r, "VIA ");
+	via_unit_io(&via[0], NULL, r);
+	via_unit_io(&via[1], NULL, r);
+	ss_close(r);
 }

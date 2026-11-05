@@ -979,7 +979,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1117,6 +1117,41 @@ paused mid-frame, the rest of that frame counts as the first. `"hash": true` add
 has no frames; use `-hidden`. In `x16dbg`'s interactive mode, `break` and then
 `frames 4 1 right a` does the same.
 
+`x16/saveState` and `x16/loadState` keep the whole machine in memory under a name the client
+picks:
+
+```jsonc
+{ "slot": "level3", "hash": false }   // hash: add the state's hash to the reply
+```
+
+`x16/saveState` takes the machine as it stands. It must be paused at a frame boundary (after an
+`x16/step`; after a `pause`, `x16/step {frames: 1}` gets there), so every state starts a frame.
+`x16/loadState` works from any pause, a breakpoint mid-frame included, and leaves the machine
+paused at the saved frame. Both reply with `slot`, `size`, `frame`, `framesTotal` and `cycles`;
+`frame` and `cycles` belong to the machine and go back with it, while `framesTotal` keeps counting
+every frame this process has run. Saving the same slot again replaces it; there are 64 slots, and
+they last as long as the emulator process. A state is about 0.7 MB with the default 512 KB of
+banked RAM, and a load takes well under a millisecond. Saving changes nothing: a machine that
+was saved runs on exactly as one that was not. In `x16dbg`'s interactive mode, `save level3` and
+`load level3`.
+
+A state holds the CPU, all RAM and banked RAM, cartridge RAM, VERA (with its sound and its
+renderer part-way through a frame), the YM2151, both VIAs, the controller ports and what the
+virtual pads hold, the SMC, the RTC and its NVRAM, the PS/2 queues, and the SD card interface.
+It does not hold host-side things:
+
+* **files**. `x16/saveState` is refused while a hostfs file is open or a transfer is part-way
+  through, since a state that thinks a file is half-read could not be put back. An SD card
+  image's contents are not saved either: a load restores where the machine was in talking to
+  the card, not what is on it. Give each instance its own image;
+* the **debugger**. Breakpoints, the DAP session and the panels are left as they are; profilers
+  and recorders start again;
+* the **audio output queue**, which is emptied, so what plays next is the loaded machine's;
+* **typed text** still waiting to go in (`x16/type`), which a load drops.
+
+After any load, `-nvram` and a cartridge's NVRAM are never written back, since the files would
+record a history that did not happen. A machine with `-serial` or `-midicard` cannot be saved yet.
+
 #### Reproducible runs: `-deterministic`
 
 With `-deterministic`, the same build, the same starting point and the same input over DAP give
@@ -1139,10 +1174,9 @@ what the machine does:
   the files;
 * `-rtc` and `-midi-in` are refused, since both take input from the host.
 
-`hash` (in `x16/status` and `x16/step`) is a 64-bit hash, as 16 hex digits, of the CPU registers,
-all RAM and banked RAM, the bank selects, and VERA: VRAM, palette, sprites, registers, FX state
-and the scan position. Two runs that agree on it agree on everything a program can read from
-those. Hostfs directory listings with timestamps still show the host's file times, and an SD card
+`hash` (in `x16/status`, `x16/step` and the state requests) is a 64-bit hash, as 16 hex digits,
+of everything a save state of the machine would hold: two machines with the same hash would save
+the same state. Hostfs directory listings with timestamps still show the host's file times, and an SD card
 image is a host file: give each instance its own copy. `testbench/test_determinism.py` checks a
 replay, `-warp` against no warp, a run with an audio device against one without, a hostfs
 `LOAD`, and the recorded audio output.

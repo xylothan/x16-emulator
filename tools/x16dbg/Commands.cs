@@ -53,6 +53,10 @@ public static class Commands
                 case "frames":
                 case "f":
                     return await DoFrames(client, args);
+                case "save":
+                    return await DoSaveState(client, args);
+                case "load":
+                    return await DoLoadState(client, args);
                 case "bp":
                     return await DoBp(client, args);
                 case "profile":
@@ -637,6 +641,40 @@ public static class Commands
 
         if (!DapSuccess(r)) { PrintDapError(r); return 1; }
         PrintJoystick(port, r);
+        return 0;
+    }
+
+    static async Task<int> DoSaveState(X16DebugClient client, string[] args)
+    {
+        if (args.Length != 1)
+        {
+            Console.Error.WriteLine("Usage: save <slot>");
+            Console.Error.WriteLine("       Saves the machine in memory, under any short name. The machine");
+            Console.Error.WriteLine("       must be paused at a frame boundary: break, then frames 1.");
+            return 1;
+        }
+        var r = await client.SaveStateAsync(args[0]);
+        if (!DapSuccess(r)) { PrintDapError(r); return 1; }
+        var b = r["body"];
+        double size = b?["size"]?.GetValue<double>() ?? 0;
+        long frame = (long)(b?["frame"]?.GetValue<double>() ?? 0);
+        Console.WriteLine($"Saved '{args[0]}' at frame {frame} ({size / 1024:F0} KB)");
+        return 0;
+    }
+
+    static async Task<int> DoLoadState(X16DebugClient client, string[] args)
+    {
+        if (args.Length != 1)
+        {
+            Console.Error.WriteLine("Usage: load <slot>");
+            Console.Error.WriteLine("       Puts the machine back to a slot saved in this emulator process.");
+            Console.Error.WriteLine("       The machine must be paused (break); it stays paused.");
+            return 1;
+        }
+        var r = await client.LoadStateAsync(args[0]);
+        if (!DapSuccess(r)) { PrintDapError(r); return 1; }
+        long frame = (long)(r["body"]?["frame"]?.GetValue<double>() ?? 0);
+        Console.WriteLine($"Loaded '{args[0]}': frame {frame}");
         return 0;
     }
 

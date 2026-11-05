@@ -93,6 +93,8 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#include "../savestate.h"
+
 // getvalue16() below is currently unused but kept for completeness. GCC and
 // Clang warn about unused statics under -Wall -Werror; MSVC has no equivalent
 // attribute and rejects __attribute__ outright.
@@ -334,3 +336,34 @@ void hookexternal(void *funcptr) {
 //  65C02 Cycle Count differences.
 //        ADC/SBC work differently in decimal mode.
 //        The wraparound fixes may not be required.
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The registers, the WAI state and the clocks. The penalty and addressing
+// variables are scratch for the instruction being executed and are set afresh
+// by the next one. The register struct carries is65c816, which savestate.c
+// checks against this machine before a load.
+
+void
+cpu_state_save(ss_writer *w)
+{
+	ss_begin(w, "CPU ", 1);
+	ss_put(w, &regs, sizeof regs);
+	ss_put_u8(w, waiting);
+	ss_put_u32(w, clockticks6502);
+	ss_put_u32(w, clockgoal6502);
+	ss_put_u32(w, instructions);
+	ss_end(w);
+}
+
+void
+cpu_state_load(ss_reader *r)
+{
+	ss_open(r, "CPU ");
+	ss_get(r, &regs, sizeof regs);
+	waiting        = ss_get_u8(r);
+	clockticks6502 = ss_get_u32(r);
+	clockgoal6502  = ss_get_u32(r);
+	instructions   = ss_get_u32(r);
+	ss_close(r);
+}

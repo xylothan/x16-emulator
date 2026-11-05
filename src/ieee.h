@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #define IEEE_HISTORY_MAX 64
 
@@ -35,6 +36,9 @@ extern "C" {
 #endif
 
 void ieee_init();
+// True while a host file is open or a transfer is part-way through, when a
+// save state cannot be taken. Says why in `why`.
+bool ieee_state_busy(char *why, size_t why_len);
 int SECOND(uint8_t a);
 int TKSA(uint8_t a);
 int ACPTR(uint8_t *a);

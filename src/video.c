@@ -35,6 +35,7 @@
 #include "audio.h"
 #include "render_backend.h"
 #include "x16_hash.h"
+#include "savestate.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -1751,16 +1752,19 @@ note_port_fx_affine(void)
 	vera_bandwidth_note_fx_affine(sprite_trace_current_line());
 }
 
+// Where render_line() is within the current line and frame. At file scope
+// rather than inside it so a save state can carry the ones that are machine
+// state (see video_state_save()).
+static uint16_t y_prev;
+static uint16_t s_pos_x_p;
+static uint32_t eff_y_fp; // 16.16 fixed point
+static uint32_t eff_x_fp; // 16.16 fixed point
+
+static uint8_t col_line[SCREEN_WIDTH];
+
 static void
 render_line(uint16_t y, float scan_pos_x)
 {
-	static uint16_t y_prev;
-	static uint16_t s_pos_x_p;
-	static uint32_t eff_y_fp; // 16.16 fixed point
-	static uint32_t eff_x_fp; // 16.16 fixed point
-
-	static uint8_t col_line[SCREEN_WIDTH];
-
 	uint8_t dc_video = reg_composer[0];
 	uint16_t vstart = reg_composer[6] << 1;
 	uint16_t vstop = reg_composer[7] << 1;
@@ -2164,48 +2168,110 @@ video_set_ignore_host_input(bool on)
 	ignore_host_input = on;
 }
 
-// Everything VERA holds that a program can see, as plain arrays and scalars.
-// The scan position floats go in bitwise. Not every internal of the renderer is
-// here: render_line keeps some state in function-local statics.
-uint64_t
-video_state_hash(uint64_t h)
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// What VERA needs to carry on exactly: VRAM, palette, sprite attributes, every
+// register, the FX unit, the scan position (the floats bitwise), the frame
+// counter that paces the warp render skip, and the renderer's pipeline -- the
+// two-line register history raster effects are timed by, the derived layer and
+// sprite properties, and the sprite line buffers that collisions come from.
+//
+// Left out on purpose, because they are output and not state: everything
+// render_line() writes after its warp guard (the composited line, the layer
+// line buffers, eff_x_fp, the framebuffer and the per-line debug history).
+// Under -warp those are skipped 63 frames in 64, so including them would make
+// a warped run's state differ from an unwarped one. At a frame boundary,
+// where states are taken, each is rebuilt before it is next read.
+
+static void
+video_state_io(ss_writer *w, ss_reader *r)
 {
-	h = x16_hash_bytes(h, video_ram, sizeof video_ram);
-	h = x16_hash_bytes(h, palette, sizeof palette);
-	h = x16_hash_bytes(h, sprite_data, sizeof sprite_data);
-	h = x16_hash_bytes(h, io_addr, sizeof io_addr);
-	h = x16_hash_bytes(h, io_rddata, sizeof io_rddata);
-	h = x16_hash_bytes(h, io_inc, sizeof io_inc);
-	const uint8_t sel[2] = { io_addrsel, io_dcsel };
-	h = x16_hash_bytes(h, sel, sizeof sel);
-	const uint8_t irq[2] = { ien, isr };
-	h = x16_hash_bytes(h, irq, sizeof irq);
-	h = x16_hash_u64(h, irq_line);
-	h = x16_hash_bytes(h, reg_layer, sizeof reg_layer);
-	h = x16_hash_bytes(h, reg_composer, sizeof reg_composer);
-	h = x16_hash_u64(h, sprite_line_collisions);
+#define SS_BLOCK(x) do { if (w) ss_put(w, &(x), sizeof(x)); else ss_get(r, &(x), sizeof(x)); } while (0)
+	SS_BLOCK(video_ram);
+	SS_BLOCK(palette);
+	SS_BLOCK(sprite_data);
+	SS_BLOCK(io_addr);
+	SS_BLOCK(io_rddata);
+	SS_BLOCK(io_inc);
+	SS_BLOCK(io_addrsel);
+	SS_BLOCK(io_dcsel);
+	SS_BLOCK(ien);
+	SS_BLOCK(isr);
+	SS_BLOCK(irq_line);
+	SS_BLOCK(reg_layer);
+	SS_BLOCK(reg_composer);
+	SS_BLOCK(prev_reg_composer);
+	SS_BLOCK(layer_properties);
+	SS_BLOCK(prev_layer_properties);
+	SS_BLOCK(sprite_properties);
+	SS_BLOCK(sprite_line_col);
+	SS_BLOCK(sprite_line_z);
+	SS_BLOCK(sprite_line_mask);
+	SS_BLOCK(sprite_line_collisions);
+	SS_BLOCK(layer_line_enable);
+	SS_BLOCK(old_layer_line_enable);
+	SS_BLOCK(old_sprite_line_enable);
+	SS_BLOCK(sprite_line_enable);
 
-	const uint32_t fx32[] = {
-		fx_addr1_mode, fx_x_pixel_increment, fx_y_pixel_increment,
-		fx_x_pixel_position, fx_y_pixel_position, fx_poly_fill_length,
-		fx_affine_tile_base, fx_affine_map_base, fx_affine_map_size,
-		fx_4bit_mode, fx_16bit_hop, fx_cache_byte_cycling, fx_cache_fill,
-		fx_cache_write, fx_trans_writes, fx_2bit_poly, fx_2bit_poking,
-		fx_cache_increment_mode, fx_cache_nibble_index, fx_cache_byte_index,
-		fx_multiplier, fx_subtract, fx_affine_clip, fx_16bit_hop_align,
-		fx_nibble_bit[0], fx_nibble_bit[1], fx_nibble_incr[0], fx_nibble_incr[1],
-		(uint32_t)fx_mult_accumulator,
-	};
-	h = x16_hash_bytes(h, fx32, sizeof fx32);
-	h = x16_hash_bytes(h, fx_cache, sizeof fx_cache);
+	SS_BLOCK(fx_addr1_mode);
+	SS_BLOCK(fx_x_pixel_increment);
+	SS_BLOCK(fx_y_pixel_increment);
+	SS_BLOCK(fx_x_pixel_position);
+	SS_BLOCK(fx_y_pixel_position);
+	SS_BLOCK(fx_poly_fill_length);
+	SS_BLOCK(fx_affine_tile_base);
+	SS_BLOCK(fx_affine_map_base);
+	SS_BLOCK(fx_affine_map_size);
+	SS_BLOCK(fx_4bit_mode);
+	SS_BLOCK(fx_16bit_hop);
+	SS_BLOCK(fx_cache_byte_cycling);
+	SS_BLOCK(fx_cache_fill);
+	SS_BLOCK(fx_cache_write);
+	SS_BLOCK(fx_trans_writes);
+	SS_BLOCK(fx_2bit_poly);
+	SS_BLOCK(fx_2bit_poking);
+	SS_BLOCK(fx_cache_increment_mode);
+	SS_BLOCK(fx_cache_nibble_index);
+	SS_BLOCK(fx_cache_byte_index);
+	SS_BLOCK(fx_multiplier);
+	SS_BLOCK(fx_subtract);
+	SS_BLOCK(fx_affine_clip);
+	SS_BLOCK(fx_16bit_hop_align);
+	SS_BLOCK(fx_nibble_bit);
+	SS_BLOCK(fx_nibble_incr);
+	SS_BLOCK(fx_cache);
+	SS_BLOCK(fx_mult_accumulator);
 
-	uint32_t fbits[2];
-	memcpy(&fbits[0], &vga_scan_pos_x, 4);
-	memcpy(&fbits[1], &ntsc_half_cnt, 4);
-	h = x16_hash_bytes(h, fbits, sizeof fbits);
-	h = x16_hash_u64(h, vga_scan_pos_y);
-	h = x16_hash_u64(h, ntsc_scan_pos_y);
-	return h;
+	SS_BLOCK(vga_scan_pos_x);
+	SS_BLOCK(vga_scan_pos_y);
+	SS_BLOCK(ntsc_half_cnt);
+	SS_BLOCK(ntsc_scan_pos_y);
+	SS_BLOCK(frame_count);
+	SS_BLOCK(y_prev);
+	SS_BLOCK(s_pos_x_p);
+	SS_BLOCK(eff_y_fp);
+#undef SS_BLOCK
+}
+
+void
+video_state_save(ss_writer *w)
+{
+	ss_begin(w, "VERA", 1);
+	video_state_io(w, NULL);
+	ss_end(w);
+}
+
+void
+video_state_load(ss_reader *r)
+{
+	ss_open(r, "VERA");
+	video_state_io(NULL, r);
+	ss_close(r);
+
+	// The colours are derived from the palette; the per-line debug history
+	// describes the machine that was replaced.
+	video_palette.dirty = true;
+	memset(line_state_valid, 0, sizeof(line_state_valid));
 }
 
 bool

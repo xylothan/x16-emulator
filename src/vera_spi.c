@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include "sdcard.h"
+#include "savestate.h"
 #include "vera_spi.h"
 
 #define SPI_CLOCK_RATE_MHZ 12.5f
@@ -109,4 +110,32 @@ vera_spi_debug_get_state(vera_spi_debug_state_t *out)
 	out->sending_byte  = sending_byte;
 	out->received_byte = received_byte;
 	out->outcounter    = outcounter;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+
+void
+vera_spi_state_save(ss_writer *w)
+{
+	ss_begin(w, "SPI ", 1);
+	ss_put_bool(w, ss);
+	ss_put_bool(w, busy);
+	ss_put_bool(w, autotx);
+	ss_put_u8(w, sending_byte);
+	ss_put_u8(w, received_byte);
+	ss_put_f32(w, outcounter);
+	ss_end(w);
+}
+
+void
+vera_spi_state_load(ss_reader *r)
+{
+	ss_open(r, "SPI ");
+	ss          = ss_get_bool(r);
+	busy        = ss_get_bool(r);
+	autotx      = ss_get_bool(r);
+	sending_byte  = ss_get_u8(r);
+	received_byte = ss_get_u8(r);
+	outcounter  = ss_get_f32(r);
+	ss_close(r);
 }

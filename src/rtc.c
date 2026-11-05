@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include "rtc.h"
+#include "savestate.h"
 #include "glue.h"
 
 bool nvram_dirty = false;
@@ -275,4 +276,45 @@ rtc_debug_get_state(rtc_debug_state_t *out)
 	for (int i = 0; i < 0x40; i++) {
 		out->nvram[i] = nvram[i];
 	}
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The time registers, the sub-second cycle accumulator, the control bits, the
+// NVRAM and the I2C transfer in progress. A loaded state never marks the NVRAM
+// for writing back to the -nvram file (see savestate_any_loaded()).
+
+void
+rtc_state_save(ss_writer *w)
+{
+	ss_begin(w, "RTC ", 1);
+	ss_put(w, nvram, sizeof nvram);
+	ss_put_bool(w, running);
+	ss_put_bool(w, vbaten);
+	ss_put_bool(w, h24);
+	ss_put_u32(w, clocks);
+	const int32_t t[7] = { seconds, minutes, hours, day_of_week, day, month, year };
+	ss_put(w, t, sizeof t);
+	ss_put(w, i2c_data, sizeof i2c_data);
+	ss_put_u8(w, i2c_data_pos);
+	ss_end(w);
+}
+
+void
+rtc_state_load(ss_reader *r)
+{
+	ss_open(r, "RTC ");
+	ss_get(r, nvram, sizeof nvram);
+	running = ss_get_bool(r);
+	vbaten  = ss_get_bool(r);
+	h24     = ss_get_bool(r);
+	clocks  = ss_get_u32(r);
+	int32_t t[7];
+	ss_get(r, t, sizeof t);
+	seconds = t[0]; minutes = t[1]; hours = t[2]; day_of_week = t[3];
+	day = t[4]; month = t[5]; year = t[6];
+	ss_get(r, i2c_data, sizeof i2c_data);
+	i2c_data_pos = ss_get_u8(r);
+	ss_close(r);
+	nvram_dirty = false;
 }

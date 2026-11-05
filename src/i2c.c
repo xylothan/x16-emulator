@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include "i2c.h"
+#include "savestate.h"
 #include "smc.h"
 #include "rtc.h"
 #include "io_trace.h"
@@ -458,4 +459,61 @@ i2c_debug_get_state(i2c_debug_state_t *out)
 	// keyboard buffer fill = (KBD_SIZE + head - tail) & (KBD_SIZE - 1)
 	out->kbd_fill = i2c_kbd_buffer_count();
 	out->mse_fill = i2c_mse_buffer_count();
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// The bus state machine and its lines, the keyboard and mouse queues the SMC
+// serves, and the mouse's accumulated movement. The debug counters are left.
+
+void
+i2c_state_save(ss_writer *w)
+{
+	ss_begin(w, "I2C ", 1);
+	ss_put_u32(w, (uint32_t)i2c_port.clk_in);
+	ss_put_u32(w, (uint32_t)i2c_port.data_in);
+	ss_put_u32(w, (uint32_t)i2c_port.data_out);
+	ss_put_u32(w, (uint32_t)state);
+	ss_put_bool(w, read_mode);
+	ss_put_u8(w, value);
+	ss_put_u32(w, (uint32_t)count);
+	ss_put_u8(w, device);
+	ss_put(w, kbd_buffer, sizeof kbd_buffer);
+	ss_put_u8(w, kbd_head);
+	ss_put_u8(w, kbd_tail);
+	ss_put(w, mse_buffer, sizeof mse_buffer);
+	ss_put_u8(w, mse_head);
+	ss_put_u8(w, mse_tail);
+	ss_put_u8(w, buttons);
+	ss_put_u16(w, (uint16_t)mouse_diff_x);
+	ss_put_u16(w, (uint16_t)mouse_diff_y);
+	ss_put_u8(w, (uint8_t)wheel);
+	ss_put_u8(w, mouse_device_id);
+	ss_end(w);
+}
+
+void
+i2c_state_load(ss_reader *r)
+{
+	ss_open(r, "I2C ");
+	i2c_port.clk_in   = (int)ss_get_u32(r);
+	i2c_port.data_in  = (int)ss_get_u32(r);
+	i2c_port.data_out = (int)ss_get_u32(r);
+	state     = (int)ss_get_u32(r);
+	read_mode = ss_get_bool(r);
+	value     = ss_get_u8(r);
+	count     = (int)ss_get_u32(r);
+	device    = ss_get_u8(r);
+	ss_get(r, kbd_buffer, sizeof kbd_buffer);
+	kbd_head = ss_get_u8(r);
+	kbd_tail = ss_get_u8(r);
+	ss_get(r, mse_buffer, sizeof mse_buffer);
+	mse_head = ss_get_u8(r);
+	mse_tail = ss_get_u8(r);
+	buttons         = ss_get_u8(r);
+	mouse_diff_x    = (int16_t)ss_get_u16(r);
+	mouse_diff_y    = (int16_t)ss_get_u16(r);
+	wheel           = (int8_t)ss_get_u8(r);
+	mouse_device_id = ss_get_u8(r);
+	ss_close(r);
 }

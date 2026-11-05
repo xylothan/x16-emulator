@@ -65,6 +65,7 @@
 #include "cartridge.h"
 #include "midi.h"
 #include "git_rev.h"
+#include "savestate.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -2071,7 +2072,7 @@ void main_shutdown() {
 	}
 	if(cartridge_path) {
 		// Never under -deterministic, for the same reason as -nvram.
-		if (!deterministic_mode) {
+		if (!deterministic_mode && !savestate_any_loaded()) {
 			cartridge_save_nvram();
 		}
 		cartridge_unload();
@@ -3115,7 +3116,7 @@ emulator_loop(void *param)
 
 		if (!headless && new_frame) {
 			// Never under -deterministic: instances sharing a path would race.
-			if (nvram_dirty && nvram_path && !deterministic_mode) {
+			if (nvram_dirty && nvram_path && !deterministic_mode && !savestate_any_loaded()) {
 				SDL_RWops *f = SDL_RWFromFile(nvram_path, "wb");
 				if (f) {
 					SDL_RWwrite(f, nvram, 1, sizeof(nvram));
@@ -3172,4 +3173,48 @@ emulator_loop(void *param)
 	}
 
 	return 0;
+}
+
+// ─── Save states ─────────────────────────────────────────────────────────────
+//
+// old_clockticks6502 is machine state, not bookkeeping: an interrupt taken at
+// the end of a loop pass charges its entry cycles to the CPU clock after the
+// devices were stepped, and the next pass hands exactly that difference to
+// VIA, VERA, the sound chips and the rest. Restoring the clock without it
+// would give the devices a different number of cycles than the CPU spent.
+
+void
+main_state_save(ss_writer *w)
+{
+	ss_begin(w, "MAIN", 1);
+	ss_put_u32(w, old_clockticks6502);
+	ss_put_u32(w, (uint32_t)instruction_counter);
+	ss_end(w);
+}
+
+void
+main_state_load(ss_reader *r)
+{
+	ss_open(r, "MAIN");
+	old_clockticks6502  = ss_get_u32(r);
+	instruction_counter = (int)ss_get_u32(r);
+	ss_close(r);
+}
+
+// After a load: host-side things that measured the old timeline start again,
+// and text still waiting to be typed is dropped. It was meant for the machine
+// that was replaced, and a load is a clean starting point.
+void
+main_state_loaded(void)
+{
+	host_prof_last_cycles = clockticks6502;
+	if (pasting_bas) {
+		pasting_bas = false;
+		if (warp_pastes) machine_set_warp(false);
+	}
+	paste_text = NULL;
+	if (clipboard_buffer) {
+		SDL_free(clipboard_buffer);
+		clipboard_buffer = NULL;
+	}
 }
