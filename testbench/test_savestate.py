@@ -4,10 +4,11 @@
 
 Runs a small program that keeps every device busy -- sprites crossing so their
 collisions fire, a line interrupt changing the scroll mid-screen, PSG voices,
-the PCM FIFO hovering at its almost-empty mark, a YM2151 note and both its
-timers, a free-running VIA timer, the real-time clock and its NVRAM and the
-SMC read over I2C, the SPI controller -- with a fixed joystick pattern,
-recording the machine state hash after every frame ("run A").
+the PCM FIFO hovering at its almost-empty mark, a YM2151 note with noise
+vibrato and both its timers, a free-running VIA timer, the real-time clock
+and its NVRAM and the SMC read over I2C, the SPI controller -- with a fixed
+joystick pattern, recording the machine state hash after every frame
+("run A").
 
 Then, in the same process: save, run A, run a second program ("B") that
 scribbles over every one of those devices and over RAM, load, run A again. The
@@ -114,6 +115,7 @@ YM_SETUP = bytes([
     0xA0, 0x05, 0xA8, 0x05, 0xB0, 0x05, 0xB8, 0x05,     # decay 1
     0xC0, 0x02, 0xC8, 0x02, 0xD0, 0x02, 0xD8, 0x02,     # decay 2
     0xE0, 0x27, 0xE8, 0x27, 0xF0, 0x27, 0xF8, 0x27,     # D1L/RR
+    0x18, 0xF0, 0x19, 0xFF, 0x1B, 0x03, 0x38, 0x70,     # vibrato from a fast noise LFO
     0x10, 0x80, 0x11, 0x01, 0x12, 0xC0,                 # timer A and B periods
     0x14, 0x0F,                                         # start both, with their IRQ flags
     0x08, 0x78,                                         # key on ch0
