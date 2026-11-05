@@ -522,7 +522,7 @@ if bwstats and bwstats.get("success"):
     # reaching the wire.
     expect("a scanline is 800 clocks", bwb.get("lineClocks") == 800)
     expect("a VRAM access is four bytes", bwb.get("bytesPerAccess") == 4)
-    expect("and costs two clocks", bwb.get("accessClocks") == 2)
+    expect("and holds the bus one clock", bwb.get("accessClocks") == 1)
     expect("VGA scans 525 lines", bwb.get("scanlinesPerFrame") == 525)
 
     expect("bandwidth accounting reports itself enabled", bwb.get("enabled") is True)
