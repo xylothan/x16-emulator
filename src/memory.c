@@ -24,6 +24,7 @@
 #include "debugger.h"
 #include "io_trace.h"
 #include "perf_budget.h"
+#include "x16_hash.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -39,6 +40,9 @@ static uint8_t addr_ym = 0;
 static void io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles);
 
 bool randomizeRAM = false;
+// -seed: fill from a private PRNG instead of rand() seeded from the clock.
+static bool     randomSeeded = false;
+static uint32_t randomSeed   = 0;
 bool reportUninitializedAccess = false;
 const char *reportUsageStatisticsFilename = NULL;
 bool *RAM_access_flags, *BRAM_access_flags;
@@ -83,7 +87,12 @@ memory_init()
 
 
 	// Randomize all RAM (if option selected)
-	if (randomizeRAM) {
+	if (randomizeRAM && randomSeeded) {
+		// A fixed seed: the same bytes every run, whatever else calls rand().
+		x16_fill_random(RAM, RAM_SIZE, randomSeed, 1);
+		memset(&RAM[0x9f00], 0, 0x10000 - 0x9f00);   // the unused hole stays 0, as below
+		x16_fill_random(BRAM, BRAM_SIZE, randomSeed, 2);
+	} else if (randomizeRAM) {
 		time_t t;
 		srand((unsigned)time(&t));
 		for (int i = 0; i < RAM_SIZE; i++) {
@@ -141,9 +150,18 @@ memory_randomize_ram(bool value)
 }
 
 void
+memory_set_random_seed(uint32_t seed)
+{
+	randomSeed   = seed;
+	randomSeeded = true;
+}
+
+void
 memory_initialize_cart(uint8_t *mem)
 {
-	if(randomizeRAM) {
+	if(randomizeRAM && randomSeeded) {
+		x16_fill_random(mem, 0x4000, randomSeed, 3);
+	} else if(randomizeRAM) {
 		for(int i=0; i<0x4000; ++i) {
 			mem[i] = rand();
 		}

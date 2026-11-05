@@ -34,6 +34,7 @@
 #include "i2c.h"
 #include "audio.h"
 #include "render_backend.h"
+#include "x16_hash.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -136,6 +137,13 @@ bool no_keyboard_capture = false;
 bool kernal_mouse_enabled = false;
 
 static uint8_t video_ram[0x20000];
+
+// -seed fills VRAM from a private PRNG at reset instead of rand().
+static bool     vram_seeded = false;
+static uint32_t vram_seed   = 0;
+// -deterministic: keyboard, mouse and controller events from the host are
+// dropped, so nothing outside the debug connection reaches the machine.
+static bool     ignore_host_input = false;
 static uint8_t palette[256 * 2];
 static uint8_t sprite_data[128][8];
 
@@ -400,8 +408,12 @@ video_reset()
 	refresh_palette();
 
 	// fill video RAM with random data
-	for (int i = 0; i < 128 * 1024; i++) {
-		video_ram[i] = rand();
+	if (vram_seeded) {
+		x16_fill_random(video_ram, sizeof video_ram, vram_seed, 4);
+	} else {
+		for (int i = 0; i < 128 * 1024; i++) {
+			video_ram[i] = rand();
+		}
 	}
 
 	sprite_line_collisions = 0;
@@ -2139,6 +2151,63 @@ video_step(float mhz, float steps, bool midline)
 	return new_frame;
 }
 
+void
+video_set_random_seed(uint32_t seed)
+{
+	vram_seed   = seed;
+	vram_seeded = true;
+}
+
+void
+video_set_ignore_host_input(bool on)
+{
+	ignore_host_input = on;
+}
+
+// Everything VERA holds that a program can see, as plain arrays and scalars.
+// The scan position floats go in bitwise. Not every internal of the renderer is
+// here: render_line keeps some state in function-local statics.
+uint64_t
+video_state_hash(uint64_t h)
+{
+	h = x16_hash_bytes(h, video_ram, sizeof video_ram);
+	h = x16_hash_bytes(h, palette, sizeof palette);
+	h = x16_hash_bytes(h, sprite_data, sizeof sprite_data);
+	h = x16_hash_bytes(h, io_addr, sizeof io_addr);
+	h = x16_hash_bytes(h, io_rddata, sizeof io_rddata);
+	h = x16_hash_bytes(h, io_inc, sizeof io_inc);
+	const uint8_t sel[2] = { io_addrsel, io_dcsel };
+	h = x16_hash_bytes(h, sel, sizeof sel);
+	const uint8_t irq[2] = { ien, isr };
+	h = x16_hash_bytes(h, irq, sizeof irq);
+	h = x16_hash_u64(h, irq_line);
+	h = x16_hash_bytes(h, reg_layer, sizeof reg_layer);
+	h = x16_hash_bytes(h, reg_composer, sizeof reg_composer);
+	h = x16_hash_u64(h, sprite_line_collisions);
+
+	const uint32_t fx32[] = {
+		fx_addr1_mode, fx_x_pixel_increment, fx_y_pixel_increment,
+		fx_x_pixel_position, fx_y_pixel_position, fx_poly_fill_length,
+		fx_affine_tile_base, fx_affine_map_base, fx_affine_map_size,
+		fx_4bit_mode, fx_16bit_hop, fx_cache_byte_cycling, fx_cache_fill,
+		fx_cache_write, fx_trans_writes, fx_2bit_poly, fx_2bit_poking,
+		fx_cache_increment_mode, fx_cache_nibble_index, fx_cache_byte_index,
+		fx_multiplier, fx_subtract, fx_affine_clip, fx_16bit_hop_align,
+		fx_nibble_bit[0], fx_nibble_bit[1], fx_nibble_incr[0], fx_nibble_incr[1],
+		(uint32_t)fx_mult_accumulator,
+	};
+	h = x16_hash_bytes(h, fx32, sizeof fx32);
+	h = x16_hash_bytes(h, fx_cache, sizeof fx_cache);
+
+	uint32_t fbits[2];
+	memcpy(&fbits[0], &vga_scan_pos_x, 4);
+	memcpy(&fbits[1], &ntsc_half_cnt, 4);
+	h = x16_hash_bytes(h, fbits, sizeof fbits);
+	h = x16_hash_u64(h, vga_scan_pos_y);
+	h = x16_hash_u64(h, ntsc_scan_pos_y);
+	return h;
+}
+
 bool
 video_get_irq_out()
 {
@@ -2547,6 +2616,18 @@ video_update()
 			return false;
 		}
 #endif
+		if (ignore_host_input) {
+			switch (event.type) {
+				case SDL_KEYDOWN: case SDL_KEYUP: case SDL_TEXTINPUT: case SDL_TEXTEDITING:
+				case SDL_MOUSEMOTION: case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+				case SDL_MOUSEWHEEL:
+				case SDL_JOYDEVICEADDED: case SDL_JOYDEVICEREMOVED:
+				case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
+					continue;
+				default:
+					break;
+			}
+		}
 		if (event.type == SDL_KEYDOWN) {
 			bool consumed = false;
 			if (cmd_down && !(disable_emu_cmd_keys || mouse_grabbed)) {

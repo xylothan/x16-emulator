@@ -1088,8 +1088,10 @@ There is also `x16/registers`, which returns the full CPU, KERNAL and VERA state
 `x16/status` reports where the machine is in emulated time: `frame` and `framesTotal` (completed
 frames, counted at the same point as `-input` script frames), `cycles` (emulated CPU cycles, all
 three 64-bit), `paused`, and `atFrameBoundary` (paused where a frame ended, with nothing run
-since; a stop mid-frame, at a breakpoint for instance, reports `false`). `x16dbg status` prints them. A paused machine answers requests as they
-arrive, so a script that pauses and polls pays a round trip, not a sleep, per request.
+since; a stop mid-frame, at a breakpoint for instance, reports `false`), `deterministic` and
+`seed` (see below). With `"hash": true` it adds `hash`, described below. `x16dbg status` prints
+them. A paused machine answers requests as they arrive, so a script that pauses and polls pays a
+round trip, not a sleep, per request.
 
 `x16/step` runs a paused machine for a number of whole frames and answers when it stops, with
 memory read at that point:
@@ -1110,9 +1112,40 @@ script frames, and the reply carries `framesRun`, `reason`, `frame`,
 `framesTotal`, `cycles` and `reads` (base64, one per region, at most 32K in all). `reason` is
 `frames` when the count ran out; a breakpoint, watchpoint or `pause` ends the step early and says
 so, and `continue` or another run-control request ends it as `cancelled`. If the machine was
-paused mid-frame, the rest of that frame counts as the first. The machine must be paused, and
-`-headless` is refused because it has no frames; use `-hidden`. In `x16dbg`'s interactive mode,
-`break` and then `frames 4 1 right a` does the same.
+paused mid-frame, the rest of that frame counts as the first. `"hash": true` adds the state
+`hash`. The machine must be paused, and a `-testbench` run is refused because without video it
+has no frames; use `-hidden`. In `x16dbg`'s interactive mode, `break` and then
+`frames 4 1 right a` does the same.
+
+#### Reproducible runs: `-deterministic`
+
+With `-deterministic`, the same build, the same starting point and the same input over DAP give
+the same machine on every run, frame for frame. It takes nothing from the host that could change
+what the machine does:
+
+* uninitialized RAM, VRAM and cartridge RAM are filled from a seed (`-seed <n>`, 0 if not given)
+  rather than from the clock;
+* physical game controllers are never opened (`-nohostjoy` on its own does just this), and the
+  host keyboard and mouse are ignored. Input comes only over DAP, and lands at a fixed point
+  only when it is sent while the machine is paused: `x16/step`'s `joysticks`, or `x16/joystick`
+  and `x16/type` sent between steps. Sent to a running machine they apply wherever the
+  connection happens to be read;
+* hostfs `LOAD`/`SAVE` cost no emulated time; normally the time the host took is charged as
+  cycles, which moves every later frame by a host-dependent amount;
+* the sound chips run at a fixed rate whether or not an audio device opens, `-sound none`
+  included. Without one, nothing would drain the PCM FIFO, and a program that waits on it would
+  see a different machine;
+* `-nvram`, and a cartridge's NVRAM, are read but never written back, so instances can share
+  the files;
+* `-rtc` and `-midi-in` are refused, since both take input from the host.
+
+`hash` (in `x16/status` and `x16/step`) is a 64-bit hash, as 16 hex digits, of the CPU registers,
+all RAM and banked RAM, the bank selects, and VERA: VRAM, palette, sprites, registers, FX state
+and the scan position. Two runs that agree on it agree on everything a program can read from
+those. Hostfs directory listings with timestamps still show the host's file times, and an SD card
+image is a host file: give each instance its own copy. `testbench/test_determinism.py` checks a
+replay, `-warp` against no warp, a run with an audio device against one without, a hostfs
+`LOAD`, and the recorded audio output.
 
 #### Profiling the guest: how much of a frame is your code using?
 

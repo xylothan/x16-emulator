@@ -144,6 +144,16 @@ slot_button_mask(int slot)
 	return 0xffff;
 }
 
+// -deterministic / -nohostjoy: physical controllers are never opened, so only
+// the virtual ports (x16/joystick, x16/step) drive the machine.
+static bool ignore_host_joysticks = false;
+
+void
+joystick_set_ignore_host(bool on)
+{
+	ignore_host_joysticks = on;
+}
+
 bool
 joystick_init(void)
 {
@@ -172,7 +182,7 @@ joystick_init(void)
 void
 joystick_add(int index)
 {
-	if (!SDL_IsGameController(index)) {
+	if (ignore_host_joysticks || !SDL_IsGameController(index)) {
 		return;
 	}
 

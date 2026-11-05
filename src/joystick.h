@@ -36,6 +36,8 @@ extern bool Joystick_slots_enabled[NUM_JOYSTICKS];
 
 bool joystick_init(void); //initialize SDL controllers
 void joystick_add(int index);
+// Never open a physical controller, at startup or when one is plugged in.
+void joystick_set_ignore_host(bool on);
 void joystick_remove(int index);
 
 void joystick_button_down(int instance_id, uint8_t button);

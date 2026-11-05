@@ -1,5 +1,6 @@
 #include "cartridge.h"
 #include "files.h"
+#include "x16_hash.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -14,10 +15,25 @@ char *Cartridge_nvram_path = NULL;
 const char Cartridge_magic_number[CART_MAGIC_NUMBER_SIZE] = { 'C', 'X', '1', '6', ' ', 'C', 'A', 'R', 'T', 'R', 'I', 'D', 'G', 'E', '\r', '\n' };
 const char Cartridge_current_version[CART_VERSION_SIZE]   = { '0', '1', '.', '0', '0', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
+// -seed: banks are filled from a private PRNG, one stream per bank in load
+// order, so a seeded run gets the same cartridge RAM every time.
+static bool     cart_seeded = false;
+static uint32_t cart_seed   = 0;
+static uint64_t cart_stream = 0;
+
+void
+cartridge_set_random_seed(uint32_t seed)
+{
+	cart_seed   = seed;
+	cart_seeded = true;
+}
+
 static void 
 initialize_cart_bank(uint8_t *mem, bool randomize)
 {
-	if(randomize) {
+	if(randomize && cart_seeded) {
+		x16_fill_random(mem, CART_BANK_SIZE, cart_seed, 0x100 + cart_stream++);
+	} else if(randomize) {
 		for(int i=0; i<CART_BANK_SIZE; ++i) {
 			mem[i] = rand();
 		}

@@ -124,6 +124,11 @@ public static class Commands
             string state = paused ? (boundary ? "paused at a frame boundary" : "paused mid-frame")
                                   : "running";
             Console.WriteLine($"Frame {frame} ({total} this process), {cycles} cycles, {state}");
+            if (b["deterministic"]?.GetValue<bool>() == true)
+            {
+                var seed = b["seed"];
+                Console.WriteLine($"Deterministic, seed {(seed == null ? "?" : (long)seed.GetValue<double>())}");
+            }
         }
 
         var threads = await client.GetThreadsAsync();

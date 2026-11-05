@@ -66,6 +66,24 @@ static const int16_t filter[512] = {
 };
 
 static SDL_AudioDeviceID audio_dev;
+// -deterministic: the sound chips are clocked whether or not a device opens.
+// Without one they still run -- the PCM FIFO drains, YM timers count -- and the
+// mix is computed and discarded, so a machine behaves the same with or without
+// a sound card. The rate is fixed too, rather than whatever the device offers.
+static bool fixed_audio = false;
+static bool audio_virtual = false;   // running with no device behind it
+
+static bool
+audio_running(void)
+{
+	return audio_dev > 0 || audio_virtual;
+}
+
+void
+audio_set_deterministic(bool on)
+{
+	fixed_audio = on;
+}
 static int16_t * buffer;
 static uint32_t buffer_size = 0;
 static uint32_t rdidx = 0;
@@ -130,14 +148,13 @@ audio_callback(void *userdata, Uint8 *stream, int len)
 void
 audio_init(const char *dev_name, int num_audio_buffers)
 {
-	if (audio_dev > 0) {
+	if (audio_running()) {
 		audio_close();
 	}
 
-	if (dev_name) {
-		if (!strcmp("none", dev_name)) {
-			return;
-		}
+	const bool no_device = dev_name && !strcmp("none", dev_name);
+	if (no_device && !fixed_audio) {
+		return;
 	}
 
 	// Set number of buffers
@@ -167,8 +184,22 @@ audio_init(const char *dev_name, int num_audio_buffers)
 	desired.channels = 2;
 	desired.callback = audio_callback;
 
-	audio_dev = SDL_OpenAudioDevice(dev_name, 0, &desired, &obtained, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-	if (audio_dev <= 0) {
+	if (no_device) {
+		audio_dev = 0;
+	} else {
+		// A fixed rate is asked for, not offered: SDL converts if the device
+		// runs at another one, so the mix is computed the same way everywhere.
+		audio_dev = SDL_OpenAudioDevice(dev_name, 0, &desired, &obtained,
+		                                fixed_audio ? 0 : SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+	}
+	if (audio_dev <= 0 && fixed_audio) {
+		if (!no_device) {
+			fprintf(stderr, "No audio device (%s); the sound chips run silently.\n", SDL_GetError());
+		}
+		audio_dev = 0;
+		audio_virtual = true;
+		obtained.freq = AUDIO_SAMPLERATE;
+	} else if (audio_dev <= 0) {
 		fprintf(stderr, "SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
 		if (dev_name != NULL) {
 			audio_usage();
@@ -206,18 +237,23 @@ audio_init(const char *dev_name, int num_audio_buffers)
 	fs_buf[0] = fs_buf[1] = 0;
 
 	// Start playback
-	SDL_PauseAudioDevice(audio_dev, 0);
+	if (audio_dev > 0) {
+		SDL_PauseAudioDevice(audio_dev, 0);
+	}
 }
 
 void
 audio_close(void)
 {
-	if (audio_dev == 0) {
+	if (!audio_running()) {
 		return;
 	}
 
-	SDL_CloseAudioDevice(audio_dev);
+	if (audio_dev > 0) {
+		SDL_CloseAudioDevice(audio_dev);
+	}
 	audio_dev = 0;
+	audio_virtual = false;
 
 	// Free audio buffers
 	if (buffer != NULL) {
@@ -230,7 +266,7 @@ void
 audio_step(int cpu_clocks)
 {
 	// Accumulate how many samples each source have to render
-	if (audio_dev == 0) {
+	if (!audio_running()) {
 		return;
 	}
 
@@ -252,7 +288,7 @@ audio_render()
 	// Render all audio sources until read and write positions catch up
 	// This happens when there's a change to sound registers or one of the
 	// sources' sample buffer head position is too far
-	if (audio_dev == 0) {
+	if (!audio_running()) {
 		return;
 	}
 
@@ -309,7 +345,7 @@ audio_render()
 	len_fs = (len_fs - (4 << SAMP_POS_FRAC_BITS)) / fs_samps_per_host_samps;
 	len = SDL_min(len_vera, len_ym);
 	len = SDL_min(len, len_fs);
-	SDL_LockAudioDevice(audio_dev);
+	if (audio_dev > 0) SDL_LockAudioDevice(audio_dev);
 	for (int i = 0; i < len; i++) {
 		int32_t samp[8];
 		int32_t filter_idx = 0;
@@ -410,7 +446,7 @@ audio_render()
 		rdidx = (rdidx + buffer_skip_amount) % buffer_size;
 		buffer_written -= buffer_skip_amount;
 	}
-	SDL_UnlockAudioDevice(audio_dev);
+	if (audio_dev > 0) SDL_UnlockAudioDevice(audio_dev);
 
 	// catch up all buffers if they are too far behind
 	uint32_t skip = len_vera - len;
