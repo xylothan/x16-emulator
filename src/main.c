@@ -818,8 +818,8 @@ usage()
 	printf("\tTake nothing from the host that could change what the machine does:\n");
 	printf("\t-seed 0 unless a seed is given, -nohostjoy, host keyboard and mouse\n");
 	printf("\tignored, hostfs LOAD/SAVE cost no emulated time, the sound chips run at\n");
-	printf("\ta fixed rate with or without an audio device, and -nvram is never\n");
-	printf("\twritten. -rtc and -midi-in are refused.\n");
+	printf("\ta fixed rate with or without an audio device, and neither -nvram nor\n");
+	printf("\ta cartridge's NVRAM is written back. -rtc and -midi-in are refused.\n");
 	printf("-zeroram\n");
 	printf("\tSet all RAM to zero instead of uninitialized random values\n");
 	printf("-wuninit\n");
@@ -2070,7 +2070,10 @@ void main_shutdown() {
 		SDL_Quit();
 	}
 	if(cartridge_path) {
-		cartridge_save_nvram();
+		// Never under -deterministic, for the same reason as -nvram.
+		if (!deterministic_mode) {
+			cartridge_save_nvram();
+		}
 		cartridge_unload();
 	}
 	files_shutdown();

@@ -1126,14 +1126,17 @@ what the machine does:
 * uninitialized RAM, VRAM and cartridge RAM are filled from a seed (`-seed <n>`, 0 if not given)
   rather than from the clock;
 * physical game controllers are never opened (`-nohostjoy` on its own does just this), and the
-  host keyboard and mouse are ignored, so only `x16/step`'s `joysticks` (or `x16/joystick`,
-  `x16/type` and friends) reach the machine;
+  host keyboard and mouse are ignored. Input comes only over DAP, and lands at a fixed point
+  only when it is sent while the machine is paused: `x16/step`'s `joysticks`, or `x16/joystick`
+  and `x16/type` sent between steps. Sent to a running machine they apply wherever the
+  connection happens to be read;
 * hostfs `LOAD`/`SAVE` cost no emulated time; normally the time the host took is charged as
   cycles, which moves every later frame by a host-dependent amount;
 * the sound chips run at a fixed rate whether or not an audio device opens, `-sound none`
   included. Without one, nothing would drain the PCM FIFO, and a program that waits on it would
   see a different machine;
-* `-nvram` is read but never written, so instances can share the path;
+* `-nvram`, and a cartridge's NVRAM, are read but never written back, so instances can share
+  the files;
 * `-rtc` and `-midi-in` are refused, since both take input from the host.
 
 `hash` (in `x16/status` and `x16/step`) is a 64-bit hash, as 16 hex digits, of the CPU registers,
@@ -1141,7 +1144,8 @@ all RAM and banked RAM, the bank selects, and VERA: VRAM, palette, sprites, regi
 and the scan position. Two runs that agree on it agree on everything a program can read from
 those. Hostfs directory listings with timestamps still show the host's file times, and an SD card
 image is a host file: give each instance its own copy. `testbench/test_determinism.py` checks a
-replay, `-warp` against no warp, and a run with an audio device against one without.
+replay, `-warp` against no warp, a run with an audio device against one without, a hostfs
+`LOAD`, and the recorded audio output.
 
 #### Profiling the guest: how much of a frame is your code using?
 
