@@ -4930,6 +4930,10 @@ bool debug_server_is_enabled(void) {
     return server_enabled;
 }
 
+bool debug_server_step_pending(void) {
+    return step.pending;
+}
+
 void debug_server_frame_end(void) {
     machine_frames++;
     process_frames++;

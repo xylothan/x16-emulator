@@ -36,6 +36,8 @@
 #include "render_backend.h"
 #include "x16_hash.h"
 #include "savestate.h"
+#include "state_slots.h"
+#include "timing.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -106,9 +108,11 @@
 #ifdef __APPLE__
 #define LSHORTCUT_KEY SDL_SCANCODE_LGUI
 #define RSHORTCUT_KEY SDL_SCANCODE_RGUI
+#define SHORTCUT_MOD  KMOD_GUI
 #else
 #define LSHORTCUT_KEY SDL_SCANCODE_LCTRL
 #define RSHORTCUT_KEY SDL_SCANCODE_RCTRL
+#define SHORTCUT_MOD  KMOD_CTRL
 #endif
 
 // When rendering a layer line, we can amortize some of the cost by calculating multiple pixels at a time.
@@ -309,8 +313,7 @@ mousegrab_toggle() {
 	SDL_SetWindowGrab(window, mouse_grabbed && !no_keyboard_capture);
 	SDL_SetRelativeMouseMode(mouse_grabbed);
 	SDL_ShowCursor((mouse_grabbed || kernal_mouse_enabled) ? SDL_DISABLE : SDL_ENABLE);
-	sprintf(window_title, WINDOW_TITLE "%s", mouse_grabbed ? MOUSE_GRAB_MSG : "");
-	video_update_title(window_title);
+	timing_refresh_title();
 }
 
 // Re-derive the layer properties from the raw layer registers and seed both
@@ -2575,6 +2578,11 @@ video_imgui_debug_key(SDL_Keysym ks)
 			}
 			break;
 		default:
+			// Ctrl+F1 / Ctrl+F3 / Ctrl+0-9: the save-state slot keys, as in
+			// the emulator window.
+			if (ctrl && !shift && !(ks.mod & KMOD_ALT)) {
+				state_slots_hotkey(ks.sym);
+			}
 			break;
 	}
 }
@@ -2611,6 +2619,12 @@ video_debug_ui_pump_paused(void)
 		    event.key.windowID == imgui_window_id &&
 		    !debug_ui_want_text_input()) {
 			video_imgui_debug_key(event.key.keysym);
+		} else if (event.type == SDL_KEYDOWN && !(imgui_window && event.key.windowID == imgui_window_id) &&
+		           !(disable_emu_cmd_keys || mouse_grabbed) &&
+		           (event.key.keysym.mod & SHORTCUT_MOD) != 0) {
+			// The emulator window's save-state slot keys work while paused
+			// too: a load is the usual reason to want one there.
+			state_slots_hotkey(event.key.keysym.sym);
 		}
 	}
 
@@ -2739,6 +2753,9 @@ video_update()
 					consumed = true;
 				} else if (event.key.keysym.sym == SDLK_d) {
 					sdcard_detach();
+					consumed = true;
+				} else if (state_slots_hotkey(event.key.keysym.sym)) {
+					// F1 load, F3 save, 0-9 select a save-state slot
 					consumed = true;
 #ifndef __EMSCRIPTEN__
 				} else if (event.key.keysym.sym == SDLK_p) {

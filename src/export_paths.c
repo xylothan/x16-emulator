@@ -104,6 +104,36 @@ export_path(export_kind_t kind, const char *name, char *out, size_t out_size)
 	return export_name_has_folder(name) || export_make_dir(dir);
 }
 
+bool
+export_state_name(const char *prg_path, int slot, char *out, size_t out_size)
+{
+	if (!out || out_size == 0)
+		return false;
+	const char *base = "x16emu";
+	size_t      len  = strlen(base);
+	if (prg_path && prg_path[0]) {
+		// After the last separator, up to a ",address" suffix.
+		const char *s = prg_path;
+		for (const char *c = prg_path; *c; c++)
+			if (*c == '/' || *c == '\\' || (c == prg_path + 1 && *c == ':'))
+				s = c + 1;
+		const char *comma = strchr(s, ',');
+		size_t      n     = comma ? (size_t)(comma - s) : strlen(s);
+		// Then the extension, unless the name is nothing but one (".prg").
+		for (size_t i = n; i > 1; i--)
+			if (s[i - 1] == '.') {
+				n = i - 1;
+				break;
+			}
+		if (n > 0) {
+			base = s;
+			len  = n;
+		}
+	}
+	const int w = snprintf(out, out_size, "%.*s-%d.x16s", (int)len, base, slot);
+	return w > 0 && (size_t)w < out_size;
+}
+
 static bool
 ends_with_ci(const char *s, const char *ext)
 {

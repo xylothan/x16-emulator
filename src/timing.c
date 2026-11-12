@@ -37,6 +37,25 @@ int64_t cpu_ticks;
 int64_t last_perf_cpu_ticks;
 char window_title[255];
 
+// See timing.h. Measured every 5 s; 100 until the first measurement.
+const char *(*timing_title_note)(void) = NULL;
+static uint32_t title_perf      = 100;
+static bool     title_note_shown = false;
+
+void
+timing_refresh_title(void)
+{
+	const char *note = timing_title_note ? timing_title_note() : NULL;
+	char        perf[16] = "";
+	if (title_perf < 100 || warp_mode) {
+		snprintf(perf, sizeof perf, " (%u%%)", (unsigned)title_perf);
+	}
+	snprintf(window_title, sizeof window_title, WINDOW_TITLE "%s%s%s%s", perf, note ? " - " : "", note ? note : "",
+	         mouse_grabbed ? MOUSE_GRAB_MSG : "");
+	title_note_shown = note != NULL;
+	video_update_title(window_title);
+}
+
 // The target clock, or 0 for "not set", meaning run at the machine's own.
 static int emu_speed_khz = 0;
 
@@ -289,18 +308,13 @@ timing_update_ex(bool may_sleep)
 	}
 
 	if (sdlTicks - last_perf_update > 5000) {
-		uint32_t perf = (cpu_ticks - last_perf_cpu_ticks) / (MHZ * 50000);
-
-		if (perf < 100 || warp_mode) {
-			sprintf(window_title, WINDOW_TITLE " (%d%%)%s", perf, mouse_grabbed ? MOUSE_GRAB_MSG : "");
-		} else {
-			sprintf(window_title, WINDOW_TITLE "%s", mouse_grabbed ? MOUSE_GRAB_MSG : "");
-		}
-
-		video_update_title(window_title);
+		title_perf = (uint32_t)((cpu_ticks - last_perf_cpu_ticks) / (MHZ * 50000));
+		timing_refresh_title();
 
 		last_perf_cpu_ticks = cpu_ticks;
 		last_perf_update = sdlTicks;
+	} else if (title_note_shown && !(timing_title_note && timing_title_note())) {
+		timing_refresh_title(); // the note has had its time
 	}
 
 	if (log_speed) {

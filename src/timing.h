@@ -8,6 +8,13 @@ extern "C" {
 #endif
 
 void timing_init();
+
+// The window title: "Commander X16", the speed when it is not 100%, then a
+// short note when timing_title_note returns one (NULL: none), then the mouse
+// capture hint. Rebuilt every 5 s, when a note ends, and on request. The note
+// is a hook rather than a call so this file needs nothing that supplies it.
+extern const char *(*timing_title_note)(void);
+void timing_refresh_title(void);
 void timing_update();
 void timing_update_no_sleep();
 int64_t timing_lead_us();

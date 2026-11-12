@@ -61,6 +61,9 @@ void machine_paste(char *text, bool handle_free) { (void)text; (void)handle_free
 void machine_reset(void) { }
 void machine_toggle_warp(void) { }
 void main_shutdown(void) { }
+// The window title (timing.c) and the save-state slot keys (state_slots.c).
+void timing_refresh_title(void) { }
+bool state_slots_hotkey(SDL_Keycode sym) { (void)sym; return false; }
 
 void handle_keyboard(bool down, SDL_Keycode sym, SDL_Scancode scancode)
 	{ (void)down; (void)sym; (void)scancode; }

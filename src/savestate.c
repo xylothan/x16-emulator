@@ -121,6 +121,22 @@ savestate_any_loaded(void)
 	return loaded_any;
 }
 
+static uint32_t boundary_ticks = 0;
+static bool     boundary_seen  = false;
+
+void
+savestate_mark_frame_boundary(void)
+{
+	boundary_ticks = clockticks6502;
+	boundary_seen  = true;
+}
+
+bool
+savestate_at_frame_boundary(void)
+{
+	return boundary_seen && clockticks6502 == boundary_ticks;
+}
+
 // ─── Header ──────────────────────────────────────────────────────────────────
 //
 // The machine a state was taken from. Loading into a machine configured
@@ -347,6 +363,7 @@ savestate_apply(const void *data, size_t len, char *err, size_t err_len)
 	ss_reader_init(&r, data, len);
 	savestate_read(&r);
 	loaded_any = true;
+	savestate_mark_frame_boundary(); // every state is taken on one
 	if (r.failed || r.pos != len) {
 		// Unreachable after a passing check, short of a loader that reads
 		// differently from its saver. The machine is part-overwritten now.

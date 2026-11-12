@@ -34,6 +34,13 @@ bool savestate_apply(const void *data, size_t len, char *err, size_t err_len);
 // since they would record a history that did not happen.
 bool savestate_any_loaded(void);
 
+// Frame boundaries, for saving from a paused machine. The main loop marks one
+// at the top of the first instruction of each frame (where an x16/step stops)
+// and a load marks the loaded machine as standing on one. The machine is still
+// there while the CPU clock has not moved since.
+void savestate_mark_frame_boundary(void);
+bool savestate_at_frame_boundary(void);
+
 // ─── Named in-memory slots ───────────────────────────────────────────────────
 
 #define SAVESTATE_MAX_SLOTS     64

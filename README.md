@@ -331,6 +331,29 @@ reset, `Ctrl`+`V` to paste, and so on, or their command-key equivalents on macOS
 and are unchanged. ADD adds a few of its own, listed under
 [Keyboard shortcuts](#keyboard-shortcuts).
 
+### Save states
+
+Each program gets ten save slots, 0 to 9. `Ctrl`+`F3` saves the machine to the selected slot and
+`Ctrl`+`F1` loads it back; `Ctrl`+`0` to `Ctrl`+`9` select a slot. `F2` sits between the two on
+purpose, so a load is never one slip away from a save. With `-imgui` the debugger's **State** menu
+does the same, lists what each slot holds and when it was saved, and keeps quick load and quick
+save at opposite ends.
+
+A slot is a file named after the program, `GAME-3.x16s` for `-prg GAME.PRG` (`x16emu-3.x16s`
+without one), in the working directory. With `-imgui` the folder is set in **Settings → Export
+folders** and is kept in `imgui.ini`, with the selected slot. The window title says what happened:
+`Saved slot 3`, or why not.
+
+A save or load asked for while the machine runs happens at the end of the current frame. Paused,
+a load happens at once, and so does a save if the machine is paused at the end of a frame; one
+paused part-way through a frame is refused rather than saved half-done.
+
+A slot loads only into the same emulator build, ROM and machine configuration that saved it (see
+[Scripting input for automated tests](#scripting-input-for-automated-tests) under the debug
+protocol, which reads and writes the same files). After the
+first load, `-nvram` and cartridge NVRAM are no longer written back for the rest of the session,
+since what they would record never happened on that machine.
+
 
 Advanced Debugging
 ------------------
@@ -480,14 +503,15 @@ Active when the debugger window has focus and you are not typing into a search o
 
 On macOS these are the physical `Control` and `Shift` keys, not `Command`.
 
-These work in the emulator window and are handy while debugging graphics:
+The [save-state](#save-states) keys work in both windows, running or paused:
 
 | Key | Action |
 | --- | --- |
-| `Ctrl`+`F3` | Toggle VERA layer 0 |
-| `Alt`+`F3` | Toggle VERA layer 1 |
-| `Shift`+`F3` | Toggle sprites |
-| `Shift`+`F8` | Toggle KERNAL skip |
+| `Ctrl`+`F1` | Quick load from the selected slot |
+| `Ctrl`+`F3` | Quick save to the selected slot |
+| `Ctrl`+`0` … `Ctrl`+`9` | Select slot 0 to 9 |
+
+In the emulator window on macOS they are `Command`, like the other emulator hotkeys.
 
 ### A tour of the panels
 

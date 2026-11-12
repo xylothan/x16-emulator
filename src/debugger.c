@@ -24,6 +24,7 @@
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "debug_server.h"
+#include "state_slots.h"
 #include "host_prof.h"
 #include "dbg_info.h"
 #include "rendertext.h"
@@ -523,6 +524,12 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 					break;
 
 				case SDL_KEYDOWN:                               // Handle key presses.
+					// Ctrl (or Cmd) with F1, F3 or a digit is a save-state
+					// slot key, paused as when running.
+					if ((event.key.keysym.mod & (KMOD_CTRL | KMOD_GUI)) &&
+					    state_slots_hotkey(event.key.keysym.sym)) {
+						break;
+					}
 					DEBUGHandleKeyEvent(event.key.keysym.sym, event.key.keysym.mod & (KMOD_LSHIFT|KMOD_RSHIFT));
 					break;
 

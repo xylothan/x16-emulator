@@ -66,6 +66,7 @@
 #include "midi.h"
 #include "git_rev.h"
 #include "savestate.h"
+#include "state_slots.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -1920,6 +1921,7 @@ main(int argc, char **argv)
 		}
 	}
 
+	state_slots_set_program(prg_path); // before the ",address" is cut off
 	prg_override_start = -1;
 	if (prg_path) {
 		char *comma = strchr(prg_path, ',');
@@ -2819,6 +2821,7 @@ emulator_step_during_move(void)
 		// transitions without entering a debugger SDL event pump from this
 		// nested window procedure. Check before the first instruction and every
 		// one after it, so a breakpointed instruction is never executed.
+		STATE_SLOTS_POLL();
 		if ((debugger_enabled || debug_gate_ui)
 		    && DEBUGPollStatusNoPump(regs.pc) != 0) {
 			break;
@@ -2900,6 +2903,7 @@ emulator_step_during_move(void)
 		debug_gate_refresh();
 		input_tick();
 		debug_server_frame_end();
+		state_slots_frame_end();
 	}
 
 	in_step = false;
@@ -2940,6 +2944,9 @@ emulator_loop(void *param)
 		// machine: both used to be out-of-line calls on every instruction,
 		// which was the largest single host cost of having a debugger
 		// attached at all.
+		// A quick save or load waits for the first instruction of a frame:
+		// here, before the debugger's poll, which is where an x16/step stops.
+		STATE_SLOTS_POLL();
 		if (debugger_enabled || debug_gate_ui || debug_gate_dap) {
 			int dbgCmd = DEBUGPollStatus(regs.pc);
 			if (dbgCmd > 0) continue;
@@ -3148,6 +3155,7 @@ emulator_loop(void *param)
 			debug_gate_refresh();
 			input_tick();
 			debug_server_frame_end();
+			state_slots_frame_end();
 			if (!bench_tick() || !capture_cli_tick()) {
 				break;
 			}

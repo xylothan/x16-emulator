@@ -15,6 +15,109 @@
 #include "../host_prof.h"     // host-time accounting: per-panel and UI draw cost
 #include "../profile_capture.h" // capture mode: the debugger goes quiet while it records
 #include "../profile_session.h" // profile_session_sync_names
+#include "../state_slots.h"     // State menu: save-state slots
+
+#include <time.h>
+
+// "Slot 3   Nov 11 14:02" or "Slot 3   empty", for the State menu's lists.
+static const char *
+state_slot_label(int slot, bool have, time_t when, char *buf, size_t size)
+{
+    char stamp[32] = "empty";
+    if (have) {
+        const struct tm *t = localtime(&when);
+        if (!t || !strftime(stamp, sizeof stamp, "%b %d %H:%M:%S", t))
+            snprintf(stamp, sizeof stamp, "saved");
+    }
+    snprintf(buf, size, "Slot %d   %s", slot, stamp);
+    return buf;
+}
+
+// State: save-state slots (state_slots.h). Quick load is at the top and quick
+// save at the bottom, the slot lists between, so neither is one slip of the
+// mouse from the other -- as Ctrl+F1 and Ctrl+F3 are kept a key apart.
+static void
+debug_ui_state_menu(void)
+{
+    // Ctrl+0..9 may have picked a slot; keep the saved setting in step.
+    DebugUiSettings &s = debug_ui_settings();
+    if (s.state_slot != state_slots_selected()) {
+        s.state_slot = state_slots_selected();
+        debug_ui_settings_mark_dirty();
+    }
+    if (!ImGui::BeginMenu("State"))
+        return;
+
+    // Read the folder when the menu opens, not every frame.
+    static bool   have[STATE_SLOTS];
+    static time_t when[STATE_SLOTS];
+    if (ImGui::IsWindowAppearing())
+        for (int i = 0; i < STATE_SLOTS; i++)
+            have[i] = state_slots_exists(i, &when[i]);
+
+    const int cur = state_slots_selected();
+    char      label[96];
+
+    snprintf(label, sizeof label, "Quick load (slot %d)", cur);
+    if (ImGui::MenuItem(label, "Ctrl+F1", false, have[cur]))
+        state_slots_request_load(-1);
+    ImGui::SetItemTooltip("Put the machine back as slot %d holds it, at the end of this frame.", cur);
+    if (ImGui::BeginMenu("Load from slot")) {
+        for (int i = 0; i < STATE_SLOTS; i++) {
+            ImGui::PushID(i);
+            if (ImGui::MenuItem(state_slot_label(i, have[i], when[i], label, sizeof label), nullptr, false, have[i]))
+                state_slots_request_load(i);
+            ImGui::PopID();
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::Separator();
+    if (ImGui::BeginMenu("Select slot")) {
+        for (int i = 0; i < STATE_SLOTS; i++) {
+            char key[16];
+            snprintf(key, sizeof key, "Ctrl+%d", i);
+            ImGui::PushID(i);
+            if (ImGui::MenuItem(state_slot_label(i, have[i], when[i], label, sizeof label), key, i == cur))
+                state_slots_select(i);
+            ImGui::PopID();
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::SetItemTooltip("The slot Ctrl+F1 and Ctrl+F3 use. Ctrl+0 to Ctrl+9 pick one from the\n"
+                          "keyboard, in this window or the emulator's.");
+
+    ImGui::Separator();
+    if (ImGui::BeginMenu("Save to slot")) {
+        for (int i = 0; i < STATE_SLOTS; i++) {
+            ImGui::PushID(i);
+            if (ImGui::MenuItem(state_slot_label(i, have[i], when[i], label, sizeof label)))
+                state_slots_request_save(i);
+            ImGui::PopID();
+        }
+        ImGui::EndMenu();
+    }
+    snprintf(label, sizeof label, "Quick save (slot %d)", cur);
+    if (ImGui::MenuItem(label, "Ctrl+F3"))
+        state_slots_request_save(-1);
+    ImGui::SetItemTooltip("Save the machine to slot %d at the end of this frame%s.", cur,
+                          have[cur] ? ", replacing what it holds" : "");
+
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save state folder..."))
+        debug_ui_open_settings("Export folders");
+    ImGui::SetItemTooltip("Where slots are kept: <program>-<slot>.x16s (Settings > Export folders).");
+
+    unsigned    age = 0;
+    const char *msg = state_slots_message(&age);
+    if (msg && age < 15000) {
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextDisabled("%s", msg);
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndMenu();
+}
 
 // How often the debugger repaints its menu bar while a capture records.
 static const Uint32 CAPTURE_UI_INTERVAL_MS = 250;
@@ -717,10 +820,12 @@ debug_ui_draw_control_bar(void)
         ImGui::Separator();
         if (ImGui::MenuItem("Export folders..."))
             debug_ui_open_settings("Export folders");
-        ImGui::SetItemTooltip("Where profiles, screenshots and dumps are written, and how exports\n"
-                              "are named (Settings > Export folders).");
+        ImGui::SetItemTooltip("Where profiles, screenshots, dumps and save states are written, and how\n"
+                              "exports are named (Settings > Export folders).");
         ImGui::EndMenu();
     }
+
+    debug_ui_state_menu();
 
     if (ImGui::BeginMenu("View")) {
         for (DebugPanel &panel : debug_ui_panels()) {
@@ -782,6 +887,9 @@ debug_ui_draw_control_bar(void)
                 { "F9",            "Toggle breakpoint at PC" },
                 { "Ctrl+Shift+F5", "Reset machine" },
                 { "Ctrl+wheel",    "Zoom the panel under the cursor" },
+                { "Ctrl+F1",       "Quick load from the selected slot" },
+                { "Ctrl+F3",       "Quick save to the selected slot" },
+                { "Ctrl+0 to 9",   "Select a save-state slot" },
             };
             if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit)) {
                 for (const auto &k : keys) {
