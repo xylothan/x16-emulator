@@ -109,8 +109,14 @@ struct DebugUiSettings {
     bool        profile_export_stamp = false;     // add the date and time to it
 
     // --- Save states ----------------------------------------------------------
-    // The slot Ctrl+F3 and Ctrl+F1 use (state_slots.h), kept for next time.
+    // The slot the host key's F3 and F1 use (state_slots.h), kept for next time.
     int state_slot = 0;
+
+    // --- Keyboard -------------------------------------------------------------
+    // The host key by name, empty for the default (video_set_host_key), and
+    // whether upstream's Ctrl shortcuts work too. -hostkey and -ctrlkeys win.
+    std::string host_key;
+    bool        ctrl_shortcuts = false;
 };
 
 // Push the export folders into export_paths, after a load or an edit.

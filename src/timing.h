@@ -10,10 +10,13 @@ extern "C" {
 void timing_init();
 
 // The window title: "Commander X16", the speed when it is not 100%, then a
-// short note when timing_title_note returns one (NULL: none), then the mouse
-// capture hint. Rebuilt every 5 s, when a note ends, and on request. The note
-// is a hook rather than a call so this file needs nothing that supplies it.
+// short note when timing_title_note returns one (NULL: none), then the
+// keyboard's state from timing_title_status (the mouse capture hint, or that
+// the host key is latched). Rebuilt every 5 s, when a note ends, and on
+// request. Both are hooks rather than calls so this file needs nothing that
+// supplies them.
 extern const char *(*timing_title_note)(void);
+extern const char *(*timing_title_status)(void);
 void timing_refresh_title(void);
 void timing_update();
 void timing_update_no_sleep();

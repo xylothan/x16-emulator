@@ -10,6 +10,7 @@
 #include "../perf_budget.h"
 #include "../source_view.h"
 #include "../state_slots.h"
+#include "../video.h" // video_set_host_key
 
 #include <ctype.h>
 
@@ -75,6 +76,7 @@ fields(int *count)
         { "PerfGraphFrames",     nullptr, nullptr, &s.perf_graph_frames },
         { "ProfileExportStamp",  &s.profile_export_stamp,   nullptr, nullptr },
         { "StateSlot",           nullptr, nullptr, &s.state_slot },
+        { "CtrlShortcuts",       &s.ctrl_shortcuts,         nullptr, nullptr },
     };
     *count = (int)(sizeof(table) / sizeof(table[0]));
     return table;
@@ -99,6 +101,7 @@ settings_read_line(ImGuiContext *, ImGuiSettingsHandler *, void *, const char *l
             { "ExportDumpDir=",       &DebugUiSettings::export_dump_dir },
             { "ExportStateDir=",      &DebugUiSettings::export_state_dir },
             { "ProfileExportName=",   &DebugUiSettings::profile_export_name },
+            { "HostKey=",             &DebugUiSettings::host_key },
         };
         for (const auto &t : text) {
             const size_t n = strlen(t.key);
@@ -154,6 +157,9 @@ settings_apply_to_core()
         source_view_retry_missing();
     debug_ui_apply_export_dirs();
     state_slots_select_quietly(s.state_slot);
+    if (!s.host_key.empty() && !video_set_host_key(s.host_key.c_str(), false))
+        printf("imgui.ini: HostKey=%s is not a key; keeping %s\n", s.host_key.c_str(), video_host_key_name());
+    video_set_ctrl_shortcuts(s.ctrl_shortcuts, false);
 }
 
 void
@@ -186,6 +192,7 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
         buf->appendf("ExportDumpDir=%s\n", ds.export_dump_dir.c_str());
         buf->appendf("ExportStateDir=%s\n", ds.export_state_dir.c_str());
         buf->appendf("ProfileExportName=%s\n", ds.profile_export_name.c_str());
+        buf->appendf("HostKey=%s\n", ds.host_key.c_str());
     }
     const char *page = debug_ui_settings_page();
     if (page && page[0])

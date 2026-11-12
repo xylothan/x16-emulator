@@ -18,9 +18,9 @@ extern "C" {
 
 typedef enum {
 	EXPORT_PROFILE = 0, // Profile panel: .folded, .json, .trace.json
-	EXPORT_SCREENSHOT,  // Ctrl+P
-	EXPORT_DUMP,        // Ctrl+S, and the dump made when the PC reaches $FFFF
-	EXPORT_STATE,       // save-state slots: Ctrl+F3 / Ctrl+F1 and the State menu
+	EXPORT_SCREENSHOT,  // host key+P
+	EXPORT_DUMP,        // host key+S, and the dump made when the PC reaches $FFFF
+	EXPORT_STATE,       // save-state slots: host key+F3 / +F1 and the State menu
 	EXPORT_KINDS
 } export_kind_t;
 

@@ -42,14 +42,14 @@ const Row ROWS[] = {
      "The Profile panel's Flame graph (.folded), Everything (.json) and\n"
      "Timeline (.trace.json) files.",
      &DebugUiSettings::export_profile_dir},
-    {"Screenshots", "Ctrl+P in the emulator window: x16emu-<date>-<time>.png.",
+    {"Screenshots", "Host key+P: x16emu-<date>-<time>.png.",
      &DebugUiSettings::export_screenshot_dir},
     {"Memory dumps",
-     "Ctrl+S in the emulator window, and the dump made when the CPU runs\n"
-     "off the top of memory: dump.bin, then dump-1.bin, dump-2.bin and so on.",
+     "Host key+S, and the dump made when the CPU runs off the top of\n"
+     "memory: dump.bin, then dump-1.bin, dump-2.bin and so on.",
      &DebugUiSettings::export_dump_dir},
     {"Save states",
-     "The State menu's slots, Ctrl+F3 to save and Ctrl+F1 to load:\n"
+     "The State menu's slots, host key+F3 to save and +F1 to load:\n"
      "<program>-<slot>.x16s, such as GAME-3.x16s. Without -imgui this\n"
      "setting is not read, and slots go in the working directory.",
      &DebugUiSettings::export_state_dir},

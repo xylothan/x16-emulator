@@ -63,6 +63,7 @@ void machine_toggle_warp(void) { }
 void main_shutdown(void) { }
 // The window title (timing.c) and the save-state slot keys (state_slots.c).
 void timing_refresh_title(void) { }
+const char *(*timing_title_status)(void) = NULL;
 bool state_slots_hotkey(SDL_Keycode sym) { (void)sym; return false; }
 
 void handle_keyboard(bool down, SDL_Keycode sym, SDL_Scancode scancode)
@@ -99,6 +100,8 @@ void video_win32_remove_move_hook(SDL_Window *window) { (void)window; }
 // ─── Debugger overlay ───────────────────────────────────────────────────────
 
 void DEBUGBreakToDebugger(void) { }
+void DEBUGPause(void) { }
+bool DEBUGIsRunning(void) { return true; }
 void DEBUGFreeUI(void) { }
 void DEBUGInitUI(render_backend_t *r) { (void)r; }
 void DEBUGRenderDisplay(int width, int height) { (void)width; (void)height; }

@@ -16,6 +16,7 @@
 #include "../profile_capture.h" // capture mode: the debugger goes quiet while it records
 #include "../profile_session.h" // profile_session_sync_names
 #include "../state_slots.h"     // State menu: save-state slots
+#include "../video.h"           // video_host_key_name, for the shortcut labels
 
 #include <time.h>
 
@@ -35,11 +36,11 @@ state_slot_label(int slot, bool have, time_t when, char *buf, size_t size)
 
 // State: save-state slots (state_slots.h). Quick load is at the top and quick
 // save at the bottom, the slot lists between, so neither is one slip of the
-// mouse from the other -- as Ctrl+F1 and Ctrl+F3 are kept a key apart.
+// mouse from the other -- as Host+F1 and Host+F3 are kept a key apart.
 static void
 debug_ui_state_menu(void)
 {
-    // Ctrl+0..9 may have picked a slot; keep the saved setting in step.
+    // Host+0..9 may have picked a slot; keep the saved setting in step.
     DebugUiSettings &s = debug_ui_settings();
     if (s.state_slot != state_slots_selected()) {
         s.state_slot = state_slots_selected();
@@ -55,11 +56,14 @@ debug_ui_state_menu(void)
         for (int i = 0; i < STATE_SLOTS; i++)
             have[i] = state_slots_exists(i, &when[i]);
 
-    const int cur = state_slots_selected();
-    char      label[96];
+    const int   cur  = state_slots_selected();
+    const char *host = video_host_key_name();
+    char        label[96];
+    char        key[48];
 
     snprintf(label, sizeof label, "Quick load (slot %d)", cur);
-    if (ImGui::MenuItem(label, "Ctrl+F1", false, have[cur]))
+    snprintf(key, sizeof key, "%s+F1", host);
+    if (ImGui::MenuItem(label, key, false, have[cur]))
         state_slots_request_load(-1);
     ImGui::SetItemTooltip("Put the machine back as slot %d holds it, at the end of this frame.", cur);
     if (ImGui::BeginMenu("Load from slot")) {
@@ -75,8 +79,7 @@ debug_ui_state_menu(void)
     ImGui::Separator();
     if (ImGui::BeginMenu("Select slot")) {
         for (int i = 0; i < STATE_SLOTS; i++) {
-            char key[16];
-            snprintf(key, sizeof key, "Ctrl+%d", i);
+            snprintf(key, sizeof key, "%s+%d", host, i);
             ImGui::PushID(i);
             if (ImGui::MenuItem(state_slot_label(i, have[i], when[i], label, sizeof label), key, i == cur))
                 state_slots_select(i);
@@ -84,8 +87,9 @@ debug_ui_state_menu(void)
         }
         ImGui::EndMenu();
     }
-    ImGui::SetItemTooltip("The slot Ctrl+F1 and Ctrl+F3 use. Ctrl+0 to Ctrl+9 pick one from the\n"
-                          "keyboard, in this window or the emulator's.");
+    ImGui::SetItemTooltip("The slot %s+F1 and %s+F3 use. %s+0 to %s+9 pick one from the\n"
+                          "keyboard, in this window or the emulator's.",
+                          host, host, host, host);
 
     ImGui::Separator();
     if (ImGui::BeginMenu("Save to slot")) {
@@ -98,7 +102,8 @@ debug_ui_state_menu(void)
         ImGui::EndMenu();
     }
     snprintf(label, sizeof label, "Quick save (slot %d)", cur);
-    if (ImGui::MenuItem(label, "Ctrl+F3"))
+    snprintf(key, sizeof key, "%s+F3", host);
+    if (ImGui::MenuItem(label, key))
         state_slots_request_save(-1);
     ImGui::SetItemTooltip("Save the machine to slot %d at the end of this frame%s.", cur,
                           have[cur] ? ", replacing what it holds" : "");
@@ -887,9 +892,23 @@ debug_ui_draw_control_bar(void)
                 { "F9",            "Toggle breakpoint at PC" },
                 { "Ctrl+Shift+F5", "Reset machine" },
                 { "Ctrl+wheel",    "Zoom the panel under the cursor" },
-                { "Ctrl+F1",       "Quick load from the selected slot" },
-                { "Ctrl+F3",       "Quick save to the selected slot" },
-                { "Ctrl+0 to 9",   "Select a save-state slot" },
+            };
+            // The host key's commands, in either window. None reaches the X16.
+            static const struct { const char *key, *what; } host_keys[] = {
+                { "F1",            "Quick load from the selected slot" },
+                { "F3",            "Quick save to the selected slot" },
+                { "0 to 9",        "Select a save-state slot" },
+                { "R",             "Reset" },
+                { "Backspace",     "NMI" },
+                { "V",             "Paste" },
+                { "F or Enter",    "Fullscreen" },
+                { "M",             "Capture the mouse and keyboard" },
+                { "=",             "Warp speed" },
+                { "P",             "Screenshot" },
+                { "S",             "Dump memory" },
+                { "A / D",         "Attach / detach the SD card" },
+                { "F5 F9 F10 F11", "The debugger's keys, from the emulator window" },
+                { "Pause or F12",  "Pause, from the emulator window" },
             };
             if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit)) {
                 for (const auto &k : keys) {
@@ -899,8 +918,19 @@ debug_ui_draw_control_bar(void)
                     ImGui::TableNextColumn();
                     ImGui::TextDisabled("%s", k.what);
                 }
+                const char *host = video_host_key_name();
+                for (const auto &k : host_keys) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%s+%s", host, k.key);
+                    ImGui::TableNextColumn();
+                    ImGui::TextDisabled("%s", k.what);
+                }
                 ImGui::EndTable();
             }
+            ImGui::TextDisabled("Hold %s with the key, or tap it alone to stay in command\n"
+                                "mode until the next tap or Esc.",
+                                video_host_key_name());
             ImGui::EndMenu();
         }
         ImGui::Separator();

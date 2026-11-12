@@ -24,7 +24,6 @@
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "debug_server.h"
-#include "state_slots.h"
 #include "host_prof.h"
 #include "dbg_info.h"
 #include "rendertext.h"
@@ -495,6 +494,12 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 			// received no input at all: dead buttons, dead text fields, stale
 			// mouse state. -imgui -bp reaches this combination without asking
 			// for it, since -bp switches the text debugger on.
+			// The host key and its commands first, from either window.
+			if (video_host_key_event(&event)) {
+				if (video_debug_ui_available())
+					video_debug_ui_feed_event(&event);
+				continue;
+			}
 			if (video_debug_ui_available()) {
 				video_debug_ui_feed_event(&event);
 				// Events aimed at the debugger window must not also drive the
@@ -524,12 +529,6 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 					break;
 
 				case SDL_KEYDOWN:                               // Handle key presses.
-					// Ctrl (or Cmd) with F1, F3 or a digit is a save-state
-					// slot key, paused as when running.
-					if ((event.key.keysym.mod & (KMOD_CTRL | KMOD_GUI)) &&
-					    state_slots_hotkey(event.key.keysym.sym)) {
-						break;
-					}
 					DEBUGHandleKeyEvent(event.key.keysym.sym, event.key.keysym.mod & (KMOD_LSHIFT|KMOD_RSHIFT));
 					break;
 

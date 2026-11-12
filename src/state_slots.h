@@ -3,8 +3,9 @@
 //
 // A slot is a file, <program>-<N>.x16s (export_state_name), in the save-state
 // folder from the debugger's Settings window (EXPORT_STATE; the working
-// directory without -imgui). One slot is selected; Ctrl+F3 saves to it and
-// Ctrl+F1 loads from it, deliberately keys apart, and Ctrl+0..9 selects.
+// directory without -imgui). One slot is selected; the host key (hostkey.h)
+// with F3 saves to it and with F1 loads from it, deliberately keys apart, and
+// with 0..9 selects.
 //
 // A state is taken at a frame boundary, so a request made while the machine
 // runs is carried out at the next one: the same point an x16/step over DAP
@@ -47,8 +48,8 @@ void state_slots_request_load(int slot);
 // before the first.
 const char *state_slots_message(unsigned *age_ms);
 
-// A key pressed with the shortcut modifier held (Ctrl; Cmd in the emulator
-// window on macOS): F1 loads, F3 saves, 0..9 selects. True if it was one of
+// A key pressed with the host key (or, with -ctrlkeys, Ctrl; Cmd in the
+// emulator window on macOS): F1 loads, F3 saves, 0..9 selects. True if it was one of
 // these, which the caller then keeps from the machine.
 bool state_slots_hotkey(SDL_Keycode sym);
 

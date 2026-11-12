@@ -326,15 +326,44 @@ guest code can detect whether the emulator it is running under understands them.
 * [Official X16 documentation][x16docs] — the machine itself, its KERNAL and BASIC
 * [WebAssembly notes][webassembly] — building the web target
 
-The emulator hotkeys (`Ctrl`+`F` for fullscreen, `Ctrl`+`M` for mouse capture, `Ctrl`+`R` to
-reset, `Ctrl`+`V` to paste, and so on, or their command-key equivalents on macOS) are upstream's
-and are unchanged. ADD adds a few of its own, listed under
-[Keyboard shortcuts](#keyboard-shortcuts).
+### The host key
+
+The emulator's own commands are on one key, **Scroll Lock** (**Right Command** on a Mac, which has
+no Scroll Lock), so that every other key and every `Ctrl` combination belongs to the X16. Hold it
+and press a command key, or tap it on its own to stay in command mode, shown in the title bar,
+until you tap it again or press `Esc`. Neither the host key nor anything pressed with it reaches
+the X16.
+
+| Host + | Action |
+| --- | --- |
+| `F1` | Quick load from the selected [save-state](#save-states) slot |
+| `F3` | Quick save to the selected slot |
+| `0` … `9` | Select slot 0 to 9 |
+| `R` | Reset |
+| `Backspace` | NMI |
+| `V` | Paste |
+| `F` or `Enter` | Fullscreen |
+| `M` | Capture the mouse and keyboard, and release them |
+| `=` or `+` | Warp speed |
+| `P` | Screenshot |
+| `S` | Dump memory |
+| `A` / `D` | Attach / detach the SD card |
+| `F5` `F9` `F10` `F11` | The [debugger's keys](#keyboard-shortcuts), from the emulator window |
+| `Pause` or `F12` | Pause into the debugger |
+
+`-hostkey` picks another key by its SDL name: `-hostkey "Right Ctrl"`, `-hostkey F13`,
+`-hostkey Menu`. With `-imgui` it can also be set as `HostKey=` in `imgui.ini`; the command line
+wins.
+
+Upstream puts these commands on `Ctrl` (`Command` on macOS), which takes those combinations from
+the X16: `Ctrl`+`1` to `Ctrl`+`8` set the text colour, for one. `-ctrlkeys` (or `CtrlShortcuts=1`
+in `imgui.ini`) brings them back alongside the host key; `-noemucmdkeys`, and a program writing
+the emulator's register to turn them off, still turn off only those.
 
 ### Save states
 
-Each program gets ten save slots, 0 to 9. `Ctrl`+`F3` saves the machine to the selected slot and
-`Ctrl`+`F1` loads it back; `Ctrl`+`0` to `Ctrl`+`9` select a slot. `F2` sits between the two on
+Each program gets ten save slots, 0 to 9. Host+`F3` saves the machine to the selected slot and
+Host+`F1` loads it back; Host+`0` to Host+`9` select a slot. `F2` sits between the two on
 purpose, so a load is never one slip away from a save. With `-imgui` the debugger's **State** menu
 does the same, lists what each slot holds and when it was saved, and keeps quick load and quick
 save at opposite ends.
@@ -465,8 +494,8 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 * **File** — open, save and export profile recordings (*Open profile run…*, *Recent profile runs*,
   *Save profile run*, *Save profile run as…*, *Export profile*), *Load debug info…*, and
   *Export folders…*.
-* **State** — [save states](#save-states): *Quick load* (`Ctrl+F1`) at the top and *Quick save*
-  (`Ctrl+F3`) at the bottom, with *Load from slot*, *Select slot* and *Save to slot* between them,
+* **State** — [save states](#save-states): *Quick load* (Host+`F1`) at the top and *Quick save*
+  (Host+`F3`) at the bottom, with *Load from slot*, *Select slot* and *Save to slot* between them,
   each slot shown with the time it was saved, and *Save state folder…*.
 * **View** — show or hide any panel.
 * **Layout** — *Reset to Default Layout* reopens everything and rebuilds the default docking arrangement.
@@ -506,15 +535,10 @@ Active when the debugger window has focus and you are not typing into a search o
 
 On macOS these are the physical `Control` and `Shift` keys, not `Command`.
 
-The [save-state](#save-states) keys work in both windows, running or paused:
-
-| Key | Action |
-| --- | --- |
-| `Ctrl`+`F1` | Quick load from the selected slot |
-| `Ctrl`+`F3` | Quick save to the selected slot |
-| `Ctrl`+`0` … `Ctrl`+`9` | Select slot 0 to 9 |
-
-In the emulator window on macOS they are `Command`, like the other emulator hotkeys.
+The same keys reach the debugger from the emulator window with the [host key](#the-host-key) held
+(`Scroll Lock`+`F10` steps over), without the X16 seeing them; plain, they are the X16's. The
+host key's commands, save states among them, work in both windows, running or paused. **Help →
+Keyboard Shortcuts** lists them under the host key in use.
 
 ### A tour of the panels
 

@@ -39,6 +39,7 @@ char window_title[255];
 
 // See timing.h. Measured every 5 s; 100 until the first measurement.
 const char *(*timing_title_note)(void) = NULL;
+const char *(*timing_title_status)(void) = NULL;
 static uint32_t title_perf      = 100;
 static bool     title_note_shown = false;
 
@@ -51,7 +52,7 @@ timing_refresh_title(void)
 		snprintf(perf, sizeof perf, " (%u%%)", (unsigned)title_perf);
 	}
 	snprintf(window_title, sizeof window_title, WINDOW_TITLE "%s%s%s%s", perf, note ? " - " : "", note ? note : "",
-	         mouse_grabbed ? MOUSE_GRAB_MSG : "");
+	         timing_title_status ? timing_title_status() : mouse_grabbed ? MOUSE_GRAB_MSG : "");
 	title_note_shown = note != NULL;
 	video_update_title(window_title);
 }

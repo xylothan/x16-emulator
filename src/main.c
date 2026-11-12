@@ -660,8 +660,19 @@ usage()
 	printf("\temulated filesystem starts in. Default is the current\n");
 	printf("\tworking directory if it lies within the hierarchy of fsroot,\n");
 	printf("\totherwise it defaults to fsroot itself.\n");
+	printf("-hostkey <key>\n");
+	printf("\tThe key that turns the keyboard into emulator commands:\n");
+	printf("\thold it with R to reset, V to paste, F to go fullscreen,\n");
+	printf("\tM to capture the mouse, F3 to save a state, F1 to load one,\n");
+	printf("\t0-9 to pick a state slot, and so on; tap it alone to stay in\n");
+	printf("\tcommand mode until the next tap or Esc. It and those keys\n");
+	printf("\tnever reach the X16. Default: ScrollLock (Right Cmd on\n");
+	printf("\tmacOS). Any SDL key name: \"Right Ctrl\", Pause, F13, Menu...\n");
+	printf("-ctrlkeys\n");
+	printf("\tAlso take the same commands as Ctrl+key (Cmd on macOS), as\n");
+	printf("\tupstream does. The X16 then never sees those Ctrl keys.\n");
 	printf("-noemucmdkeys\n");
-	printf("\tDisable emulator command keys.\n");
+	printf("\tDisable the -ctrlkeys commands. The host key still works.\n");
 	printf("-capture\n");
 	printf("\tStart emulator with mouse/keyboard captured.\n");
 	printf("-nokeyboardcapture\n");
@@ -1703,6 +1714,22 @@ main(int argc, char **argv)
 			startin_path = (uint8_t *)argv[0];
 			argc--;
 			argv++;
+		} else if (!strcmp(argv[0], "-hostkey")) {
+			argc--;
+			argv++;
+			if (!argc) {
+				usage();
+			}
+			if (!video_set_host_key(argv[0], true)) {
+				fprintf(stderr, "-hostkey: no key is called \"%s\"\n", argv[0]);
+				exit(1);
+			}
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-ctrlkeys")) {
+			argc--;
+			argv++;
+			video_set_ctrl_shortcuts(true, true);
 		} else if (!strcmp(argv[0], "-noemucmdkeys")) {
 			argc--;
 			argv++;

@@ -36,6 +36,21 @@ bool video_event_targets_debug_ui(const SDL_Event *ev);
 void video_debug_ui_shortcut_key(const SDL_Event *ev);
 void video_debug_ui_feed_event(const SDL_Event *ev);
 
+// ─── The host key (hostkey.h) ──────────────────────────────────────────────
+// Every key event from either window goes through video_host_key_event()
+// first, running or paused; true means it was the host key's and must go no
+// further. The emulator's own commands -- reset, paste, fullscreen, save
+// states and the rest -- are the host key plus a key, so none of the guest's
+// keys or Ctrl combinations is taken. -ctrlkeys brings back upstream's Ctrl
+// (Cmd on macOS) shortcuts as well.
+bool        video_host_key_event(const SDL_Event *ev);
+// A key by SDL's name ("ScrollLock", "Right Ctrl", "F13") or "Scroll Lock",
+// "Right Cmd", "Right Win", "Menu". The command line's choice beats the
+// debugger's saved one. False for a name that is not a key.
+bool        video_set_host_key(const char *name, bool from_cli);
+void        video_set_ctrl_shortcuts(bool on, bool from_cli);
+const char *video_host_key_name(void);
+
 // ─── Debug view accessors ──────────────────────────────────────────────────
 // Per-scanline history of the layer registers each display line was actually
 // rendered with. Programs rewrite MAPBASE/TILEBASE/scroll part-way down a frame
