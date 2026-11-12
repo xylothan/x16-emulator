@@ -465,6 +465,9 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 * **File** — open, save and export profile recordings (*Open profile run…*, *Recent profile runs*,
   *Save profile run*, *Save profile run as…*, *Export profile*), *Load debug info…*, and
   *Export folders…*.
+* **State** — [save states](#save-states): *Quick load* (`Ctrl+F1`) at the top and *Quick save*
+  (`Ctrl+F3`) at the bottom, with *Load from slot*, *Select slot* and *Save to slot* between them,
+  each slot shown with the time it was saved, and *Save state folder…*.
 * **View** — show or hide any panel.
 * **Layout** — *Reset to Default Layout* reopens everything and rebuilds the default docking arrangement.
 * **System** — *Reset* (`Ctrl+Shift+F5`, keeps your breakpoints), *Trigger IRQ*, *Trigger NMI*, and *Settings…*.
@@ -477,7 +480,7 @@ the right. A search box at the top of the list finds a setting by name.
 | --- | --- |
 | General | Appearance (interface scale), Navigation (switching to Disassembly or Source on a break) |
 | Debugging | Stepping & interrupts, Debug info (switch to another builds .dbg while running), Source folders, Safety |
-| Files | Export folders (where screenshots, memory dumps and profile exports go; profile export name and date stamp) |
+| Files | Export folders (where screenshots, memory dumps, save states and profile exports go; profile export name and date stamp) |
 | Memory & Audio | Memory (change highlighting), Audio (hold while paused) |
 | I/O trace | Capture (on/off, ring size, SD image indexing), Devices (per-device capture) |
 | Performance | Frame budget (target FPS, idle detection, history) |
