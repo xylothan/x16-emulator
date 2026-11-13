@@ -142,7 +142,7 @@ Windows ships in three flavours. Unless you have a reason to pick otherwise, tak
 | --- | --- |
 | `x16emu_win64`, `x16emu_win32`, `x16emu_win-arm64` | A single self-contained `x16emu.exe`, statically linked. Nothing to install — no SDL2, zlib or Visual C++ redistributable. Built without FluidSynth, so it offers no MIDI options at all. |
 | `…-midi` | A separate build with FluidSynth compiled in, shipped with `libfluidsynth-3.dll` for the MIDI synth (`-midicard` / `-sf2`). Take this if you want MIDI. |
-| `x16emu_win64-mingw`, `x16emu_win32-mingw` | The older MinGW build, kept as a fallback. Ships MIDI support and the `-trace` option, at the cost of around 25 DLLs alongside the executable. |
+| `x16emu_win64-mingw` | The older MinGW build, 64-bit only, kept as a fallback. Ships MIDI support and the `-trace` option, at the cost of around 25 DLLs alongside the executable. |
 
 All of them include the debugger and the DAP server.
 

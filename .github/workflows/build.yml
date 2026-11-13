@@ -331,11 +331,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # path-type inherit on the 32-bit leg exposes the runner's own PATH
-          # inside MSYS2; minimal is the action's default and what the 64-bit
-          # leg has always used.
+          # 64-bit only: MSYS2 no longer carries 32-bit (MINGW32) SDL2 or
+          # FluidSynth. The MSVC jobs above still ship 32-bit Windows builds.
           - { arch: x86_64, msystem: MINGW64, prefix: x86_64, path_type: minimal, package: x16emu_win64-mingw }
-          - { arch: i686,   msystem: MINGW32, prefix: i686,   path_type: inherit, package: x16emu_win32-mingw }
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
