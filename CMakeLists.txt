@@ -354,6 +354,8 @@ set(X16_SOURCES
     src/icon.c
     src/timing.c
     src/savestate.c
+    src/state_slots.c
+    src/hostkey.c
     src/wav_recorder.c
     src/testbench.c
     src/files.c
@@ -829,6 +831,10 @@ x16_add_test(sdcard_fat
 x16_add_test(export_paths
     SOURCES tests/test_export_paths.c tests/support/harness.c src/export_paths.c)
 
+# The host key's bookkeeping: no SDL, nothing else.
+x16_add_test(hostkey
+    SOURCES tests/test_hostkey.c tests/support/harness.c src/hostkey.c)
+
 # vera_psg.c likewise has no dependency beyond its own header and libc.
 x16_add_test(vera_psg
     SOURCES tests/test_vera_psg.c tests/support/harness.c src/vera_psg.c)
@@ -841,7 +847,7 @@ x16_add_test(vera_psg
 set(VERA_VIDEO_TEST_SOURCES
     src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c
     src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c src/host_prof.c
-    src/export_paths.c)
+    src/export_paths.c src/hostkey.c)
 
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c

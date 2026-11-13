@@ -326,10 +326,62 @@ guest code can detect whether the emulator it is running under understands them.
 * [Official X16 documentation][x16docs] — the machine itself, its KERNAL and BASIC
 * [WebAssembly notes][webassembly] — building the web target
 
-The emulator hotkeys (`Ctrl`+`F` for fullscreen, `Ctrl`+`M` for mouse capture, `Ctrl`+`R` to
-reset, `Ctrl`+`V` to paste, and so on, or their command-key equivalents on macOS) are upstream's
-and are unchanged. ADD adds a few of its own, listed under
-[Keyboard shortcuts](#keyboard-shortcuts).
+### The host key
+
+The emulator's own commands are on one key, **Scroll Lock** (**Right Command** on a Mac, which has
+no Scroll Lock), so that every other key and every `Ctrl` combination belongs to the X16. Hold it
+and press a command key, or tap it on its own to stay in command mode, shown in the title bar,
+until you tap it again or press `Esc`. Neither the host key nor anything pressed with it reaches
+the X16.
+
+| Host + | Action |
+| --- | --- |
+| `F1` | Quick load from the selected [save-state](#save-states) slot |
+| `F3` | Quick save to the selected slot |
+| `0` … `9` | Select slot 0 to 9 |
+| `R` | Reset |
+| `Backspace` | NMI |
+| `V` | Paste |
+| `F` or `Enter` | Fullscreen |
+| `M` | Capture the mouse and keyboard, and release them |
+| `=` or `+` | Warp speed |
+| `P` | Screenshot |
+| `S` | Dump memory |
+| `A` / `D` | Attach / detach the SD card |
+| `F5` `F9` `F10` `F11` | The [debugger's keys](#keyboard-shortcuts), from the emulator window |
+| `Pause` or `F12` | Pause into the debugger |
+
+`-hostkey` picks another key by its SDL name: `-hostkey "Right Ctrl"`, `-hostkey F13`,
+`-hostkey Menu`. With `-imgui` it can also be set as `HostKey=` in `imgui.ini`; the command line
+wins.
+
+Upstream puts these commands on `Ctrl` (`Command` on macOS), which takes those combinations from
+the X16: `Ctrl`+`1` to `Ctrl`+`8` set the text colour, for one. `-ctrlkeys` (or `CtrlShortcuts=1`
+in `imgui.ini`) brings them back alongside the host key; `-noemucmdkeys`, and a program writing
+the emulator's register to turn them off, still turn off only those.
+
+### Save states
+
+Each program gets ten save slots, 0 to 9. Host+`F3` saves the machine to the selected slot and
+Host+`F1` loads it back; Host+`0` to Host+`9` select a slot. `F2` sits between the two on
+purpose, so a load is never one slip away from a save. With `-imgui` the debugger's **State** menu
+does the same, lists what each slot holds and when it was saved, and keeps quick load and quick
+save at opposite ends.
+
+A slot is a file named after the program, `GAME-3.x16s` for `-prg GAME.PRG` (`x16emu-3.x16s`
+without one), in the working directory. With `-imgui` the folder is set in **Settings → Export
+folders** and is kept in `imgui.ini`, with the selected slot. The window title says what happened:
+`Saved slot 3`, or why not.
+
+A save or load asked for while the machine runs happens at the end of the current frame. Paused,
+a load happens at once, and so does a save if the machine is paused at the end of a frame; one
+paused part-way through a frame is refused rather than saved half-done.
+
+A slot loads only into the same emulator build, ROM and machine configuration that saved it (see
+[Scripting input for automated tests](#scripting-input-for-automated-tests) under the debug
+protocol, which reads and writes the same files). After the
+first load, `-nvram` and cartridge NVRAM are no longer written back for the rest of the session,
+since what they would record never happened on that machine.
 
 
 Advanced Debugging
@@ -442,6 +494,9 @@ inside an interrupt handler, the 24-bit PC as `KK:PPPP`, and the elapsed cycle a
 * **File** — open, save and export profile recordings (*Open profile run…*, *Recent profile runs*,
   *Save profile run*, *Save profile run as…*, *Export profile*), *Load debug info…*, and
   *Export folders…*.
+* **State** — [save states](#save-states): *Quick load* (Host+`F1`) at the top and *Quick save*
+  (Host+`F3`) at the bottom, with *Load from slot*, *Select slot* and *Save to slot* between them,
+  each slot shown with the time it was saved, and *Save state folder…*.
 * **View** — show or hide any panel.
 * **Layout** — *Reset to Default Layout* reopens everything and rebuilds the default docking arrangement.
 * **System** — *Reset* (`Ctrl+Shift+F5`, keeps your breakpoints), *Trigger IRQ*, *Trigger NMI*, and *Settings…*.
@@ -454,7 +509,7 @@ the right. A search box at the top of the list finds a setting by name.
 | --- | --- |
 | General | Appearance (interface scale), Navigation (switching to Disassembly or Source on a break) |
 | Debugging | Stepping & interrupts, Debug info (switch to another builds .dbg while running), Source folders, Safety |
-| Files | Export folders (where screenshots, memory dumps and profile exports go; profile export name and date stamp) |
+| Files | Export folders (where screenshots, memory dumps, save states and profile exports go; profile export name and date stamp) |
 | Memory & Audio | Memory (change highlighting), Audio (hold while paused) |
 | I/O trace | Capture (on/off, ring size, SD image indexing), Devices (per-device capture) |
 | Performance | Frame budget (target FPS, idle detection, history) |
@@ -480,14 +535,10 @@ Active when the debugger window has focus and you are not typing into a search o
 
 On macOS these are the physical `Control` and `Shift` keys, not `Command`.
 
-These work in the emulator window and are handy while debugging graphics:
-
-| Key | Action |
-| --- | --- |
-| `Ctrl`+`F3` | Toggle VERA layer 0 |
-| `Alt`+`F3` | Toggle VERA layer 1 |
-| `Shift`+`F3` | Toggle sprites |
-| `Shift`+`F8` | Toggle KERNAL skip |
+The same keys reach the debugger from the emulator window with the [host key](#the-host-key) held
+(`Scroll Lock`+`F10` steps over), without the X16 seeing them; plain, they are the X16's. The
+host key's commands, save states among them, work in both windows, running or paused. **Help →
+Keyboard Shortcuts** lists them under the host key in use.
 
 ### A tour of the panels
 

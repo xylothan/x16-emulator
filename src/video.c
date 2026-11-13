@@ -36,6 +36,9 @@
 #include "render_backend.h"
 #include "x16_hash.h"
 #include "savestate.h"
+#include "state_slots.h"
+#include "timing.h"
+#include "hostkey.h"
 
 #include <stdbool.h>
 #include <limits.h>
@@ -106,10 +109,19 @@
 #ifdef __APPLE__
 #define LSHORTCUT_KEY SDL_SCANCODE_LGUI
 #define RSHORTCUT_KEY SDL_SCANCODE_RGUI
+#define SHORTCUT_MOD  KMOD_GUI
 #else
 #define LSHORTCUT_KEY SDL_SCANCODE_LCTRL
 #define RSHORTCUT_KEY SDL_SCANCODE_RCTRL
+#define SHORTCUT_MOD  KMOD_CTRL
 #endif
+
+// Upstream's Ctrl (Cmd) shortcuts, as well as the host key's: -ctrlkeys.
+// See video_set_host_key().
+static bool ctrl_shortcuts     = false;
+static bool host_key_from_cli  = false;
+static bool ctrl_keys_from_cli = false;
+static const char *video_title_status(void);
 
 // When rendering a layer line, we can amortize some of the cost by calculating multiple pixels at a time.
 #define LAYER_PIXELS_PER_ITERATION 8
@@ -309,8 +321,7 @@ mousegrab_toggle() {
 	SDL_SetWindowGrab(window, mouse_grabbed && !no_keyboard_capture);
 	SDL_SetRelativeMouseMode(mouse_grabbed);
 	SDL_ShowCursor((mouse_grabbed || kernal_mouse_enabled) ? SDL_DISABLE : SDL_ENABLE);
-	sprintf(window_title, WINDOW_TITLE "%s", mouse_grabbed ? MOUSE_GRAB_MSG : "");
-	video_update_title(window_title);
+	timing_refresh_title();
 }
 
 // Re-derive the layer properties from the raw layer registers and seed both
@@ -507,6 +518,7 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 	                          SDL_strcasecmp(requested_driver, "dx12") == 0;
 	renderer_screen_x_scale = screen_x_scale;
 	renderer_quality = quality;
+	timing_title_status = video_title_status;
 
 #ifdef __EMSCRIPTEN__
 	// Setting this flag would render the web canvas outside of its bounds on high dpi screens
@@ -2605,12 +2617,21 @@ video_debug_ui_pump_paused(void)
 			return -1;
 		}
 
+		if (video_host_key_event(&event)) {
+			continue;
+		}
 		// Only an active text field (goto/search) suppresses the shortcuts; a
 		// merely focused panel does not, so F5/F10/F11 work while just viewing.
 		if (event.type == SDL_KEYDOWN && imgui_window &&
 		    event.key.windowID == imgui_window_id &&
 		    !debug_ui_want_text_input()) {
 			video_imgui_debug_key(event.key.keysym);
+		} else if (event.type == SDL_KEYDOWN && !(imgui_window && event.key.windowID == imgui_window_id) &&
+		           ctrl_shortcuts && !(disable_emu_cmd_keys || mouse_grabbed) &&
+		           (event.key.keysym.mod & SHORTCUT_MOD) != 0) {
+			// -ctrlkeys: the save-state slot keys work while paused too, as
+			// with the host key; a load is the usual reason to want one there.
+			state_slots_hotkey(event.key.keysym.sym);
 		}
 	}
 
@@ -2645,6 +2666,144 @@ void video_debug_ui_shortcut_key(const SDL_Event *ev) { (void)ev; }
 void video_debug_ui_feed_event(const SDL_Event *ev) { (void)ev; }
 #endif
 
+// ─── The host key ────────────────────────────────────────────────────────────
+// See video.h and hostkey.h.
+
+static const struct { const char *name; SDL_Scancode sc; } host_key_aliases[] = {
+	{ "Scroll Lock", SDL_SCANCODE_SCROLLLOCK },
+	{ "Right Cmd", SDL_SCANCODE_RGUI },
+	{ "Right Command", SDL_SCANCODE_RGUI },
+	{ "Right Win", SDL_SCANCODE_RGUI },
+	{ "Menu", SDL_SCANCODE_APPLICATION },
+};
+
+bool
+video_set_host_key(const char *name, bool from_cli)
+{
+	if (!name || !name[0])
+		return false;
+	SDL_Scancode sc = SDL_GetScancodeFromName(name);
+	for (size_t i = 0; sc == SDL_SCANCODE_UNKNOWN && i < sizeof host_key_aliases / sizeof host_key_aliases[0]; i++)
+		if (SDL_strcasecmp(name, host_key_aliases[i].name) == 0)
+			sc = host_key_aliases[i].sc;
+	if (sc == SDL_SCANCODE_UNKNOWN)
+		return false;
+	if (from_cli || !host_key_from_cli)
+		hostkey_set((int)sc);
+	host_key_from_cli |= from_cli;
+	return true;
+}
+
+void
+video_set_ctrl_shortcuts(bool on, bool from_cli)
+{
+	if (from_cli || !ctrl_keys_from_cli)
+		ctrl_shortcuts = on;
+	ctrl_keys_from_cli |= from_cli;
+}
+
+const char *
+video_host_key_name(void)
+{
+	switch (hostkey_scancode()) {
+		case SDL_SCANCODE_SCROLLLOCK:  return "Scroll Lock";
+		case SDL_SCANCODE_APPLICATION: return "Menu";
+#ifdef __APPLE__
+		case SDL_SCANCODE_RGUI:        return "Right Cmd";
+		case SDL_SCANCODE_LGUI:        return "Left Cmd";
+#else
+		case SDL_SCANCODE_RGUI:        return "Right Win";
+		case SDL_SCANCODE_LGUI:        return "Left Win";
+#endif
+		default:                       return SDL_GetScancodeName((SDL_Scancode)hostkey_scancode());
+	}
+}
+
+// The title's last part: that the host key is latched, and how to end a
+// mouse capture.
+static const char *
+video_title_status(void)
+{
+	static char buf[160];
+	buf[0] = 0;
+	if (hostkey_latched())
+		snprintf(buf, sizeof buf, " [host key on: %s or Esc to leave]", video_host_key_name());
+	if (mouse_grabbed) {
+		size_t n = strlen(buf);
+		snprintf(buf + n, sizeof buf - n, " (%s+M to end mouse/keyboard capture)", video_host_key_name());
+	}
+	return buf;
+}
+
+// One emulator command: the host key plus this key, or with -ctrlkeys Ctrl
+// (Cmd) plus it. False for a key that is no command.
+static bool
+video_host_command(SDL_Keysym ks)
+{
+	switch (ks.sym) {
+		case SDLK_s:         machine_dump("user keyboard request"); return true;
+		case SDLK_r:         machine_reset(); return true;
+		case SDLK_BACKSPACE: machine_nmi(); return true;
+		case SDLK_v:         machine_paste(SDL_GetClipboardText(), true); return true;
+		case SDLK_f:
+		case SDLK_RETURN:
+			is_fullscreen = !is_fullscreen;
+			SDL_SetWindowFullscreen(window, is_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+			return true;
+		case SDLK_PLUS:
+		case SDLK_EQUALS:    machine_toggle_warp(); return true;
+		case SDLK_a:         sdcard_attach(); return true;
+		case SDLK_d:         sdcard_detach(); return true;
+		case SDLK_m:         mousegrab_toggle(); return true;
+#ifndef __EMSCRIPTEN__
+		case SDLK_p:         screenshot(); return true;
+#endif
+		default:
+			break;
+	}
+	// The debugger's keys, which this way reach it from the emulator window
+	// without the guest seeing them.
+	switch (ks.scancode) {
+		case SDL_SCANCODE_F5:
+		case SDL_SCANCODE_F9:
+		case SDL_SCANCODE_F10:
+		case SDL_SCANCODE_F11:
+		case SDL_SCANCODE_F12:
+		case SDL_SCANCODE_PAUSE:
+#ifdef HAS_IMGUI
+			if (video_debug_ui_available()) {
+				if (ks.scancode == SDL_SCANCODE_F12)
+					ks.scancode = SDL_SCANCODE_PAUSE;
+				video_imgui_debug_key(ks);
+				return true;
+			}
+#endif
+			if ((ks.scancode == SDL_SCANCODE_F12 || ks.scancode == SDL_SCANCODE_PAUSE) && debugger_enabled &&
+			    DEBUGIsRunning()) {
+				DEBUGPause();
+				return true;
+			}
+			return false;
+		default:
+			break;
+	}
+	return state_slots_hotkey(ks.sym); // F1 load, F3 save, 0-9 select a save-state slot
+}
+
+bool
+video_host_key_event(const SDL_Event *ev)
+{
+	if (ev->type != SDL_KEYDOWN && ev->type != SDL_KEYUP)
+		return false;
+	const bool     was_latched = hostkey_latched();
+	hostkey_action a = hostkey_event(ev->type == SDL_KEYDOWN, (int)ev->key.keysym.scancode, ev->key.repeat != 0);
+	if (a == HOSTKEY_COMMAND)
+		video_host_command(ev->key.keysym);
+	if (hostkey_latched() != was_latched)
+		timing_refresh_title();
+	return a != HOSTKEY_PASS;
+}
+
 bool
 video_update()
 {
@@ -2674,6 +2833,9 @@ video_update()
 				// Closing the debugger window must not kill the emulator.
 				if (event.type == SDL_WINDOWEVENT &&
 				    event.window.event == SDL_WINDOWEVENT_CLOSE) {
+					continue;
+				}
+				if (video_host_key_event(&event)) {
 					continue;
 				}
 				// The VS-style shortcuts also work while the machine is running
@@ -2712,45 +2874,26 @@ video_update()
 					break;
 			}
 		}
+		if (video_host_key_event(&event)) {
+			continue;
+		}
 		if (event.type == SDL_KEYDOWN) {
 			bool consumed = false;
-			if (cmd_down && !(disable_emu_cmd_keys || mouse_grabbed)) {
-				if (event.key.keysym.sym == SDLK_s) {
-					machine_dump("user keyboard request");
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_r) {
-					machine_reset();
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
-					machine_nmi();
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_v) {
-					machine_paste(SDL_GetClipboardText(), true);
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_f || event.key.keysym.sym == SDLK_RETURN) {
-					is_fullscreen = !is_fullscreen;
-					SDL_SetWindowFullscreen(window, is_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_PLUS || event.key.keysym.sym == SDLK_EQUALS) {
-					machine_toggle_warp();
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_a) {
-					sdcard_attach();
-					consumed = true;
-				} else if (event.key.keysym.sym == SDLK_d) {
-					sdcard_detach();
-					consumed = true;
-#ifndef __EMSCRIPTEN__
-				} else if (event.key.keysym.sym == SDLK_p) {
-					screenshot();
-					consumed = true;
-#endif
-				}
-			}
-			if (cmd_down) {
+			// -ctrlkeys: upstream's Ctrl (Cmd) shortcuts, the same commands
+			// as the host key's. They take those Ctrl combinations from the
+			// guest, which the host key does not, so they are off by default,
+			// and a program can turn them off too (-noemucmdkeys, $9FB7).
+			if (ctrl_shortcuts && cmd_down) {
 				if (event.key.keysym.sym == SDLK_m) {
-					mousegrab_toggle();
-					consumed = true;
+					consumed = video_host_command(event.key.keysym);
+				} else if (!(disable_emu_cmd_keys || mouse_grabbed)) {
+					SDL_Keysym ks = event.key.keysym;
+					// Only the commands upstream had, and the slot keys: the
+					// debugger's F-keys stay plain F-keys here.
+					if (!(ks.scancode >= SDL_SCANCODE_F5 && ks.scancode <= SDL_SCANCODE_F12) &&
+					    ks.scancode != SDL_SCANCODE_PAUSE) {
+						consumed = video_host_command(ks);
+					}
 				}
 			}
 			if (alt_down && !disable_emu_cmd_keys) {

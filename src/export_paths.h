@@ -18,8 +18,9 @@ extern "C" {
 
 typedef enum {
 	EXPORT_PROFILE = 0, // Profile panel: .folded, .json, .trace.json
-	EXPORT_SCREENSHOT,  // Ctrl+P
-	EXPORT_DUMP,        // Ctrl+S, and the dump made when the PC reaches $FFFF
+	EXPORT_SCREENSHOT,  // host key+P
+	EXPORT_DUMP,        // host key+S, and the dump made when the PC reaches $FFFF
+	EXPORT_STATE,       // save-state slots: host key+F3 / +F1 and the State menu
 	EXPORT_KINDS
 } export_kind_t;
 
@@ -32,6 +33,12 @@ const char *export_dir(export_kind_t kind);
 // in it is left alone. False if the result does not fit, or the folder cannot
 // be created (`out` then holds the path that was wanted).
 bool export_path(export_kind_t kind, const char *name, char *out, size_t out_size);
+
+// The file name of save-state slot `slot` for the program at `prg_path`:
+// "GAME-3.x16s" for "games/GAME.PRG,0801". The folder, the load address
+// after a comma and the extension are dropped. Without a program (NULL or
+// empty) it is "x16emu-3.x16s". False if it does not fit in `out`.
+bool export_state_name(const char *prg_path, int slot, char *out, size_t out_size);
 
 // Does `name` say where it goes (absolute, or containing a folder)?
 bool export_name_has_folder(const char *name);

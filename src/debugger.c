@@ -494,6 +494,12 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 			// received no input at all: dead buttons, dead text fields, stale
 			// mouse state. -imgui -bp reaches this combination without asking
 			// for it, since -bp switches the text debugger on.
+			// The host key and its commands first, from either window.
+			if (video_host_key_event(&event)) {
+				if (video_debug_ui_available())
+					video_debug_ui_feed_event(&event);
+				continue;
+			}
 			if (video_debug_ui_available()) {
 				video_debug_ui_feed_event(&event);
 				// Events aimed at the debugger window must not also drive the

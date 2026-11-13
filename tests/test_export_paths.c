@@ -63,6 +63,34 @@ main(void)
 		remove("exp_test_out/profiles/b.txt");
 	}
 
+	// ── Save-state slot names ───────────────────────────────────────────────
+	{
+		static const struct {
+			const char *prg;
+			int         slot;
+			const char *want;
+		} cases[] = {
+			{"GAME.PRG", 3, "GAME-3.x16s"},
+			{"games/sub/GAME.PRG", 0, "GAME-0.x16s"},
+			{"games\\GAME.PRG", 9, "GAME-9.x16s"},
+			{"C:GAME.PRG", 1, "GAME-1.x16s"},
+			{"GAME.PRG,0801", 2, "GAME-2.x16s"},
+			{"dir.v2/GAME", 4, "GAME-4.x16s"},
+			{"my.game.prg", 5, "my.game-5.x16s"},
+			{".prg", 6, ".prg-6.x16s"},
+			{"", 7, "x16emu-7.x16s"},
+			{NULL, 8, "x16emu-8.x16s"},
+		};
+		for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+			char msg[96];
+			snprintf(msg, sizeof msg, "slot name for \"%s\"", cases[i].prg ? cases[i].prg : "(none)");
+			check(export_state_name(cases[i].prg, cases[i].slot, out, sizeof out) && strcmp(out, cases[i].want) == 0,
+			      msg);
+		}
+		char small[8];
+		check(!export_state_name("GAME.PRG", 3, small, sizeof small), "a slot name that does not fit fails");
+	}
+
 	// ── Too long is refused, not cut ────────────────────────────────────────
 	char tiny[8];
 	check(!export_path(EXPORT_PROFILE, "run.json", tiny, sizeof tiny), "a path that does not fit fails");

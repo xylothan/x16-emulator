@@ -104,8 +104,19 @@ struct DebugUiSettings {
     std::string export_profile_dir;
     std::string export_screenshot_dir;
     std::string export_dump_dir;
+    std::string export_state_dir;
     std::string profile_export_name = "profile"; // the Profile panel's file name
     bool        profile_export_stamp = false;     // add the date and time to it
+
+    // --- Save states ----------------------------------------------------------
+    // The slot the host key's F3 and F1 use (state_slots.h), kept for next time.
+    int state_slot = 0;
+
+    // --- Keyboard -------------------------------------------------------------
+    // The host key by name, empty for the default (video_set_host_key), and
+    // whether upstream's Ctrl shortcuts work too. -hostkey and -ctrlkeys win.
+    std::string host_key;
+    bool        ctrl_shortcuts = false;
 };
 
 // Push the export folders into export_paths, after a load or an edit.

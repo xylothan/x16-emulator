@@ -29,6 +29,7 @@ static inline void debug_server_note_resumed(void) { }
 static inline void debug_server_shutdown(void) { }
 static inline bool debug_server_wait(uint32_t timeout_ms) { (void)timeout_ms; return false; }
 static inline void debug_server_frame_end(void) { }
+static inline bool debug_server_step_pending(void) { return false; }
 
 #else
 
@@ -101,6 +102,9 @@ bool debug_server_wait(uint32_t timeout_ms);
 // Called once per completed emulated frame, at the same point as the -input
 // script's frame tick, so frame numbers agree with input scripts.
 void debug_server_frame_end(void);
+
+// Whether a client's x16/step is still running frames.
+bool debug_server_step_pending(void);
 
 #endif // HAS_DAP
 

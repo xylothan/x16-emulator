@@ -66,6 +66,7 @@
 #include "midi.h"
 #include "git_rev.h"
 #include "savestate.h"
+#include "state_slots.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -659,8 +660,19 @@ usage()
 	printf("\temulated filesystem starts in. Default is the current\n");
 	printf("\tworking directory if it lies within the hierarchy of fsroot,\n");
 	printf("\totherwise it defaults to fsroot itself.\n");
+	printf("-hostkey <key>\n");
+	printf("\tThe key that turns the keyboard into emulator commands:\n");
+	printf("\thold it with R to reset, V to paste, F to go fullscreen,\n");
+	printf("\tM to capture the mouse, F3 to save a state, F1 to load one,\n");
+	printf("\t0-9 to pick a state slot, and so on; tap it alone to stay in\n");
+	printf("\tcommand mode until the next tap or Esc. It and those keys\n");
+	printf("\tnever reach the X16. Default: ScrollLock (Right Cmd on\n");
+	printf("\tmacOS). Any SDL key name: \"Right Ctrl\", Pause, F13, Menu...\n");
+	printf("-ctrlkeys\n");
+	printf("\tAlso take the same commands as Ctrl+key (Cmd on macOS), as\n");
+	printf("\tupstream does. The X16 then never sees those Ctrl keys.\n");
 	printf("-noemucmdkeys\n");
-	printf("\tDisable emulator command keys.\n");
+	printf("\tDisable the -ctrlkeys commands. The host key still works.\n");
 	printf("-capture\n");
 	printf("\tStart emulator with mouse/keyboard captured.\n");
 	printf("-nokeyboardcapture\n");
@@ -1702,6 +1714,22 @@ main(int argc, char **argv)
 			startin_path = (uint8_t *)argv[0];
 			argc--;
 			argv++;
+		} else if (!strcmp(argv[0], "-hostkey")) {
+			argc--;
+			argv++;
+			if (!argc) {
+				usage();
+			}
+			if (!video_set_host_key(argv[0], true)) {
+				fprintf(stderr, "-hostkey: no key is called \"%s\"\n", argv[0]);
+				exit(1);
+			}
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-ctrlkeys")) {
+			argc--;
+			argv++;
+			video_set_ctrl_shortcuts(true, true);
 		} else if (!strcmp(argv[0], "-noemucmdkeys")) {
 			argc--;
 			argv++;
@@ -1920,6 +1948,7 @@ main(int argc, char **argv)
 		}
 	}
 
+	state_slots_set_program(prg_path); // before the ",address" is cut off
 	prg_override_start = -1;
 	if (prg_path) {
 		char *comma = strchr(prg_path, ',');
@@ -2819,6 +2848,7 @@ emulator_step_during_move(void)
 		// transitions without entering a debugger SDL event pump from this
 		// nested window procedure. Check before the first instruction and every
 		// one after it, so a breakpointed instruction is never executed.
+		STATE_SLOTS_POLL();
 		if ((debugger_enabled || debug_gate_ui)
 		    && DEBUGPollStatusNoPump(regs.pc) != 0) {
 			break;
@@ -2900,6 +2930,7 @@ emulator_step_during_move(void)
 		debug_gate_refresh();
 		input_tick();
 		debug_server_frame_end();
+		state_slots_frame_end();
 	}
 
 	in_step = false;
@@ -2940,6 +2971,9 @@ emulator_loop(void *param)
 		// machine: both used to be out-of-line calls on every instruction,
 		// which was the largest single host cost of having a debugger
 		// attached at all.
+		// A quick save or load waits for the first instruction of a frame:
+		// here, before the debugger's poll, which is where an x16/step stops.
+		STATE_SLOTS_POLL();
 		if (debugger_enabled || debug_gate_ui || debug_gate_dap) {
 			int dbgCmd = DEBUGPollStatus(regs.pc);
 			if (dbgCmd > 0) continue;
@@ -3148,6 +3182,7 @@ emulator_loop(void *param)
 			debug_gate_refresh();
 			input_tick();
 			debug_server_frame_end();
+			state_slots_frame_end();
 			if (!bench_tick() || !capture_cli_tick()) {
 				break;
 			}
