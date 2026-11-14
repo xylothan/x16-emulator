@@ -573,6 +573,11 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 		// DEBUG_POLL_INTERVAL instructions whichever path ran them.
 		if (debug_poll_tick >= DEBUG_POLL_INTERVAL || ++debug_poll_tick >= DEBUG_POLL_INTERVAL) {
 			debug_poll_tick = 0;
+			// Not from inside a window drag: a request is answered from the
+			// nested window procedure otherwise, and some of them do real
+			// work. Requests wait for the drag to end, as they always have.
+			if (!allow_ui_pump)
+				return 0;
 			// Timed only with a client possible: the clock reads would
 			// otherwise be the most frequent thing here.
 			const bool timed = debug_server_is_enabled();

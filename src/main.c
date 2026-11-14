@@ -2822,13 +2822,11 @@ emulator_step_during_move(void)
 	if (in_step) {
 		return;
 	}
-	// DAP dispatch can spend up to 500 ms dropping a client that stopped reading.
-	// Do not put that bounded send loop inside the OS window procedure. Local
-	// debuggers use the no-pump status path below; DAP retains its existing
-	// pause-during-drag behaviour until its output path is independently queued.
-	if (debug_server_is_enabled()) {
-		return;
-	}
+	// A DAP server keeps running too. The no-pump status path below never
+	// reads the socket, so requests wait for the drag to end; what the machine
+	// itself announces meanwhile (a stop, a finished step) is still sent, but
+	// with no-wait set so a client that is not reading costs it at once rather
+	// than stalling the window procedure for the send loop's 500 ms.
 
 	// Already ahead of real time: do nothing at all. This is the common case
 	// now that a fast drag calls us on every mouse message, and it has to stay
@@ -2838,6 +2836,7 @@ emulator_step_during_move(void)
 	}
 
 	in_step = true;
+	debug_server_set_no_wait(true);
 
 	bool new_frame = false;
 	bool ran_instruction = false;
@@ -2933,6 +2932,7 @@ emulator_step_during_move(void)
 		state_slots_frame_end();
 	}
 
+	debug_server_set_no_wait(false);
 	in_step = false;
 }
 
