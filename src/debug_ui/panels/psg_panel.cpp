@@ -306,10 +306,15 @@ draw_voices_tab(int *selected_voice)
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                   ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_ScrollX | ImGuiTableFlags_Resizable;
-    if (ImGui::BeginTable("psg_voices", 10, flags, ImVec2(0, 310))) {
+    const uint16_t mute = psg_debug_get_mute_mask();
+    if (dbgui_unmute_all_button(mute)) {
+        psg_debug_set_mute_mask(0);
+    }
+    if (ImGui::BeginTable("psg_voices", 11, flags, ImVec2(0, 310))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         // Samples are the widest value each column can ever hold, so the layout
         // never depends on the live values (see col_w).
+        ImGui::TableSetupColumn("",      ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight() + 2.0f);
         ImGui::TableSetupColumn("Ch",    ImGuiTableColumnFlags_WidthFixed, col_w("Ch__"));
         ImGui::TableSetupColumn("Wave",  ImGuiTableColumnFlags_WidthFixed, col_w("Noise_"));
         ImGui::TableSetupColumn("Freq",  ImGuiTableColumnFlags_WidthFixed, col_w("$FFFF / 65535_"));
@@ -335,29 +340,36 @@ draw_voices_tab(int *selected_voice)
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.48f);
             }
 
-            ImGui::TableSetColumnIndex(0);
-            if (ImGui::Selectable(label, *selected_voice == ch, ImGuiSelectableFlags_SpanAllColumns)) {
+            const bool muted = (mute >> ch) & 1;
+            const int mute_cols = dbgui_mute_row_begin(muted);
+
+            // The selectable spans the whole row, so it must allow overlap for
+            // the mute button (drawn last, in column 0) to get its clicks.
+            ImGui::TableSetColumnIndex(1);
+            if (ImGui::Selectable(label, *selected_voice == ch,
+                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap)) {
                 *selected_voice = ch;
             }
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(waveform_name(c.waveform));
+            ImGui::PopStyleColor(mute_cols);
             ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(waveform_name(c.waveform));
+            ImGui::TableSetColumnIndex(3);
             ImGui::Text("$%04X / %5u", (unsigned)c.freq, (unsigned)c.freq);
             dbgui_hover_value_tooltip("16-bit frequency word", c.freq, 2);
-            ImGui::TableSetColumnIndex(3);
-            ImGui::Text("%9.3f", freq_hz(c.freq));
             ImGui::TableSetColumnIndex(4);
-            ImGui::TextUnformatted(note);
+            ImGui::Text("%9.3f", freq_hz(c.freq));
             ImGui::TableSetColumnIndex(5);
-            ImGui::TextUnformatted(pw);
+            ImGui::TextUnformatted(note);
             ImGui::TableSetColumnIndex(6);
+            ImGui::TextUnformatted(pw);
+            ImGui::TableSetColumnIndex(7);
             ImGui::Text("%2u -> %3u", (unsigned)c.vol_raw, (unsigned)c.vol_lut);
             dbgui_hover_value_tooltip("volume register value", c.vol_raw, 1);
-            ImGui::TableSetColumnIndex(7);
-            ImGui::TextUnformatted(c.left ? "on" : "-");
             ImGui::TableSetColumnIndex(8);
-            ImGui::TextUnformatted(c.right ? "on" : "-");
+            ImGui::TextUnformatted(c.left ? "on" : "-");
             ImGui::TableSetColumnIndex(9);
+            ImGui::TextUnformatted(c.right ? "on" : "-");
+            ImGui::TableSetColumnIndex(10);
             char meter_id[16];
             snprintf(meter_id, sizeof meter_id, "##lvl%d", ch);
             dbgui_level_meter(meter_id, (float)c.peak / PSG_PEAK_FULLSCALE,
@@ -365,6 +377,13 @@ draw_voices_tab(int *selected_voice)
 
             if (silent) {
                 ImGui::PopStyleVar();
+            }
+
+            // Full opacity even on a silent voice: muting one before it starts
+            // playing is a normal thing to want.
+            ImGui::TableSetColumnIndex(0);
+            if (dbgui_mute_button(ch, muted)) {
+                psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
         ImGui::EndTable();
@@ -471,6 +490,9 @@ draw_scope_tab(int *selected_voice)
         ImGui::TextDisabled("frozen; capture will lapse");
     }
 
+    if (dbgui_unmute_all_button(psg_debug_get_mute_mask())) {
+        psg_debug_set_mute_mask(0);
+    }
     const float mini_h = ImGui::GetTextLineHeight() * 4.0f;
     if (ImGui::BeginTable("psg_scope_grid", 4, ImGuiTableFlags_SizingStretchSame)) {
         for (int ch = 0; ch < PSG_NUM_CHANNELS; ++ch) {
@@ -486,6 +508,9 @@ draw_scope_tab(int *selected_voice)
                         waveform_color(c.waveform, silent), ctl.window, ctl.gain, ctl.trigger, overlay);
             if (ImGui::IsItemClicked()) {
                 *selected_voice = ch;
+            }
+            if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> ch) & 1)) {
+                psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
         ImGui::EndTable();
@@ -503,6 +528,9 @@ draw_scope_tab(int *selected_voice)
                 ImVec2(0, ImGui::GetTextLineHeight() * 8.0f),
                 waveform_color(snap.ch[*selected_voice].waveform, voice_silent(snap.ch[*selected_voice])),
                 ctl.window, ctl.gain, ctl.trigger, overlay);
+    if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> *selected_voice) & 1)) {
+        psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << *selected_voice)));
+    }
 
     ImGui::TextUnformatted("Summed PSG output");
     dbgui_scope("psg_scope_mix_l", buffers[PSG_SCOPE_MIX_L], (int)counts[PSG_SCOPE_MIX_L],

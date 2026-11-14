@@ -48,6 +48,12 @@ static uint16_t volume_lut[64] = {
 
 static uint16_t noise_state;
 
+// Debugger mute: one bit per voice. A muted voice still runs exactly as before
+// (phase, noise latch, level meter, its own scope trace); it is only left out of
+// the L/R sum that goes to the host. Not part of the machine: psg_reset() leaves
+// it alone and save states do not carry it.
+static uint16_t mute_mask;
+
 // Debugger oscilloscope capture. One shared write index keeps every stream
 // time-aligned. `scope_armed` counts down in render() and is refreshed by
 // psg_debug_scope_read(), so capture stops by itself once the debugger stops
@@ -140,6 +146,9 @@ render(int16_t *left, int16_t *right)
 			scope_buf[i][scope_wridx] = val;
 		}
 
+		if (mute_mask & (1u << i)) {
+			continue;
+		}
 		if (ch->left) {
 			l += val >> 3;
 		}
@@ -204,6 +213,18 @@ uint16_t
 psg_debug_get_noise_state(void)
 {
 	return noise_state;
+}
+
+void
+psg_debug_set_mute_mask(uint16_t mask)
+{
+	mute_mask = mask;
+}
+
+uint16_t
+psg_debug_get_mute_mask(void)
+{
+	return mute_mask;
 }
 
 unsigned

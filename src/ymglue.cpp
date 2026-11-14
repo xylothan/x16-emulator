@@ -48,6 +48,11 @@ struct ym_register_fields : ymfm::opm_registers {
 	static table lfo_waveform() { return &ym_register_fields::m_lfo_waveform; }
 };
 
+// Debugger mute: one bit per channel, applied only to what goes to the host.
+// File scope rather than per instance so the scratch chip used for scope
+// projections hears the same mix as the live one.
+static uint8_t s_mute_mask;
+
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:
 		ym2151_interface():
@@ -122,6 +127,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			update_clocks(numsamples);
 			for (uint32_t i = 0; i < numsamples; i++) {
 				m_chip.generate(&opm_out);
+				apply_mute(opm_out);
 				ls = opm_out.data[0];
 				rs = opm_out.data[1];
 				if (ls < -32768) ls = -32768;
@@ -315,6 +321,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				// bookkeeping, so timer-driven envelope changes show up.
 				scratch.update_clocks(1);
 				scratch.m_chip.generate(&out);
+				scratch.apply_mute(out);
 				int32_t ls = out.data[0], rs = out.data[1];
 				if (ls < -32768) ls = -32768;
 				if (ls > 32767) ls = 32767;
@@ -352,6 +359,22 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (kon & 0x04) slots |= 1u << 1; // M2 -> slot 1
 			if (kon & 0x08) slots |= 1u << 3; // C2 -> slot 3
 			m_keyon[value & 7] = slots;
+		}
+
+		// Replace `out` (just produced by generate()) with the mix minus the
+		// muted channels. generate() itself always runs every channel, and must:
+		// output() also computes each channel's operator-1 feedback input, which
+		// the next clock() consumes, so leaving a channel out of generate()
+		// would change how it sounds afterwards and what a save state holds.
+		// This second pass recomputes those same values from unchanged inputs
+		// (the argument sample_streams() below relies on too), so it changes
+		// nothing but the samples handed to the host.
+		void apply_mute(ymfm::ym2151::output_data &out) {
+			if (s_mute_mask == 0) {
+				return;
+			}
+			m_chip.engine().output(out.clear(), 0, 32767, 0xffu & ~(uint32_t)s_mute_mask);
+			out.roundtrip_fp();
 		}
 
 		// Isolate each channel by re-running the engine's output stage with a
@@ -468,6 +491,14 @@ extern "C" {
 		ss_open(r, "YM  ");
 		if (ss_get_bool(r)) opm_iface.state_load(r);
 		ss_close(r);
+	}
+
+	void YM_debug_set_mute_mask(uint8_t mask) {
+		s_mute_mask = mask;
+	}
+
+	uint8_t YM_debug_get_mute_mask() {
+		return s_mute_mask;
 	}
 
 	bool YM_debug_is_busy() {

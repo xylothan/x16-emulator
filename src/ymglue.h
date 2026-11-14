@@ -61,6 +61,14 @@ extern "C" {
 	uint8_t YM_debug_get_status(void);
 	bool    YM_debug_is_busy(void);
 
+	// Host-output mute, one bit per channel (bit n = channel n). The chip runs
+	// every channel exactly as it would otherwise; muted ones are only left out
+	// of the mix sent to the host (and so out of the scope's mix streams and any
+	// WAV recording). Per-channel scope traces still show them. A debugger
+	// setting, not machine state: save states neither store nor restore it.
+	void    YM_debug_set_mute_mask(uint8_t mask);
+	uint8_t YM_debug_get_mute_mask(void);
+
 	// ─── Scope capture ──────────────────────────────────────────────────────
 	// Self-arming per-channel capture, same contract as the PSG's (see
 	// vera_psg.h): reading (re)arms it for roughly half a second. This one

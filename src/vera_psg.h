@@ -57,6 +57,15 @@ uint8_t psg_debug_get_reg(uint8_t reg);
 // The shared 16-bit noise LFSR state.
 uint16_t psg_debug_get_noise_state(void);
 
+// Host-output mute, one bit per voice (bit n = voice n). A muted voice keeps
+// running exactly as it would otherwise and still feeds its level meter and its
+// own scope trace; it is only left out of the mixed output sent to the host
+// (and so out of the scope's mix streams and any WAV recording). It is a
+// debugger setting, not machine state: psg_reset() keeps it and save states
+// neither store nor restore it.
+void     psg_debug_set_mute_mask(uint16_t mask);
+uint16_t psg_debug_get_mute_mask(void);
+
 // ─── Scope capture ──────────────────────────────────────────────────────────
 // Self-arming per-voice sample capture backing the debugger's oscilloscope.
 // psg_debug_scope_read() (re)arms capture for roughly half a second; if nothing
