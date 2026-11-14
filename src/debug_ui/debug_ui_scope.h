@@ -288,4 +288,141 @@ dbgui_audio_predicted_note(const char *what)
                           what);
 }
 
+// ─── Host-output mute ───────────────────────────────────────────────────────
+// The PSG and YM panels can mute a voice on the host output. The chip keeps
+// playing it exactly as before (see psg_debug_set_mute_mask and
+// YM_debug_set_mute_mask); only what reaches the speakers changes.
+
+#define DBGUI_MUTE_COLOR IM_COL32(200, 60, 60, 255)
+
+// Speaker glyph in a `size` x `size` box at `p0`: a small box and a flared cone,
+// then either two sound-wave arcs (playing) or a slash through the whole glyph
+// (muted) - the usual volume / mute iconography, drawn so it needs no icon font.
+static inline void
+dbgui_draw_speaker(ImDrawList *dl, ImVec2 p0, float size, ImU32 col, bool muted)
+{
+    const float s  = size;
+    const float x  = p0.x + s * 0.10f;
+    const float cy = p0.y + s * 0.5f;
+
+    dl->AddRectFilled(ImVec2(x, cy - s * 0.14f), ImVec2(x + s * 0.20f, cy + s * 0.14f), col);
+    dl->AddQuadFilled(ImVec2(x + s * 0.20f, cy - s * 0.14f), ImVec2(x + s * 0.46f, cy - s * 0.36f),
+                      ImVec2(x + s * 0.46f, cy + s * 0.36f), ImVec2(x + s * 0.20f, cy + s * 0.14f), col);
+
+    const float th = (s >= 18.0f) ? 1.8f : 1.4f;
+    if (!muted) {
+        const ImVec2 c(x + s * 0.48f, cy);
+        dl->PathArcTo(c, s * 0.16f, -0.85f, 0.85f, 8);
+        dl->PathStroke(col, ImDrawFlags_None, th);
+        dl->PathArcTo(c, s * 0.32f, -0.85f, 0.85f, 12);
+        dl->PathStroke(col, ImDrawFlags_None, th);
+    } else {
+        // Dark under-stroke first so the slash stays readable over the cone.
+        const ImVec2 a(p0.x + s * 0.12f, p0.y + s * 0.12f);
+        const ImVec2 b(p0.x + s * 0.88f, p0.y + s * 0.88f);
+        dl->AddLine(a, b, IM_COL32(20, 20, 24, 255), th + 2.0f);
+        dl->AddLine(a, b, DBGUI_MUTE_COLOR, th + 0.4f);
+    }
+}
+
+// Speaker toggle for a voice-table row: speaker with sound waves while audible,
+// speaker with a red slash while muted. Returns true when clicked; the caller
+// flips its bit. Rows with a SpanAllColumns selectable must create it with
+// ImGuiSelectableFlags_AllowOverlap and draw this afterwards, or the selectable
+// takes the click.
+//
+// The ID is scoped under "mute" rather than pushed as the bare voice number:
+// TableHeadersRow() pushes each header's column index as its ID, so voice 0 in
+// column 0 would otherwise collide with that column's header.
+static inline bool
+dbgui_mute_button(int voice, bool muted)
+{
+    ImGui::PushID("mute");
+    ImGui::PushID(voice);
+    const float  sz = ImGui::GetTextLineHeight() + 2.0f;
+    const bool   clicked = ImGui::InvisibleButton("##spk", ImVec2(sz, sz));
+    const ImVec2 p0 = ImGui::GetItemRectMin();
+    ImDrawList  *dl = ImGui::GetWindowDrawList();
+    if (ImGui::IsItemHovered()) {
+        dl->AddRectFilled(p0, ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_ButtonHovered), 3.0f);
+    }
+    const ImU32 col = muted ? IM_COL32(150, 150, 158, 255) : ImGui::GetColorU32(ImGuiCol_Text);
+    dbgui_draw_speaker(dl, p0, sz, col, muted);
+    ImGui::SetItemTooltip(muted ? "Muted on the host output; the chip still plays it.\nClick to unmute."
+                                : "Mute this voice on the host output.\nThe chip keeps playing it; only the speakers stop hearing it.");
+    ImGui::PopID();
+    ImGui::PopID();
+    return clicked;
+}
+
+// Call straight after dbgui_scope() for a voice's trace: marks it when muted
+// and returns true on a right-click, which toggles mute (left-click already
+// selects the voice in both panels).
+static inline bool
+dbgui_scope_mute_toggle(bool muted)
+{
+    const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+    if (muted) {
+        const ImVec2 p0 = ImGui::GetItemRectMin();
+        const ImVec2 p1 = ImGui::GetItemRectMax();
+        ImDrawList  *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, p1, IM_COL32(60, 10, 10, 90));
+        dl->AddRect(p0, p1, DBGUI_MUTE_COLOR, 0.0f, 0, 2.0f);
+        const float sz = ImGui::GetTextLineHeight() + 2.0f;
+        dbgui_draw_speaker(dl, ImVec2(p1.x - sz - 3.0f, p0.y + 2.0f), sz, IM_COL32(200, 200, 208, 255), true);
+    }
+    ImGui::SetItemTooltip(muted ? "Right-click to unmute" : "Right-click to mute on the host output");
+    return clicked;
+}
+
+// Muted voice-table row. Call after TableNextRow() and before the row's
+// SpanAllColumns selectable; it tints the row and returns how many style
+// colours it pushed, which the caller pops straight after the selectable.
+//
+// The tint alone is not enough: the selected row's highlight (ImGuiCol_Header)
+// is drawn by the selectable OVER the row background, so a muted row that was
+// also the selected one showed as selected, not muted. While muted, the
+// selectable's own highlight colours turn red too, so the row reads as muted
+// in every state - plain, hovered and selected.
+static inline int
+dbgui_mute_row_begin(bool muted)
+{
+    if (!muted) {
+        return 0;
+    }
+    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(120, 30, 30, 90));
+    ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(170, 45, 45, 150));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(190, 60, 60, 170));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(210, 70, 70, 200));
+    return 3;
+}
+
+// "Unmute all (n)" button. ALWAYS DRAWN - disabled while nothing is muted -
+// and always the width of its widest label. A control that appears, vanishes
+// or changes width moves everything after it, so the panel jumped under the
+// pointer the moment a voice was muted or unmuted. Returns true when clicked.
+static inline bool
+dbgui_unmute_all_button(unsigned mask)
+{
+    int n = 0;
+    for (unsigned m = mask; m; m &= m - 1) {
+        ++n;
+    }
+    char label[48];
+    // "###" keeps one ID while the visible count changes.
+    snprintf(label, sizeof label, "Unmute all (%d)###unmute_all", n);
+    const ImGuiStyle &st = ImGui::GetStyle();
+    const float w = ImGui::CalcTextSize("Unmute all (16)").x + st.FramePadding.x * 2.0f;
+
+    ImGui::BeginDisabled(mask == 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(st.FramePadding.x, 0.0f)); // SmallButton look
+    const bool clicked = ImGui::Button(label, ImVec2(w, 0.0f));
+    ImGui::PopStyleVar();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(mask ? "Unmute every voice muted on the host output."
+                               : "Nothing is muted. Click a voice's speaker icon, or right-click\n"
+                                 "its scope trace, to mute it on the host output.");
+    return clicked && mask != 0;
+}
+
 #endif // DEBUG_UI_SCOPE_H

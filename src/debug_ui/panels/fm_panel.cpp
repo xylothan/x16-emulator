@@ -190,6 +190,38 @@ void draw_eg_summary(int ch)
     }
 }
 
+// A table column: header text, default width (0 = stretch), and the help shown
+// when hovering the header. ImGui::TableHeadersRow() cannot attach a tooltip
+// per header, so headers_with_help() draws the row itself.
+struct ColHelp {
+    const char *name;
+    float       width;
+    const char *help;
+};
+
+void setup_columns(const ColHelp *cols, int n)
+{
+    for (int i = 0; i < n; ++i) {
+        if (cols[i].width > 0.0f) {
+            ImGui::TableSetupColumn(cols[i].name, ImGuiTableColumnFlags_WidthFixed, cols[i].width);
+        } else {
+            ImGui::TableSetupColumn(cols[i].name, ImGuiTableColumnFlags_WidthStretch);
+        }
+    }
+}
+
+void headers_with_help(const ColHelp *cols, int n)
+{
+    ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+    for (int i = 0; i < n; ++i) {
+        if (!ImGui::TableSetColumnIndex(i)) continue;
+        ImGui::PushID(i);
+        ImGui::TableHeader(ImGui::TableGetColumnName(i));
+        if (cols[i].help) ImGui::SetItemTooltip("%s", cols[i].help);
+        ImGui::PopID();
+    }
+}
+
 void draw_channels_tab()
 {
     // Channels are numbered 0-7 throughout this panel, matching the register
@@ -198,19 +230,80 @@ void draw_channels_tab()
     // datasheet numbers them 1-8.)
     ImGui::TextDisabled("Channels are 0-7, matching the $20+ch / $28+ch register offsets "
                         "and the $08 key-on channel field.");
-    if (ImGui::BeginTable("ym_channels", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("Ch", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Ch", "00"));
-        ImGui::TableSetupColumn("KC / note");
-        ImGui::TableSetupColumn("KF", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("KF", "$FF"));
-        ImGui::TableSetupColumn("ALG", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("ALG", "000"));
-        ImGui::TableSetupColumn("FB", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("FB", "00"));
-        ImGui::TableSetupColumn("Pan", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Pan", "L+R"));
-        ImGui::TableSetupColumn("PMS", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("PMS", "000"));
-        ImGui::TableSetupColumn("AMS", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("AMS", "000"));
-        ImGui::TableSetupColumn("Key-on");
-        ImGui::TableSetupColumn("EG");
-        ImGui::TableSetupColumn("Level", ImGuiTableColumnFlags_WidthFixed, dbgui_col_width("Level", "-00.0 dB"));
-        ImGui::TableHeadersRow();
+    const uint8_t mute = YM_debug_get_mute_mask();
+    if (dbgui_unmute_all_button(mute)) {
+        YM_debug_set_mute_mask(0);
+    }
+    // Every column is fixed at the width of the widest thing it can ever hold
+    // (and at least its header), so nothing is squeezed or clipped: stretch
+    // columns used to share whatever was left and cut the note text short.
+    // Multi-part cells are measured as drawn: four labels with 4 px between.
+    const float gap4    = 3.0f * 4.0f;
+    const float note_w  = dbgui_col_width("KC / note", "$7F  A#10 +100 c  13289.75 Hz !");
+    const float keyon_w = dbgui_col_fit("Key-on", dbgui_text_width("M1M2C1C2") + gap4);
+    const float eg_w    = dbgui_col_fit("EG", dbgui_text_width("DDDD") + gap4);
+    const float level_w = dbgui_col_fit("Level", 80.0f); // dbgui_level_meter below is 80 px
+    const ColHelp cols[12] = {
+        { "",          ImGui::GetTextLineHeight() + 2.0f,
+          "Host-output mute. Click a speaker to silence that channel on the\n"
+          "speakers; the chip keeps playing it." },
+        { "Ch",        dbgui_col_width("Ch", "00"),
+          "Channel 0-7 (the OPM datasheet numbers them 1-8). Click a row to\n"
+          "select it for the Operators, Algorithm and Scope tabs." },
+        { "KC / note", note_w,
+          "Key code, register $28+ch. Bits 6-4 are the octave; bits 3-0 the\n"
+          "note, as codes 0-14 with every fourth code unused. Shown with the\n"
+          "note it plays. A '!' marks an unused note code." },
+        { "KF",        dbgui_col_width("KF", "63"),
+          "Key fraction, register $30+ch bits 7-2: 0-63, in 64ths of a\n"
+          "semitone above the key code's note. Fine pitch for vibrato,\n"
+          "slides and tuning." },
+        { "ALG",       dbgui_col_width("ALG", "0"),
+          "Algorithm (connection), register $20+ch bits 2-0: how the four\n"
+          "operators M1 C1 M2 C2 are wired, from 0 (one serial stack, one\n"
+          "carrier) to 7 (four parallel sine carriers). Hover a value for\n"
+          "its wiring; the Algorithm tab draws it." },
+        { "FB",        dbgui_col_width("FB", "0"),
+          "Feedback, register $20+ch bits 5-3: 0-7, how much of M1's own\n"
+          "output modulates M1. 0 is a pure sine; higher is brighter and\n"
+          "saw-like; 6-7 approach noise." },
+        { "Pan",       dbgui_col_width("Pan", "L/R"),
+          "Output routing, register $20+ch bit 6 (L) and bit 7 (R).\n"
+          "L/R plays in both speakers, L/- left only, -/R right only,\n"
+          "-/- nowhere (the channel still runs, but is not heard)." },
+        { "PMS",       dbgui_col_width("PMS", "0"),
+          "Phase modulation sensitivity, register $38+ch bits 6-4: 0-7, how\n"
+          "far the LFO bends this channel's pitch (vibrato). 0 is off." },
+        { "AMS",       dbgui_col_width("AMS", "0"),
+          "Amplitude modulation sensitivity, register $38+ch bits 1-0: 0-3,\n"
+          "how far the LFO moves the level of operators that have AMS-EN set\n"
+          "(tremolo). 0 is off." },
+        { "Key-on",    keyon_w,
+          "Which operators are keyed on (register $08: M1 C1 M2 C2). Key-on\n"
+          "starts an operator's attack and resets its phase; key-off starts\n"
+          "its release." },
+        { "EG",        eg_w,
+          "Envelope state of each operator: A attack, D first decay (D1R),\n"
+          "S second decay (D2R, after the D1L level), R release, - idle." },
+        { "Level",     level_w,
+          "Output level of the channel's carriers after TL and the envelope." },
+    };
+    // Fixed widths plus ScrollX: a window narrower than the table scrolls
+    // sideways instead of crushing columns. ScrollX makes the table its own
+    // child window, so it needs an explicit height - header plus eight rows,
+    // each as tall as the mute button (text line + 2) plus cell padding.
+    const ImGuiStyle &st = ImGui::GetStyle();
+    const float row_h = ImGui::GetTextLineHeight() + 2.0f + st.CellPadding.y * 2.0f;
+    const float tbl_h = row_h * (YM_NUM_CHANNELS + 1) + st.ScrollbarSize + 4.0f;
+    // New ID on purpose: imgui.ini keeps per-table column widths by ID, and the
+    // widths saved for the old stretch layout would override these defaults.
+    if (ImGui::BeginTable("ym_channel_table", 12,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                          ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX,
+                          ImVec2(0.0f, tbl_h))) {
+        ImGui::TableSetupScrollFreeze(2, 1); // keep mute + channel number visible
+        setup_columns(cols, 12);
+        headers_with_help(cols, 12);
         for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
             const uint8_t r20 = ch_reg(0x20, ch);
             const uint8_t kc = ch_reg(0x28, ch) & 0x7f;
@@ -221,28 +314,47 @@ void draw_channels_tab()
             const bool silent = channel_effectively_silent(ch);
 
             ImGui::TableNextRow();
+            const bool muted = (mute >> ch) & 1;
+            const int mute_cols = dbgui_mute_row_begin(muted);
             if (silent) ImGui::BeginDisabled();
-            ImGui::TableSetColumnIndex(0);
+            // The selectable spans the whole row, so it must allow overlap for
+            // the mute button (drawn last, in column 0) to get its clicks.
+            ImGui::TableSetColumnIndex(1);
             char id[16];
             snprintf(id, sizeof(id), "Ch %d", ch);
-            if (ImGui::Selectable(id, s_selected_ch == ch, ImGuiSelectableFlags_SpanAllColumns)) {
+            if (ImGui::Selectable(id, s_selected_ch == ch,
+                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap)) {
                 s_selected_ch = ch;
             }
-            ImGui::TableSetColumnIndex(1);
+            ImGui::PopStyleColor(mute_cols);
+            ImGui::TableSetColumnIndex(2);
             ImGui::Text("$%02X  %s", kc, note.text);
             if (!note.valid) ImGui::SameLine(), ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "!");
-            ImGui::TableSetColumnIndex(2); ImGui::Text("%2u", (unsigned)(kf >> 2));
-            ImGui::TableSetColumnIndex(3); ImGui::Text("%u", (unsigned)(r20 & 7));
-            ImGui::TableSetColumnIndex(4); ImGui::Text("%u", (unsigned)((r20 >> 3) & 7));
-            ImGui::TableSetColumnIndex(5); ImGui::Text("%c/%c", (r20 & 0x40) ? 'L' : '-', (r20 & 0x80) ? 'R' : '-');
-            ImGui::TableSetColumnIndex(6); ImGui::Text("%u", (unsigned)((r38 >> 4) & 7));
-            ImGui::TableSetColumnIndex(7); ImGui::Text("%u", (unsigned)(r38 & 3));
-            ImGui::TableSetColumnIndex(8); draw_key_mask(YM_debug_get_keyon(ch));
-            ImGui::TableSetColumnIndex(9); draw_eg_summary(ch);
-            ImGui::TableSetColumnIndex(10);
+            ImGui::TableSetColumnIndex(3); ImGui::Text("%2u", (unsigned)(kf >> 2));
+            ImGui::SetItemTooltip("%u/64 of a semitone above %s", (unsigned)(kf >> 2), note.text);
+            ImGui::TableSetColumnIndex(4); ImGui::Text("%u", (unsigned)(r20 & 7));
+            ImGui::SetItemTooltip("ALG %u: %s", (unsigned)(r20 & 7), s_alg[r20 & 7].desc);
+            ImGui::TableSetColumnIndex(5); ImGui::Text("%u", (unsigned)((r20 >> 3) & 7));
+            ImGui::SetItemTooltip(((r20 >> 3) & 7) ? "M1 feeds back into itself at level %u of 7"
+                                                   : "No feedback: M1 is a pure sine (%u)", (unsigned)((r20 >> 3) & 7));
+            ImGui::TableSetColumnIndex(6); ImGui::Text("%c/%c", (r20 & 0x40) ? 'L' : '-', (r20 & 0x80) ? 'R' : '-');
+            ImGui::SetItemTooltip("%s", ((r20 & 0xC0) == 0xC0) ? "Both speakers" : (r20 & 0x40) ? "Left speaker only"
+                                       : (r20 & 0x80) ? "Right speaker only" : "Not routed to either speaker");
+            ImGui::TableSetColumnIndex(7); ImGui::Text("%u", (unsigned)((r38 >> 4) & 7));
+            ImGui::TableSetColumnIndex(8); ImGui::Text("%u", (unsigned)(r38 & 3));
+            ImGui::TableSetColumnIndex(9); draw_key_mask(YM_debug_get_keyon(ch));
+            ImGui::TableSetColumnIndex(10); draw_eg_summary(ch);
+            ImGui::TableSetColumnIndex(11);
             snprintf(id, sizeof(id), "##lev%d", ch);
             dbgui_level_meter(id, channel_carrier_level(ch), ImVec2(80.0f, 0.0f), IM_COL32(80, 190, 110, 255));
             if (silent) ImGui::EndDisabled();
+
+            // Outside the disabled span: muting a channel before it plays is a
+            // normal thing to want.
+            ImGui::TableSetColumnIndex(0);
+            if (dbgui_mute_button(ch, muted)) {
+                YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << ch)));
+            }
         }
         ImGui::EndTable();
     }
@@ -321,10 +433,66 @@ void draw_operators_tab()
     ImGui::TextDisabled("Envelope sketches are qualitative ADSR/TL shapes, not cycle-accurate ymfm EG traces.");
     const int first_ch = show_all ? 0 : s_selected_ch;
     const int last_ch = show_all ? YM_NUM_CHANNELS : (s_selected_ch + 1);
-    if (ImGui::BeginTable("ym_ops", 15, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0.0f, 0.0f))) {
-        const char *cols[15] = { "Slot", "DT1", "MUL", "TL", "KS", "AR", "D1R", "DT2", "D2R", "D1L", "RR", "AMS-EN", "EG state", "Atten", "ADSR sketch" };
-        for (int i = 0; i < 15; ++i) ImGui::TableSetupColumn(cols[i]);
-        ImGui::TableHeadersRow();
+    // FIXED COLUMN WIDTHS, fitted to each column's widest value. Declared with
+    // no width, every column stretched to an equal share, so a one-digit DT1
+    // got as much room as the envelope sketch and the sketch was clipped.
+    // ScrollX lets a narrow window scroll instead of squeezing; the Slot
+    // column stays frozen so each row stays identified.
+    const ColHelp cols[15] = {
+        { "Slot",   dbgui_col_width("Slot", "Ch 0 M1"),
+          "Channel and operator. M1/M2 are modulators or carriers depending on\n"
+          "ALG; C2 is always a carrier, and on channel 7 can be the noise." },
+        { "DT1",    dbgui_col_width("DT1", "7"),
+          "Detune 1, register $40 bits 6-4: a small pitch offset, 0-3 up and\n"
+          "5-7 down (4 is 0). Two detuned operators beat into a chorus." },
+        { "MUL",    dbgui_col_width("MUL", "15"),
+          "Frequency multiple, register $40 bits 3-0: the operator runs at\n"
+          "MUL x the note (0 means x0.5). On a modulator it sets which\n"
+          "harmonics the carrier gets." },
+        { "TL",     dbgui_col_width("TL", "127"),
+          "Total level, register $60 bits 6-0: attenuation, 0.75 dB a step;\n"
+          "0 is loudest, 127 silent. On a carrier it is volume; on a\n"
+          "modulator it is brightness." },
+        { "KS",     dbgui_col_width("KS", "3"),
+          "Key scaling, register $80 bits 7-6: 0-3, how much higher notes\n"
+          "speed up this operator's envelope rates." },
+        { "AR",     dbgui_col_width("AR", "31"),
+          "Attack rate, register $80 bits 4-0: 0-31, how fast the level rises\n"
+          "after key-on. 31 is instant; 0 never starts." },
+        { "D1R",    dbgui_col_width("D1R", "31"),
+          "First decay rate, register $A0 bits 4-0: 0-31, how fast the level\n"
+          "falls from the peak toward D1L. 0 holds." },
+        { "DT2",    dbgui_col_width("DT2", "3"),
+          "Detune 2, register $C0 bits 7-6: a coarse pitch offset for\n"
+          "inharmonic, bell-like ratios. 0 is off." },
+        { "D2R",    dbgui_col_width("D2R", "31"),
+          "Second decay rate, register $C0 bits 4-0: 0-31, how fast the level\n"
+          "keeps falling after it reaches D1L, while the key is held. 0 holds." },
+        { "D1L",    dbgui_col_width("D1L", "15"),
+          "First decay level, register $E0 bits 7-4: 0-15, the level where\n"
+          "D1R hands over to D2R, 3 dB a step (15 is 93 dB down)." },
+        { "RR",     dbgui_col_width("RR", "15"),
+          "Release rate, register $E0 bits 3-0: 0-15, how fast the level falls\n"
+          "after key-off. Higher is a shorter tail." },
+        { "AMS-EN", dbgui_col_width("AMS-EN", "yes"),
+          "Register $A0 bit 7: whether the LFO's amplitude modulation (the\n"
+          "channel's AMS) applies to this operator." },
+        { "EG state", dbgui_col_width("EG state", "Release"),
+          "Where the envelope is now: Attack, Decay (D1R), Sustain (D2R)\n"
+          "or Release." },
+        { "Atten",  dbgui_col_fit("Atten", 90.0f),
+          "Live attenuation: TL plus the envelope, as a level." },
+        { "ADSR sketch", dbgui_col_fit("ADSR sketch", 110.0f),
+          "A qualitative shape from AR, D1R, D1L, D2R, RR and TL - not a\n"
+          "cycle-accurate trace." },
+    };
+    if (ImGui::BeginTable("ym_ops", 15,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | DBGUI_TABLE_FLAGS_RESIZABLE |
+                          ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, 0.0f))) {
+        ImGui::TableSetupScrollFreeze(1, 1);
+        setup_columns(cols, 15);
+        headers_with_help(cols, 15);
         for (int ch = first_ch; ch < last_ch; ++ch) {
             for (int slot = 0; slot < OP_COUNT; ++slot) draw_operator_row(ch, slot);
         }
@@ -588,6 +756,9 @@ void draw_scope_tab()
     }
     ImGui::TextDisabled("Per-channel capture is self-armed only while this Scope tab reads it; hidden tabs let it disarm.");
 
+    if (dbgui_unmute_all_button(YM_debug_get_mute_mask())) {
+        YM_debug_set_mute_mask(0);
+    }
     if (ImGui::BeginTable("ym_scope_grid", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg)) {
         for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
             if ((ch % 2) == 0) ImGui::TableNextRow();
@@ -600,6 +771,9 @@ void draw_scope_tab()
             snprintf(id, sizeof(id), "mini%d", ch);
             dbgui_scope(id, samples[ch], (int)counts[ch], ImVec2(0.0f, 58.0f), IM_COL32(90, 190, 245, 255), ctl.window, ctl.gain, ctl.trigger, overlay);
             if (ImGui::IsItemClicked()) s_selected_ch = ch;
+            if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> ch) & 1)) {
+                YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << ch)));
+            }
         }
         ImGui::EndTable();
     }
@@ -609,6 +783,9 @@ void draw_scope_tab()
     note_from_kc_kf(ch_reg(0x28, s_selected_ch) & 0x7f, ch_reg(0x30, s_selected_ch) & 0xfc, &note);
     snprintf(overlay, sizeof(overlay), "Selected Ch %d ALG %u %s", s_selected_ch, (unsigned)alg_for_ch(s_selected_ch), note.text);
     dbgui_scope("selected", samples[s_selected_ch], (int)counts[s_selected_ch], ImVec2(0.0f, 120.0f), IM_COL32(105, 225, 140, 255), ctl.window, ctl.gain, ctl.trigger, overlay);
+    if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> s_selected_ch) & 1)) {
+        YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << s_selected_ch)));
+    }
     ImGui::TextUnformatted("Summed YM output");
     dbgui_scope("mix_l", samples[YM_SCOPE_MIX_L], (int)counts[YM_SCOPE_MIX_L], ImVec2(0.0f, 84.0f), IM_COL32(245, 185, 90, 255), ctl.window, ctl.gain, ctl.trigger, "Mix L");
     dbgui_scope("mix_r", samples[YM_SCOPE_MIX_R], (int)counts[YM_SCOPE_MIX_R], ImVec2(0.0f, 84.0f), IM_COL32(245, 120, 160, 255), ctl.window, ctl.gain, ctl.trigger, "Mix R");
