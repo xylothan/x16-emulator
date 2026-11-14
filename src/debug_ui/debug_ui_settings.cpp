@@ -82,6 +82,14 @@ fields(int *count)
     return table;
 }
 
+// Where each window was: "MainWindow=x,y,w,h,maximized". Read from the ini,
+// applied once per run -- not again when the UI is rebuilt mid-session (the
+// DX12 fallback), which would yank windows back to where they started.
+const char *const       kWindowKeys[VIDEO_WINDOW_COUNT] = { "MainWindow", "DebuggerWindow" };
+video_window_geometry_t s_window_geom[VIDEO_WINDOW_COUNT];
+bool                    s_window_geom_have[VIDEO_WINDOW_COUNT];
+bool                    s_window_geom_applied = false;
+
 void *
 settings_read_open(ImGuiContext *, ImGuiSettingsHandler *, const char *name)
 {
@@ -109,6 +117,17 @@ settings_read_line(ImGuiContext *, ImGuiSettingsHandler *, void *, const char *l
                 ds.*(t.field) = line + n;
                 return;
             }
+        }
+    }
+    for (int w = 0; w < VIDEO_WINDOW_COUNT; w++) {
+        const size_t n = strlen(kWindowKeys[w]);
+        if (strncmp(line, kWindowKeys[w], n) == 0 && line[n] == '=') {
+            int x, y, cw, ch, max = 0;
+            if (sscanf(line + n + 1, "%d,%d,%d,%d,%d", &x, &y, &cw, &ch, &max) >= 4) {
+                s_window_geom[w]      = { x, y, cw, ch, max != 0 };
+                s_window_geom_have[w] = true;
+            }
+            return;
         }
     }
     if (strncmp(line, "SettingsPage=", 13) == 0) {
@@ -160,6 +179,13 @@ settings_apply_to_core()
     if (!s.host_key.empty() && !video_set_host_key(s.host_key.c_str(), false))
         printf("imgui.ini: HostKey=%s is not a key; keeping %s\n", s.host_key.c_str(), video_host_key_name());
     video_set_ctrl_shortcuts(s.ctrl_shortcuts, false);
+    if (!s_window_geom_applied) {
+        s_window_geom_applied = true;
+        for (int w = 0; w < VIDEO_WINDOW_COUNT; w++) {
+            if (s_window_geom_have[w])
+                video_restore_window_geometry((video_window_t)w, &s_window_geom[w]);
+        }
+    }
 }
 
 void
@@ -197,6 +223,18 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
     const char *page = debug_ui_settings_page();
     if (page && page[0])
         buf->appendf("SettingsPage=%s\n", page);
+    // Placement as it is now, or as last saved for a window that is not open
+    // (or never left fullscreen) this run, so that one is not forgotten.
+    video_window_geometry_poll();
+    for (int w = 0; w < VIDEO_WINDOW_COUNT; w++) {
+        video_window_geometry_t g;
+        const bool have = video_window_geometry((video_window_t)w, &g);
+        if (!have && !s_window_geom_have[w])
+            continue;
+        if (!have)
+            g = s_window_geom[w];
+        buf->appendf("%s=%d,%d,%d,%d,%d\n", kWindowKeys[w], g.x, g.y, g.w, g.h, g.maximized ? 1 : 0);
+    }
     buf->append("\n");
 }
 

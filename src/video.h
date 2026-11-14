@@ -51,6 +51,33 @@ bool        video_set_host_key(const char *name, bool from_cli);
 void        video_set_ctrl_shortcuts(bool on, bool from_cli);
 const char *video_host_key_name(void);
 
+// ─── Window placement ──────────────────────────────────────────────────────
+// The debugger saves where both windows were in imgui.ini and puts them back
+// at the next start. x/y/w/h are the window's *normal* (un-maximized) rect in
+// SDL screen coordinates; `maximized` says whether it was maximized on top of
+// that, so restoring down afterwards still lands on the remembered rect.
+typedef enum {
+	VIDEO_WINDOW_MAIN,
+	VIDEO_WINDOW_DEBUGGER,
+	VIDEO_WINDOW_COUNT
+} video_window_t;
+
+typedef struct {
+	int  x, y, w, h;
+	bool maximized;
+} video_window_geometry_t;
+
+// The last normal rect seen for the window. False when that window does not
+// exist or has never been seen in its normal state.
+bool video_window_geometry(video_window_t which, video_window_geometry_t *out);
+// Move and size a window to a saved placement. Ignored when nothing of its
+// title bar would land on a connected display (a monitor since unplugged),
+// for the main window in fullscreen, and for hidden (benchmark) windows.
+void video_restore_window_geometry(video_window_t which, const video_window_geometry_t *g);
+// Look at both windows; true when either moved, resized or changed maximized
+// state since the last call. Cheap enough to call once per debugger frame.
+bool video_window_geometry_poll(void);
+
 // ─── Debug view accessors ──────────────────────────────────────────────────
 // Per-scanline history of the layer registers each display line was actually
 // rendered with. Programs rewrite MAPBASE/TILEBASE/scroll part-way down a frame
