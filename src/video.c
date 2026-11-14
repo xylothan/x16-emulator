@@ -508,6 +508,282 @@ render_driver_available(const char *name)
 	return false;
 }
 
+// ─── Window placement (see video.h) ────────────────────────────────────────
+
+static video_window_geometry_t window_geom[VIDEO_WINDOW_COUNT];
+static bool window_geom_valid[VIDEO_WINDOW_COUNT];
+
+static SDL_Window *
+video_window_for(video_window_t which)
+{
+	switch (which) {
+		case VIDEO_WINDOW_MAIN: return window;
+#ifdef HAS_IMGUI
+		case VIDEO_WINDOW_DEBUGGER: return imgui_window;
+#endif
+		default: return NULL;
+	}
+}
+
+bool
+video_window_geometry_poll(void)
+{
+	bool changed = false;
+	for (int i = 0; i < VIDEO_WINDOW_COUNT; i++) {
+		SDL_Window *win = video_window_for((video_window_t)i);
+		if (!win) {
+			continue;
+		}
+		const Uint32 flags = SDL_GetWindowFlags(win);
+		// Neither a minimized nor a fullscreen window says anything about
+		// where the user wants it next time; keep the last placement.
+		if (flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+			continue;
+		}
+		video_window_geometry_t *g = &window_geom[i];
+		const bool maximized = (flags & SDL_WINDOW_MAXIMIZED) != 0;
+		if (maximized) {
+			// A maximized window reports the monitor's size; keep the normal
+			// rect from before, so restoring down still goes back to it.
+			if (!g->maximized) {
+				g->maximized = true;
+				changed = true;
+			}
+			continue;
+		}
+		int x, y, w, h;
+		SDL_GetWindowPosition(win, &x, &y);
+		SDL_GetWindowSize(win, &w, &h);
+		if (!window_geom_valid[i] || g->maximized ||
+		    x != g->x || y != g->y || w != g->w || h != g->h) {
+			g->x = x; g->y = y; g->w = w; g->h = h;
+			g->maximized = false;
+			window_geom_valid[i] = true;
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+bool
+video_window_geometry(video_window_t which, video_window_geometry_t *out)
+{
+	// Through int: GCC makes this enum unsigned, and "< 0" on it trips
+	// -Wtype-limits under the Linux CI's -Werror.
+	if ((int)which < 0 || (int)which >= VIDEO_WINDOW_COUNT || !video_window_for(which) ||
+	    !window_geom_valid[which]) {
+		return false;
+	}
+	*out = window_geom[which];
+	return true;
+}
+
+// True when a usable stretch of the title bar above (x, y) is on some display,
+// so the window can still be grabbed and dragged.
+static bool
+video_title_bar_visible(int x, int y, int w)
+{
+	const SDL_Rect bar = { x, y - APPROX_TITLEBAR_HEIGHT, w, APPROX_TITLEBAR_HEIGHT };
+	const int need = w < 100 ? w : 100;
+	const int displays = SDL_GetNumVideoDisplays();
+	for (int d = 0; d < displays; d++) {
+		SDL_Rect bounds, hit;
+		if (SDL_GetDisplayBounds(d, &bounds) != 0) {
+			continue;
+		}
+		if (SDL_IntersectRect(&bar, &bounds, &hit) && hit.w >= need) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void
+video_restore_window_geometry(video_window_t which, const video_window_geometry_t *g)
+{
+	SDL_Window *win = video_window_for(which);
+	if (!win || !g || hidden_windows) {
+		return;
+	}
+	if (which == VIDEO_WINDOW_MAIN && is_fullscreen) {
+		return;
+	}
+	if (g->w < 64 || g->h < 64 || !video_title_bar_visible(g->x, g->y, g->w)) {
+		return;
+	}
+	if (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) {
+		SDL_RestoreWindow(win);
+	}
+	SDL_SetWindowSize(win, g->w, g->h);
+	SDL_SetWindowPosition(win, g->x, g->y);
+	if (g->maximized) {
+		SDL_MaximizeWindow(win);
+	}
+}
+
+// ─── Main window placement without the debugger ────────────────────────────
+// With -imgui, ImGui owns imgui.ini and its settings handler saves both windows
+// (debug_ui_settings.cpp). A plain run has no ImGui at all, so it reads and
+// rewrites just the one MainWindow= line itself: same file, same section, same
+// format, so either kind of run picks up where the other left the window.
+
+#define PLACEMENT_INI     "imgui.ini"
+#define PLACEMENT_SECTION "[X16Debugger][Prefs]"
+#define PLACEMENT_KEY     "MainWindow="
+
+static bool
+placement_owned_here(void)
+{
+	return !imgui_debugger_enabled && !hidden_windows;
+}
+
+// The whole file, NUL-terminated, or NULL when there is none.
+static char *
+placement_read_file(size_t *out_len)
+{
+	FILE *f = fopen(PLACEMENT_INI, "rb");
+	if (!f) {
+		return NULL;
+	}
+	fseek(f, 0, SEEK_END);
+	const long len = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	char *buf = len >= 0 ? malloc((size_t)len + 1) : NULL;
+	if (buf) {
+		const size_t got = fread(buf, 1, (size_t)len, f);
+		buf[got] = 0;
+		*out_len = got;
+	}
+	fclose(f);
+	return buf;
+}
+
+// Where the MainWindow= line of our section starts and ends (end excludes the
+// newline), or false when the section or the line is missing. *section_end is
+// where a line can be inserted into the section when the key is missing.
+static bool
+placement_find(const char *buf, size_t len, size_t *line_start, size_t *line_end,
+               size_t *section_end, bool *have_section)
+{
+	bool   in_section = false;
+	size_t pos        = 0;
+	*have_section     = false;
+	while (pos < len) {
+		size_t eol = pos;
+		while (eol < len && buf[eol] != '\n') {
+			eol++;
+		}
+		size_t end = eol;
+		if (end > pos && buf[end - 1] == '\r') {
+			end--;
+		}
+		const size_t n = end - pos;
+		if (n > 0 && buf[pos] == '[') {
+			if (in_section) {
+				return false; // left our section without seeing the key
+			}
+			in_section = n == strlen(PLACEMENT_SECTION) &&
+			             !memcmp(buf + pos, PLACEMENT_SECTION, n);
+			if (in_section) {
+				*have_section = true;
+				*section_end  = eol < len ? eol + 1 : len;
+			}
+		} else if (in_section) {
+			if (n > 0) {
+				*section_end = eol < len ? eol + 1 : len;
+			}
+			if (n >= strlen(PLACEMENT_KEY) &&
+			    !memcmp(buf + pos, PLACEMENT_KEY, strlen(PLACEMENT_KEY))) {
+				*line_start = pos;
+				*line_end   = end;
+				return true;
+			}
+		}
+		pos = eol + 1;
+	}
+	return false;
+}
+
+static void
+placement_load_main(void)
+{
+	if (!placement_owned_here()) {
+		return;
+	}
+	size_t len = 0;
+	char  *buf = placement_read_file(&len);
+	if (!buf) {
+		return;
+	}
+	size_t s, e, se;
+	bool   have_section;
+	if (placement_find(buf, len, &s, &e, &se, &have_section)) {
+		video_window_geometry_t g = { 0 };
+		int max = 0;
+		if (sscanf(buf + s + strlen(PLACEMENT_KEY), "%d,%d,%d,%d,%d",
+		           &g.x, &g.y, &g.w, &g.h, &max) >= 4) {
+			g.maximized = max != 0;
+			video_restore_window_geometry(VIDEO_WINDOW_MAIN, &g);
+		}
+	}
+	free(buf);
+}
+
+static void
+placement_save_main(void)
+{
+	if (!placement_owned_here()) {
+		return;
+	}
+	video_window_geometry_poll();
+	video_window_geometry_t g;
+	if (!video_window_geometry(VIDEO_WINDOW_MAIN, &g)) {
+		return;
+	}
+	char line[96];
+	snprintf(line, sizeof line, PLACEMENT_KEY "%d,%d,%d,%d,%d",
+	         g.x, g.y, g.w, g.h, g.maximized ? 1 : 0);
+
+	size_t len = 0;
+	char  *buf = placement_read_file(&len);
+	size_t s = 0, e = 0, se = 0;
+	bool   have_section = false;
+	const bool found = buf && placement_find(buf, len, &s, &e, &se, &have_section);
+	if (found && e - s == strlen(line) && !memcmp(buf + s, line, e - s)) {
+		free(buf); // unchanged; leave the file alone
+		return;
+	}
+	FILE *f = fopen(PLACEMENT_INI, "wb");
+	if (!f) {
+		free(buf);
+		return;
+	}
+	if (found) {
+		// Replace the line in place; everything else is kept byte for byte.
+		fwrite(buf, 1, s, f);
+		fputs(line, f);
+		fwrite(buf + e, 1, len - e, f);
+	} else if (have_section) {
+		fwrite(buf, 1, se, f);
+		if (se > 0 && buf[se - 1] != '\n') {
+			fputc('\n', f);
+		}
+		fprintf(f, "%s\n", line);
+		fwrite(buf + se, 1, len - se, f);
+	} else {
+		if (buf && len) {
+			fwrite(buf, 1, len, f);
+			if (buf[len - 1] != '\n') {
+				fputc('\n', f);
+			}
+			fputc('\n', f);
+		}
+		fprintf(f, PLACEMENT_SECTION "\n%s\n\n", line);
+	}
+	fclose(f);
+	free(buf);
+}
+
 bool
 video_init(int window_scale, float screen_x_scale, const char *quality,
            const char *render_driver, bool fullscreen, float opacity)
@@ -633,6 +909,9 @@ video_init(int window_scale, float screen_x_scale, const char *quality,
 			SDL_SetWindowPosition(window, winX, winY);
 		}
 	}
+
+	// After the off-screen nudge above: a saved placement replaces it.
+	placement_load_main();
 
 	SDL_SetWindowOpacity(window, opacity);
 
@@ -2817,6 +3096,12 @@ video_update()
 
 	video_render_all();
 
+	// Without the debugger nothing else watches the main window; keep its
+	// normal rect current so a maximize just before quitting cannot lose it.
+	if (placement_owned_here()) {
+		video_window_geometry_poll();
+	}
+
 	if (debug_overlay) {
 		return true;
 	}
@@ -3198,6 +3483,10 @@ video_end()
 		GifEnd(&gif_writer);
 		record_gif = RECORD_GIF_DISABLED;
 	}
+
+	// While still fullscreen if it is: the poll skips a fullscreen window and
+	// keeps the windowed placement from before.
+	placement_save_main();
 
 	is_fullscreen = false;
 	SDL_SetWindowFullscreen(window, 0);

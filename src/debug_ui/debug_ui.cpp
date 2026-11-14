@@ -522,11 +522,21 @@ debug_ui_create_context(SDL_Window *win)
     // Detect first run (no imgui.ini yet) so we install a sensible default dock
     // layout once. After that ImGui persists the user's own arrangement and we
     // leave it alone.
+    //
+    // "No layout yet" means no [Docking] section rather than no file: a run
+    // without -imgui writes imgui.ini too, holding only the main window's
+    // placement, and that must not cost the first debugger run its layout.
     s_build_default_layout = true;
     if (const char *ini = io.IniFilename) {
         if (FILE *f = fopen(ini, "rb")) {
+            std::string text;
+            char        chunk[4096];
+            size_t      got;
+            while ((got = fread(chunk, 1, sizeof chunk, f)) > 0)
+                text.append(chunk, got);
             fclose(f);
-            s_build_default_layout = false;
+            if (text.find("[Docking][Data]") != std::string::npos)
+                s_build_default_layout = false;
         }
     }
 
@@ -1287,6 +1297,12 @@ debug_ui_render(void)
     }
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
+    // SDL window moves and resizes are not ImGui's, so nothing else tells it
+    // the saved placement (MainWindow= / DebuggerWindow=) is stale.
+    if (video_window_geometry_poll()) {
+        ImGui::MarkIniSettingsDirty();
+    }
 
     // Publish any cross-panel goto requested last frame so every panel sees it.
     debug_ui_latch_goto();
