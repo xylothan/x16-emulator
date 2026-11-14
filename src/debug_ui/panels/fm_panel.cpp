@@ -2,8 +2,8 @@
 //
 // Tabs:
 //   * Channels  — the 8 OPM channels: note, pan, algorithm, key-on, EG and level.
-//   * Operators — all parameters for the selected channel's M1/M2/C1/C2 slots.
-//   * Algorithm — a live connection diagram for the selected channel's algorithm.
+//   * Operators — all parameters of the M1/M2/C1/C2 slots of the lit channels.
+//   * Algorithm — live connection diagrams for the lit channels' algorithms.
 //   * Global    — LFO, noise, timers, CT pins, status and chip/sample clocks.
 //   * Registers — all 256 accepted YM register shadows with compact decodes.
 //   * Scope     — per-channel and summed waveforms using the shared scope widget.
@@ -74,6 +74,15 @@ inline uint8_t op_mask_to_slot_mask(uint8_t op_mask)
 }
 
 static const char *s_slot_names[OP_COUNT] = { "M1", "M2", "C1", "C2" };
+// The datasheet's names for the four operator slots. They are names, not roles:
+// which operators are heard (carriers) depends on ALG. C2 is a carrier in every
+// algorithm, and in ALG 7 all four are.
+static const char *s_slot_long[OP_COUNT] = { "Modulator 1", "Modulator 2", "Carrier 1", "Carrier 2" };
+static const char *s_slot_legend =
+    "M1, M2, C1, C2 are the datasheet's names for a channel's four operators\n"
+    "(Modulator 1/2, Carrier 1/2). They are names, not roles: ALG decides\n"
+    "which ones are heard (carriers) and which only shape another's tone\n"
+    "(modulators). C2 is always heard; in ALG 7 all four are.";
 static const char *s_eg_names[5] = { "-", "Attack", "Decay", "Sustain", "Release" };
 static const char *s_lfo_waves[4] = { "saw", "square", "triangle", "noise" };
 
@@ -101,13 +110,20 @@ uint8_t alg_for_ch(int ch) { return (uint8_t)(ch_reg(0x20, ch) & 0x07); }
 // in this panel. s_alg holds ymfm O-indices, hence the permutation.
 uint8_t carriers_for_alg(int alg) { return op_mask_to_slot_mask(s_alg[alg & 7].carriers_mask); }
 
+// The operator's live output level: envelope plus total level, as ymfm's
+// envelope_attenuation() combines them (TL is 0.75 dB a step, the envelope
+// 0.09375 dB a unit, so TL counts 8 units). The debugger bridge's
+// eg_attenuation is the envelope ALONE, so TL has to be added here or a
+// carrier at TL 127 would read as full volume. LFO AM is not included.
 float operator_level(int slot, int ch)
 {
     ym_debug_operator op = {};
     if (!YM_debug_get_operator(op_index(slot, ch), &op)) {
         return 0.0f;
     }
-    return clamp01(1.0f - (float)op.eg_attenuation / 1023.0f);
+    int att = (int)op.eg_attenuation + ((op_reg(0x60, slot, ch) & 0x7f) << 3);
+    if (att > 0x3ff) att = 0x3ff;
+    return clamp01(1.0f - (float)att / 1023.0f);
 }
 
 float channel_carrier_level(int ch)
@@ -172,7 +188,59 @@ void draw_key_mask(uint8_t mask)
         ImGui::TextColored((mask & (1u << slot)) ? ImVec4(0.45f, 1.0f, 0.55f, 1.0f)
                                                  : ImVec4(0.35f, 0.36f, 0.38f, 1.0f),
                            "%s", s_slot_names[slot]);
+        ImGui::SetItemTooltip("%s (%s): %s", s_slot_names[slot], s_slot_long[slot],
+                              (mask & (1u << slot)) ? "keyed on" : "keyed off");
     }
+}
+
+// Channel toggles for the tabs that show some channels: one button per channel,
+// lit when shown, plus All / None. The row never goes away, so the set can
+// always be changed. Turning a channel on also makes it the selected channel
+// that the other tabs follow. A channel whose operators are all silent is
+// drawn dimmed, like its Channels row.
+void draw_channel_toggles(uint8_t *mask)
+{
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Channels");
+    ImGui::SetItemTooltip("Click channels to show or hide them; any number can be lit.");
+    const ImVec4 lit = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+    for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
+        ImGui::SameLine();
+        char id[8];
+        snprintf(id, sizeof(id), "%d", ch);
+        const bool on = (*mask >> ch) & 1;
+        const bool quiet = channel_effectively_silent(ch);
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, lit);
+        if (quiet) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.6f);
+        if (ImGui::Button(id)) {
+            *mask ^= (uint8_t)(1u << ch);
+            if (!on) s_selected_ch = ch;
+        }
+        if (quiet) ImGui::PopStyleVar();
+        if (on) ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("Channel %d, ALG %u%s - click to %s", ch, (unsigned)alg_for_ch(ch),
+                              quiet ? " (silent)" : "", on ? "hide" : "show");
+    }
+    ImGui::SameLine(0.0f, 12.0f);
+    if (ImGui::SmallButton("All")) *mask = 0xff;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("None")) *mask = 0x00;
+}
+
+// Seeds a toggle set from the selected channel the first time a tab is shown.
+inline void seed_toggles(uint8_t *mask, bool *seeded)
+{
+    if (!*seeded) {
+        *mask = (uint8_t)(1u << s_selected_ch);
+        *seeded = true;
+    }
+}
+
+inline int popcount8(uint8_t m)
+{
+    int n = 0;
+    for (; m; m &= (uint8_t)(m - 1)) ++n;
+    return n;
 }
 
 void draw_eg_summary(int ch)
@@ -230,6 +298,8 @@ void draw_channels_tab()
     // datasheet numbers them 1-8.)
     ImGui::TextDisabled("Channels are 0-7, matching the $20+ch / $28+ch register offsets "
                         "and the $08 key-on channel field.");
+    ImGui::TextDisabled("Operators: M1/M2 = Modulator 1/2, C1/C2 = Carrier 1/2 (hover for more).");
+    ImGui::SetItemTooltip("%s", s_slot_legend);
     const uint8_t mute = YM_debug_get_mute_mask();
     if (dbgui_unmute_all_button(mute)) {
         YM_debug_set_mute_mask(0);
@@ -279,14 +349,16 @@ void draw_channels_tab()
           "how far the LFO moves the level of operators that have AMS-EN set\n"
           "(tremolo). 0 is off." },
         { "Key-on",    keyon_w,
-          "Which operators are keyed on (register $08: M1 C1 M2 C2). Key-on\n"
-          "starts an operator's attack and resets its phase; key-off starts\n"
-          "its release." },
+          "Which of the channel's four operators are keyed on (bright) or off\n"
+          "(dim): M1/M2 = Modulator 1/2, C1/C2 = Carrier 1/2. Set by register\n"
+          "$08, whose bits run M1 C1 M2 C2. Key-on starts an operator's attack\n"
+          "and resets its phase; key-off starts its release." },
         { "EG",        eg_w,
           "Envelope state of each operator: A attack, D first decay (D1R),\n"
           "S second decay (D2R, after the D1L level), R release, - idle." },
         { "Level",     level_w,
-          "Output level of the channel's carriers after TL and the envelope." },
+          "Output level of the channel's loudest carrier: TL plus the envelope\n"
+          "(LFO tremolo not included)." },
     };
     // Fixed widths plus ScrollX: a window narrower than the table scrolls
     // sideways instead of crushing columns. ScrollX makes the table its own
@@ -360,10 +432,142 @@ void draw_channels_tab()
     }
 }
 
+// ---- Envelope timing model -------------------------------------------------
+// Mirrors ymfm's OPM envelope generator (ymfm_fm.ipp clock_envelope(),
+// ymfm_opm.cpp cache_operator_data()) closely enough to give real phase times:
+//
+//   * The EG steps once every 3 samples (EG_CLOCK_DIVIDER = 3).
+//   * 6-bit rates: AR, D1R, D2R are reg*2, RR is reg*4+2, each plus the key
+//     scaling bonus (KC>>2) >> (KS^3), clamped to 63; a register value of 0
+//     stays 0 (the phase never moves).
+//   * At rate r, attenuation updates every 2^(11 - r/4) EG steps (every step
+//     from r=44 up), adding the next nibble of s_eg_inc[r] — so the time halves
+//     every 4 rate steps, i.e. every 2 steps of AR/D1R/D2R.
+//   * Attack is exponential: att -= ceil((att+1) * inc / 16). Rates 62-63 start
+//     at full volume on key-on.
+//   * D1L 0-14 is a level of D1L*32 units (3 dB a step); 15 means 31*32.
+//
+// The starting phase of the global EG counter is unknowable from here, so a
+// slow rate's first update can land up to one interval early or late.
+constexpr double EG_STEP_HZ = YM_SAMPLE_HZ / 3.0;
+
+// Copy of ymfm's attenuation_increment() table (ymfm_fm.ipp).
+static const uint32_t s_eg_inc[64] = {
+    0x00000000, 0x00000000, 0x10101010, 0x10101010, 0x10101010, 0x10101010, 0x11101110, 0x11101110,
+    0x10101010, 0x10111010, 0x11101110, 0x11111110, 0x10101010, 0x10111010, 0x11101110, 0x11111110,
+    0x10101010, 0x10111010, 0x11101110, 0x11111110, 0x10101010, 0x10111010, 0x11101110, 0x11111110,
+    0x10101010, 0x10111010, 0x11101110, 0x11111110, 0x10101010, 0x10111010, 0x11101110, 0x11111110,
+    0x10101010, 0x10111010, 0x11101110, 0x11111110, 0x10101010, 0x10111010, 0x11101110, 0x11111110,
+    0x10101010, 0x10111010, 0x11101110, 0x11111110, 0x10101010, 0x10111010, 0x11101110, 0x11111110,
+    0x11111111, 0x21112111, 0x21212121, 0x22212221, 0x22222222, 0x42224222, 0x42424242, 0x44424442,
+    0x44444444, 0x84448444, 0x84848484, 0x88848884, 0x88888888, 0x88888888, 0x88888888, 0x88888888,
+};
+
+inline int eg_inc(int rate, int idx) { return (int)((s_eg_inc[rate] >> (4 * idx)) & 0xf); }
+
+// EG steps between attenuation updates at this rate.
+inline double eg_update_interval(int rate)
+{
+    const int shift = rate >> 2;
+    return (shift >= 11) ? 1.0 : (double)(1u << (11 - shift));
+}
+
+// Average attenuation units added per EG step by a linear (non-attack) phase.
+double eg_units_per_step(int rate)
+{
+    if (rate <= 0) return 0.0;
+    int sum = 0;
+    for (int i = 0; i < 8; ++i) sum += eg_inc(rate, i);
+    return ((double)sum / 8.0) / eg_update_interval(rate);
+}
+
+// Milliseconds for a linear phase to cover `units`; negative means never.
+double eg_linear_ms(int rate, int units)
+{
+    if (units <= 0) return 0.0;
+    const double ups = eg_units_per_step(rate);
+    if (ups <= 0.0) return -1.0;
+    return (double)units / ups / EG_STEP_HZ * 1000.0;
+}
+
+// Milliseconds for the attack to go from silence to full; negative means never.
+double eg_attack_ms(int rate)
+{
+    if (rate >= 62) return 0.0;
+    if (eg_units_per_step(rate) <= 0.0) return -1.0;
+    int att = 0x3ff;
+    int updates = 0;
+    for (int idx = 0; att > 0 && updates < 100000; idx = (idx + 1) & 7, ++updates) {
+        att -= ((att + 1) * eg_inc(rate, idx) + 15) >> 4;
+        if (att < 0) att = 0;
+    }
+    return (double)updates * eg_update_interval(rate) / EG_STEP_HZ * 1000.0;
+}
+
+struct EnvModel {
+    int    tl_units;       // TL in envelope units (TL*8)
+    int    sustain_units;  // D1L as an envelope level
+    int    rates[4];       // effective 6-bit AR, D1R, D2R, RR
+    double attack_ms;      // silence -> peak
+    double decay_ms;       // peak -> D1L
+    double sustain_ms;     // D1L -> silence while held
+    double release_ms;     // D1L -> silence after key-off
+    double d2r_db_per_s;   // how fast the held level keeps falling
+};
+
+int eg_effective(int raw, int ksr) { return (raw == 0) ? 0 : ((raw + ksr > 63) ? 63 : raw + ksr); }
+
+void env_model(int slot, int ch, EnvModel *m)
+{
+    const uint8_t tl  = op_reg(0x60, slot, ch) & 0x7f;
+    const uint8_t r80 = op_reg(0x80, slot, ch);
+    const uint8_t d1r = op_reg(0xa0, slot, ch) & 0x1f;
+    const uint8_t d2r = op_reg(0xc0, slot, ch) & 0x1f;
+    const uint8_t re0 = op_reg(0xe0, slot, ch);
+    const int keycode = (ch_reg(0x28, ch) & 0x7f) >> 2;
+    const int ksr = keycode >> (((r80 >> 6) & 3) ^ 3);
+    int d1l = (re0 >> 4) & 0x0f;
+    if (d1l == 15) d1l = 31;
+
+    m->tl_units = tl << 3;
+    m->sustain_units = d1l << 5;
+    m->rates[0] = eg_effective((r80 & 0x1f) * 2, ksr);
+    m->rates[1] = eg_effective(d1r * 2, ksr);
+    m->rates[2] = eg_effective(d2r * 2, ksr);
+    m->rates[3] = eg_effective((re0 & 0x0f) * 4 + 2, ksr);
+    m->attack_ms  = eg_attack_ms(m->rates[0]);
+    m->decay_ms   = eg_linear_ms(m->rates[1], m->sustain_units);
+    m->sustain_ms = eg_linear_ms(m->rates[2], 0x3ff - m->sustain_units);
+    m->release_ms = eg_linear_ms(m->rates[3], 0x3ff - m->sustain_units);
+    m->d2r_db_per_s = eg_units_per_step(m->rates[2]) * EG_STEP_HZ * 0.09375;
+}
+
+void format_ms(char *out, size_t n, double ms)
+{
+    if (ms < 0.0)          snprintf(out, n, "never");
+    else if (ms < 0.05)    snprintf(out, n, "instant");
+    else if (ms < 1000.0)  snprintf(out, n, "%.1f ms", ms);
+    else                   snprintf(out, n, "%.2f s", ms / 1000.0);
+}
+
+// Width share of a phase: log of its real time, so 1 ms and 10 s both fit and
+// the same time always draws the same width in every operator's sketch.
+float env_time_frac(double ms)
+{
+    if (ms < 0.0) return 1.0f;
+    const double f = log1p(ms / 2.0) / log1p(10000.0 / 2.0);
+    return (float)(f > 1.0 ? 1.0 : f);
+}
+
+// Envelope sketch. X is time on a log scale per phase (attack | decay to D1L |
+// a fixed one-second hold | release), Y is attenuation in dB, 0 dB at the top
+// and the chip's 96 dB floor at the bottom, with TL included. The dot is the
+// operator's live envelope position. Exact times are in the tooltip.
 void draw_env_shape(int slot, int ch, ImVec2 size)
 {
     ImGui::PushID(slot * 16 + ch);
     ImGui::InvisibleButton("##env", size);
+    const bool hovered = ImGui::IsItemHovered();
     const ImVec2 p0 = ImGui::GetItemRectMin();
     const ImVec2 p1 = ImGui::GetItemRectMax();
     ImGui::PopID();
@@ -371,26 +575,87 @@ void draw_env_shape(int slot, int ch, ImVec2 size)
     dl->AddRectFilled(p0, p1, IM_COL32(16, 18, 22, 255));
     dl->AddRect(p0, p1, IM_COL32(70, 78, 90, 255));
 
-    const uint8_t tl = op_reg(0x60, slot, ch) & 0x7f;
-    const uint8_t ar = op_reg(0x80, slot, ch) & 0x1f;
-    const uint8_t d1r = op_reg(0xa0, slot, ch) & 0x1f;
-    const uint8_t d2r = op_reg(0xc0, slot, ch) & 0x1f;
-    const uint8_t d1l = (op_reg(0xe0, slot, ch) >> 4) & 0x0f;
-    const uint8_t rr = op_reg(0xe0, slot, ch) & 0x0f;
+    EnvModel m;
+    env_model(slot, ch, &m);
 
-    const float w = p1.x - p0.x;
-    const float h = p1.y - p0.y;
-    const float loud = (float)tl / 127.0f;
-    const float sustain = (float)d1l / 15.0f;
-    const float x1 = p0.x + w * (0.12f + (31 - ar) * 0.0025f);
-    const float x2 = x1 + w * (0.14f + (31 - d1r) * 0.003f);
-    const float x3 = x2 + w * (0.18f + (31 - d2r) * 0.002f);
-    const float x4 = p1.x - w * (0.08f + (15 - rr) * 0.004f);
-    const float y0 = p1.y - 2.0f;
-    const float y_peak = p0.y + 2.0f + h * loud;
-    const float y_sus = p0.y + 2.0f + h * (loud + (1.0f - loud) * sustain);
-    ImVec2 pts[5] = { ImVec2(p0.x + 2.0f, y0), ImVec2(x1, y_peak), ImVec2(x2, y_sus), ImVec2(x3, y_sus), ImVec2(x4, y0) };
-    dl->AddPolyline(pts, 5, IM_COL32(120, 190, 255, 255), false, 1.5f);
+    const float l = p0.x + 2.0f, r = p1.x - 2.0f;
+    const float t = p0.y + 2.0f, b = p1.y - 2.0f;
+    const float w = r - l;
+    auto y_of = [&](int env) {
+        int a = env + m.tl_units;
+        if (a > 0x3ff) a = 0x3ff;
+        return t + (b - t) * (float)a / 1023.0f;
+    };
+
+    // Phase widths: attack, decay and release share the box by log time; the
+    // hold is a fixed slice showing one second of D2R.
+    const float xa = l + w * 0.22f * env_time_frac(m.attack_ms);
+    const float xd = xa + w * 0.24f * env_time_frac(m.decay_ms);
+    const float xs = xd + w * 0.22f;
+    const float xr = xs + w * 0.32f * env_time_frac(m.release_ms);
+
+    const ImU32 line = IM_COL32(120, 190, 255, 255);
+    ImVec2 seg[4][2];
+    int nseg = 0;
+    if (m.attack_ms < 0.0) {
+        // AR 0: the level never rises, so the operator stays silent.
+        seg[nseg][0] = ImVec2(l, b); seg[nseg][1] = ImVec2(r, b); ++nseg;
+    } else {
+        // Sustain level reached after a second of D2R (clamped at silence).
+        double held = (double)m.sustain_units;
+        int peak_env = 0, hold_env;
+        if (m.decay_ms < 0.0) {
+            // D1R 0: the level stays at the peak and never reaches D1L.
+            hold_env = 0;
+        } else {
+            held += eg_units_per_step(m.rates[2]) * EG_STEP_HZ;
+            hold_env = (held > 1023.0) ? 0x3ff : (int)held;
+        }
+        const int hold_start = (m.decay_ms < 0.0) ? peak_env : m.sustain_units;
+        seg[nseg][0] = ImVec2(l, b);              seg[nseg][1] = ImVec2(xa, y_of(peak_env));  ++nseg;
+        seg[nseg][0] = seg[nseg - 1][1];          seg[nseg][1] = ImVec2(xd, y_of(hold_start)); ++nseg;
+        seg[nseg][0] = seg[nseg - 1][1];          seg[nseg][1] = ImVec2(xs, y_of(hold_env));   ++nseg;
+        seg[nseg][0] = seg[nseg - 1][1];          seg[nseg][1] = ImVec2(xr, b);                ++nseg;
+        // Key-off marker.
+        dl->AddLine(ImVec2(xs, t), ImVec2(xs, b), IM_COL32(90, 96, 110, 255), 1.0f);
+    }
+    for (int i = 0; i < nseg; ++i) dl->AddLine(seg[i][0], seg[i][1], line, 1.5f);
+
+    // Live position: the point on the current phase's segment at the
+    // operator's actual envelope level.
+    ym_debug_operator op = {};
+    if (nseg == 4 && YM_debug_get_operator(op_index(slot, ch), &op) &&
+        op.eg_state >= YM_EG_ATTACK && op.eg_state <= YM_EG_RELEASE && op.eg_attenuation < 0x3ff) {
+        const int s = op.eg_state - YM_EG_ATTACK;
+        const float y0 = seg[s][0].y, y1 = seg[s][1].y;
+        const float y = y_of(op.eg_attenuation);
+        const float f = (fabsf(y1 - y0) > 0.5f) ? clamp01((y - y0) / (y1 - y0)) : 0.5f;
+        const ImVec2 dot(seg[s][0].x + (seg[s][1].x - seg[s][0].x) * f, y);
+        dl->AddCircleFilled(dot, 2.5f, eg_color(op.eg_state));
+    }
+
+    if (hovered && ImGui::BeginTooltip()) {
+        char a[24], d[24], s[24], rr[24];
+        format_ms(a, sizeof(a), m.attack_ms);
+        format_ms(d, sizeof(d), m.decay_ms);
+        format_ms(s, sizeof(s), m.sustain_ms);
+        format_ms(rr, sizeof(rr), m.release_ms);
+        ImGui::Text("Ch %d %s (%s) envelope", ch, s_slot_names[slot], s_slot_long[slot]);
+        ImGui::Separator();
+        ImGui::Text("Attack   %-10s silence to peak", a);
+        ImGui::Text("Decay    %-10s peak to D1L (-%.0f dB)", d, (double)m.sustain_units * 0.09375);
+        if (m.d2r_db_per_s > 0.0)
+            ImGui::Text("Hold     %-10s D1L to silence, %.1f dB/s while held", s, m.d2r_db_per_s);
+        else
+            ImGui::Text("Hold     stays at D1L while the key is held (D2R 0)");
+        ImGui::Text("Release  %-10s D1L to silence after key-off", rr);
+        ImGui::Text("Peak     -%.2f dB (TL)", (double)m.tl_units * 0.09375);
+        ImGui::Separator();
+        ImGui::TextDisabled("Times from ymfm's EG rates, incl. key scaling at the\n"
+                            "current note. Width is log time; the slice after the\n"
+                            "grey key-off line shows the release. Dot = live position.");
+        ImGui::EndTooltip();
+    }
 }
 
 void draw_operator_row(int ch, int slot)
@@ -423,16 +688,17 @@ void draw_operator_row(int ch, int slot)
     snprintf(id, sizeof(id), "##att%d_%d", ch, slot);
     dbgui_level_meter(id, operator_level(slot, ch), ImVec2(90.0f, 0.0f), IM_COL32(90, 170, 240, 255));
     ImGui::TableSetColumnIndex(14);
-    draw_env_shape(slot, ch, ImVec2(110.0f, 28.0f));
+    draw_env_shape(slot, ch, ImVec2(160.0f, 30.0f));
 }
 
 void draw_operators_tab()
 {
-    static bool show_all = false;
-    ImGui::Checkbox("Show all 32 operators grouped by channel", &show_all);
-    ImGui::TextDisabled("Envelope sketches are qualitative ADSR/TL shapes, not cycle-accurate ymfm EG traces.");
-    const int first_ch = show_all ? 0 : s_selected_ch;
-    const int last_ch = show_all ? YM_NUM_CHANNELS : (s_selected_ch + 1);
+    static uint8_t shown = 0;
+    static bool seeded = false;
+    seed_toggles(&shown, &seeded);
+    draw_channel_toggles(&shown);
+    ImGui::TextDisabled("Envelope: attack | decay to D1L | 1 s held | release. Time is log scale, level in dB. "
+                        "Hover for exact times.");
     // FIXED COLUMN WIDTHS, fitted to each column's widest value. Declared with
     // no width, every column stretched to an equal share, so a one-digit DT1
     // got as much room as the envelope sketch and the sketch was clipped.
@@ -440,8 +706,9 @@ void draw_operators_tab()
     // column stays frozen so each row stays identified.
     const ColHelp cols[15] = {
         { "Slot",   dbgui_col_width("Slot", "Ch 0 M1"),
-          "Channel and operator. M1/M2 are modulators or carriers depending on\n"
-          "ALG; C2 is always a carrier, and on channel 7 can be the noise." },
+          "Channel and operator: M1/M2 = Modulator 1/2, C1/C2 = Carrier 1/2.\n"
+          "Those are slot names; ALG decides which are actually heard. C2 is\n"
+          "always a carrier, and on channel 7 can be the noise." },
         { "DT1",    dbgui_col_width("DT1", "7"),
           "Detune 1, register $40 bits 6-4: a small pitch offset, 0-3 up and\n"
           "5-7 down (4 is 0). Two detuned operators beat into a chorus." },
@@ -481,19 +748,24 @@ void draw_operators_tab()
           "Where the envelope is now: Attack, Decay (D1R), Sustain (D2R)\n"
           "or Release." },
         { "Atten",  dbgui_col_fit("Atten", 90.0f),
-          "Live attenuation: TL plus the envelope, as a level." },
-        { "ADSR sketch", dbgui_col_fit("ADSR sketch", 110.0f),
-          "A qualitative shape from AR, D1R, D1L, D2R, RR and TL - not a\n"
-          "cycle-accurate trace." },
+          "Live output level: TL plus the envelope (LFO tremolo not included)." },
+        { "Envelope", dbgui_col_fit("Envelope", 160.0f),
+          "The envelope from AR, D1R, D1L, D2R, RR, TL and KS at the current\n"
+          "note: attack | decay to D1L | one second held | release, on a log\n"
+          "time scale with level in dB. The dot is the live position. Hover a\n"
+          "sketch for its phase times." },
     };
-    if (ImGui::BeginTable("ym_ops", 15,
+    // New ID: imgui.ini keeps column widths by table ID, and the old ID's
+    // saved width would keep the sketch column at its former size.
+    if (ImGui::BeginTable("ym_ops_v2", 15,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | DBGUI_TABLE_FLAGS_RESIZABLE |
                           ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY,
                           ImVec2(0.0f, 0.0f))) {
         ImGui::TableSetupScrollFreeze(1, 1);
         setup_columns(cols, 15);
         headers_with_help(cols, 15);
-        for (int ch = first_ch; ch < last_ch; ++ch) {
+        for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
+            if (!((shown >> ch) & 1)) continue;
             for (int slot = 0; slot < OP_COUNT; ++slot) draw_operator_row(ch, slot);
         }
         ImGui::EndTable();
@@ -523,21 +795,81 @@ void draw_arrow(ImDrawList *dl, ImVec2 a, ImVec2 b, ImU32 color)
     dl->AddTriangleFilled(b, p1, p2, color);
 }
 
-void draw_algorithm_tab()
+// Slot mask of the operators that `slot` feeds (modulates) in this algorithm.
+uint8_t alg_targets_of(int alg, int slot)
 {
-    const int ch = s_selected_ch;
+    uint8_t mask = 0;
+    for (int dst_op = 1; dst_op < OP_COUNT; ++dst_op) {
+        const uint8_t srcs = source_mask(s_alg[alg].inputs[dst_op]);
+        for (int src_op = 0; src_op < OP_COUNT; ++src_op) {
+            if ((srcs & (1u << src_op)) && kOpToSlot[src_op] == slot) mask |= (uint8_t)(1u << kOpToSlot[dst_op]);
+        }
+    }
+    return mask;
+}
+
+void append_slot_list(char *out, size_t n, uint8_t mask)
+{
+    bool first = true;
+    for (int s = 0; s < OP_COUNT; ++s) {
+        if (!(mask & (1u << s))) continue;
+        const size_t len = strlen(out);
+        snprintf(out + len, n - len, "%s%s", first ? "" : ", ", s_slot_names[s]);
+        first = false;
+    }
+}
+
+void op_box_tooltip(int ch, int alg, int slot, uint8_t fb)
+{
+    const bool carrier = (carriers_for_alg(alg) & (1u << slot)) != 0;
+    const uint8_t feeds = alg_targets_of(alg, slot);
+    uint8_t fed_by = 0;
+    for (int s = 0; s < OP_COUNT; ++s) {
+        if (alg_targets_of(alg, s) & (1u << slot)) fed_by |= (uint8_t)(1u << s);
+    }
+    ym_debug_operator op = {};
+    YM_debug_get_operator(op_index(slot, ch), &op);
+    const uint8_t st = (op.eg_state <= YM_EG_RELEASE) ? op.eg_state : 0;
+
+    ImGui::BeginTooltip();
+    ImGui::Text("%s - %s, channel %d", s_slot_names[slot], s_slot_long[slot], ch);
+    char buf[64] = "";
+    if (carrier) {
+        ImGui::TextUnformatted("Carrier: its output is heard.");
+    } else {
+        append_slot_list(buf, sizeof(buf), feeds);
+        ImGui::Text("Modulator: not heard; bends the tone of %s.", buf);
+    }
+    buf[0] = '\0';
+    append_slot_list(buf, sizeof(buf), fed_by);
+    if (fed_by) ImGui::Text("Modulated by %s.", buf);
+    if (slot == 0 && fb) ImGui::Text("Feeds back into itself (FB %u).", (unsigned)fb);
+    ImGui::Text("Level %.0f%% (%s), TL %u, MUL %u", operator_level(slot, ch) * 100.0f,
+                s_eg_names[st], (unsigned)(op_reg(0x60, slot, ch) & 0x7f), (unsigned)(op_reg(0x40, slot, ch) & 0x0f));
+    ImGui::EndTooltip();
+}
+
+// The connection diagram for one channel. `compact` drops the per-box level
+// text so eight fit on screen; `titled` labels the canvas with its channel,
+// for when several are on screen. Returns true when clicked.
+bool draw_alg_diagram(int ch, ImVec2 canvas, bool compact, bool titled = false)
+{
     const int alg = alg_for_ch(ch);
     const uint8_t fb = (ch_reg(0x20, ch) >> 3) & 7;
-    ImGui::Text("Channel %d  ALG %d: %s", ch, alg, s_alg[alg].desc);
-    ImGui::TextDisabled("Algorithm table is derived from ymfm_fm.ipp output_4op(). Box brightness follows live EG attenuation.");
-
-    const ImVec2 canvas = ImVec2(ImGui::GetContentRegionAvail().x, 330.0f);
-    ImGui::InvisibleButton("alg_canvas", canvas);
+    ImGui::PushID(ch);
+    const bool clicked = ImGui::InvisibleButton("alg_canvas", canvas);
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
     const ImVec2 p0 = ImGui::GetItemRectMin();
     const ImVec2 p1 = ImGui::GetItemRectMax();
     ImDrawList *dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p0, p1, IM_COL32(14, 16, 20, 255));
-    dl->AddRect(p0, p1, IM_COL32(70, 78, 90, 255));
+    dl->AddRect(p0, p1, (titled && ch == s_selected_ch) ? IM_COL32(150, 170, 210, 255) : IM_COL32(70, 78, 90, 255));
+    if (titled) {
+        char title[32];
+        snprintf(title, sizeof(title), "Ch %d  ALG %d", ch, alg);
+        dl->AddText(ImVec2(p0.x + 6.0f, p0.y + 4.0f), IM_COL32(200, 205, 215, 255), title);
+    }
 
     ImVec2 c[OP_COUNT] = {
         ImVec2(p0.x + canvas.x * 0.16f, p0.y + canvas.y * 0.42f),
@@ -545,7 +877,8 @@ void draw_algorithm_tab()
         ImVec2(p0.x + canvas.x * 0.38f, p0.y + canvas.y * 0.62f),
         ImVec2(p0.x + canvas.x * 0.64f, p0.y + canvas.y * 0.42f),
     };
-    const ImVec2 box(70.0f, 42.0f);
+    const ImVec2 box = compact ? ImVec2(40.0f, 24.0f) : ImVec2(70.0f, 42.0f);
+    const float fb_lift = compact ? 22.0f : 60.0f;
     const uint8_t carriers = carriers_for_alg(alg);
     const ImU32 mod_col = IM_COL32(140, 170, 220, 255);
     const ImU32 out_col = IM_COL32(110, 230, 130, 255);
@@ -566,8 +899,8 @@ void draw_algorithm_tab()
     if (fb != 0) {
         const ImVec2 a(c[0].x - 18.0f, c[0].y - box.y * 0.5f);
         const ImVec2 b(c[0].x + 18.0f, c[0].y - box.y * 0.5f);
-        dl->AddBezierCubic(a, ImVec2(a.x - 45.0f, a.y - 60.0f), ImVec2(b.x + 45.0f, b.y - 60.0f), b, IM_COL32(235, 170, 80, 255), 2.0f);
-        dl->AddText(ImVec2(c[0].x - 18.0f, a.y - 58.0f), IM_COL32(235, 185, 100, 255), "FB");
+        dl->AddBezierCubic(a, ImVec2(a.x - 45.0f, a.y - fb_lift), ImVec2(b.x + 45.0f, b.y - fb_lift), b, IM_COL32(235, 170, 80, 255), 2.0f);
+        if (!compact) dl->AddText(ImVec2(c[0].x - 18.0f, a.y - 58.0f), IM_COL32(235, 185, 100, 255), "FB");
     }
     const ImVec2 out(p0.x + canvas.x * 0.86f, p0.y + canvas.y * 0.42f);
     for (int slot = 0; slot < OP_COUNT; ++slot) {
@@ -587,8 +920,50 @@ void draw_algorithm_tab()
         dl->AddRectFilled(b0, b1, fill, 5.0f);
         dl->AddRect(b0, b1, carrier ? out_col : mod_col, 5.0f, 0, 2.0f);
         char label[32];
-        snprintf(label, sizeof(label), "%s\n%.0f%%", s_slot_names[slot], lvl * 100.0f);
-        dl->AddText(ImVec2(b0.x + 8.0f, b0.y + 5.0f), IM_COL32(235, 240, 245, 255), label);
+        if (compact) snprintf(label, sizeof(label), "%s", s_slot_names[slot]);
+        else         snprintf(label, sizeof(label), "%s\n%.0f%%", s_slot_names[slot], lvl * 100.0f);
+        dl->AddText(ImVec2(b0.x + (compact ? 5.0f : 8.0f), b0.y + (compact ? 4.0f : 5.0f)), IM_COL32(235, 240, 245, 255), label);
+        if (hovered && ImGui::IsMouseHoveringRect(b0, b1)) op_box_tooltip(ch, alg, slot, fb);
+    }
+    return clicked;
+}
+
+void draw_algorithm_tab()
+{
+    static uint8_t shown = 0;
+    static bool seeded = false;
+    seed_toggles(&shown, &seeded);
+    draw_channel_toggles(&shown);
+    ImGui::TextDisabled("M1/M2 = Modulator 1/2, C1/C2 = Carrier 1/2. Green boxes are heard (carriers); "
+                        "blue ones only shape another's tone. Brightness = live level. Hover a box.");
+    ImGui::SetItemTooltip("%s", s_slot_legend);
+
+    const int n = popcount8(shown);
+    if (n == 0) {
+        ImGui::TextDisabled("No channels lit - click a channel number above.");
+        return;
+    }
+    if (n == 1) {
+        int ch = 0;
+        while (!((shown >> ch) & 1)) ++ch;
+        const int alg = alg_for_ch(ch);
+        ImGui::Text("Channel %d  ALG %d: %s", ch, alg, s_alg[alg].desc);
+        draw_alg_diagram(ch, ImVec2(ImGui::GetContentRegionAvail().x, 330.0f), false);
+        return;
+    }
+    // Two lit channels still get full-size boxes; more drop to compact ones.
+    const bool compact = n > 2;
+    const float h = compact ? 120.0f : 260.0f;
+    if (ImGui::BeginTable("ym_alg_grid", 2, ImGuiTableFlags_SizingStretchSame)) {
+        int cell = 0;
+        for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
+            if (!((shown >> ch) & 1)) continue;
+            if ((cell % 2) == 0) ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(cell % 2);
+            ++cell;
+            if (draw_alg_diagram(ch, ImVec2(ImGui::GetContentRegionAvail().x, h), compact, true)) s_selected_ch = ch;
+        }
+        ImGui::EndTable();
     }
 }
 
