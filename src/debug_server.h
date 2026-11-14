@@ -30,6 +30,7 @@ static inline void debug_server_shutdown(void) { }
 static inline bool debug_server_wait(uint32_t timeout_ms) { (void)timeout_ms; return false; }
 static inline void debug_server_frame_end(void) { }
 static inline bool debug_server_step_pending(void) { return false; }
+static inline void debug_server_set_no_wait(bool on) { (void)on; }
 
 #else
 
@@ -105,6 +106,11 @@ void debug_server_frame_end(void);
 
 // Whether a client's x16/step is still running frames.
 bool debug_server_step_pending(void);
+
+// While set, a send that would block drops the client at once instead of
+// waiting up to 500 ms for it to read. For code that must not stall, such as
+// the emulation run from inside a Windows window drag.
+void debug_server_set_no_wait(bool on);
 
 #endif // HAS_DAP
 

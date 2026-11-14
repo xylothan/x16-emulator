@@ -434,6 +434,13 @@ static void platform_cleanup(void) {
 static void disconnect_client(void);
 static void dap_release_session_state(void);
 
+// See debug_server_set_no_wait().
+static bool send_no_wait = false;
+
+void debug_server_set_no_wait(bool on) {
+    send_no_wait = on;
+}
+
 static void send_dap_message(cJSON *json) {
     if (client_sock == SOCKET_INVALID) {
         cJSON_Delete(json);
@@ -474,7 +481,7 @@ static void send_dap_message(cJSON *json) {
                     offset += n;
                     stalls = 0;
                 } else if (n < 0 && WOULD_BLOCK) {
-                    if (++stalls > max_stalls) {
+                    if (send_no_wait || ++stalls > max_stalls) {
                         fprintf(stderr, "[dap] client is not reading; dropping it\n");
                         disconnect_client();
                         break;
