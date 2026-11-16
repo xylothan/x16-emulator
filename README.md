@@ -1156,6 +1156,7 @@ memory read at that point:
   "read": [ { "addr": "0x0400", "len": 64 },
             { "addr": "0xA000", "len": 32, "bank": 5 },  // bank: x16 RAM bank for $A000-$BFFF
             { "addr": "vram:1FC00", "len": 1024 } ],
+  "audio": true,                                        // or { "keyOff": true }; default off
   "events": false }                                     // stopped/continued events; default off
 ```
 
@@ -1170,6 +1171,25 @@ paused mid-frame, the rest of that frame counts as the first. `"hash": true` add
 has no frames; use `-hidden`, which still draws every frame but skips copying it to the hidden
 window, the fastest way to run frames. In `x16dbg`'s interactive mode, `break` and then
 `frames 4 1 right a` does the same.
+
+`"audio"` adds what the program told the sound chips to play during the step, without changing
+anything: the machine runs, and hashes, the same with it on or off.
+
+```jsonc
+"ym":  [ { "frame": 0, "channel": 0, "ops": 15, "kc": 74, "kf": 0, "voice": 1119398731 },
+         { "frame": 6, "channel": 0, "off": true } ],   // key-offs only with { "keyOff": true }
+"pcm": [ 6 ]
+```
+
+`ym` lists the YM2151 key-ons in order: every write to register `$08` with an operator bit set.
+`frame` counts from 0 within the step, `ops` is the operator mask (bits 3-6 of the write, M1 C1
+M2 C2 from bit 0), and `kc` and `kf` are the channel's key code and 6-bit key fraction. `voice` is
+a 32-bit FNV-1a hash of the channel's sound-defining registers at that moment, `$20`+ch and, for
+operators M1 M2 C1 C2, `$40` `$60` `$80` `$A0` `$C0` `$E0` + op×8 + ch, so the same instrument
+gives the same `voice` whatever note it plays. With `{ "keyOff": true }` writes that key every
+operator off are listed too, as `"off": true`. `pcm` holds the frames in which the program wrote
+to an empty VERA PCM FIFO, at most once a frame: the start of a sample. A step keeps up to 512
+YM events; any more are counted in `ymDropped`. Writes made by the debugger are not counted.
 
 `x16/saveState` and `x16/loadState` keep the whole machine in memory under a name the client
 picks, or in a file:

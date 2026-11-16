@@ -26,6 +26,7 @@
 #include "perf_budget.h"
 #include "x16_hash.h"
 #include "savestate.h"
+#include "audio_events.h"
 
 uint8_t ram_bank;
 uint8_t rom_bank;
@@ -476,7 +477,11 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 				addr_ym = value;
 			} else {                       // YM data (partially decoded)
 				audio_render();
-				if (!YM_write_reg(addr_ym, value)) {
+				const bool accepted = YM_write_reg(addr_ym, value);
+				if (accepted && audio_events_on && !debugOn) {
+					audio_events_ym_write(addr_ym, value); // x16/step "audio"
+				}
+				if (!accepted) {
 					// The chip drops it, as the real one would. Say where it came
 					// from: the usual cause is a sound driver that does not wait
 					// for bit 7 of $9F41 to clear before writing.

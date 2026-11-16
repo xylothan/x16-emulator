@@ -19,6 +19,7 @@ uint8_t pcm_read_rate(void);
 void    pcm_write_fifo(uint8_t val);
 void    pcm_render(int16_t *buf, unsigned num_samples);
 bool    pcm_is_fifo_almost_empty(void);
+bool    pcm_is_fifo_empty(void);
 
 // ─── Debugger accessors ─────────────────────────────────────────────────────
 // Read-only views of the VERA PCM channel for the ImGui debugger's PCM panel.

@@ -33,6 +33,7 @@
 #include "sdcard.h"
 #include "i2c.h"
 #include "audio.h"
+#include "audio_events.h"
 #include "render_backend.h"
 #include "x16_hash.h"
 #include "savestate.h"
@@ -4361,7 +4362,13 @@ void video_write(uint8_t reg, uint8_t value) {
 
 		case 0x1B: audio_render(); pcm_write_ctrl(value); break;
 		case 0x1C: audio_render(); pcm_write_rate(value); break;
-		case 0x1D: audio_render(); pcm_write_fifo(value); break;
+		case 0x1D:
+			audio_render();
+			if (audio_events_on && !debug_port_write && pcm_is_fifo_empty()) {
+				audio_events_pcm_start(); // x16/step "audio"
+			}
+			pcm_write_fifo(value);
+			break;
 
 		case 0x1E:
 		case 0x1F:
