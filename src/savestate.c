@@ -338,8 +338,10 @@ header_skip(ss_reader *r)
 	ss_close(r);
 }
 
-// Who wrote the state that last passed header_check(), and the last one loaded.
+// Who wrote the state header_check() last looked at (whether or not it was
+// then loaded), and the last one loaded.
 static savestate_origin checked_origin, loaded_origin;
+static bool             checked_valid;
 
 const savestate_origin *
 savestate_last_origin(void)
@@ -347,10 +349,17 @@ savestate_last_origin(void)
 	return loaded_any ? &loaded_origin : NULL;
 }
 
+const savestate_origin *
+savestate_checked_origin(void)
+{
+	return checked_valid ? &checked_origin : NULL;
+}
+
 // Only the header is read, so this works on the first bytes of a file too.
 static bool
 header_check(const void *data, size_t len, char *err, size_t err_len)
 {
+	checked_valid = false;
 	ss_reader r;
 	ss_reader_init(&r, data, len);
 	if (ss_open(&r, "X16S") != SAVESTATE_FORMAT) {
@@ -364,7 +373,9 @@ header_check(const void *data, size_t len, char *err, size_t err_len)
 		snprintf(err, err_len, "the state's header is damaged");
 		return false;
 	}
-	if (!parse_build(build, &checked_origin)) {
+	const bool readable = parse_build(build, &checked_origin);
+	checked_valid       = checked_origin.layout >= 0;
+	if (!readable) {
 		if (checked_origin.layout < 0) {
 			snprintf(err, err_len, "the state was saved by an emulator whose states this one cannot read (%s; this is %s)",
 			         build, build_id());
@@ -536,9 +547,20 @@ note_origin(const savestate_origin *o)
 }
 
 bool
-savestate_apply(const void *data, size_t len, char *err, size_t err_len)
+savestate_apply(const void *data, size_t len, bool allow_behaviour_change, char *err, size_t err_len)
 {
 	if (!savestate_check(data, len, err, err_len)) {
+		return false;
+	}
+	// Readable, but saved by a machine that ran differently: from here it would
+	// not do what it did when saved, which a caller replaying recordings must
+	// know before it trusts the state. So the caller has to ask.
+	if (checked_origin.machine_changed && !allow_behaviour_change) {
+		snprintf(err, err_len,
+		         "the state was saved by machine version %d and this is %d, so the machine would not run on "
+		         "from it as it did when saved; loading it anyway has to be asked for "
+		         "(x16/loadState allowBehaviourChange)",
+		         checked_origin.machine, SAVESTATE_MACHINE_VERSION);
 		return false;
 	}
 
@@ -656,7 +678,8 @@ savestate_slot_load(const char *name, size_t *size, char *err, size_t err_len)
 	if (size) {
 		*size = s->w.len;
 	}
-	return savestate_apply(s->w.data, s->w.len, err, err_len);
+	// Saved by this process, so by this machine: there is no behaviour to change.
+	return savestate_apply(s->w.data, s->w.len, false, err, err_len);
 }
 
 const void *
@@ -715,7 +738,7 @@ savestate_file_save(const char *path, char *err, size_t err_len)
 }
 
 bool
-savestate_file_load(const char *path, size_t *size, char *err, size_t err_len)
+savestate_file_load(const char *path, size_t *size, bool allow_behaviour_change, char *err, size_t err_len)
 {
 	if (path == NULL || path[0] == '\0') {
 		snprintf(err, err_len, "'path' must name a file");
@@ -755,7 +778,7 @@ savestate_file_load(const char *path, size_t *size, char *err, size_t err_len)
 			         path, (long long)file_len, (unsigned long long)expect);
 		}
 	} else {
-		loaded = savestate_apply(data, got, err, err_len);
+		loaded = savestate_apply(data, got, allow_behaviour_change, err, err_len);
 		if (loaded && size) {
 			*size = got;
 		}

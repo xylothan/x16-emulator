@@ -273,7 +273,9 @@ class Dap:
             m = self.read(timeout)
             if m.get("type") == "response" and m.get("request_seq") == self.seq:
                 if not m.get("success", True):
-                    raise RuntimeError("%s refused: %s" % (cmd, m.get("message")))
+                    e = RuntimeError("%s refused: %s" % (cmd, m.get("message")))
+                    e.body = m.get("body", {})
+                    raise e
                 return m.get("body", {})
 
     def mem(self, addr, n):
@@ -386,7 +388,9 @@ def run(fn):
 
 def check_ids():
     """What a state's build ID decides: another layout is refused; another
-    machine version or toolchain loads, says so, and is the same machine."""
+    machine version is refused unless the load allows it, and then loads and
+    says so; another toolchain loads and says so. Every load is the same
+    machine, and a refusal still says who saved the state."""
     proc, d = launch()
     try:
         step_to(d, 60)
@@ -398,37 +402,45 @@ def check_ids():
         with open(base, "rb") as f:
             data = bytearray(f.read())
 
-        def load_as(build):
+        def load_as(build, allow):
             data[12:76] = build.encode().ljust(64, b"\0")
             p = os.path.join(WORK, "id-variant.x16s")
             with open(p, "wb") as f:
                 f.write(data)
+            a = {"path": p, "hash": True}
+            if allow:
+                a["allowBehaviourChange"] = True
             try:
-                return d.req("x16/loadState", {"path": p, "hash": True}), None
+                return d.req("x16/loadState", a), None, None
             except RuntimeError as e:
-                return None, str(e)
+                return None, str(e), getattr(e, "body", {})
 
-        def loads(build, behaviour, toolchain):
-            r, err = load_as(build)
+        def loads(build, behaviour, toolchain, allow=False):
+            r, err, _ = load_as(build, allow)
             m = (r or {}).get("machine") or {}
-            case("ID %r loads (%s), behaviourChanged %s, toolchainChanged %s, the same machine"
-                 % (build, err or "ok", behaviour, toolchain),
+            case("ID %r%s loads (%s), behaviourChanged %s, toolchainChanged %s, the same machine"
+                 % (build, " with allowBehaviourChange" if allow else "", err or "ok", behaviour, toolchain),
                  r is not None and m.get("behaviourChanged") == behaviour
                  and m.get("toolchainChanged") == toolchain and r.get("hash") == want)
 
-        def refused(build, why):
-            r, err = load_as(build)
-            case("ID %r is refused (%s)" % (build, err), r is None and err and why in err)
+        def refused(build, why, saved=None):
+            r, err, body = load_as(build, False)
+            m = (body or {}).get("machine") or {}
+            case("ID %r is refused (%s)%s" % (build, err, "" if saved is None else
+                 ", and the refusal says machine %s saved it" % m.get("saved")),
+                 r is None and err and why in err and (saved is None or m.get("saved") == saved))
 
+        other = machine + 1000
         loads("x16emu layout %d machine %d toolchain %s" % (layout, machine, tc), False, False)
-        loads("x16emu layout %d machine %d toolchain %s" % (layout, machine + 1000, tc), True, False)
+        refused("x16emu layout %d machine %d toolchain %s" % (layout, other, tc), "allowBehaviourChange", other)
+        loads("x16emu layout %d machine %d toolchain %s" % (layout, other, tc), True, False, allow=True)
         loads("x16emu layout %d machine %d toolchain 00000000" % (layout, machine), False, True)
         refused("x16emu layout %d machine %d toolchain %s" % (layout + 1, machine, tc), "layout")
         refused("x16emu r50 0123456789abcdef-%s" % tc, "cannot read")
         if layout == 1:
             # Earlier IDs, read as layout 1 while that is this build's.
             loads("x16emu machine %d-%s" % (machine, tc), False, False)
-            loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819")
+            loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819", allow=True)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

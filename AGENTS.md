@@ -113,9 +113,10 @@ updates on the strength of this, so get them right:
   old states keep loading and the layout version stays.
 * **`SAVESTATE_MACHINE_VERSION`: how the machine runs.** Bump it in any change
   that alters what the emulated machine does (CPU, memory, VERA, audio chips,
-  VIAs, SMC, timing of any of them). A state from another machine version still
-  loads, but `x16/loadState` reports `behaviourChanged`, and a console line says
-  so, because it will not run on as it did when saved.
+  VIAs, SMC, timing of any of them). A state from another machine version is
+  refused by `x16/loadState` unless the caller passes `allowBehaviourChange`,
+  because it will not run on as it did when saved; the error body still carries
+  `machine` so the caller can see why.
 * **Leave both** for changes to the debugger, DAP, the window, keys, or the
   sound sent to the host, which is not machine state.
 * **Never save a struct whole.** Its bytes would depend on the compiler. Write a

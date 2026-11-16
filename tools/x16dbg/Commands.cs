@@ -676,19 +676,24 @@ public static class Commands
 
     static async Task<int> DoLoadState(X16DebugClient client, string[] args)
     {
-        if (args.Length != 1)
+        bool allow = args.Length == 2 && args[1] == "--allow-behaviour-change";
+        if (args.Length != 1 && !allow)
         {
-            Console.Error.WriteLine("Usage: load <slot|file>");
+            Console.Error.WriteLine("Usage: load <slot|file> [--allow-behaviour-change]");
             Console.Error.WriteLine("       Puts the machine back to a slot saved in this emulator process,");
             Console.Error.WriteLine("       or to a state file saved by a build of the same layout. The machine must be");
-            Console.Error.WriteLine("       paused (break); it stays paused.");
+            Console.Error.WriteLine("       paused (break); it stays paused. A file saved by another machine");
+            Console.Error.WriteLine("       version loads only with --allow-behaviour-change, since the machine");
+            Console.Error.WriteLine("       will not run on from it as it did when it was saved.");
             return 1;
         }
         var (target, isPath) = StateTarget(args[0]);
-        var r = await client.LoadStateAsync(target, isPath);
+        var r = await client.LoadStateAsync(target, isPath, allow);
         if (!DapSuccess(r)) { PrintDapError(r); return 1; }
         long frame = (long)(r["body"]?["frame"]?.GetValue<double>() ?? 0);
-        Console.WriteLine($"Loaded '{target}': frame {frame}");
+        bool changed = r["body"]?["machine"]?["behaviourChanged"]?.GetValue<bool>() ?? false;
+        Console.WriteLine($"Loaded '{target}': frame {frame}" +
+                          (changed ? " (saved by another machine version: it will not run on as it did)" : ""));
         return 0;
     }
 

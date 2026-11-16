@@ -1222,10 +1222,12 @@ that saved it:
   `-midline-effects`, hostfs on or off, and an SD card attached or not.
 
 A state saved by another **machine version** (a second number in `src/savestate.c`, raised when
-a change alters how the emulated machine behaves) or another **toolchain** (compiler and version,
-target, Debug or Release) does load, since its bytes mean what they did. The machine will not (or,
-for a toolchain, may not) run on from it exactly as it did when it was saved, so `x16/loadState`
-says who saved it, and the console says so once per such writer:
+a change alters how the emulated machine behaves) still means what it did, but the machine would
+not run on from it as it did when it was saved. `x16/loadState` refuses it unless asked with
+`"allowBehaviourChange": true`; the F1 slot key loads it and says so in the title bar. A state
+saved by another **toolchain** (compiler and version, target, Debug or Release) loads, since it may
+run on differently but usually does not. Either way, loaded or refused, `x16/loadState` says who
+saved it, and the console notes each such writer once:
 
 ```jsonc
 "machine": { "saved": 1, "current": 2, "savedToolchain": "fafd4819", "currentToolchain": "fafd4819",
