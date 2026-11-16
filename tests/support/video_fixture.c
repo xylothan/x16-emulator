@@ -63,6 +63,9 @@ void machine_toggle_warp(void) { }
 void main_shutdown(void) { }
 // The window title (timing.c) and the save-state slot keys (state_slots.c).
 void timing_refresh_title(void) { }
+// x16/step's sound events (audio_events.c): never on here.
+bool audio_events_on = false;
+void audio_events_pcm_start(void) { }
 const char *(*timing_title_status)(void) = NULL;
 bool state_slots_hotkey(SDL_Keycode sym) { (void)sym; return false; }
 

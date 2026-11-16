@@ -133,6 +133,12 @@ pcm_is_fifo_almost_empty(void)
 	return fifo_cnt < 1024;
 }
 
+bool
+pcm_is_fifo_empty(void)
+{
+	return fifo_cnt == 0;
+}
+
 void
 pcm_render(int16_t *buf, unsigned num_samples)
 {

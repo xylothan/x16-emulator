@@ -354,6 +354,7 @@ set(X16_SOURCES
     src/icon.c
     src/timing.c
     src/savestate.c
+    src/audio_events.c
     src/state_slots.c
     src/hostkey.c
     src/wav_recorder.c

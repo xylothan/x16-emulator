@@ -108,6 +108,9 @@ void via2_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA2, reg, value)
 void video_write(uint8_t reg, uint8_t value) { note_write(FAKE_VERA, reg, value); }
 void midi_serial_write(uint8_t reg, uint8_t value) { note_write(FAKE_MIDI, reg, value); }
 bool YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value); return true; }
+// x16/step's sound events (audio_events.c): never on here.
+bool audio_events_on = false;
+void audio_events_ym_write(uint8_t reg, uint8_t val) { (void)reg; (void)val; }
 
 // memory.c brackets its VERA writes with this so the bandwidth accounting can
 // tell a debugger's poke from a store the guest made. There is no accounting

@@ -161,11 +161,18 @@ load_now(int slot)
 		return false;
 	}
 	size_t size = 0;
-	if (!savestate_file_load(path, &size, err, sizeof err)) {
+	// Someone pressed a key to get back to a saved moment: one saved by another
+	// machine version is better than none, as long as they are told.
+	if (!savestate_file_load(path, &size, true, err, sizeof err)) {
 		say("Slot %d not loaded: %s", slot, err);
 		return false;
 	}
-	say("Loaded slot %d", slot);
+	const savestate_origin *o = savestate_last_origin();
+	if (o && o->machine_changed) {
+		say("Loaded slot %d, saved by another emulator version: it may play out differently", slot);
+	} else {
+		say("Loaded slot %d", slot);
+	}
 	printf("  from %s\n", path);
 	return true;
 }

@@ -100,6 +100,53 @@ booting, and early assertions otherwise race it), and pass a port —
 speaks DAP will connect to a server on the default 9009 and take the session down
 mid-suite.
 
+## Save states: layout and machine versions
+
+A save state names two versions from `src/savestate.c`, and a build treats
+them differently. Training runs keep hundreds of states across emulator
+updates on the strength of this, so get them right:
+
+* **`SAVESTATE_LAYOUT_VERSION`: what the bytes mean.** Another layout is
+  refused. Bump it when a chunk gains, loses or reorders a field, or a value
+  changes meaning, and then empty `legacy_builds`. Prefer a new *chunk* version
+  whose loader still reads the old one, filling new fields with defaults: then
+  old states keep loading and the layout version stays.
+* **`SAVESTATE_MACHINE_VERSION`: how the machine runs.** Bump it in any change
+  that alters what the emulated machine does (CPU, memory, VERA, audio chips,
+  VIAs, SMC, timing of any of them). A state from another machine version is
+  refused by `x16/loadState` unless the caller passes `allowBehaviourChange`,
+  because it will not run on as it did when saved; the error body still carries
+  `machine` so the caller can see why.
+* **Leave both** for changes to the debugger, DAP, the window, keys, or the
+  sound sent to the host, which is not machine state.
+* **Never save a struct whole.** Its bytes would depend on the compiler. Write a
+  byte image with explicit offsets, as `regs_to_image()` (`cpu/fake6502.c`) and
+  `layer_image()` (`video.c`) do, with a `_Static_assert` on the struct's size,
+  so that a new field cannot slip past its image.
+* The toolchain is in the ID as well, since floating-point code can run
+  differently under another compiler. It is reported (`toolchainChanged`), never
+  refused.
+* `testbench/test_machine_version.py` replays fixed workloads from power-on and
+  compares each state's chunk list and its hashes with
+  `testbench/machine_golden.json`. CI runs it on Linux (the `machine-version`
+  job):
+  * chunks that change under the same layout version mean a layout bump was
+    missed;
+  * hashes that change under the same machine version mean a machine bump was
+    missed.
+
+  It also loads one state under edited IDs to check what each version decides.
+  The goldens depend on the ROM, so the job pins one: x16-rom release `r49`,
+  checked by SHA-256. To run it or regenerate:
+
+  ```powershell
+  python testbench/test_machine_version.py <x16emu> <r49 rom.bin>            # check
+  python testbench/test_machine_version.py <x16emu> <r49 rom.bin> --update   # rewrite the goldens
+  ```
+
+  When it fails, the job's log ends with the JSON this build gives, ready to
+  commit once you have bumped the version.
+
 ## Poking at a running emulator
 
 `tools/x16dbg` is a .NET DAP client:

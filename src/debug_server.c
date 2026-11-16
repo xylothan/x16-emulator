@@ -38,6 +38,7 @@
 #include <cjson/cJSON.h>
 #include "x16_hash.h"
 #include "savestate.h"
+#include "audio_events.h"
 
 extern bool headless;   // main.c
 
@@ -147,6 +148,7 @@ static struct {
     bool        by_frames;     // stopped because the count ran out
     bool        events;        // the client wants stopped/continued events
     bool        hash;          // include the machine state hash in the reply
+    bool        audio;         // report what the sound chips were told to play
     int         num_reads;
     step_read_t reads[STEP_MAX_READS];
 } step;
@@ -513,12 +515,17 @@ static void send_dap_response(int request_seq, const char *command, bool success
     send_dap_message(resp);
 }
 
-static void send_dap_error_response(int request_seq, const char *command, const char *message) {
+// An error response whose body carries one more item, key and value (taken
+// over), beside the error; key NULL for none.
+static void send_dap_error_response_with(int request_seq, const char *command, const char *message,
+                                         const char *key, cJSON *item) {
     cJSON *body = cJSON_CreateObject();
     cJSON *error_obj = cJSON_CreateObject();
     cJSON_AddNumberToObject(error_obj, "id", 1);
     cJSON_AddStringToObject(error_obj, "format", message);
     cJSON_AddItemToObject(body, "error", error_obj);
+    if (key && item) cJSON_AddItemToObject(body, key, item);
+    else if (item) cJSON_Delete(item);
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddNumberToObject(resp, "seq", dap_seq++);
@@ -529,6 +536,10 @@ static void send_dap_error_response(int request_seq, const char *command, const 
     cJSON_AddStringToObject(resp, "message", message);
     cJSON_AddItemToObject(resp, "body", body);
     send_dap_message(resp);
+}
+
+static void send_dap_error_response(int request_seq, const char *command, const char *message) {
+    send_dap_error_response_with(request_seq, command, message, NULL, NULL);
 }
 
 static void send_dap_event(const char *event_name, cJSON *body) {
@@ -2206,8 +2217,9 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // Cheap enough to call between every bot decision. JSON numbers are doubles,
 // exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
 // 8 MHz.
-// A hash of the whole machine: exactly the bytes a save state of it would hold
-// (savestate.c), so two machines with the same hash would save the same state.
+// A hash of the whole machine: the bytes a save state of it would hold, but for
+// the build ID (savestate_hash), so two machines with the same hash would save
+// the same state, whichever build of one machine version runs them.
 // Sent as a hex string, since a JSON number cannot carry 64 bits exactly.
 static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
     char hex[24];
@@ -2216,7 +2228,7 @@ static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
 }
 
 static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
-    dap_add_hex64(body, "hash", x16_hash_bytes(X16_HASH_INIT, data, len));
+    dap_add_hex64(body, "hash", savestate_hash(data, len));
 }
 
 static void dap_add_state_hash(cJSON *body) {
@@ -2256,6 +2268,13 @@ static int handle_x16_status(int seq, cJSON *args) {
     cJSON_AddBoolToObject(body, "deterministic", deterministic_mode);
     if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
     else                 cJSON_AddNullToObject(body, "seed");
+    // Which states this build loads: those of the same layout. One from another
+    // machine version or toolchain loads, and x16/loadState says so (savestate.c).
+    cJSON_AddNumberToObject(body, "layout", savestate_layout_version());
+    cJSON_AddNumberToObject(body, "machine", savestate_machine_version());
+    cJSON_AddStringToObject(body, "toolchain", savestate_toolchain());
+    cJSON_AddStringToObject(body, "build", savestate_build_id());
+    cJSON_AddStringToObject(body, "sourceId", savestate_source_id());
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     // The picture is output, not machine state, so it has its own hash.
     if (dap_arg_true(args, "screenHash")) dap_add_hex64(body, "screenHash", video_screen_hash());
@@ -2334,6 +2353,19 @@ static int handle_x16_save_state(int seq, cJSON *args) {
     return 0;
 }
 
+// Who saved a state, for x16/loadState's reply, refusals included.
+static cJSON *dap_origin(const savestate_origin *o) {
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddNumberToObject(m, "saved", o->machine);
+    cJSON_AddNumberToObject(m, "current", savestate_machine_version());
+    cJSON_AddNumberToObject(m, "layout", o->layout);
+    cJSON_AddStringToObject(m, "savedToolchain", o->toolchain);
+    cJSON_AddStringToObject(m, "currentToolchain", savestate_toolchain());
+    cJSON_AddBoolToObject(m, "behaviourChanged", o->machine_changed);
+    cJSON_AddBoolToObject(m, "toolchainChanged", o->toolchain_changed);
+    return m;
+}
+
 static int handle_x16_load_state(int seq, cJSON *args) {
     const char *slot, *path;
     if (!dap_state_target(seq, "x16/loadState", args, &slot, &path)) {
@@ -2345,10 +2377,14 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     }
     char err[512];
     size_t size = 0;
+    const bool allow = dap_arg_true(args, "allowBehaviourChange");
     const bool loaded = slot ? savestate_slot_load(slot, &size, err, sizeof err)
-                             : savestate_file_load(path, &size, err, sizeof err);
+                             : savestate_file_load(path, &size, allow, err, sizeof err);
     if (!loaded) {
-        send_dap_error_response(seq, "x16/loadState", err);
+        // Who saved it goes with a refusal too, when the header named a known
+        // writer, so a client can tell "another machine version" from damage.
+        const savestate_origin *o = savestate_checked_origin();
+        send_dap_error_response_with(seq, "x16/loadState", err, o ? "machine" : NULL, o ? dap_origin(o) : NULL);
         return 0;
     }
     // The debugger's idea of where the machine is stopped follows the load.
@@ -2360,6 +2396,10 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     cJSON_AddStringToObject(body, slot ? "slot" : "path", slot ? slot : path);
     cJSON_AddNumberToObject(body, "size", (double)size);
     dap_add_state_position(body);
+    // Who saved it: another machine version loads only when asked for, and
+    // another toolchain loads but may not run on exactly as it did then.
+    const savestate_origin *o = savestate_last_origin();
+    if (o) cJSON_AddItemToObject(body, "machine", dap_origin(o));
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     send_dap_response(seq, "x16/loadState", true, body);
     if (dap_arg_true(args, "events")) debug_server_notify_stopped("restore");
@@ -2445,6 +2485,32 @@ static void step_finish(const char *reason) {
         free(raw);
     }
     cJSON_AddItemToObject(body, "reads", reads);
+    if (step.audio) {
+        audio_events_end();
+        cJSON *ym = cJSON_CreateArray();
+        for (int i = 0; i < audio_events_ym_count(); i++) {
+            const audio_ym_event *e = audio_events_ym(i);
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "frame", e->frame);
+            cJSON_AddNumberToObject(o, "channel", e->channel);
+            if (e->off) {
+                cJSON_AddTrueToObject(o, "off");
+            } else {
+                cJSON_AddNumberToObject(o, "ops", e->ops);
+                cJSON_AddNumberToObject(o, "kc", e->kc);
+                cJSON_AddNumberToObject(o, "kf", e->kf);
+                cJSON_AddNumberToObject(o, "voice", e->voice);
+            }
+            cJSON_AddItemToArray(ym, o);
+        }
+        cJSON_AddItemToObject(body, "ym", ym);
+        if (audio_events_ym_dropped())
+            cJSON_AddNumberToObject(body, "ymDropped", audio_events_ym_dropped());
+        cJSON *pcm = cJSON_CreateArray();
+        for (int i = 0; i < audio_events_pcm_count(); i++)
+            cJSON_AddItemToArray(pcm, cJSON_CreateNumber(audio_events_pcm_frame(i)));
+        cJSON_AddItemToObject(body, "pcm", pcm);
+    }
     if (step.hash) dap_add_state_hash(body);
     send_dap_response(step.seq, "x16/step", true, body);
 }
@@ -2594,6 +2660,27 @@ static int handle_x16_step(int seq, cJSON *args) {
     }
     cJSON *ev = args ? cJSON_GetObjectItemCaseSensitive(args, "events") : NULL;
 
+    // "audio": true, or {"keyOff": true} for key-offs too.
+    cJSON *au        = args ? cJSON_GetObjectItemCaseSensitive(args, "audio") : NULL;
+    bool   audio     = false;
+    bool   audio_off = false;
+    if (au) {
+        if (cJSON_IsBool(au)) {
+            audio = cJSON_IsTrue(au);
+        } else if (cJSON_IsObject(au)) {
+            cJSON *ko = cJSON_GetObjectItemCaseSensitive(au, "keyOff");
+            if (ko && !cJSON_IsBool(ko)) {
+                send_dap_error_response(seq, "x16/step", "'audio.keyOff' must be true or false");
+                return 0;
+            }
+            audio     = true;
+            audio_off = ko && cJSON_IsTrue(ko);
+        } else {
+            send_dap_error_response(seq, "x16/step", "'audio' must be true, false or {\"keyOff\": true}");
+            return 0;
+        }
+    }
+
     for (int i = 0; i < num_joys; i++) {
         if (joy_off[i]) joystick_clear_virtual(joy_index[i]);
         else            joystick_set_virtual(joy_index[i], joy_mask[i]);
@@ -2606,8 +2693,12 @@ static int handle_x16_step(int seq, cJSON *args) {
     step.by_frames   = false;
     step.events      = ev && cJSON_IsTrue(ev);
     step.hash        = dap_arg_true(args, "hash");
+    step.audio       = audio;
     step.num_reads   = num_reads;
     memcpy(step.reads, reads, sizeof(reads[0]) * (size_t)num_reads);
+
+    if (audio) audio_events_begin(audio_off);
+    else       audio_events_end();
 
     // As continue does, but the continued event is optional: a client stepping
     // many times a second does not want two events per step.
@@ -4612,6 +4703,7 @@ static void dap_release_session_state(void) {
     // A step nobody is waiting for must not stop the machine some frames from
     // now, with no client left to resume it.
     step.pending = false;
+    audio_events_end();
 
     // Let go of anything this session armed for polling, so a client that
     // asked for statistics and then disconnected does not strand the
@@ -4950,6 +5042,7 @@ void debug_server_frame_end(void) {
 
     if (step.pending && currentMode != DMODE_STOP) {
         step.frames_run++;
+        audio_events_frame_end();
         if (--step.frames_left == 0) {
             // Stop before the next instruction. The reply goes from the poll
             // once the machine has actually parked (see step_poll).
