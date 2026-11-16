@@ -180,11 +180,42 @@ cpu_irq_take_entered_flag(void)
 
 // ─── Save states ─────────────────────────────────────────────────────────────
 
+// Each frame as a 12-byte image at fixed offsets: the layout struct irq_frame
+// has always had, so states from when the array was saved whole read the same.
+#define FRAME_IMAGE 12
+_Static_assert(sizeof(struct irq_frame) == FRAME_IMAGE && offsetof(struct irq_frame, from_pc) == 4 &&
+               offsetof(struct irq_frame, sp) == 8, "struct irq_frame changed: update its save-state image");
+
+static void
+frames_to_image(uint8_t *img)
+{
+	memset(img, 0, FRAME_IMAGE * CPU_IRQ_CTX_MAX);
+	for (int i = 0; i < CPU_IRQ_CTX_MAX; i++) {
+		uint8_t *b = img + i * FRAME_IMAGE;
+		b[0]       = frames[i].vector;
+		ss_le32(b + 4, frames[i].from_pc);
+		ss_le16(b + 8, frames[i].sp);
+	}
+}
+
+static void
+frames_from_image(const uint8_t *img)
+{
+	for (int i = 0; i < CPU_IRQ_CTX_MAX; i++) {
+		const uint8_t *b   = img + i * FRAME_IMAGE;
+		frames[i].vector  = b[0];
+		frames[i].from_pc = ss_rd32(b + 4);
+		frames[i].sp      = ss_rd16(b + 8);
+	}
+}
+
 void
 irq_ctx_state_save(ss_writer *w)
 {
+	uint8_t img[FRAME_IMAGE * CPU_IRQ_CTX_MAX];
+	frames_to_image(img);
 	ss_begin(w, "IRQC", 1);
-	ss_put(w, frames, sizeof frames);
+	ss_put(w, img, sizeof img);
 	ss_put_u32(w, (uint32_t)depth);
 	ss_put_u32(w, taken);
 	ss_put_u8(w, last_vector);
@@ -195,8 +226,12 @@ irq_ctx_state_save(ss_writer *w)
 void
 irq_ctx_state_load(ss_reader *r)
 {
+	uint8_t img[FRAME_IMAGE * CPU_IRQ_CTX_MAX];
 	ss_open(r, "IRQC");
-	ss_get(r, frames, sizeof frames);
+	ss_get(r, img, sizeof img);
+	if (!r->failed) {
+		frames_from_image(img);
+	}
 	depth                = (int)ss_get_u32(r);
 	taken                = ss_get_u32(r);
 	last_vector          = ss_get_u8(r);

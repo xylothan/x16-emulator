@@ -515,12 +515,17 @@ static void send_dap_response(int request_seq, const char *command, bool success
     send_dap_message(resp);
 }
 
-static void send_dap_error_response(int request_seq, const char *command, const char *message) {
+// An error response whose body carries one more item, key and value (taken
+// over), beside the error; key NULL for none.
+static void send_dap_error_response_with(int request_seq, const char *command, const char *message,
+                                         const char *key, cJSON *item) {
     cJSON *body = cJSON_CreateObject();
     cJSON *error_obj = cJSON_CreateObject();
     cJSON_AddNumberToObject(error_obj, "id", 1);
     cJSON_AddStringToObject(error_obj, "format", message);
     cJSON_AddItemToObject(body, "error", error_obj);
+    if (key && item) cJSON_AddItemToObject(body, key, item);
+    else if (item) cJSON_Delete(item);
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddNumberToObject(resp, "seq", dap_seq++);
@@ -531,6 +536,10 @@ static void send_dap_error_response(int request_seq, const char *command, const 
     cJSON_AddStringToObject(resp, "message", message);
     cJSON_AddItemToObject(resp, "body", body);
     send_dap_message(resp);
+}
+
+static void send_dap_error_response(int request_seq, const char *command, const char *message) {
+    send_dap_error_response_with(request_seq, command, message, NULL, NULL);
 }
 
 static void send_dap_event(const char *event_name, cJSON *body) {
@@ -2208,8 +2217,9 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // Cheap enough to call between every bot decision. JSON numbers are doubles,
 // exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
 // 8 MHz.
-// A hash of the whole machine: exactly the bytes a save state of it would hold
-// (savestate.c), so two machines with the same hash would save the same state.
+// A hash of the whole machine: the bytes a save state of it would hold, but for
+// the build ID (savestate_hash), so two machines with the same hash would save
+// the same state, whichever build of one machine version runs them.
 // Sent as a hex string, since a JSON number cannot carry 64 bits exactly.
 static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
     char hex[24];
@@ -2218,7 +2228,7 @@ static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
 }
 
 static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
-    dap_add_hex64(body, "hash", x16_hash_bytes(X16_HASH_INIT, data, len));
+    dap_add_hex64(body, "hash", savestate_hash(data, len));
 }
 
 static void dap_add_state_hash(cJSON *body) {
@@ -2258,6 +2268,13 @@ static int handle_x16_status(int seq, cJSON *args) {
     cJSON_AddBoolToObject(body, "deterministic", deterministic_mode);
     if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
     else                 cJSON_AddNullToObject(body, "seed");
+    // Which states this build loads: those of the same layout. One from another
+    // machine version or toolchain loads, and x16/loadState says so (savestate.c).
+    cJSON_AddNumberToObject(body, "layout", savestate_layout_version());
+    cJSON_AddNumberToObject(body, "machine", savestate_machine_version());
+    cJSON_AddStringToObject(body, "toolchain", savestate_toolchain());
+    cJSON_AddStringToObject(body, "build", savestate_build_id());
+    cJSON_AddStringToObject(body, "sourceId", savestate_source_id());
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     // The picture is output, not machine state, so it has its own hash.
     if (dap_arg_true(args, "screenHash")) dap_add_hex64(body, "screenHash", video_screen_hash());
@@ -2336,6 +2353,19 @@ static int handle_x16_save_state(int seq, cJSON *args) {
     return 0;
 }
 
+// Who saved a state, for x16/loadState's reply, refusals included.
+static cJSON *dap_origin(const savestate_origin *o) {
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddNumberToObject(m, "saved", o->machine);
+    cJSON_AddNumberToObject(m, "current", savestate_machine_version());
+    cJSON_AddNumberToObject(m, "layout", o->layout);
+    cJSON_AddStringToObject(m, "savedToolchain", o->toolchain);
+    cJSON_AddStringToObject(m, "currentToolchain", savestate_toolchain());
+    cJSON_AddBoolToObject(m, "behaviourChanged", o->machine_changed);
+    cJSON_AddBoolToObject(m, "toolchainChanged", o->toolchain_changed);
+    return m;
+}
+
 static int handle_x16_load_state(int seq, cJSON *args) {
     const char *slot, *path;
     if (!dap_state_target(seq, "x16/loadState", args, &slot, &path)) {
@@ -2347,10 +2377,14 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     }
     char err[512];
     size_t size = 0;
+    const bool allow = dap_arg_true(args, "allowBehaviourChange");
     const bool loaded = slot ? savestate_slot_load(slot, &size, err, sizeof err)
-                             : savestate_file_load(path, &size, err, sizeof err);
+                             : savestate_file_load(path, &size, allow, err, sizeof err);
     if (!loaded) {
-        send_dap_error_response(seq, "x16/loadState", err);
+        // Who saved it goes with a refusal too, when the header named a known
+        // writer, so a client can tell "another machine version" from damage.
+        const savestate_origin *o = savestate_checked_origin();
+        send_dap_error_response_with(seq, "x16/loadState", err, o ? "machine" : NULL, o ? dap_origin(o) : NULL);
         return 0;
     }
     // The debugger's idea of where the machine is stopped follows the load.
@@ -2362,6 +2396,10 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     cJSON_AddStringToObject(body, slot ? "slot" : "path", slot ? slot : path);
     cJSON_AddNumberToObject(body, "size", (double)size);
     dap_add_state_position(body);
+    // Who saved it: another machine version loads only when asked for, and
+    // another toolchain loads but may not run on exactly as it did then.
+    const savestate_origin *o = savestate_last_origin();
+    if (o) cJSON_AddItemToObject(body, "machine", dap_origin(o));
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     send_dap_response(seq, "x16/loadState", true, body);
     if (dap_arg_true(args, "events")) debug_server_notify_stopped("restore");

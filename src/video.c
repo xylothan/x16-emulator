@@ -2475,6 +2475,145 @@ video_set_ignore_host_input(bool on)
 // a warped run's state differ from an unwarped one. At a frame boundary,
 // where states are taken, each is rebuilt before it is next read.
 
+// The layer and sprite property structs as byte images with fixed offsets,
+// which are the layouts the structs have always had on every target: states
+// from when they were saved whole read the same. The asserts say so, and fail
+// when a field is added without a place in its image.
+#define LAYER_IMAGE  56
+#define SPRITE_IMAGE 24
+_Static_assert(sizeof(struct video_layer_properties) == LAYER_IMAGE &&
+               offsetof(struct video_layer_properties, min_eff_x) == 44 &&
+               offsetof(struct video_layer_properties, color_fields_max) == 55,
+               "struct video_layer_properties changed: update its save-state image");
+_Static_assert(sizeof(struct video_sprite_properties) == SPRITE_IMAGE &&
+               offsetof(struct video_sprite_properties, sprite_address) == 16 &&
+               offsetof(struct video_sprite_properties, palette_offset) == 20,
+               "struct video_sprite_properties changed: update its save-state image");
+
+static void
+layer_image(struct video_layer_properties *p, uint8_t *b, bool to_image)
+{
+	if (to_image) {
+		memset(b, 0, LAYER_IMAGE);
+		b[0] = p->color_depth;
+		ss_le32(b + 4, p->map_base);
+		ss_le32(b + 8, p->tile_base);
+		b[12] = p->text_mode;
+		b[13] = p->text_mode_256c;
+		b[14] = p->tile_mode;
+		b[15] = p->bitmap_mode;
+		ss_le16(b + 16, p->hscroll);
+		ss_le16(b + 18, p->vscroll);
+		b[20] = p->mapw_log2;
+		b[21] = p->maph_log2;
+		ss_le16(b + 22, p->tilew);
+		ss_le16(b + 24, p->tileh);
+		b[26] = p->tilew_log2;
+		b[27] = p->tileh_log2;
+		ss_le16(b + 28, p->mapw_max);
+		ss_le16(b + 30, p->maph_max);
+		ss_le16(b + 32, p->tilew_max);
+		ss_le16(b + 34, p->tileh_max);
+		ss_le16(b + 36, p->layerw_max);
+		ss_le16(b + 38, p->layerh_max);
+		b[40] = p->tile_size_log2;
+		ss_le32(b + 44, (uint32_t)p->min_eff_x);
+		ss_le32(b + 48, (uint32_t)p->max_eff_x);
+		b[52] = p->bits_per_pixel;
+		b[53] = p->first_color_pos;
+		b[54] = p->color_mask;
+		b[55] = p->color_fields_max;
+	} else {
+		p->color_depth      = b[0];
+		p->map_base         = ss_rd32(b + 4);
+		p->tile_base        = ss_rd32(b + 8);
+		p->text_mode        = b[12] != 0;
+		p->text_mode_256c   = b[13] != 0;
+		p->tile_mode        = b[14] != 0;
+		p->bitmap_mode      = b[15] != 0;
+		p->hscroll          = ss_rd16(b + 16);
+		p->vscroll          = ss_rd16(b + 18);
+		p->mapw_log2        = b[20];
+		p->maph_log2        = b[21];
+		p->tilew            = ss_rd16(b + 22);
+		p->tileh            = ss_rd16(b + 24);
+		p->tilew_log2       = b[26];
+		p->tileh_log2       = b[27];
+		p->mapw_max         = ss_rd16(b + 28);
+		p->maph_max         = ss_rd16(b + 30);
+		p->tilew_max        = ss_rd16(b + 32);
+		p->tileh_max        = ss_rd16(b + 34);
+		p->layerw_max       = ss_rd16(b + 36);
+		p->layerh_max       = ss_rd16(b + 38);
+		p->tile_size_log2   = b[40];
+		p->min_eff_x        = (int32_t)ss_rd32(b + 44);
+		p->max_eff_x        = (int32_t)ss_rd32(b + 48);
+		p->bits_per_pixel   = b[52];
+		p->first_color_pos  = b[53];
+		p->color_mask       = b[54];
+		p->color_fields_max = b[55];
+	}
+}
+
+static void
+sprite_image(struct video_sprite_properties *p, uint8_t *b, bool to_image)
+{
+	if (to_image) {
+		memset(b, 0, SPRITE_IMAGE);
+		b[0]  = (uint8_t)p->sprite_zdepth;
+		b[1]  = p->sprite_collision_mask;
+		ss_le16(b + 2, (uint16_t)p->sprite_x);
+		ss_le16(b + 4, (uint16_t)p->sprite_y);
+		b[6]  = p->sprite_width_log2;
+		b[7]  = p->sprite_height_log2;
+		b[8]  = p->sprite_width;
+		b[9]  = p->sprite_height;
+		b[10] = p->hflip;
+		b[11] = p->vflip;
+		b[12] = p->color_mode;
+		ss_le32(b + 16, p->sprite_address);
+		ss_le16(b + 20, p->palette_offset);
+	} else {
+		p->sprite_zdepth         = (int8_t)b[0];
+		p->sprite_collision_mask = b[1];
+		p->sprite_x              = (int16_t)ss_rd16(b + 2);
+		p->sprite_y              = (int16_t)ss_rd16(b + 4);
+		p->sprite_width_log2     = b[6];
+		p->sprite_height_log2    = b[7];
+		p->sprite_width          = b[8];
+		p->sprite_height         = b[9];
+		p->hflip                 = b[10] != 0;
+		p->vflip                 = b[11] != 0;
+		p->color_mode            = b[12];
+		p->sprite_address        = ss_rd32(b + 16);
+		p->palette_offset        = ss_rd16(b + 20);
+	}
+}
+
+static void layer_image_v(void *p, uint8_t *b, bool to) { layer_image(p, b, to); }
+static void sprite_image_v(void *p, uint8_t *b, bool to) { sprite_image(p, b, to); }
+
+// n structs through their images, written or read in one piece.
+static void
+props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, size_t image_size,
+         void (*image)(void *, uint8_t *, bool))
+{
+	uint8_t img[128 * SPRITE_IMAGE]; // the largest: every sprite
+	const size_t len = (size_t)n * image_size;
+	if (len > sizeof img) {
+		if (w) w->failed = true; else r->failed = true;
+		return;
+	}
+	if (w) {
+		for (int i = 0; i < n; i++) image((uint8_t *)structs + i * struct_size, img + i * image_size, true);
+		ss_put(w, img, len);
+	} else {
+		ss_get(r, img, len);
+		if (r->failed) return;
+		for (int i = 0; i < n; i++) image((uint8_t *)structs + i * struct_size, img + i * image_size, false);
+	}
+}
+
 static void
 video_state_io(ss_writer *w, ss_reader *r)
 {
@@ -2493,9 +2632,10 @@ video_state_io(ss_writer *w, ss_reader *r)
 	SS_BLOCK(reg_layer);
 	SS_BLOCK(reg_composer);
 	SS_BLOCK(prev_reg_composer);
-	SS_BLOCK(layer_properties);
-	SS_BLOCK(prev_layer_properties);
-	SS_BLOCK(sprite_properties);
+	props_io(w, r, layer_properties, sizeof layer_properties[0], NUM_LAYERS, LAYER_IMAGE, layer_image_v);
+	props_io(w, r, prev_layer_properties, sizeof prev_layer_properties[0][0], 2 * NUM_LAYERS, LAYER_IMAGE,
+	         layer_image_v);
+	props_io(w, r, sprite_properties, sizeof sprite_properties[0], 128, SPRITE_IMAGE, sprite_image_v);
 	SS_BLOCK(sprite_line_col);
 	SS_BLOCK(sprite_line_z);
 	SS_BLOCK(sprite_line_mask);

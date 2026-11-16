@@ -10,6 +10,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The ROM testbench/machine_golden.json was recorded with. The goldens depend
+# on it, so the jobs that check them use this one rather than whatever x16-rom
+# built last.
+env:
+  GOLDEN_ROM_TAG: r49
+  GOLDEN_ROM_SHA256: b81654cc8c87ed96e3ffc7c8e7c312c9f3b7b870c7bb34de61e61eac931b819a
+
 # The platform jobs are grouped by operating system rather than listed one per
 # architecture: windows, windows-legacy, linux, macos and wasm. Each group is a
 # matrix, so the run summary collapses to five boxes instead of a wall of
@@ -224,6 +231,43 @@ jobs:
           X16_KLAUS_REQUIRED: 1
           X16_VERA_RTL_REQUIRED: 1
         run: python tests/mutation_check.py --build-dir build
+  # Save states load into any build of the same SAVESTATE_MACHINE_VERSION, which
+  # is only safe while those builds all run the machine identically. This runs
+  # fixed workloads from power-on and compares their state hashes with
+  # testbench/machine_golden.json; a difference means the machine changed and
+  # the version must be bumped. The ROM is pinned, because the goldens depend on
+  # it and the platform jobs take whatever x16-rom built last.
+  machine-version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev libcjson-dev zlib1g-dev xvfb
+      - name: Fetch the pinned ROM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p pinned_rom
+          gh release download "$GOLDEN_ROM_TAG" -R X16Community/x16-rom --pattern '*.zip' --dir pinned_rom
+          unzip -o pinned_rom/*.zip rom.bin -d pinned_rom
+          echo "$GOLDEN_ROM_SHA256  pinned_rom/rom.bin" | sha256sum -c -
+      - name: Build Emulator
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
+          cmake --build build -j"$(nproc)"
+      - name: Check the machine against its goldens
+        # No display and no sound card here; the emulator runs -hidden on SDL's
+        # dummy drivers, under a virtual X server in case the video driver
+        # wants one.
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: xvfb-run -a python testbench/test_machine_version.py build/x16emu pinned_rom/rom.bin
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
   # with no redistributable to install. The MinGW jobs in windows-legacy still
@@ -285,6 +329,23 @@ jobs:
           -DENABLE_TRACE=OFF
       - name: Build
         run: cmake --build build --config Release
+      - name: Check the machine against its goldens
+        # The machine-version job's guard, on MSVC: these hashes must equal the
+        # goldens whichever compiler recorded them, which is what lets a save
+        # state cross toolchains. The 32-bit leg checks a 32-bit build too. The
+        # ARM64 legs are cross-built and cannot run here; the MIDI legs are the
+        # same machine.
+        if: ${{ matrix.midi == 'OFF' && matrix.arch != 'arm64' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SDL_AUDIODRIVER: dummy
+        run: |
+          New-Item -ItemType Directory -Force pinned_rom | Out-Null
+          gh release download $env:GOLDEN_ROM_TAG -R X16Community/x16-rom --pattern '*.zip' --dir pinned_rom
+          Expand-Archive -Force (Get-ChildItem pinned_rom/*.zip).FullName pinned_rom/x
+          $h = (Get-FileHash pinned_rom/x/rom.bin -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:GOLDEN_ROM_SHA256) { throw "the pinned ROM's SHA-256 is $h" }
+          python testbench/test_machine_version.py build/Release/x16emu.exe pinned_rom/x/rom.bin
       - name: Package Emulator
         run: |
           New-Item -ItemType Directory -Force emu_binaries | Out-Null
