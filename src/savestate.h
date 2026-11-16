@@ -34,6 +34,16 @@ bool savestate_apply(const void *data, size_t len, char *err, size_t err_len);
 // since they would record a history that did not happen.
 bool savestate_any_loaded(void);
 
+// What a state names as its writer: "x16emu machine <version>-<toolchain>".
+// See savestate.c. The source hash is not part of it, only reported.
+const char *savestate_build_id(void);
+int         savestate_machine_version(void);
+const char *savestate_source_id(void);
+
+// The hash x16/step and friends report for a state: all of it but the build ID,
+// so it compares across builds of one machine version.
+uint64_t savestate_hash(const void *data, size_t len);
+
 // Frame boundaries, for saving from a paused machine. The main loop marks one
 // at the top of the first instruction of each frame (where an x16/step stops)
 // and a load marks the loaded machine as standing on one. The machine is still

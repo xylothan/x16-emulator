@@ -100,6 +100,32 @@ booting, and early assertions otherwise race it), and pass a port —
 speaks DAP will connect to a server on the default 9009 and take the session down
 mid-suite.
 
+## Save states and the machine version
+
+A save state loads into any build with the same `SAVESTATE_MACHINE_VERSION`
+(`src/savestate.c`) and toolchain. Training runs keep hundreds of states across
+emulator updates on the strength of that, so:
+
+* **Bump the version** in any change that alters what the emulated machine does
+  (CPU, memory, VERA, audio chips, VIAs, SMC, timing of any of them) or what a
+  state holds or how it is laid out (a saved struct, chunk or field). When you
+  bump it, empty `legacy_builds` and regenerate the goldens (below).
+* **Leave it** for changes to the debugger, DAP, the window, keys, or the sound
+  sent to the host, which is not machine state.
+* `testbench/test_machine_version.py` replays fixed workloads from power-on and
+  compares their hashes with `testbench/machine_golden.json`. CI runs it on
+  Linux (the `machine-version` job); a mismatch under an unchanged version means
+  the machine changed without a bump. The goldens depend on the ROM, so the job
+  pins one: x16-rom release `r49`, checked by SHA-256. To run it or regenerate:
+
+  ```powershell
+  python testbench/test_machine_version.py <x16emu> <r49 rom.bin>            # check
+  python testbench/test_machine_version.py <x16emu> <r49 rom.bin> --update   # rewrite the goldens
+  ```
+
+  When it fails, the job's log ends with the JSON this build gives, ready to
+  commit once you have bumped the version.
+
 ## Poking at a running emulator
 
 `tools/x16dbg` is a .NET DAP client:

@@ -2208,8 +2208,9 @@ static int handle_x16_joystick(int seq, cJSON *args) {
 // Cheap enough to call between every bot decision. JSON numbers are doubles,
 // exact to 2^53: about 4.7 million years of frames, or 35 years of cycles at
 // 8 MHz.
-// A hash of the whole machine: exactly the bytes a save state of it would hold
-// (savestate.c), so two machines with the same hash would save the same state.
+// A hash of the whole machine: the bytes a save state of it would hold, but for
+// the build ID (savestate_hash), so two machines with the same hash would save
+// the same state, whichever build of one machine version runs them.
 // Sent as a hex string, since a JSON number cannot carry 64 bits exactly.
 static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
     char hex[24];
@@ -2218,7 +2219,7 @@ static void dap_add_hex64(cJSON *body, const char *key, uint64_t h) {
 }
 
 static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
-    dap_add_hex64(body, "hash", x16_hash_bytes(X16_HASH_INIT, data, len));
+    dap_add_hex64(body, "hash", savestate_hash(data, len));
 }
 
 static void dap_add_state_hash(cJSON *body) {
@@ -2258,6 +2259,11 @@ static int handle_x16_status(int seq, cJSON *args) {
     cJSON_AddBoolToObject(body, "deterministic", deterministic_mode);
     if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
     else                 cJSON_AddNullToObject(body, "seed");
+    // Which states this build loads: those naming the same machine version
+    // and toolchain (savestate.c).
+    cJSON_AddNumberToObject(body, "machine", savestate_machine_version());
+    cJSON_AddStringToObject(body, "build", savestate_build_id());
+    cJSON_AddStringToObject(body, "sourceId", savestate_source_id());
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     // The picture is output, not machine state, so it has its own hash.
     if (dap_arg_true(args, "screenHash")) dap_add_hex64(body, "screenHash", video_screen_hash());
