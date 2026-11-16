@@ -100,23 +100,43 @@ booting, and early assertions otherwise race it), and pass a port —
 speaks DAP will connect to a server on the default 9009 and take the session down
 mid-suite.
 
-## Save states and the machine version
+## Save states: layout and machine versions
 
-A save state loads into any build with the same `SAVESTATE_MACHINE_VERSION`
-(`src/savestate.c`) and toolchain. Training runs keep hundreds of states across
-emulator updates on the strength of that, so:
+A save state names two versions from `src/savestate.c`, and a build treats
+them differently. Training runs keep hundreds of states across emulator
+updates on the strength of this, so get them right:
 
-* **Bump the version** in any change that alters what the emulated machine does
-  (CPU, memory, VERA, audio chips, VIAs, SMC, timing of any of them) or what a
-  state holds or how it is laid out (a saved struct, chunk or field). When you
-  bump it, empty `legacy_builds` and regenerate the goldens (below).
-* **Leave it** for changes to the debugger, DAP, the window, keys, or the sound
-  sent to the host, which is not machine state.
+* **`SAVESTATE_LAYOUT_VERSION`: what the bytes mean.** Another layout is
+  refused. Bump it when a chunk gains, loses or reorders a field, or a value
+  changes meaning, and then empty `legacy_builds`. Prefer a new *chunk* version
+  whose loader still reads the old one, filling new fields with defaults: then
+  old states keep loading and the layout version stays.
+* **`SAVESTATE_MACHINE_VERSION`: how the machine runs.** Bump it in any change
+  that alters what the emulated machine does (CPU, memory, VERA, audio chips,
+  VIAs, SMC, timing of any of them). A state from another machine version still
+  loads, but `x16/loadState` reports `behaviourChanged`, and a console line says
+  so, because it will not run on as it did when saved.
+* **Leave both** for changes to the debugger, DAP, the window, keys, or the
+  sound sent to the host, which is not machine state.
+* **Never save a struct whole.** Its bytes would depend on the compiler. Write a
+  byte image with explicit offsets, as `regs_to_image()` (`cpu/fake6502.c`) and
+  `layer_image()` (`video.c`) do, with a `_Static_assert` on the struct's size,
+  so that a new field cannot slip past its image.
+* The toolchain is in the ID as well, since floating-point code can run
+  differently under another compiler. It is reported (`toolchainChanged`), never
+  refused.
 * `testbench/test_machine_version.py` replays fixed workloads from power-on and
-  compares their hashes with `testbench/machine_golden.json`. CI runs it on
-  Linux (the `machine-version` job); a mismatch under an unchanged version means
-  the machine changed without a bump. The goldens depend on the ROM, so the job
-  pins one: x16-rom release `r49`, checked by SHA-256. To run it or regenerate:
+  compares each state's chunk list and its hashes with
+  `testbench/machine_golden.json`. CI runs it on Linux (the `machine-version`
+  job):
+  * chunks that change under the same layout version mean a layout bump was
+    missed;
+  * hashes that change under the same machine version mean a machine bump was
+    missed.
+
+  It also loads one state under edited IDs to check what each version decides.
+  The goldens depend on the ROM, so the job pins one: x16-rom release `r49`,
+  checked by SHA-256. To run it or regenerate:
 
   ```powershell
   python testbench/test_machine_version.py <x16emu> <r49 rom.bin>            # check

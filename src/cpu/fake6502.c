@@ -344,11 +344,54 @@ void hookexternal(void *funcptr) {
 // by the next one. The register struct carries is65c816, which savestate.c
 // checks against this machine before a load.
 
+// The registers as an 18-byte image, offsets fixed here rather than by the
+// compiler. It is the layout struct regs has always had on every target, which
+// is how states written when the struct was saved whole still read the same;
+// the asserts say so, and fail when a field is added without a place here.
+#define REGS_IMAGE 18
+_Static_assert(sizeof(struct regs) == REGS_IMAGE && offsetof(struct regs, pc) == 12 &&
+               offsetof(struct regs, is65c816) == 17, "struct regs changed: update its save-state image");
+
+static void
+regs_to_image(uint8_t *b)
+{
+	memset(b, 0, REGS_IMAGE);
+	ss_le16(b + 0, regs.c);
+	ss_le16(b + 2, regs.x);
+	ss_le16(b + 4, regs.y);
+	ss_le16(b + 6, regs.dp);
+	ss_le16(b + 8, regs.sp);
+	b[10] = regs.db;
+	ss_le16(b + 12, regs.pc);
+	b[14] = regs.k;
+	b[15] = regs.status;
+	b[16] = regs.e;
+	b[17] = regs.is65c816 ? 1 : 0;
+}
+
+static void
+regs_from_image(const uint8_t *b)
+{
+	regs.c        = ss_rd16(b + 0);
+	regs.x        = ss_rd16(b + 2);
+	regs.y        = ss_rd16(b + 4);
+	regs.dp       = ss_rd16(b + 6);
+	regs.sp       = ss_rd16(b + 8);
+	regs.db       = b[10];
+	regs.pc       = ss_rd16(b + 12);
+	regs.k        = b[14];
+	regs.status   = b[15];
+	regs.e        = b[16];
+	regs.is65c816 = b[17] != 0;
+}
+
 void
 cpu_state_save(ss_writer *w)
 {
+	uint8_t img[REGS_IMAGE];
+	regs_to_image(img);
 	ss_begin(w, "CPU ", 1);
-	ss_put(w, &regs, sizeof regs);
+	ss_put(w, img, sizeof img);
 	ss_put_u8(w, waiting);
 	ss_put_u32(w, clockticks6502);
 	ss_put_u32(w, clockgoal6502);
@@ -359,8 +402,12 @@ cpu_state_save(ss_writer *w)
 void
 cpu_state_load(ss_reader *r)
 {
+	uint8_t img[REGS_IMAGE];
 	ss_open(r, "CPU ");
-	ss_get(r, &regs, sizeof regs);
+	ss_get(r, img, sizeof img);
+	if (!r->failed) {
+		regs_from_image(img);
+	}
 	waiting        = ss_get_u8(r);
 	clockticks6502 = ss_get_u32(r);
 	clockgoal6502  = ss_get_u32(r);

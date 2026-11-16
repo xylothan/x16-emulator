@@ -2259,9 +2259,11 @@ static int handle_x16_status(int seq, cJSON *args) {
     cJSON_AddBoolToObject(body, "deterministic", deterministic_mode);
     if (random_seed_set) cJSON_AddNumberToObject(body, "seed", random_seed);
     else                 cJSON_AddNullToObject(body, "seed");
-    // Which states this build loads: those naming the same machine version
-    // and toolchain (savestate.c).
+    // Which states this build loads: those of the same layout. One from another
+    // machine version or toolchain loads, and x16/loadState says so (savestate.c).
+    cJSON_AddNumberToObject(body, "layout", savestate_layout_version());
     cJSON_AddNumberToObject(body, "machine", savestate_machine_version());
+    cJSON_AddStringToObject(body, "toolchain", savestate_toolchain());
     cJSON_AddStringToObject(body, "build", savestate_build_id());
     cJSON_AddStringToObject(body, "sourceId", savestate_source_id());
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
@@ -2368,6 +2370,18 @@ static int handle_x16_load_state(int seq, cJSON *args) {
     cJSON_AddStringToObject(body, slot ? "slot" : "path", slot ? slot : path);
     cJSON_AddNumberToObject(body, "size", (double)size);
     dap_add_state_position(body);
+    // Who saved it. A state from another machine version or toolchain loads,
+    // but the machine will not (or may not) run on from it as it did then.
+    const savestate_origin *o = savestate_last_origin();
+    if (o) {
+        cJSON *m = cJSON_AddObjectToObject(body, "machine");
+        cJSON_AddNumberToObject(m, "saved", o->machine);
+        cJSON_AddNumberToObject(m, "current", savestate_machine_version());
+        cJSON_AddStringToObject(m, "savedToolchain", o->toolchain);
+        cJSON_AddStringToObject(m, "currentToolchain", savestate_toolchain());
+        cJSON_AddBoolToObject(m, "behaviourChanged", o->machine_changed);
+        cJSON_AddBoolToObject(m, "toolchainChanged", o->toolchain_changed);
+    }
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     send_dap_response(seq, "x16/loadState", true, body);
     if (dap_arg_true(args, "events")) debug_server_notify_stopped("restore");

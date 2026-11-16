@@ -680,7 +680,7 @@ public static class Commands
         {
             Console.Error.WriteLine("Usage: load <slot|file>");
             Console.Error.WriteLine("       Puts the machine back to a slot saved in this emulator process,");
-            Console.Error.WriteLine("       or to a state file saved by this same build. The machine must be");
+            Console.Error.WriteLine("       or to a state file saved by a build of the same layout. The machine must be");
             Console.Error.WriteLine("       paused (break); it stays paused.");
             return 1;
         }

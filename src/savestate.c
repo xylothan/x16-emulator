@@ -38,24 +38,35 @@ extern bool no_ieee_intercept;
 
 // ─── Which machine wrote a state ─────────────────────────────────────────────
 //
-// A state means something only to an emulator whose machine behaves the same,
-// down to the last bit, and that lays its saved values out the same way. Two
-// things decide that:
+// A state's header names three things about the emulator that wrote it, and
+// each is treated as what it is:
 //
-// * SAVESTATE_MACHINE_VERSION, kept by hand. Bump it whenever a change alters
-//   how the emulated machine behaves, or what a state holds or how it is laid
-//   out: any saved struct, chunk or field. testbench/test_machine_version.py,
-//   run in CI, replays fixed workloads and fails when their hashes change
-//   under an unchanged version. Changes that leave the machine alone
-//   (the debugger, DAP, the host window, keys, audio output to the host) keep
-//   the version, so states saved before them still load.
-// * The toolchain: compiler and version, target and configuration. Some
-//   chunks are written in the writer's own memory layout, and the arithmetic
-//   is the compiler's, so a state never crosses toolchains.
+// * SAVESTATE_LAYOUT_VERSION: what the bytes mean. A state of another layout
+//   cannot be read, so it is refused. Bump it when a change alters what a
+//   state holds or how it is laid out (a chunk gains, loses or reorders a
+//   field, or a value changes meaning), unless the chunk can take a new chunk
+//   version whose loader still reads the old one.
+// * SAVESTATE_MACHINE_VERSION: how the machine runs. Bump it whenever a change
+//   alters what the emulated machine does (CPU, memory, VERA, the sound chips,
+//   VIAs, SMC, any of their timing). A state from another machine version
+//   still loads, since its bytes mean what they did, but it will not run on
+//   as it did when it was saved, and the load says so (savestate_last_origin(),
+//   the x16/loadState reply, a console line). Changes that leave the machine
+//   alone (the debugger, DAP, the host window, keys, audio sent to the host)
+//   keep both versions.
+// * The toolchain: compiler and version, target, Debug or Release. Layout does
+//   not depend on it (savestate_io.h), but floating-point arithmetic can, so a
+//   state from another toolchain loads and is reported like one from another
+//   machine version.
 //
-// x16_source_id, a hash of every source file, no longer decides anything; it
-// is reported over DAP (x16/status) so a state's writer can still be traced.
+// testbench/test_machine_version.py, run in CI, replays fixed workloads and
+// fails when their hashes change under an unchanged machine version, or their
+// chunk list changes under an unchanged layout version.
+//
+// x16_source_id, a hash of every source file, decides nothing; it is reported
+// over DAP (x16/status) so a state's writer can still be traced.
 
+#define SAVESTATE_LAYOUT_VERSION  1
 #define SAVESTATE_MACHINE_VERSION 1
 
 extern const char x16_source_id[];
@@ -90,37 +101,76 @@ extern const char x16_source_id[];
 
 #define SAVESTATE_BUILD_LEN 64
 
-// The ID, NUL-padded to SAVESTATE_BUILD_LEN bytes, which is how a header holds it.
+static uint32_t
+toolchain_hash(void)
+{
+	static const char toolchain[] = SS_COMPILER " " SS_ARCH " " X16_BUILD_CONFIG;
+	return (uint32_t)x16_hash_bytes(X16_HASH_INIT, toolchain, strlen(toolchain));
+}
+
+// The ID, NUL-padded to SAVESTATE_BUILD_LEN bytes, which is how a header holds
+// it: "x16emu layout <L> machine <M> toolchain <8 hex digits>".
 static const char *
 build_id(void)
 {
 	static char id[SAVESTATE_BUILD_LEN];
 	if (id[0] == '\0') {
-		static const char toolchain[] = SS_COMPILER " " SS_ARCH " " X16_BUILD_CONFIG;
-		const uint32_t tc = (uint32_t)x16_hash_bytes(X16_HASH_INIT, toolchain, strlen(toolchain));
-		snprintf(id, sizeof id, "x16emu machine %d-%08x", SAVESTATE_MACHINE_VERSION, (unsigned)tc);
+		snprintf(id, sizeof id, "x16emu layout %d machine %d toolchain %08x", SAVESTATE_LAYOUT_VERSION,
+		         SAVESTATE_MACHINE_VERSION, (unsigned)toolchain_hash());
 	}
 	return id;
 }
 
-// Builds from before the machine version, each identified by its source hash,
-// whose machine is shown to be this version's: same behaviour (their states,
-// loaded here and there, run on with the same hash every frame) and the same
-// layout. Whole IDs, toolchain included, so one built by another compiler is
-// still refused. Empty this list when SAVESTATE_MACHINE_VERSION is bumped.
-static const char *const legacy_builds[] = {
-	"x16emu r50 4666e4fd3e96ba94-fafd4819", // main @ 0e22ecb (#134), MSVC x64 Release
+// IDs from before the layout version, which are read as layout 1:
+//
+// * "x16emu machine <M>-<toolchain>": every such build wrote layout 1, its
+//   structs laid out as the images that now write them spell out.
+// * Builds identified by a hash of their sources, only those listed here. Each
+//   is known to hold layout 1 and to run as the machine version given (its
+//   states, loaded there and here, run on with the same hash every frame).
+//   Others are refused: chunk versions were not bumped while the source hash
+//   guarded every change, so one might hold a same-length chunk that means
+//   something else.
+//
+// When SAVESTATE_LAYOUT_VERSION is bumped, empty this list and drop the
+// "machine <M>-" form from parse_build().
+static const struct {
+	const char *id;
+	int         machine;
+	uint32_t    toolchain;
+} legacy_builds[] = {
+	{ "x16emu r50 4666e4fd3e96ba94-fafd4819", 1, 0xfafd4819 }, // main @ 0e22ecb (#134), MSVC x64 Release
 };
 
+// What a header's build ID says. False when this build cannot read the state:
+// another layout, or an ID it does not know.
 static bool
-build_matches(const char *build)
+parse_build(const char *build, savestate_origin *o)
 {
-	if (strcmp(build, build_id()) == 0)
-		return true;
-	for (size_t i = 0; i < sizeof legacy_builds / sizeof legacy_builds[0]; i++)
-		if (strcmp(build, legacy_builds[i]) == 0)
-			return true;
-	return false;
+	unsigned tc     = 0;
+	int      layout = -1, machine = -1, n = 0;
+	if (sscanf(build, "x16emu layout %d machine %d toolchain %8x%n", &layout, &machine, &tc, &n) == 3 &&
+	    build[n] == '\0') {
+		// this format
+	} else if ((n = 0, sscanf(build, "x16emu machine %d-%8x%n", &machine, &tc, &n) == 2) && build[n] == '\0') {
+		layout = 1;
+	} else {
+		layout = machine = -1;
+		for (size_t i = 0; i < sizeof legacy_builds / sizeof legacy_builds[0]; i++) {
+			if (strcmp(build, legacy_builds[i].id) == 0) {
+				layout  = 1;
+				machine = legacy_builds[i].machine;
+				tc      = legacy_builds[i].toolchain;
+			}
+		}
+	}
+	memset(o, 0, sizeof *o);
+	o->layout  = layout;
+	o->machine = machine;
+	snprintf(o->toolchain, sizeof o->toolchain, "%08x", tc);
+	o->machine_changed   = machine != SAVESTATE_MACHINE_VERSION;
+	o->toolchain_changed = (uint32_t)tc != toolchain_hash();
+	return layout == SAVESTATE_LAYOUT_VERSION;
 }
 
 const char *
@@ -130,9 +180,25 @@ savestate_build_id(void)
 }
 
 int
+savestate_layout_version(void)
+{
+	return SAVESTATE_LAYOUT_VERSION;
+}
+
+int
 savestate_machine_version(void)
 {
 	return SAVESTATE_MACHINE_VERSION;
+}
+
+const char *
+savestate_toolchain(void)
+{
+	static char tc[12];
+	if (tc[0] == '\0') {
+		snprintf(tc, sizeof tc, "%08x", (unsigned)toolchain_hash());
+	}
+	return tc;
 }
 
 const char *
@@ -272,6 +338,15 @@ header_skip(ss_reader *r)
 	ss_close(r);
 }
 
+// Who wrote the state that last passed header_check(), and the last one loaded.
+static savestate_origin checked_origin, loaded_origin;
+
+const savestate_origin *
+savestate_last_origin(void)
+{
+	return loaded_any ? &loaded_origin : NULL;
+}
+
 // Only the header is read, so this works on the first bytes of a file too.
 static bool
 header_check(const void *data, size_t len, char *err, size_t err_len)
@@ -285,9 +360,18 @@ header_check(const void *data, size_t len, char *err, size_t err_len)
 	char build[SAVESTATE_BUILD_LEN];
 	ss_get(&r, build, sizeof build);
 	build[sizeof build - 1] = '\0';
-	if (r.failed || !build_matches(build)) {
-		snprintf(err, err_len, "the state was saved by a different machine or toolchain (%s; this is %s)",
-		         r.failed ? "?" : build, build_id());
+	if (r.failed) {
+		snprintf(err, err_len, "the state's header is damaged");
+		return false;
+	}
+	if (!parse_build(build, &checked_origin)) {
+		if (checked_origin.layout < 0) {
+			snprintf(err, err_len, "the state was saved by an emulator whose states this one cannot read (%s; this is %s)",
+			         build, build_id());
+		} else {
+			snprintf(err, err_len, "the state has save-state layout %d and this emulator reads layout %d",
+			         checked_origin.layout, SAVESTATE_LAYOUT_VERSION);
+		}
 		return false;
 	}
 	shape_field shape[SHAPE_MAX];
@@ -421,6 +505,36 @@ savestate_check(const void *data, size_t len, char *err, size_t err_len)
 	return true;
 }
 
+// A state from another machine version or toolchain loads, but will not, or
+// may not, run on as it did when it was saved. Said once for each such writer,
+// since a client may load the same state thousands of times.
+static void
+note_origin(const savestate_origin *o)
+{
+	if (!o->machine_changed && !o->toolchain_changed) {
+		return;
+	}
+	static char said[8][32];
+	static int  n_said;
+	char        key[32];
+	snprintf(key, sizeof key, "%d-%s", o->machine, o->toolchain);
+	for (int i = 0; i < n_said; i++) {
+		if (strcmp(said[i], key) == 0) {
+			return;
+		}
+	}
+	if (n_said < 8) {
+		snprintf(said[n_said++], sizeof said[0], "%s", key);
+	}
+	if (o->machine_changed) {
+		printf("Save state: saved by machine version %d, and this is %d. It loaded, but will not run on exactly as it did when saved.\n",
+		       o->machine, SAVESTATE_MACHINE_VERSION);
+	} else {
+		printf("Save state: saved by another toolchain (%s, this is %s). It loaded, but may not run on exactly as it did when saved.\n",
+		       o->toolchain, savestate_toolchain());
+	}
+}
+
 bool
 savestate_apply(const void *data, size_t len, char *err, size_t err_len)
 {
@@ -431,7 +545,9 @@ savestate_apply(const void *data, size_t len, char *err, size_t err_len)
 	ss_reader r;
 	ss_reader_init(&r, data, len);
 	savestate_read(&r);
-	loaded_any = true;
+	loaded_any    = true;
+	loaded_origin = checked_origin;
+	note_origin(&loaded_origin);
 	savestate_mark_frame_boundary(); // every state is taken on one
 	if (r.failed || r.pos != len) {
 		// Unreachable after a passing check, short of a loader that reads

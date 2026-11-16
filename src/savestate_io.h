@@ -11,8 +11,12 @@
 //
 //     tag[4]  version (u16)  reserved (u16, 0)  length (u32)  bytes[length]
 //
-// Values are stored in the host's own byte order and layout: a state belongs to
-// the build that wrote it, which the header checks (savestate.c).
+// Values are little-endian, the byte order of every host this builds for (the
+// check below stops a big-endian one). Structs are never written as the
+// compiler lays them out: a module saving one writes a byte image with its
+// offsets spelled out (ss_le16() and friends), so a state means the same to
+// every compiler and target, and a state's layout can only change in source.
+// Which layouts a build reads is the header's business (savestate.c).
 //
 // A writer can also just count. Run the savers through a counting writer and
 // the result is the chunk list a state from this machine must have, which is how
@@ -27,7 +31,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "save states are little-endian, and so is every host this emulator supports"
+#endif
+
 #define SS_CHUNK_HEADER 12
+
+// Fixed-offset images of structs: store and fetch little-endian values at a
+// given place in a byte buffer.
+static inline void ss_le16(uint8_t *b, uint16_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); }
+static inline void ss_le32(uint8_t *b, uint32_t v) { ss_le16(b, (uint16_t)v); ss_le16(b + 2, (uint16_t)(v >> 16)); }
+static inline uint16_t ss_rd16(const uint8_t *b) { return (uint16_t)(b[0] | b[1] << 8); }
+static inline uint32_t ss_rd32(const uint8_t *b) { return ss_rd16(b) | (uint32_t)ss_rd16(b + 2) << 16; }
 
 #define SS_LAYOUT_MAX 32
 

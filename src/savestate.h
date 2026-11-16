@@ -34,11 +34,26 @@ bool savestate_apply(const void *data, size_t len, char *err, size_t err_len);
 // since they would record a history that did not happen.
 bool savestate_any_loaded(void);
 
-// What a state names as its writer: "x16emu machine <version>-<toolchain>".
-// See savestate.c. The source hash is not part of it, only reported.
+// What a state names as its writer: "x16emu layout <L> machine <M> toolchain
+// <hash>". See savestate.c: another layout is refused; another machine version
+// or toolchain loads, but is reported, since the machine will not (or may not)
+// run on as it did. The source hash is not part of it, only reported.
 const char *savestate_build_id(void);
+int         savestate_layout_version(void);
 int         savestate_machine_version(void);
+const char *savestate_toolchain(void); // 8 hex digits
 const char *savestate_source_id(void);
+
+typedef struct {
+	int  layout;            // the state's layout version
+	int  machine;           // the machine version that saved it
+	char toolchain[12];     // and its toolchain, 8 hex digits
+	bool machine_changed;   // not this machine version: will not run on as it did
+	bool toolchain_changed; // not this toolchain: may not run on as it did
+} savestate_origin;
+
+// Who saved the state last loaded into this process, or NULL if none was.
+const savestate_origin *savestate_last_origin(void);
 
 // The hash x16/step and friends report for a state: all of it but the build ID,
 // so it compares across builds of one machine version.
@@ -68,8 +83,8 @@ const void *savestate_slot_data(const char *name, size_t *len);
 
 // ─── Files ───────────────────────────────────────────────────────────────────
 //
-// A state file holds the same bytes as a slot, so it loads only into the build
-// that wrote it, with the same machine configuration and ROM.
+// A state file holds the same bytes as a slot, so it loads only into a build
+// that reads its layout, with the same machine configuration and ROM.
 
 // Save the machine to a file, replacing it. Returns the state's size, or 0
 // with a reason in err.
