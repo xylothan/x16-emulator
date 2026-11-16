@@ -440,7 +440,7 @@ def check_ids():
         if layout == 1:
             # Earlier IDs, read as layout 1 while that is this build's.
             loads("x16emu machine %d-%s" % (machine, tc), False, False)
-            loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819", allow=True)
+            loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819", allow=machine != 1)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:
