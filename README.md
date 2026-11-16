@@ -1213,18 +1213,32 @@ was saved runs on exactly as one that was not. In `x16dbg`'s interactive mode, `
 A state file holds the same bytes as a slot, and loads only into a machine that matches the one
 that saved it:
 
-* the same **machine version** and **toolchain**. The machine version is a number kept in
-  `src/savestate.c` and raised whenever a change alters how the emulated machine behaves or what a
-  state holds; changes elsewhere (the debugger, DAP, the window, keys, sound sent to the host)
-  leave it, so states survive them. Another compiler or compiler version, target or configuration
-  (Debug or Release) is refused, since some of a state is laid out as that build lays it out.
-  `x16/status` reports `machine`, the `build` a state from this emulator names, and `sourceId`,
-  a hash of its sources;
+* the same **layout version**: what the state's bytes mean. It is a number kept in
+  `src/savestate.c`, raised only when what a state holds changes. A state's bytes do not depend
+  on the compiler or target, so a state saved by any build of the same layout version reads the
+  same;
 * the same **ROM** and **cartridge**, which a state does not hold;
 * the same **configuration**: CPU, `-mhz`, `-ram`, `-via2`, `-enable-ym2151-irq`,
   `-midline-effects`, hostfs on or off, and an SD card attached or not.
 
-Anything else is refused with what differs, and the machine is left as it was. Slots are checked
+A state saved by another **machine version** (a second number in `src/savestate.c`, raised when
+a change alters how the emulated machine behaves) still means what it did, but the machine would
+not run on from it as it did when it was saved. `x16/loadState` refuses it unless asked with
+`"allowBehaviourChange": true`; the F1 slot key loads it and says so in the title bar. A state
+saved by another **toolchain** (compiler and version, target, Debug or Release) loads, since it may
+run on differently but usually does not. Either way, loaded or refused, `x16/loadState` says who
+saved it, and the console notes each such writer once:
+
+```jsonc
+"machine": { "saved": 1, "current": 2, "savedToolchain": "fafd4819", "currentToolchain": "fafd4819",
+             "behaviourChanged": true, "toolchainChanged": false }
+```
+
+Changes outside the machine (the debugger, DAP, the window, keys, sound sent to the host) leave
+both versions, so states survive them unflagged. `x16/status` reports `layout`, `machine`,
+`toolchain`, the `build` a state from this emulator names, and `sourceId`, a hash of its sources.
+
+A state that does not match the three requirements above is refused with what differs, and the machine is left as it was. Slots are checked
 the same way, so a slot saved before attaching an SD card does not load after it. Options that only
 set what the machine starts with (`-prg`, `-nvram`, `-seed`) or how the host shows and plays it
 (`-warp`, `-sound`, `-scale`) do not matter. To carry on exactly as the saved machine would have,
@@ -1273,7 +1287,7 @@ what the machine does:
 `hash` (in `x16/status`, `x16/step` and the state requests) is a 64-bit hash, as 16 hex digits,
 of everything a save state of the machine would hold but the ID of the build writing it: two
 machines with the same hash would save the same state, and the same machine hashes the same in
-any build of one machine version and toolchain. Hostfs directory listings with timestamps still show the host's file times, and an SD card
+any build of one layout version. Hostfs directory listings with timestamps still show the host's file times, and an SD card
 image is a host file: give each instance its own copy. `testbench/test_determinism.py` checks a
 replay, `-warp` against no warp, a run with an audio device against one without, a hostfs
 `LOAD`, and the recorded audio output. `testbench/test_savestate.py` checks that a restored

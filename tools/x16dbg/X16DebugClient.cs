@@ -427,10 +427,15 @@ public class X16DebugClient : IDisposable
     /// <summary>
     /// Put the machine back to a slot saved earlier in this emulator process, or
     /// to a state file when isPath. Works from any pause; the machine stays
-    /// paused at the saved frame.
+    /// paused at the saved frame. A state saved by another machine version is
+    /// refused unless allowBehaviourChange.
     /// </summary>
-    public Task<JsonNode> LoadStateAsync(string target, bool isPath = false) =>
-        SendRequestAsync("x16/loadState", new JsonObject { [isPath ? "path" : "slot"] = target });
+    public Task<JsonNode> LoadStateAsync(string target, bool isPath = false, bool allowBehaviourChange = false) =>
+        SendRequestAsync("x16/loadState", new JsonObject
+        {
+            [isPath ? "path" : "slot"] = target,
+            ["allowBehaviourChange"] = allowBehaviourChange
+        });
 
     public Task<JsonNode> EvaluateAsync(string expression) =>
         SendRequestAsync("evaluate", new JsonObject

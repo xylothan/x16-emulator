@@ -2,16 +2,24 @@
 
     python testbench/test_machine_version.py <x16emu> <rom.bin> [--update] [--port N]
 
-A save state names the machine version that wrote it (SAVESTATE_MACHINE_VERSION
-in src/savestate.c), and a build loads states of its own version. That is only
-safe while every build of a version runs the machine identically, and this is
-what checks it: each workload starts from power-on, paused before the first
-instruction, runs a fixed program for a fixed number of frames, and the state
-hash at each checkpoint is compared with testbench/machine_golden.json.
+A save state names its layout version, the machine version that wrote it and
+that build's toolchain (src/savestate.c). A build refuses another layout, and
+loads another machine version but reports that the machine will not run on as
+it did. Both are only true while the versions are bumped when they should be,
+and this is what checks it: each workload starts from power-on, paused before
+the first instruction, runs a fixed program for a fixed number of frames, and
+its state's chunk list and the state hash at each checkpoint are compared with
+testbench/machine_golden.json.
 
-  * Same version, a hash differs: the machine changed. Bump
-    SAVESTATE_MACHINE_VERSION, empty legacy_builds, and regenerate.
-  * The version differs from the goldens': regenerate (--update) and commit.
+  * Same layout version, the chunks differ: the state layout changed. Bump
+    SAVESTATE_LAYOUT_VERSION (or version the chunk), and regenerate.
+  * Same machine version, a hash differs: the machine changed. Bump
+    SAVESTATE_MACHINE_VERSION, and regenerate.
+  * A version differs from the goldens': regenerate (--update) and commit.
+
+It also checks what a state's build ID decides, by loading one state under
+edited IDs: another layout or an unknown ID is refused; another machine version
+or toolchain loads, is reported, and is the same machine.
 
 Every workload runs twice, so a workload that is not deterministic says so
 instead of looking like a machine change, and each checks that its program
@@ -265,7 +273,9 @@ class Dap:
             m = self.read(timeout)
             if m.get("type") == "response" and m.get("request_seq") == self.seq:
                 if not m.get("success", True):
-                    raise RuntimeError("%s refused: %s" % (cmd, m.get("message")))
+                    e = RuntimeError("%s refused: %s" % (cmd, m.get("message")))
+                    e.body = m.get("body", {})
+                    raise e
                 return m.get("body", {})
 
     def mem(self, addr, n):
@@ -346,14 +356,92 @@ def w_vera(d):
 
 WORKLOADS = [("boot", w_boot), ("hostfs-pcm", w_hostfs), ("ym2151", w_ym), ("vera-psg-via", w_vera)]
 
+def chunks_of(path):
+    """A state file's chunk list: [tag, version, length] for each."""
+    with open(path, "rb") as f:
+        data = f.read()
+    out, pos = [], 0
+    while pos + 12 <= len(data):
+        tag = data[pos:pos + 4].decode("latin-1")
+        ver = int.from_bytes(data[pos + 4:pos + 6], "little")
+        n   = int.from_bytes(data[pos + 8:pos + 12], "little")
+        out.append([tag, ver, n])
+        pos += 12 + n
+    return out
+
 def run(fn):
     proc, d = launch()
     try:
         pts, hs, checks = fn(d)
-        size = d.req("x16/saveState", {"slot": "mv", "hash": False}).get("size")
-        machine = d.req("x16/status").get("machine")
+        path = os.path.join(WORK, "end.x16s")
+        size = d.req("x16/saveState", {"path": path, "hash": False}).get("size")
+        st = d.req("x16/status")
         d.req("disconnect", {"terminateDebuggee": True})
-        return {"frames": pts, "hashes": hs, "stateSize": size}, checks, machine
+        return ({"frames": pts, "hashes": hs, "stateSize": size, "chunks": chunks_of(path)}, checks,
+                (st.get("layout"), st.get("machine")))
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def check_ids():
+    """What a state's build ID decides: another layout is refused; another
+    machine version is refused unless the load allows it, and then loads and
+    says so; another toolchain loads and says so. Every load is the same
+    machine, and a refusal still says who saved the state."""
+    proc, d = launch()
+    try:
+        step_to(d, 60)
+        base = os.path.join(WORK, "id.x16s")
+        d.req("x16/saveState", {"path": base, "hash": False})
+        want = d.req("x16/status", {"hash": True})["hash"]
+        st = d.req("x16/status")
+        layout, machine, tc = st["layout"], st["machine"], st["toolchain"]
+        with open(base, "rb") as f:
+            data = bytearray(f.read())
+
+        def load_as(build, allow):
+            data[12:76] = build.encode().ljust(64, b"\0")
+            p = os.path.join(WORK, "id-variant.x16s")
+            with open(p, "wb") as f:
+                f.write(data)
+            a = {"path": p, "hash": True}
+            if allow:
+                a["allowBehaviourChange"] = True
+            try:
+                return d.req("x16/loadState", a), None, None
+            except RuntimeError as e:
+                return None, str(e), getattr(e, "body", {})
+
+        def loads(build, behaviour, toolchain, allow=False):
+            r, err, _ = load_as(build, allow)
+            m = (r or {}).get("machine") or {}
+            case("ID %r%s loads (%s), behaviourChanged %s, toolchainChanged %s, the same machine"
+                 % (build, " with allowBehaviourChange" if allow else "", err or "ok", behaviour, toolchain),
+                 r is not None and m.get("behaviourChanged") == behaviour
+                 and m.get("toolchainChanged") == toolchain and r.get("hash") == want)
+
+        def refused(build, why, saved=None):
+            r, err, body = load_as(build, False)
+            m = (body or {}).get("machine") or {}
+            case("ID %r is refused (%s)%s" % (build, err, "" if saved is None else
+                 ", and the refusal says machine %s saved it" % m.get("saved")),
+                 r is None and err and why in err and (saved is None or m.get("saved") == saved))
+
+        other = machine + 1000
+        loads("x16emu layout %d machine %d toolchain %s" % (layout, machine, tc), False, False)
+        refused("x16emu layout %d machine %d toolchain %s" % (layout, other, tc), "allowBehaviourChange", other)
+        loads("x16emu layout %d machine %d toolchain %s" % (layout, other, tc), True, False, allow=True)
+        loads("x16emu layout %d machine %d toolchain 00000000" % (layout, machine), False, True)
+        refused("x16emu layout %d machine %d toolchain %s" % (layout + 1, machine, tc), "layout")
+        refused("x16emu r50 0123456789abcdef-%s" % tc, "cannot read")
+        if layout == 1:
+            # Earlier IDs, read as layout 1 while that is this build's.
+            loads("x16emu machine %d-%s" % (machine, tc), False, False)
+            loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819", allow=machine != 1)
+        d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:
             proc.wait(timeout=10)
@@ -362,22 +450,28 @@ def run(fn):
 
 
 print("Machine version: %d workloads from power-on, ROM %s" % (len(WORKLOADS), ROM_SHA[:16]))
-results, machine = {}, None
+results, versions = {}, (None, None)
 for name, fn in WORKLOADS:
-    a, checks, machine = run(fn)
+    a, checks, versions = run(fn)
     b, _, _ = run(fn)
     case("%s: runs the same twice (last hash %s)" % (name, a["hashes"][-1]), a == b)
     for what, n in checks.items():
         case("%s: %s (%d)" % (name, what, n), n > 0)
     results[name] = a
+layout, machine = versions
 
-current = {"machine": machine, "rom_sha256": ROM_SHA, "workloads": results}
+print("Save-state build IDs")
+check_ids()
+
+current = {"layout": layout, "machine": machine, "rom_sha256": ROM_SHA, "workloads": results}
 try:
     with open(GOLDEN) as f:
         golden = json.load(f)
 except (OSError, ValueError):
     golden = None
 
+REGEN = "regenerate with --update and commit testbench/machine_golden.json"
+print("Goldens")
 if UPDATE:
     with open(GOLDEN, "w", newline="\n") as f:
         json.dump(current, f, indent=1)
@@ -388,24 +482,44 @@ elif golden is None:
 elif golden.get("rom_sha256") != ROM_SHA:
     case("the ROM is the one the goldens were recorded with (%s, not %s)"
          % (golden.get("rom_sha256"), ROM_SHA), False)
-elif golden.get("machine") != machine:
-    case("SAVESTATE_MACHINE_VERSION is %s and the goldens are for %s: regenerate them with "
-         "--update and commit testbench/machine_golden.json" % (machine, golden.get("machine")), False)
+elif golden.get("layout") != layout:
+    case("SAVESTATE_LAYOUT_VERSION is %s and the goldens are for %s: %s"
+         % (layout, golden.get("layout"), REGEN), False)
 else:
+    # The layout first: chunks that changed under the same layout version mean
+    # states of that version would be misread. A new layout changes every hash
+    # too, so the hashes are only judged once the chunks agree.
+    layout_moved = False
     for name, now in results.items():
         was = golden["workloads"].get(name)
-        if was == now:
-            case("%s: the same as recorded for machine %s" % (name, machine), True)
-            continue
         if was is None:
-            case("%s: has goldens (regenerate with --update)" % name, False)
+            case("%s: has goldens (%s)" % (name, REGEN), False)
             continue
-        diff = next((f for f, x, y in zip(now["frames"], now["hashes"], was["hashes"]) if x != y), None)
-        how = ("first differs at frame %d" % diff if diff is not None
-               else "state size %s, was %s" % (now["stateSize"], was["stateSize"]))
-        case("%s: the same as recorded for machine %s (%s). The machine has changed: "
-             "bump SAVESTATE_MACHINE_VERSION in src/savestate.c, empty legacy_builds, "
-             "and regenerate with --update" % (name, machine, how), False)
+        same = was.get("chunks") == now["chunks"]
+        diff = next((("%s v%d %d bytes, was v%d %d bytes" % (n[0], n[1], n[2], o[1], o[2]))
+                     for n, o in zip(now["chunks"], was.get("chunks", [])) if n != o),
+                    "%d chunks, was %d" % (len(now["chunks"]), len(was.get("chunks", []))))
+        case("%s: the state's chunks are as recorded for layout %s%s" % (
+             name, layout, "" if same else " (%s). The state layout has changed: bump "
+             "SAVESTATE_LAYOUT_VERSION in src/savestate.c, or give the chunk a new version "
+             "whose loader still reads the old one; then %s" % (diff, REGEN)), same)
+        layout_moved |= not same
+    if layout_moved:
+        print("  (hashes not compared: the layout has changed, and with it every hash)")
+    elif golden.get("machine") != machine:
+        case("SAVESTATE_MACHINE_VERSION is %s and the goldens are for %s: %s"
+             % (machine, golden.get("machine"), REGEN), False)
+    else:
+        for name, now in results.items():
+            was = golden["workloads"].get(name)
+            if was is None:
+                continue
+            first = next((f for f, x, y in zip(now["frames"], now["hashes"], was["hashes"]) if x != y), None)
+            same = first is None and now["frames"] == was["frames"]
+            case("%s: hashes as recorded for machine %s%s" % (
+                 name, machine, "" if same else " (first differs at frame %s). The machine has "
+                 "changed: bump SAVESTATE_MACHINE_VERSION in src/savestate.c, then %s" % (first, REGEN)),
+                 same)
 
 if failed and not UPDATE:
     print("\nWhat this build gives, for testbench/machine_golden.json:")
