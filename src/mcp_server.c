@@ -1869,8 +1869,13 @@ int mcp_server_init_http(int port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)port);
+    // Spelled out in network order. htonl and htons are unsafe here: src/endian.h
+    // shadows the system's for <netinet/in.h>, and with these includes glibc then
+    // takes this for a big-endian machine and leaves the bytes alone.
+    const uint8_t loopback[4] = { 127, 0, 0, 1 };
+    const uint8_t port_be[2]  = { (uint8_t)(port >> 8), (uint8_t)port };
+    memcpy(&addr.sin_addr, loopback, sizeof loopback);
+    memcpy(&addr.sin_port, port_be, sizeof port_be);
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof addr) != 0 ||
         listen(listen_sock, 8) != 0) {
         fprintf(stderr, "[mcp] cannot listen on 127.0.0.1:%d: %s\n", port, mcp_sock_error());
