@@ -381,6 +381,7 @@ static void add_machine_state(cJSON *data) {
     const char *why = paused ? DEBUGGetStopReason() : NULL;
     if (why && *why) cJSON_AddStringToObject(data, "stopReason", why);
     else             cJSON_AddNullToObject(data, "stopReason");
+    if (!cJSON_HasObjectItem(data, "stop")) debug_server_add_stop_info(data);
 }
 
 static cJSON *text_content(const char *text) {
@@ -1234,6 +1235,11 @@ static cJSON *tool_perf_stats(cJSON *args) {
     return tool_forward("x16/perfStats", args);
 }
 
+static cJSON *tool_get_vera_state(cJSON *args) {
+    (void)args;
+    return tool_passthrough("x16/vera");
+}
+
 // The lines are the answer, so they are the text a client reads first.
 static cJSON *tool_get_screen(cJSON *args) {
     dbg_reply_t r;
@@ -1467,6 +1473,12 @@ static const mcp_tool_t tools[] = {
       "\"description\":\"window lengths in seconds; 0 means since start\"}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_perf_stats },
+    { "get_vera_state",
+      "VERA's internal state, which its registers do not all read back: both data ports "
+      "(address, increment, prefetch, nibble) whatever ADDRSEL is, interrupts, the scanline, "
+      "and the FX state whatever DCSEL is. Fields ending 16_16 are the emulator's 16.16 "
+      "fixed point. Reading it changes nothing.",
+      NO_ARGS, TOOL_READ, tool_get_vera_state },
     { "get_screen",
       "The text on screen, one string per row, read from VRAM. With no 'layer' it uses the "
       "first of layers 1 and 0 that is showing text, and is an error if neither is. VERA "

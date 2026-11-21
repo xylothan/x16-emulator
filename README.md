@@ -1044,7 +1044,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1460,6 +1460,7 @@ debugging it.
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
 | Input | `type_text`, `send_key`, `joystick` |
 | Screen | `get_screen`, `screenshot` |
+| VERA | `get_vera_state` |
 | Other | `save_state`, `load_state`, `perf_stats` |
 
 Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
@@ -1467,8 +1468,16 @@ moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` an
 machine stops. At `timeoutMs` they answer `completed: false` and the machine keeps going, so a
 client carries on with `wait_for_stop`, passing the last `stopId`.
 
+A stop caused by a watch also carries a `stop` object: the `address`, `bank`, `value`, `access` and
+`space`, and the `accessingPc` of the instruction that made the access, which the PC has already
+moved past. DAP clients get the same object on the `stopped` event and in `x16/status`.
+
 Breakpoints belong to whoever set them: removing one leaves it armed if an editor or the command
 line also holds it.
+
+`get_vera_state` (`x16/vera`) reports what VERA's registers do not all read back: both data ports
+whatever ADDRSEL is, and the FX state whatever DCSEL is. Fields ending `16_16` are the emulator's
+16.16 fixed point, wider than the hardware's own precision.
 
 #### Reading the screen
 
