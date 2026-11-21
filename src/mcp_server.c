@@ -30,6 +30,7 @@
   #define MCP_O_WRONLY          _O_WRONLY
 #else
   #include <fcntl.h>
+  #include <signal.h>
   #include <unistd.h>
   #define MCP_READ(fd, buf, n)  read((fd), (buf), (n))
   #define MCP_WRITE(fd, buf, n) write((fd), (buf), (n))
@@ -46,6 +47,9 @@
 #define MCP_LINES_PER_POLL 16
 #define MCP_READ_LIMIT     4096
 #define MCP_DISASM_LIMIT   256
+#define MCP_WAIT_DEFAULT   5000                // ms a long-running call waits
+#define MCP_WAIT_LIMIT     30000
+#define MCP_FRAMES_LIMIT   1000000000
 
 #define RPC_PARSE_ERROR      (-32700)
 #define RPC_INVALID_REQUEST  (-32600)
@@ -86,6 +90,20 @@ static bool       out_stop = false;
 // that a stop landing between two calls cannot be missed.
 static uint32_t   stop_id = 0;
 static bool       was_stopped = false;
+
+// The one call that answers later: a step, a run of frames, or a wait for a
+// stop. Other requests are still served while it waits, on the machine it is
+// waiting for, so a client can pause what it started.
+typedef enum { WAIT_NONE, WAIT_STOP, WAIT_FRAMES } wait_kind_t;
+
+static struct {
+    wait_kind_t kind;
+    cJSON      *id;
+    Uint32      deadline;
+    uint32_t    since;       // WAIT_STOP: answered once stop_id has passed this
+} waiter;
+
+static const cJSON *current_id = NULL;   // the request being handled
 
 // ─── The two I/O threads ────────────────────────────────────────────
 
@@ -266,18 +284,24 @@ static void rpc_error(const cJSON *id, int code, const char *message) {
 
 // Every result says what the machine is doing, because another front end may
 // have moved it between two calls.
+static void track_stops(void) {
+    const bool stopped = DEBUGIsPaused();
+    if (stopped && !was_stopped) stop_id++;
+    was_stopped = stopped;
+}
+
 static void add_machine_state(cJSON *data) {
-    dbg_reply_t st;
-    debug_server_call("x16/status", NULL, &st);
-    bool paused = false;
-    if (st.body) {
-        cJSON *p = cJSON_GetObjectItemCaseSensitive(st.body, "paused");
-        cJSON *f = cJSON_GetObjectItemCaseSensitive(st.body, "frame");
-        paused = p && cJSON_IsTrue(p);
-        if (!cJSON_HasObjectItem(data, "paused"))
-            cJSON_AddBoolToObject(data, "paused", paused);
-        if (f && !cJSON_HasObjectItem(data, "frame"))
-            cJSON_AddNumberToObject(data, "frame", f->valuedouble);
+    track_stops();
+    const bool paused = DEBUGIsPaused();
+    if (!cJSON_HasObjectItem(data, "paused"))
+        cJSON_AddBoolToObject(data, "paused", paused);
+    // A finished run of frames already says which frame it ended on, and can be
+    // reported from inside another request, where this call would be refused.
+    if (!cJSON_HasObjectItem(data, "frame")) {
+        dbg_reply_t st;
+        debug_server_call("x16/status", NULL, &st);
+        cJSON *f = st.body ? cJSON_GetObjectItemCaseSensitive(st.body, "frame") : NULL;
+        if (f) cJSON_AddNumberToObject(data, "frame", f->valuedouble);
         cJSON_Delete(st.body);
     }
     cJSON_AddNumberToObject(data, "stopId", stop_id);
@@ -367,6 +391,72 @@ static bool arg_address(cJSON *args, bool vram, char *out, size_t n, char *err, 
     return false;
 }
 
+static bool arg_space(cJSON *args, bool *vram, char *err, size_t errn) {
+    cJSON *sp = args ? cJSON_GetObjectItemCaseSensitive(args, "space") : NULL;
+    if (sp && (!cJSON_IsString(sp) ||
+               (strcmp(sp->valuestring, "cpu") && strcmp(sp->valuestring, "vram")))) {
+        snprintf(err, errn, "'space' must be \"cpu\" or \"vram\"");
+        return false;
+    }
+    *vram = sp && !strcmp(sp->valuestring, "vram");
+    return true;
+}
+
+// Whether every key in an object is one of `keys`, which ends with NULL. The
+// argument check covers only the top level, and a misspelled "button" inside a
+// pad would otherwise quietly mean nothing held.
+static bool only_keys(cJSON *obj, const char *const *keys, const char *what,
+                      char *err, size_t errn) {
+    if (!cJSON_IsObject(obj)) {
+        snprintf(err, errn, "each %s must be an object", what);
+        return false;
+    }
+    cJSON *a;
+    cJSON_ArrayForEach(a, obj) {
+        bool known = false;
+        for (const char *const *k = keys; *k; k++) {
+            if (!strcmp(a->string, *k)) known = true;
+        }
+        if (!known) {
+            snprintf(err, errn, "a %s takes no '%.40s'", what, a->string);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Hex, already checked, to base64. Returns NULL if out of memory.
+static char *hex_to_b64(const char *hex) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const size_t n = strlen(hex) / 2;
+    char *out = (char *)malloc((n + 2) / 3 * 4 + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const size_t left = n - i;
+        unsigned t = 0;
+        for (size_t k = 0; k < 3; k++) {
+            t <<= 8;
+            if (k < left)
+                t |= (unsigned)(hex_value(hex[(i + k) * 2]) << 4 | hex_value(hex[(i + k) * 2 + 1]));
+        }
+        out[o++] = alphabet[(t >> 18) & 63];
+        out[o++] = alphabet[(t >> 12) & 63];
+        out[o++] = left > 1 ? alphabet[(t >> 6) & 63] : '=';
+        out[o++] = left > 2 ? alphabet[t & 63] : '=';
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static int b64_value(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -422,14 +512,10 @@ static cJSON *tool_list_breakpoints(cJSON *args) {
 
 static cJSON *tool_read_memory(cJSON *args) {
     char err[160], ref[48];
-    cJSON *sp = args ? cJSON_GetObjectItemCaseSensitive(args, "space") : NULL;
-    if (sp && (!cJSON_IsString(sp) ||
-               (strcmp(sp->valuestring, "cpu") && strcmp(sp->valuestring, "vram"))))
-        return tool_fail("'space' must be \"cpu\" or \"vram\"");
-    const bool vram = sp && !strcmp(sp->valuestring, "vram");
-
+    bool vram;
     int length, bank;
-    if (!arg_address(args, vram, ref, sizeof ref, err, sizeof err) ||
+    if (!arg_space(args, &vram, err, sizeof err) ||
+        !arg_address(args, vram, ref, sizeof ref, err, sizeof err) ||
         !arg_int(args, "length", 16, 1, MCP_READ_LIMIT, &length, err, sizeof err) ||
         !arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
         return tool_fail(err);
@@ -510,23 +596,628 @@ static cJSON *tool_disassemble(cJSON *args) {
     return result;
 }
 
+// ─── Calls that answer later ────────────────────────────────────────
+
+static void waiter_clear(void) {
+    cJSON_Delete(waiter.id);
+    waiter.id = NULL;
+    waiter.kind = WAIT_NONE;
+}
+
+static cJSON *wait_begin(wait_kind_t kind, int timeout_ms, uint32_t since) {
+    waiter.id = cJSON_Duplicate(current_id, 1);
+    if (!waiter.id) return tool_fail("out of memory");
+    waiter.kind = kind;
+    waiter.since = since;
+    waiter.deadline = SDL_GetTicks() + (Uint32)timeout_ms;
+    return NULL;   // the reply comes from the poll
+}
+
+// How a wait ended, with where the machine is if it has stopped there.
+static cJSON *wait_result(bool completed, const char *reason) {
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddBoolToObject(data, "completed", completed);
+    if (reason) cJSON_AddStringToObject(data, "reason", reason);
+    if (DEBUGIsPaused()) {
+        dbg_reply_t r;
+        debug_server_call("x16/registers", NULL, &r);
+        cJSON *cpu = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "cpu") : NULL;
+        cJSON *pc  = cpu ? cJSON_GetObjectItemCaseSensitive(cpu, "pc") : NULL;
+        cJSON *pbr = cpu ? cJSON_GetObjectItemCaseSensitive(cpu, "pbr") : NULL;
+        if (pc)  cJSON_AddNumberToObject(data, "pc", pc->valuedouble);
+        if (pbr) cJSON_AddNumberToObject(data, "pbr", pbr->valuedouble);
+        cJSON_Delete(r.body);
+    }
+    return tool_ok(data, NULL);
+}
+
+static void waiter_answer(cJSON *result) {
+    rpc_result(waiter.id, result);
+    waiter_clear();
+}
+
+static void waiter_poll(void) {
+    if (waiter.kind == WAIT_NONE) return;
+    track_stops();
+    if (waiter.kind == WAIT_STOP && (int32_t)(stop_id - waiter.since) > 0) {
+        waiter_answer(wait_result(true, NULL));
+    } else if (SDL_TICKS_PASSED(SDL_GetTicks(), waiter.deadline)) {
+        // The machine keeps going. wait_for_stop picks it up from here.
+        waiter_answer(wait_result(false, "timeout"));
+    }
+}
+
+// From the debug server, when a run of frames ends for any reason. It can be in
+// the middle of a request, since a continue is one of the things that ends it.
+static void on_frames_done(cJSON *body) {
+    if (waiter.kind != WAIT_FRAMES) {
+        // That call already timed out, and a stop id tells the client the rest.
+        cJSON_Delete(body);
+        return;
+    }
+    cJSON *why = cJSON_GetObjectItemCaseSensitive(body, "reason");
+    const bool cancelled = why && cJSON_IsString(why) && !strcmp(why->valuestring, "cancelled");
+    cJSON_AddBoolToObject(body, "completed", !cancelled);
+
+    cJSON *reads = cJSON_GetObjectItemCaseSensitive(body, "reads");
+    const int n = cJSON_GetArraySize(reads);
+    for (int i = 0; i < n; i++) {
+        cJSON *item = cJSON_GetArrayItem(reads, i);
+        int bytes = 0;
+        char *hex = b64_to_hex(cJSON_IsString(item) ? item->valuestring : "", &bytes);
+        cJSON_ReplaceItemInArray(reads, i, cJSON_CreateString(hex ? hex : ""));
+        free(hex);
+    }
+    waiter_answer(tool_ok(body, NULL));
+}
+
+static bool mcp_holds_run_state(void) {
+    return enabled;
+}
+
+// ─── Run control ────────────────────────────────────────────────────
+
+static cJSON *tool_pause(cJSON *args) {
+    (void)args;
+    return tool_passthrough("pause");
+}
+
+static cJSON *tool_continue(cJSON *args) {
+    (void)args;
+    return tool_passthrough("continue");
+}
+
+static cJSON *tool_reset(cJSON *args) {
+    (void)args;
+    return tool_passthrough("restart");
+}
+
+static const char busy_message[] =
+    "another call is already waiting on the machine; let it finish or cancel it";
+
+static cJSON *tool_step(cJSON *args) {
+    char err[160];
+    int timeout;
+    if (!arg_int(args, "timeoutMs", MCP_WAIT_DEFAULT, 0, MCP_WAIT_LIMIT, &timeout, err, sizeof err))
+        return tool_fail(err);
+    cJSON *mo = args ? cJSON_GetObjectItemCaseSensitive(args, "mode") : NULL;
+    cJSON *gr = args ? cJSON_GetObjectItemCaseSensitive(args, "granularity") : NULL;
+    const char *mode = mo && cJSON_IsString(mo) ? mo->valuestring : (mo ? "" : "into");
+    const char *gran = gr && cJSON_IsString(gr) ? gr->valuestring : (gr ? "" : "instruction");
+    const char *cmd = !strcmp(mode, "into") ? "stepIn"
+                    : !strcmp(mode, "over") ? "next"
+                    : !strcmp(mode, "out")  ? "stepOut" : NULL;
+    if (!cmd) return tool_fail("'mode' must be \"into\", \"over\" or \"out\"");
+    if (strcmp(gran, "instruction") && strcmp(gran, "line"))
+        return tool_fail("'granularity' must be \"instruction\" or \"line\"");
+    if (waiter.kind != WAIT_NONE) return tool_fail(busy_message);
+    if (!DEBUGIsPaused()) return tool_fail("the machine is running: call pause first");
+
+    track_stops();
+    const uint32_t since = stop_id;
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "granularity", gran);
+    dbg_reply_t r;
+    debug_server_call(cmd, call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON_Delete(r.body);
+    return wait_begin(WAIT_STOP, timeout, since);
+}
+
+// One pad as x16/joystick and x16/step take it. NULL, with err set, if refused.
+static cJSON *pad_args(cJSON *pad, char *err, size_t errn) {
+    static const char *const keys[] = { "port", "buttons", "release", NULL };
+    if (!only_keys(pad, keys, "joystick", err, errn)) return NULL;
+    int port;
+    if (!arg_int(pad, "port", 0, 1, 4, &port, err, errn)) return NULL;
+    if (!port) {
+        snprintf(err, errn, "'port' is required: 1 to 4, as BASIC's JOY(n) numbers them");
+        return NULL;
+    }
+    cJSON *b  = cJSON_GetObjectItemCaseSensitive(pad, "buttons");
+    cJSON *re = cJSON_GetObjectItemCaseSensitive(pad, "release");
+    if (re && !cJSON_IsBool(re)) {
+        snprintf(err, errn, "'release' must be true or false");
+        return NULL;
+    }
+    const bool release = re && cJSON_IsTrue(re);
+    if (b && release) {
+        snprintf(err, errn, "give 'buttons' or 'release', not both");
+        return NULL;
+    }
+    if (b) {
+        bool names = cJSON_IsArray(b);
+        cJSON *item;
+        cJSON_ArrayForEach(item, b) {
+            if (!cJSON_IsString(item)) names = false;
+        }
+        if (!names) {
+            snprintf(err, errn, "'buttons' must be an array of button names");
+            return NULL;
+        }
+    }
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddNumberToObject(out, "index", port - 1);
+    if (release) cJSON_AddBoolToObject(out, "enabled", false);
+    else if (b)  cJSON_AddItemToObject(out, "buttons", cJSON_Duplicate(b, 1));
+    return out;
+}
+
+// One region to read back as x16/step takes it.
+static cJSON *read_args(cJSON *rd, char *err, size_t errn) {
+    static const char *const keys[] = { "address", "length", "space", "bank", NULL };
+    if (!only_keys(rd, keys, "read", err, errn)) return NULL;
+    char ref[48];
+    bool vram;
+    int length, bank;
+    if (!arg_space(rd, &vram, err, errn) ||
+        !arg_address(rd, vram, ref, sizeof ref, err, errn) ||
+        !arg_int(rd, "length", 16, 1, MCP_READ_LIMIT, &length, err, errn) ||
+        !arg_int(rd, "bank", -1, 0, 255, &bank, err, errn))
+        return NULL;
+    if (vram && bank >= 0) {
+        snprintf(err, errn, "VRAM has no banks: leave out 'bank' when 'space' is \"vram\"");
+        return NULL;
+    }
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddStringToObject(out, "addr", ref);
+    cJSON_AddNumberToObject(out, "len", length);
+    if (bank >= 0) cJSON_AddNumberToObject(out, "bank", bank);
+    return out;
+}
+
+static cJSON *tool_run_frames(cJSON *args) {
+    char err[160];
+    int frames, timeout;
+    if (!arg_int(args, "frames", 1, 1, MCP_FRAMES_LIMIT, &frames, err, sizeof err) ||
+        !arg_int(args, "timeoutMs", MCP_WAIT_DEFAULT, 0, MCP_WAIT_LIMIT, &timeout, err, sizeof err))
+        return tool_fail(err);
+    if (waiter.kind != WAIT_NONE) return tool_fail(busy_message);
+
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddNumberToObject(call, "frames", frames);
+
+    cJSON *joys = args ? cJSON_GetObjectItemCaseSensitive(args, "joysticks") : NULL;
+    if (joys) {
+        if (!cJSON_IsArray(joys)) {
+            cJSON_Delete(call);
+            return tool_fail("'joysticks' must be an array");
+        }
+        cJSON *list = cJSON_AddArrayToObject(call, "joysticks");
+        cJSON *pad;
+        cJSON_ArrayForEach(pad, joys) {
+            cJSON *one = pad_args(pad, err, sizeof err);
+            if (!one) {
+                cJSON_Delete(call);
+                return tool_fail(err);
+            }
+            cJSON_AddItemToArray(list, one);
+        }
+    }
+    cJSON *reads = args ? cJSON_GetObjectItemCaseSensitive(args, "read") : NULL;
+    if (reads) {
+        if (!cJSON_IsArray(reads)) {
+            cJSON_Delete(call);
+            return tool_fail("'read' must be an array");
+        }
+        cJSON *list = cJSON_AddArrayToObject(call, "read");
+        cJSON *rd;
+        cJSON_ArrayForEach(rd, reads) {
+            cJSON *one = read_args(rd, err, sizeof err);
+            if (!one) {
+                cJSON_Delete(call);
+                return tool_fail(err);
+            }
+            cJSON_AddItemToArray(list, one);
+        }
+    }
+    cJSON *hash = args ? cJSON_GetObjectItemCaseSensitive(args, "hash") : NULL;
+    if (hash && !cJSON_IsBool(hash)) {
+        cJSON_Delete(call);
+        return tool_fail("'hash' must be true or false");
+    }
+    if (hash && cJSON_IsTrue(hash)) cJSON_AddBoolToObject(call, "hash", true);
+
+    dbg_reply_t r;
+    debug_server_call("x16/step", call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON_Delete(r.body);
+    return wait_begin(WAIT_FRAMES, timeout, 0);
+}
+
+static cJSON *tool_wait_for_stop(cJSON *args) {
+    char err[160];
+    int since_arg, timeout;
+    if (!arg_int(args, "sinceStopId", -1, 0, 0x7FFFFFFF, &since_arg, err, sizeof err) ||
+        !arg_int(args, "timeoutMs", MCP_WAIT_DEFAULT, 0, MCP_WAIT_LIMIT, &timeout, err, sizeof err))
+        return tool_fail(err);
+    if (waiter.kind != WAIT_NONE) return tool_fail(busy_message);
+    track_stops();
+    if (since_arg < 0) {
+        // No marker: a machine that is already stopped is what was asked for.
+        if (DEBUGIsPaused()) return wait_result(true, NULL);
+        return wait_begin(WAIT_STOP, timeout, stop_id);
+    }
+    if ((int32_t)(stop_id - (uint32_t)since_arg) > 0) return wait_result(true, NULL);
+    return wait_begin(WAIT_STOP, timeout, (uint32_t)since_arg);
+}
+
+// ─── Registers and memory ───────────────────────────────────────────
+
+// As get_registers names them. The status register goes first because it sets
+// how wide A, X and Y are on a 65C816.
+static const struct { const char *arg, *name; } reg_names[] = {
+    { "status", "P (Status)" }, { "pc", "PC" }, { "a", "A" }, { "x", "X" }, { "y", "Y" },
+    { "sp", "SP" }, { "dp", "D" }, { "dbr", "DBR" }, { "pbr", "PBR" },
+    { "ramBank", "RAM Bank" }, { "romBank", "ROM Bank" },
+};
+
+#define NUM_REG_NAMES ((int)(sizeof reg_names / sizeof reg_names[0]))
+
+static bool reg_value_text(cJSON *v, char *out, size_t n) {
+    if (cJSON_IsNumber(v)) {
+        if (v->valuedouble < 0 || v->valuedouble > 0xFFFF || v->valuedouble != floor(v->valuedouble))
+            return false;
+        snprintf(out, n, "%u", (unsigned)v->valuedouble);
+        return true;
+    }
+    if (!cJSON_IsString(v) || strlen(v->valuestring) >= n) return false;
+    const char *s = v->valuestring;
+    bool hex = false;
+    if (s[0] == '$') { s++; hex = true; }
+    else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { s += 2; hex = true; }
+    if (!*s) return false;
+    for (const char *p = s; *p; p++) {
+        if (hex ? hex_value(*p) < 0 : (*p < '0' || *p > '9')) return false;
+    }
+    snprintf(out, n, "%s", v->valuestring);
+    return true;
+}
+
+static cJSON *tool_set_registers(cJSON *args) {
+    if (!args || !cJSON_GetArraySize(args))
+        return tool_fail("name at least one register, e.g. {\"pc\": \"$0801\"}");
+    // Every value is checked first, so a typo in the last one changes nothing.
+    char values[NUM_REG_NAMES][16];
+    for (int i = 0; i < NUM_REG_NAMES; i++) {
+        cJSON *v = cJSON_GetObjectItemCaseSensitive(args, reg_names[i].arg);
+        if (v && !reg_value_text(v, values[i], sizeof values[i])) {
+            char msg[120];
+            snprintf(msg, sizeof msg, "'%s' must be a number, or a string like \"$FF\" or \"0xFF\"",
+                     reg_names[i].arg);
+            return tool_fail(msg);
+        }
+    }
+    cJSON *set = cJSON_CreateObject();
+    for (int i = 0; i < NUM_REG_NAMES; i++) {
+        if (!cJSON_HasObjectItem(args, reg_names[i].arg)) continue;
+        cJSON *call = cJSON_CreateObject();
+        cJSON_AddNumberToObject(call, "variablesReference", 1);
+        cJSON_AddStringToObject(call, "name", reg_names[i].name);
+        cJSON_AddStringToObject(call, "value", values[i]);
+        dbg_reply_t r;
+        debug_server_call("setVariable", call, &r);
+        cJSON_Delete(call);
+        if (!r.success) {
+            char msg[420], done[120] = "";
+            size_t used = 0;
+            cJSON *d;
+            cJSON_ArrayForEach(d, set) {
+                used += (size_t)snprintf(done + used, sizeof done - used, " %s", d->string);
+                if (used >= sizeof done) break;
+            }
+            snprintf(msg, sizeof msg, "could not set %s: %.200s. Already set:%s",
+                     reg_names[i].arg, r.message, done[0] ? done : " none");
+            cJSON_Delete(r.body);
+            cJSON_Delete(set);
+            return tool_fail(msg);
+        }
+        cJSON *stored = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "value") : NULL;
+        cJSON_AddStringToObject(set, reg_names[i].arg,
+                                stored && cJSON_IsString(stored) ? stored->valuestring : values[i]);
+        cJSON_Delete(r.body);
+    }
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddItemToObject(data, "registers", set);
+    return tool_ok(data, NULL);
+}
+
+static cJSON *tool_write_memory(cJSON *args) {
+    char err[160], ref[48];
+    bool vram;
+    if (!arg_space(args, &vram, err, sizeof err) ||
+        !arg_address(args, vram, ref, sizeof ref, err, sizeof err))
+        return tool_fail(err);
+    cJSON *hx = args ? cJSON_GetObjectItemCaseSensitive(args, "hex") : NULL;
+    if (!hx || !cJSON_IsString(hx))
+        return tool_fail("'hex' is required: the bytes to write, e.g. \"A9058D0004\"");
+    const size_t digits = strlen(hx->valuestring);
+    if (!digits || digits % 2 || digits > MCP_READ_LIMIT * 2)
+        return tool_fail("'hex' must be an even number of digits, 1 to 4096 bytes");
+    for (size_t i = 0; i < digits; i++) {
+        if (hex_value(hx->valuestring[i]) < 0)
+            return tool_fail("'hex' may contain only hex digits");
+    }
+
+    // The write itself wraps at the top of the space, so a range that runs off
+    // the end would land on the start of memory. A read reports it instead.
+    cJSON *probe = cJSON_CreateObject();
+    cJSON_AddStringToObject(probe, "memoryReference", ref);
+    cJSON_AddNumberToObject(probe, "count", (double)(digits / 2));
+    dbg_reply_t pr;
+    debug_server_call("readMemory", probe, &pr);
+    cJSON_Delete(probe);
+    if (!pr.success) {
+        cJSON_Delete(pr.body);
+        return tool_fail(pr.message);
+    }
+    cJSON *un = pr.body ? cJSON_GetObjectItemCaseSensitive(pr.body, "unreadableBytes") : NULL;
+    const bool past_end = un && un->valuedouble > 0;
+    cJSON_Delete(pr.body);
+    if (past_end) return tool_fail("the write runs past the end of the address space");
+
+    char *b64 = hex_to_b64(hx->valuestring);
+    if (!b64) return tool_fail("out of memory");
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "memoryReference", ref);
+    cJSON_AddStringToObject(call, "data", b64);
+    free(b64);
+    dbg_reply_t r;
+    debug_server_call("writeMemory", call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON *wrote = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "bytesWritten") : NULL;
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "space", vram ? "vram" : "cpu");
+    cJSON_AddNumberToObject(data, "bytesWritten", wrote ? wrote->valuedouble : 0);
+    cJSON_Delete(r.body);
+    return tool_ok(data, NULL);
+}
+
+// ─── Breakpoints ────────────────────────────────────────────────────
+
+static cJSON *breakpoint_call(const char *command, cJSON *args) {
+    char err[160], ref[48];
+    cJSON *ad = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
+    if (ad && cJSON_IsString(ad) && !SDL_strncasecmp(ad->valuestring, "vram:", 5))
+        return tool_fail("breakpoints and watches here take CPU addresses, not VRAM");
+    if (!arg_address(args, false, ref, sizeof ref, err, sizeof err)) return tool_fail(err);
+
+    cJSON *ki = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
+    if (ki && (!cJSON_IsString(ki) ||
+               (strcmp(ki->valuestring, "exec") && strcmp(ki->valuestring, "write"))))
+        return tool_fail("'kind' must be \"exec\" or \"write\"");
+    int bank, length;
+    if (!arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err) ||
+        !arg_int(args, "length", 1, 1, 0x10000, &length, err, sizeof err))
+        return tool_fail(err);
+    cJSON *co = args ? cJSON_GetObjectItemCaseSensitive(args, "condition") : NULL;
+    cJSON *hi = args ? cJSON_GetObjectItemCaseSensitive(args, "hitCondition") : NULL;
+    if ((co && !cJSON_IsString(co)) || (hi && !cJSON_IsString(hi)))
+        return tool_fail("'condition' and 'hitCondition' must be strings");
+
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "address", ref);
+    if (ki) cJSON_AddStringToObject(call, "kind", ki->valuestring);
+    if (bank >= 0) cJSON_AddNumberToObject(call, "bank", bank);
+    if (cJSON_HasObjectItem(args, "length")) cJSON_AddNumberToObject(call, "length", length);
+    if (co) cJSON_AddStringToObject(call, "condition", co->valuestring);
+    if (hi) cJSON_AddStringToObject(call, "hitCondition", hi->valuestring);
+    dbg_reply_t r;
+    debug_server_call(command, call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    return tool_ok(r.body ? r.body : cJSON_CreateObject(), NULL);
+}
+
+static cJSON *tool_set_breakpoint(cJSON *args) {
+    return breakpoint_call("mcp/setBreakpoint", args);
+}
+
+static cJSON *tool_remove_breakpoint(cJSON *args) {
+    return breakpoint_call("mcp/removeBreakpoint", args);
+}
+
+// ─── Input, save states, statistics ─────────────────────────────────
+
+// A command whose arguments the schema has already narrowed.
+static cJSON *tool_forward(const char *command, cJSON *args) {
+    dbg_reply_t r;
+    debug_server_call(command, args, &r);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    return tool_ok(r.body ? r.body : cJSON_CreateObject(), NULL);
+}
+
+static cJSON *tool_type_text(cJSON *args) {
+    cJSON *t = args ? cJSON_GetObjectItemCaseSensitive(args, "text") : NULL;
+    if (!t || !cJSON_IsString(t)) return tool_fail("'text' is required");
+    return tool_forward("x16/type", args);
+}
+
+static cJSON *tool_send_key(cJSON *args) {
+    cJSON *k = args ? cJSON_GetObjectItemCaseSensitive(args, "key") : NULL;
+    if (!k || !cJSON_IsString(k)) return tool_fail("'key' is required: an SDL key name such as \"Return\"");
+    cJSON *ac = cJSON_GetObjectItemCaseSensitive(args, "action");
+    if (ac && (!cJSON_IsString(ac) || (strcmp(ac->valuestring, "press") &&
+                                       strcmp(ac->valuestring, "down") &&
+                                       strcmp(ac->valuestring, "up"))))
+        return tool_fail("'action' must be \"press\", \"down\" or \"up\"");
+    // The handler skips a modifier it cannot name, which would type the wrong key.
+    cJSON *mods = cJSON_GetObjectItemCaseSensitive(args, "modifiers");
+    if (mods) {
+        if (!cJSON_IsArray(mods) || cJSON_GetArraySize(mods) > 8)
+            return tool_fail("'modifiers' must be an array of at most 8 key names");
+        cJSON *m;
+        cJSON_ArrayForEach(m, mods) {
+            if (!cJSON_IsString(m) ||
+                SDL_GetScancodeFromName(m->valuestring) == SDL_SCANCODE_UNKNOWN)
+                return tool_fail("each modifier must be an SDL key name, such as \"Left Shift\"");
+        }
+    }
+    return tool_forward("x16/sendKey", args);
+}
+
+static cJSON *tool_joystick(cJSON *args) {
+    char err[160];
+    if (!args) return tool_fail("'port' is required: 1 to 4, as BASIC's JOY(n) numbers them");
+    cJSON *call = pad_args(args, err, sizeof err);
+    if (!call) return tool_fail(err);
+    cJSON *result = tool_forward("x16/joystick", call);
+    cJSON_Delete(call);
+    return result;
+}
+
+// Named slots only. A file path is a host filesystem write, which is more than
+// a debugging client should get by default.
+static cJSON *state_call(const char *command, cJSON *args, bool events) {
+    cJSON *s = args ? cJSON_GetObjectItemCaseSensitive(args, "slot") : NULL;
+    if (!s || !cJSON_IsString(s) || !s->valuestring[0])
+        return tool_fail("'slot' is required: a name for the state");
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "slot", s->valuestring);
+    if (events) cJSON_AddBoolToObject(call, "events", true);
+    cJSON *result = tool_forward(command, call);
+    cJSON_Delete(call);
+    return result;
+}
+
+static cJSON *tool_save_state(cJSON *args) {
+    return state_call("x16/saveState", args, false);
+}
+
+static cJSON *tool_load_state(cJSON *args) {
+    // An editor attached alongside has to redraw a machine that just changed.
+    return state_call("x16/loadState", args, true);
+}
+
+static cJSON *tool_perf_stats(cJSON *args) {
+    return tool_forward("x16/perfStats", args);
+}
+
+typedef enum {
+    TOOL_READ,         // changes nothing in the machine
+    TOOL_CONTROL,      // moves or feeds it, and nothing is lost
+    TOOL_DESTRUCTIVE,  // overwrites state that cannot be got back
+} tool_effect_t;
+
 typedef struct {
-    const char *name;
-    const char *description;
-    const char *schema;     // JSON Schema of the arguments
-    bool        read_only;
-    cJSON     *(*run)(cJSON *args);
+    const char   *name;
+    const char   *description;
+    const char   *schema;     // JSON Schema of the arguments
+    tool_effect_t effect;
+    cJSON       *(*run)(cJSON *args);
 } mcp_tool_t;
 
 #define NO_ARGS "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+#define TIMEOUT_ARG "\"timeoutMs\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000,\"default\":5000}"
+#define ADDRESS_ARG "\"address\":{\"type\":[\"string\",\"number\"],\"description\":\"e.g. \\\"$C000\\\" or \\\"0xC000\\\"\"}"
+#define REG_ARG     "{\"type\":[\"string\",\"integer\"]}"
+#define PAD_ITEM \
+    "{\"type\":\"object\",\"properties\":{" \
+    "\"port\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4}," \
+    "\"buttons\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}," \
+    "\"release\":{\"type\":\"boolean\"}" \
+    "},\"required\":[\"port\"],\"additionalProperties\":false}"
 
 static const mcp_tool_t tools[] = {
     { "get_status",
       "Is the machine paused, on which frame, and at how many cycles.",
-      NO_ARGS, true, tool_get_status },
+      NO_ARGS, TOOL_READ, tool_get_status },
+    { "pause",
+      "Stop the machine. A paused machine stays paused until a client resumes it.",
+      NO_ARGS, TOOL_CONTROL, tool_pause },
+    { "continue",
+      "Resume the machine. Ends a run_frames in progress, which then reports \"cancelled\".",
+      NO_ARGS, TOOL_CONTROL, tool_continue },
+    { "step",
+      "Step a paused machine and answer once it has stopped again. mode is into, over or "
+      "out. If it has not stopped by timeoutMs the result has completed: false and the "
+      "machine keeps going: follow up with wait_for_stop.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"mode\":{\"type\":\"string\",\"enum\":[\"into\",\"over\",\"out\"],\"default\":\"into\"},"
+      "\"granularity\":{\"type\":\"string\",\"enum\":[\"instruction\",\"line\"],\"default\":\"instruction\"},"
+      TIMEOUT_ARG
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_step },
+    { "run_frames",
+      "Run a paused machine for a number of frames, stop on a frame boundary, and answer. "
+      "Joysticks apply before the first instruction. 'read' returns memory as hex once it "
+      "stops. A breakpoint ends it early, and reason says why it ended.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"frames\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
+      "\"joysticks\":{\"type\":\"array\",\"items\":" PAD_ITEM "},"
+      "\"read\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":16},"
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+      "},\"required\":[\"address\"],\"additionalProperties\":false}},"
+      "\"hash\":{\"type\":\"boolean\",\"description\":\"include a hash of the whole machine state\"},"
+      TIMEOUT_ARG
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_run_frames },
+    { "wait_for_stop",
+      "Wait for the machine to stop. Pass the stopId from an earlier result as sinceStopId "
+      "and a stop that landed in between is not missed. With no sinceStopId, a machine "
+      "already paused answers at once. At timeoutMs the result has completed: false.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"sinceStopId\":{\"type\":\"integer\",\"minimum\":0},"
+      TIMEOUT_ARG
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_wait_for_stop },
+    { "reset",
+      "Reset the machine, as the reset button does. Everything running is lost.",
+      NO_ARGS, TOOL_DESTRUCTIVE, tool_reset },
     { "get_registers",
       "CPU registers, including the 65C816 extras and the current RAM and ROM banks.",
-      NO_ARGS, true, tool_get_registers },
+      NO_ARGS, TOOL_READ, tool_get_registers },
+    { "set_registers",
+      "Set CPU registers, by the names get_registers uses. Values are numbers or strings "
+      "like \"$FF\". A value wider than the register is cut to fit, and the result shows "
+      "what each register now holds.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"pc\":" REG_ARG ",\"a\":" REG_ARG ",\"x\":" REG_ARG ",\"y\":" REG_ARG ",\"sp\":" REG_ARG ","
+      "\"dp\":" REG_ARG ",\"dbr\":" REG_ARG ",\"pbr\":" REG_ARG ",\"status\":" REG_ARG ","
+      "\"ramBank\":" REG_ARG ",\"romBank\":" REG_ARG
+      "},\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_set_registers },
     { "read_memory",
       "Read up to 4096 bytes, returned as hex. VRAM is not in the CPU map: read it with "
       "space \"vram\". For banked RAM ($A000-$BFFF) and ROM ($C000-$FFFF), 'bank' reads "
@@ -537,17 +1228,91 @@ static const mcp_tool_t tools[] = {
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
-      true, tool_read_memory },
+      TOOL_READ, tool_read_memory },
+    { "write_memory",
+      "Write up to 4096 bytes, given as hex. VRAM is not in the CPU map: write it with "
+      "space \"vram\". CPU writes go through the banks currently selected and reach I/O "
+      "registers, so set ramBank or romBank first to write another bank.",
+      "{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"hex\":{\"type\":\"string\",\"description\":\"e.g. \\\"A9058D0004\\\"\"},"
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
+      "},\"required\":[\"address\",\"hex\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_write_memory },
     { "disassemble",
       "Disassemble CPU memory from an address.",
       "{\"type\":\"object\",\"properties\":{"
       "\"address\":{\"type\":[\"string\",\"number\"]},"
       "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256,\"default\":16}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
-      true, tool_disassemble },
+      TOOL_READ, tool_disassemble },
+    { "set_breakpoint",
+      "Stop when code runs at a CPU address (kind \"exec\") or when it is written (kind "
+      "\"write\", with an optional length). For exec, 'bank' pins a RAM or ROM bank, "
+      "'condition' is e.g. \"A == $05\" or \"byte[$1234] != 0\", and hitCondition \"N\" "
+      "stops from the Nth hit on. For write, 'condition' filters the byte written, e.g. "
+      "\"== $05\". A condition is refused where another client's breakpoint differs.",
+      "{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
+      "\"condition\":{\"type\":\"string\"},"
+      "\"hitCondition\":{\"type\":\"string\"}"
+      "},\"required\":[\"address\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_breakpoint },
+    { "remove_breakpoint",
+      "Remove a breakpoint or watch this client set. One another client or the command "
+      "line also holds at that address stays armed, and stillArmed says so.",
+      "{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+      "},\"required\":[\"address\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_remove_breakpoint },
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
-      NO_ARGS, true, tool_list_breakpoints },
+      NO_ARGS, TOOL_READ, tool_list_breakpoints },
+    { "type_text",
+      "Type text into the keyboard buffer, as a paste does. \\Xnn is a raw PETSCII byte. "
+      "The machine has to be running to read it.",
+      "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},"
+      "\"required\":[\"text\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_type_text },
+    { "send_key",
+      "Press, hold or release one key by its SDL name, such as \"Return\", \"F1\" or \"A\".",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"key\":{\"type\":\"string\"},"
+      "\"action\":{\"type\":\"string\",\"enum\":[\"press\",\"down\",\"up\"],\"default\":\"press\"},"
+      "\"modifiers\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":8}"
+      "},\"required\":[\"key\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_send_key },
+    { "joystick",
+      "Drive a controller port, numbered 1 to 4 as BASIC's JOY(n) does. 'buttons' is the "
+      "whole held state, so anything left out is released and [] is a connected pad with "
+      "nothing held. 'release' empties the port. With neither, reports the port. Buttons: "
+      "up down left right a b x y start select l r.",
+      PAD_ITEM,
+      TOOL_CONTROL, tool_joystick },
+    { "save_state",
+      "Save the machine to a named slot in memory. It must be paused at a frame boundary: "
+      "run_frames with frames 1 gets it to one.",
+      "{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"string\"}},"
+      "\"required\":[\"slot\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_save_state },
+    { "load_state",
+      "Replace the machine with a state from a named slot. It must be paused. Breakpoints "
+      "are configuration and are kept.",
+      "{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"string\"}},"
+      "\"required\":[\"slot\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_load_state },
+    { "perf_stats",
+      "CPU budget and VERA bandwidth statistics. The first call turns collection on.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"windows\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},"
+      "\"description\":\"window lengths in seconds; 0 means since start\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_perf_stats },
 };
 
 #define NUM_TOOLS ((int)(sizeof tools / sizeof tools[0]))
@@ -578,7 +1343,9 @@ static void handle_initialize(const cJSON *id, cJSON *params) {
     cJSON_AddStringToObject(result, "instructions",
         "A Commander X16 emulator. The machine keeps running between calls unless it is "
         "paused, and every result reports paused, frame, stopId and stopReason. VRAM is a "
-        "separate address space from the CPU map.");
+        "separate address space from the CPU map. step, run_frames and wait_for_stop answer "
+        "when the machine stops, or with completed: false at timeoutMs while it keeps going; "
+        "continue with wait_for_stop, passing the last stopId.");
     rpc_result(id, result);
 }
 
@@ -591,7 +1358,10 @@ static void handle_tools_list(const cJSON *id) {
         cJSON *schema = cJSON_Parse(tools[i].schema);
         cJSON_AddItemToObject(t, "inputSchema", schema ? schema : cJSON_CreateObject());
         cJSON *notes = cJSON_CreateObject();
-        cJSON_AddBoolToObject(notes, "readOnlyHint", tools[i].read_only);
+        cJSON_AddBoolToObject(notes, "readOnlyHint", tools[i].effect == TOOL_READ);
+        // Stated either way: a client assumes destructive when it is left out.
+        if (tools[i].effect != TOOL_READ)
+            cJSON_AddBoolToObject(notes, "destructiveHint", tools[i].effect == TOOL_DESTRUCTIVE);
         cJSON_AddItemToObject(t, "annotations", notes);
         cJSON_AddItemToArray(list, t);
     }
@@ -645,7 +1415,18 @@ static void handle_tools_call(const cJSON *id, cJSON *params) {
         rpc_result(id, tool_fail(msg));
         return;
     }
-    rpc_result(id, tool->run(args));
+    current_id = id;
+    cJSON *result = tool->run(args);
+    current_id = NULL;
+    if (result) rpc_result(id, result);   // otherwise it answers when it is done
+}
+
+// Ends the wait and sends nothing: a cancelled request gets no response. The
+// machine carries on, since stopping it is what pause is for.
+static void handle_cancelled(cJSON *params) {
+    cJSON *rid = params ? cJSON_GetObjectItemCaseSensitive(params, "requestId") : NULL;
+    if (rid && waiter.kind != WAIT_NONE && cJSON_Compare(rid, waiter.id, true))
+        waiter_clear();
 }
 
 static void handle_line(const char *line) {
@@ -684,6 +1465,7 @@ static void handle_line(const char *line) {
 
     // A notification gets no reply, whatever it is.
     if (!id) {
+        if (!strcmp(method->valuestring, "notifications/cancelled")) handle_cancelled(params);
         cJSON_Delete(msg);
         return;
     }
@@ -701,6 +1483,9 @@ static void handle_line(const char *line) {
 
 int mcp_server_init_stdio(void) {
     if (enabled) return 0;
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);   // a client hanging up is an error return, not an exit
+#endif
     fflush(stdout);
     out_fd = MCP_DUP(1);
     if (out_fd < 0) return -1;
@@ -730,6 +1515,8 @@ int mcp_server_init_stdio(void) {
     SDL_DetachThread(writer);
 
     enabled = true;
+    static const dbg_frontend_t frontend = { mcp_holds_run_state, on_frames_done };
+    debug_server_set_frontend(&frontend);
     return 0;
 }
 
@@ -737,12 +1524,20 @@ bool mcp_server_is_enabled(void) {
     return enabled;
 }
 
+void mcp_server_note_stopped(void) {
+    if (!enabled || was_stopped) return;
+    was_stopped = true;
+    stop_id++;
+}
+
+void mcp_server_note_resumed(void) {
+    was_stopped = false;
+}
+
 int mcp_server_poll(void) {
     if (!enabled) return 0;
 
-    const bool stopped = DEBUGIsPaused();
-    if (stopped && !was_stopped) stop_id++;
-    was_stopped = stopped;
+    track_stops();
 
     const int mode_before = currentMode;
     for (int n = 0; n < MCP_LINES_PER_POLL; n++) {
@@ -760,6 +1555,7 @@ int mcp_server_poll(void) {
         free(l->text);
         free(l);
     }
+    waiter_poll();
 
     // The client owns this process's lifetime: it launched it over these pipes.
     SDL_LockMutex(lock);
@@ -778,6 +1574,8 @@ int mcp_server_poll(void) {
 void mcp_server_shutdown(void) {
     if (!enabled) return;
     enabled = false;
+    debug_server_set_frontend(NULL);
+    waiter_clear();
     // Let replies already queued reach the client, without trusting it to read.
     SDL_LockMutex(lock);
     const Uint32 deadline = SDL_GetTicks() + 500;

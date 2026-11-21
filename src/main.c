@@ -824,7 +824,7 @@ usage()
 	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
 	printf("-mcp\n");
 	printf("\tServe the Model Context Protocol on stdin and stdout, so an agent can\n");
-	printf("\tlaunch the emulator and inspect it. The emulator's own output moves\n");
+	printf("\tlaunch the emulator and debug it. The emulator's own output moves\n");
 	printf("\tto stderr, and it exits when the client closes stdin.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
