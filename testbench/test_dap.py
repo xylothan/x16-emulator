@@ -1672,5 +1672,68 @@ bk_case("after a disconnect mid-step the machine runs on (frame %s -> %s)" % (s1
 bk_req("disconnect", {"terminateDebuggee": False})
 bk.close()
 
+# evaluate: vera_line, and the labels and equates of a loaded .dbg. Last in the
+# file because a loaded .dbg stays loaded for the rest of the session.
+print("\n-- evaluate: vera_line and .dbg names --")
+ev_dir = tempfile.mkdtemp(prefix="x16dap_eval_")
+ev_dbg = os.path.join(ev_dir, "eval.dbg")
+with open(ev_dbg, "w", newline="\n") as f:
+    f.write('version\tmajor=2,minor=0\n'
+            'file\tid=0,name="eval.s",size=10,mtime=0x00000000,mod=0\n'
+            'line\tid=0,file=0,line=1,span=0\n'
+            'mod\tid=0,file=0\n'
+            'scope\tid=0,mod=0,type=global,name="",size=256,span=0\n'
+            'seg\tid=0,name="CODE",start=0x00C100,size=0x0100,addrsize=absolute,type=ro,oname="eval.prg"\n'
+            'span\tid=0,seg=0,start=0,size=1,type=0\n'
+            'sym\tid=0,name="EVAL_LABEL",addrsize=absolute,size=1,scope=0,def=0,val=0xC123,type=lab\n'
+            'sym\tid=1,name="vera_regs",addrsize=absolute,size=1,scope=0,def=0,val=0xC124,type=lab\n'
+            'sym\tid=2,name="x",addrsize=absolute,size=1,scope=0,def=0,val=0xC125,type=lab\n'
+            'sym\tid=3,name="EVAL_EQUATE",addrsize=absolute,scope=0,def=0,val=0x1234,type=equ\n')
+
+bk = socket.create_connection(('127.0.0.1', PORT))
+bk_buf[0] = b""
+bk_req("initialize", {"adapterID": "test"})
+bk_req("attach", {"dbgFile": ev_dbg})
+bk_req("configurationDone", {})
+
+def ev(expr, context=None):
+    args = {"expression": expr}
+    if context:
+        args["context"] = context
+    r = bk_req("evaluate", args)
+    return bool(r.get("success")), r.get("body", {}).get("result", "")
+
+# Under -warp only one frame in 64 is drawn, so give one time to be captured.
+end = time.time() + 5
+ok, line = ev("vera_line 100")
+while not ok and time.time() < end:
+    time.sleep(0.1)
+    ok, line = ev("vera_line 100")
+bk_case("vera_line reports both layers (%s)" % line,
+        ok and line.startswith("line 100:") and " L0 " in line and " L1 " in line and " row " in line)
+_, regs = ev("vera_reg")
+l1_config = regs.split()[0x14] if len(regs.split()) == 32 else "?"
+bk_case("vera_line agrees with the live L1 config while nothing changes it",
+        ("L1 on row" in line or "L1 off row" in line) and
+        line.split(" L1 ")[1].split("config $")[1][:2] == l1_config)
+bk_case("vera_line works from a hover", ev("vera_line 100", "hover")[0])
+for bad in ("vera_line", "vera_line 480", "vera_line abc", "vera_line 10x", "vera_line -1"):
+    bk_case("%r is an error" % bad, not ev(bad)[0])
+
+bk_case("a label evaluates to its address", ev("EVAL_LABEL") == (True, "$C123 (label)"))
+bk_case("label lookup ignores case", ev("eval_label") == (True, "$C123 (label)"))
+bk_case("an equate evaluates to its value", ev("EVAL_EQUATE") == (True, "$1234 (4660, equate)"))
+bk_case("a label resolves from a hover", ev("EVAL_LABEL", "hover") == (True, "$C123 (label)"))
+bk_case("a label beginning with vera_reg is not the command",
+        ev("vera_regs") == (True, "$C124 (label)"))
+ok, reg_x = ev("x")
+bk_case("a register beats a label of the same name (%s)" % reg_x, ok and "label" not in reg_x)
+bk_case("an unknown name is still an error", not ev("EVAL_MISSING")[0])
+
+bk_req("disconnect", {"terminateDebuggee": False})
+bk.close()
+os.remove(ev_dbg)
+os.rmdir(ev_dir)
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(0 if failed == 0 else 1)
