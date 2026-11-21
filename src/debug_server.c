@@ -2808,6 +2808,26 @@ static bool dap_arg_true(cJSON *args, const char *name) {
     return v && cJSON_IsTrue(v);
 }
 
+void debug_server_add_stop_info(cJSON *body) {
+    if (!DEBUGIsPaused()) return;
+    debug_stop_info_t s;
+    DEBUGGetStopInfo(&s);
+    if (!s.has_access) return;
+    cJSON *o = cJSON_AddObjectToObject(body, "stop");
+    cJSON_AddStringToObject(o, "reason", s.reason);
+    cJSON_AddStringToObject(o, "space", s.space == DEBUG_STOP_SPACE_VRAM ? "vram" : "cpu");
+    cJSON_AddStringToObject(o, "access", s.access == DEBUG_STOP_ACCESS_READ ? "read" : "write");
+    cJSON_AddNumberToObject(o, "address", s.address);
+    if (s.x16Bank >= 0) cJSON_AddNumberToObject(o, "bank", s.x16Bank);
+    else                cJSON_AddNullToObject(o, "bank");
+    cJSON_AddNumberToObject(o, "value", s.value);
+    if (s.data_port >= 0) cJSON_AddNumberToObject(o, "dataPort", s.data_port);
+    else                  cJSON_AddNullToObject(o, "dataPort");
+    cJSON_AddNumberToObject(o, "accessingPc", s.accessing_pc);
+    if (s.accessing_bank >= 0) cJSON_AddNumberToObject(o, "accessingBank", s.accessing_bank);
+    else                       cJSON_AddNullToObject(o, "accessingBank");
+}
+
 static int handle_x16_status(int seq, cJSON *args) {
     const uint64_t cycles = emulated_cycles();
     const bool paused = DEBUGIsPaused();
@@ -2832,6 +2852,7 @@ static int handle_x16_status(int seq, cJSON *args) {
     if (dap_arg_true(args, "hash")) dap_add_state_hash(body);
     // The picture is output, not machine state, so it has its own hash.
     if (dap_arg_true(args, "screenHash")) dap_add_hex64(body, "screenHash", video_screen_hash());
+    debug_server_add_stop_info(body);
     send_dap_response(seq, "x16/status", true, body);
     return 0;
 }
@@ -2846,6 +2867,71 @@ static int handle_x16_status(int seq, cJSON *args) {
 
 static bool dap_at_frame_boundary(void) {
     return DEBUGIsPaused() && frame_end_seen && clockticks6502 == frame_end_ticks;
+}
+
+// ─── x16/vera: what VERA holds that its registers do not read back ──
+//
+// Both data ports whatever ADDRSEL says, and the FX state whatever DCSEL says.
+// Copies only. The FX positions and increments are the emulator's 16.16 fixed
+// point, and the field names say so.
+
+static int handle_x16_vera(int seq, cJSON *args) {
+    (void)args;
+    struct video_state v;
+    video_get_state(&v);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *ports = cJSON_AddArrayToObject(body, "ports");
+    for (int i = 0; i < 2; i++) {
+        cJSON *p = cJSON_CreateObject();
+        cJSON_AddNumberToObject(p, "address", v.port[i].address);
+        cJSON_AddNumberToObject(p, "incrementCode", v.port[i].increment_code);
+        cJSON_AddNumberToObject(p, "increment", v.port[i].increment);
+        cJSON_AddNumberToObject(p, "prefetch", v.port[i].prefetch);
+        cJSON_AddBoolToObject(p, "nibble", v.port[i].nibble);
+        cJSON_AddBoolToObject(p, "nibbleIncrement", v.port[i].nibble_increment);
+        cJSON_AddItemToArray(ports, p);
+    }
+    cJSON_AddNumberToObject(body, "addrsel", v.addrsel);
+    cJSON_AddNumberToObject(body, "dcsel", v.dcsel);
+    cJSON_AddNumberToObject(body, "ien", v.ien);
+    cJSON_AddNumberToObject(body, "isr", v.isr);
+    cJSON_AddNumberToObject(body, "irqLine", v.irq_line);
+    cJSON_AddBoolToObject(body, "irqOut", v.irq_out);
+    cJSON_AddBoolToObject(body, "ntsc", v.ntsc);
+    cJSON_AddNumberToObject(body, "scanline", v.scanline);
+
+    cJSON *fx = cJSON_AddObjectToObject(body, "fx");
+    cJSON_AddNumberToObject(fx, "addr1Mode", v.fx_addr1_mode);
+    cJSON_AddBoolToObject(fx, "fourBitMode", v.fx_4bit_mode);
+    cJSON_AddBoolToObject(fx, "hop16", v.fx_16bit_hop);
+    cJSON_AddNumberToObject(fx, "hopAlign", v.fx_16bit_hop_align);
+    cJSON_AddBoolToObject(fx, "cacheByteCycling", v.fx_cache_byte_cycling);
+    cJSON_AddBoolToObject(fx, "cacheFill", v.fx_cache_fill);
+    cJSON_AddBoolToObject(fx, "cacheWrite", v.fx_cache_write);
+    cJSON_AddBoolToObject(fx, "transparentWrites", v.fx_trans_writes);
+    cJSON_AddBoolToObject(fx, "twoBitPoly", v.fx_2bit_poly);
+    cJSON_AddBoolToObject(fx, "twoBitPoking", v.fx_2bit_poking);
+    cJSON_AddBoolToObject(fx, "cacheIncrementMode", v.fx_cache_increment_mode);
+    cJSON_AddBoolToObject(fx, "cacheNibbleIndex", v.fx_cache_nibble_index);
+    cJSON_AddNumberToObject(fx, "cacheByteIndex", v.fx_cache_byte_index);
+    cJSON_AddBoolToObject(fx, "multiplier", v.fx_multiplier);
+    cJSON_AddBoolToObject(fx, "subtract", v.fx_subtract);
+    cJSON_AddBoolToObject(fx, "affineClip", v.fx_affine_clip);
+    cJSON_AddNumberToObject(fx, "xIncrement16_16", v.fx_x_increment);
+    cJSON_AddNumberToObject(fx, "yIncrement16_16", v.fx_y_increment);
+    cJSON_AddNumberToObject(fx, "xPosition16_16", v.fx_x_position);
+    cJSON_AddNumberToObject(fx, "yPosition16_16", v.fx_y_position);
+    cJSON_AddNumberToObject(fx, "polyFillLength", v.fx_poly_fill_length);
+    cJSON_AddNumberToObject(fx, "affineTileBase", v.fx_affine_tile_base);
+    cJSON_AddNumberToObject(fx, "affineMapBase", v.fx_affine_map_base);
+    cJSON_AddNumberToObject(fx, "affineMapSize", v.fx_affine_map_size);
+    cJSON *cache = cJSON_AddArrayToObject(fx, "cache");
+    for (int i = 0; i < 4; i++) cJSON_AddItemToArray(cache, cJSON_CreateNumber(v.fx_cache[i]));
+    cJSON_AddNumberToObject(fx, "accumulator", v.fx_accumulator);
+
+    send_dap_response(seq, "x16/vera", true, body);
+    return 0;
 }
 
 // ─── x16/screen, x16/screenshot: what the machine is showing ────────
@@ -5767,6 +5853,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "readMemory"))    result = handle_dap_read_memory(seq, args);
     else if (!strcmp(cmd, "writeMemory"))   result = handle_dap_write_memory(seq, args);
     else if (!strcmp(cmd, "x16/status"))    result = handle_x16_status(seq, args);
+    else if (!strcmp(cmd, "x16/vera"))      result = handle_x16_vera(seq, args);
     else if (!strcmp(cmd, "x16/screen"))    result = handle_x16_screen(seq, args);
     else if (!strcmp(cmd, "x16/screenshot")) result = handle_x16_screenshot(seq, args);
     else if (!strcmp(cmd, "x16/registers")) result = handle_x16_registers(seq, args);
@@ -5859,7 +5946,7 @@ static const char *const callable_commands[] = {
     "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
-    "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot",
+    "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
 };
 
@@ -6387,6 +6474,7 @@ void debug_server_notify_stopped(const char *reason) {
 
     cJSON_AddNumberToObject(body, "threadId", 1);
     cJSON_AddBoolToObject(body, "allThreadsStopped", true);
+    debug_server_add_stop_info(body);
     send_dap_event("stopped", body);
 }
 

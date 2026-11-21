@@ -205,10 +205,16 @@ bool DEBUGGetBreakOnInterrupt(void)    { return breakOnInterrupt; }
 // free and no buffer to overrun.
 static const char *lastStopReason = "";
 
+// The access behind a watch stop. Taken at the store, while opcode_addr is still
+// the instruction that made it.
+static debug_stop_info_t lastStopAccess;
+
 void
 DEBUGSetStopReason(const char *reason)
 {
 	lastStopReason = reason ? reason : "";
+	if (strcmp(lastStopReason, "data breakpoint"))
+		lastStopAccess.has_access = false;
 }
 
 // Record the reason AND tell a DAP client execution stopped.
@@ -233,6 +239,13 @@ const char *
 DEBUGGetStopReason(void)
 {
 	return lastStopReason;
+}
+
+void
+DEBUGGetStopInfo(debug_stop_info_t *out)
+{
+	*out = lastStopAccess;
+	out->reason = lastStopReason;
 }
 char cmdLine[64]= "";                                 // command line buffer
 int currentPosInLine= 0;                              // cursor position in the buffer (NOT USED _YET_)
@@ -670,6 +683,21 @@ void DEBUGBreakOnWatchpoint(void) {
 	if (currentMode != DMODE_STOP) {
 		currentMode          = DMODE_STOP;
 		watchpointStopPending = true;
+
+		uint16_t address = 0;
+		uint8_t  value   = 0;
+		if (debug_wp_last_hit(&address, &value)) {
+			lastStopAccess.has_access     = true;
+			lastStopAccess.space          = DEBUG_STOP_SPACE_CPU;
+			lastStopAccess.access         = DEBUG_STOP_ACCESS_WRITE;
+			lastStopAccess.address        = address;
+			lastStopAccess.x16Bank        = bank_window_of(address) ? getCurrentBank(address, 0) : -1;
+			lastStopAccess.value          = value;
+			lastStopAccess.data_port      = -1;
+			lastStopAccess.accessing_pc   = opcode_addr;
+			lastStopAccess.accessing_bank = bank_window_of(opcode_addr)
+			                                    ? getCurrentBank(opcode_addr, regs.k) : -1;
+		}
 	}
 }
 

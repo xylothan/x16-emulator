@@ -42,4 +42,8 @@ int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply);
 // ending does, and resume a stopped machine if nobody is left who could.
 void debug_server_release_frontend(void);
 
+// Adds a "stop" object describing the access behind the current stop, when the
+// machine is paused because a watch fired. Otherwise adds nothing.
+void debug_server_add_stop_info(cJSON *body);
+
 #endif

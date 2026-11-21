@@ -3737,6 +3737,54 @@ static const int increments[32] = {
 	640, -640,
 };
 
+void
+video_get_state(struct video_state *out)
+{
+	memset(out, 0, sizeof *out);
+	for (int i = 0; i < 2; i++) {
+		struct video_port_state *p = &out->port[i];
+		p->address          = io_addr[i] & 0x1ffff;
+		p->increment_code   = io_inc[i];
+		p->increment        = increments[io_inc[i]];
+		p->prefetch         = io_rddata[i];
+		p->nibble           = fx_nibble_bit[i];
+		p->nibble_increment = fx_nibble_incr[i];
+	}
+	out->addrsel = io_addrsel;
+	out->dcsel   = io_dcsel;
+	video_get_irq_state(&out->ien, &out->isr, &out->irq_line);
+	out->irq_out  = video_get_irq_out();
+	out->ntsc     = reg_composer[0] & 2;
+	out->scanline = out->ntsc ? ntsc_scan_pos_y % SCAN_HEIGHT : vga_scan_pos_y;
+
+	out->fx_addr1_mode           = fx_addr1_mode;
+	out->fx_4bit_mode            = fx_4bit_mode;
+	out->fx_16bit_hop            = fx_16bit_hop;
+	out->fx_cache_byte_cycling   = fx_cache_byte_cycling;
+	out->fx_cache_fill           = fx_cache_fill;
+	out->fx_cache_write          = fx_cache_write;
+	out->fx_trans_writes         = fx_trans_writes;
+	out->fx_2bit_poly            = fx_2bit_poly;
+	out->fx_2bit_poking          = fx_2bit_poking;
+	out->fx_cache_increment_mode = fx_cache_increment_mode;
+	out->fx_cache_nibble_index   = fx_cache_nibble_index;
+	out->fx_multiplier           = fx_multiplier;
+	out->fx_subtract             = fx_subtract;
+	out->fx_affine_clip          = fx_affine_clip;
+	out->fx_cache_byte_index     = fx_cache_byte_index;
+	out->fx_16bit_hop_align      = fx_16bit_hop_align;
+	out->fx_x_increment          = (int32_t)fx_x_pixel_increment;
+	out->fx_y_increment          = (int32_t)fx_y_pixel_increment;
+	out->fx_x_position           = fx_x_pixel_position;
+	out->fx_y_position           = fx_y_pixel_position;
+	out->fx_poly_fill_length     = fx_poly_fill_length;
+	out->fx_affine_tile_base     = fx_affine_tile_base;
+	out->fx_affine_map_base      = fx_affine_map_base;
+	out->fx_affine_map_size      = fx_affine_map_size;
+	memcpy(out->fx_cache, fx_cache, sizeof out->fx_cache);
+	out->fx_accumulator          = fx_mult_accumulator;
+}
+
 uint32_t
 video_get_address(uint8_t sel)
 {
