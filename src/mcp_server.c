@@ -1113,18 +1113,21 @@ static cJSON *tool_write_memory(cJSON *args) {
 
 static cJSON *breakpoint_call(const char *command, cJSON *args) {
     char err[160], ref[48];
-    cJSON *ad = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
-    if (ad && cJSON_IsString(ad) && !SDL_strncasecmp(ad->valuestring, "vram:", 5))
-        return tool_fail("breakpoints and watches here take CPU addresses, not VRAM");
-    if (!arg_address(args, false, ref, sizeof ref, err, sizeof err)) return tool_fail(err);
+    bool vram = false;
+    if (!arg_space(args, &vram, err, sizeof err) ||
+        !arg_address(args, vram, ref, sizeof ref, err, sizeof err))
+        return tool_fail(err);
 
     cJSON *ki = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
     if (ki && (!cJSON_IsString(ki) ||
                (strcmp(ki->valuestring, "exec") && strcmp(ki->valuestring, "write"))))
         return tool_fail("'kind' must be \"exec\" or \"write\"");
+    // Code never runs from VRAM, so the only thing to catch there is a store.
+    if (vram && (!ki || strcmp(ki->valuestring, "write")))
+        return tool_fail("a VRAM watch needs \"kind\": \"write\"");
     int bank, length;
     if (!arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err) ||
-        !arg_int(args, "length", 1, 1, 0x10000, &length, err, sizeof err))
+        !arg_int(args, "length", 1, 1, 0x20000, &length, err, sizeof err))
         return tool_fail(err);
     cJSON *co = args ? cJSON_GetObjectItemCaseSensitive(args, "condition") : NULL;
     cJSON *hi = args ? cJSON_GetObjectItemCaseSensitive(args, "hitCondition") : NULL;
@@ -1411,9 +1414,12 @@ static const mcp_tool_t tools[] = {
       "\"write\", with an optional length). For exec, 'bank' pins a RAM or ROM bank, "
       "'condition' is e.g. \"A == $05\" or \"byte[$1234] != 0\", and hitCondition \"N\" "
       "stops from the Nth hit on. For write, 'condition' filters the byte written, e.g. "
-      "\"== $05\". A condition is refused where another client's breakpoint differs.",
+      "\"== $05\". With kind \"write\", space \"vram\" watches VERA video memory: it stops "
+      "when the program's store lands there through a data port, including FX writes. "
+      "A condition is refused where another client's breakpoint differs.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
       "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
       "\"length\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
@@ -1426,6 +1432,7 @@ static const mcp_tool_t tools[] = {
       "line also holds at that address stays armed, and stillArmed says so.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
       "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",

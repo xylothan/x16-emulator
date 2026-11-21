@@ -684,21 +684,45 @@ void DEBUGBreakOnWatchpoint(void) {
 		currentMode          = DMODE_STOP;
 		watchpointStopPending = true;
 
-		uint16_t address = 0;
+		uint8_t  space   = DEBUG_WP_SPACE_CPU;
+		uint32_t address = 0;
 		uint8_t  value   = 0;
-		if (debug_wp_last_hit(&address, &value)) {
+		int      port    = -1;
+		if (debug_wp_last_access(&space, &address, &value, &port)) {
+			const bool vram = space == DEBUG_WP_SPACE_VRAM;
 			lastStopAccess.has_access     = true;
-			lastStopAccess.space          = DEBUG_STOP_SPACE_CPU;
+			lastStopAccess.space          = vram ? DEBUG_STOP_SPACE_VRAM : DEBUG_STOP_SPACE_CPU;
 			lastStopAccess.access         = DEBUG_STOP_ACCESS_WRITE;
 			lastStopAccess.address        = address;
-			lastStopAccess.x16Bank        = bank_window_of(address) ? getCurrentBank(address, 0) : -1;
+			lastStopAccess.x16Bank        = (!vram && bank_window_of((uint16_t)address))
+			                                    ? getCurrentBank((uint16_t)address, 0) : -1;
 			lastStopAccess.value          = value;
-			lastStopAccess.data_port      = -1;
+			lastStopAccess.data_port      = (int8_t)port;
 			lastStopAccess.accessing_pc   = opcode_addr;
 			lastStopAccess.accessing_bank = bank_window_of(opcode_addr)
 			                                    ? getCurrentBank(opcode_addr, regs.k) : -1;
 		}
 	}
+}
+
+// A guest store reached VRAM. One FX cache write can land on several watched
+// bytes in a single instruction, and the first is the one the stop reports, so
+// nothing is checked once the machine is already on its way to stopping.
+static void vramWatchFired(uint32_t address, uint8_t value, int port) {
+	if (currentMode != DMODE_STOP && debug_wp_check_vram(address, value, port)) {
+		DEBUGBreakOnWatchpoint();
+	}
+}
+
+// The VRAM store path pays for a watch only while one is armed. debug_core
+// cannot set this itself, since its tests link without video.c.
+static void watchTableChanged(void) {
+	video_vram_watch_hook = debug_wp_armed_vram > 0 ? vramWatchFired : NULL;
+}
+
+void DEBUGInstallWatchHooks(void) {
+	debug_wp_changed = watchTableChanged;
+	watchTableChanged();
 }
 
 // *******************************************************************************************

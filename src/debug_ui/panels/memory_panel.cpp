@@ -246,6 +246,13 @@ cpu_bg_color_fn(const ImU8 *, size_t off, void *)
     return 0;
 }
 
+// Red for bytes a VRAM watch covers, matching the CPU view.
+ImU32
+vram_bg_color_fn(const ImU8 *, size_t off, void *)
+{
+    return debug_wp_covers_vram((uint32_t)off) ? IM_COL32(170, 60, 60, 130) : 0;
+}
+
 ImU8
 vram_read_fn(const ImU8 *, size_t off, void *)
 {
@@ -339,6 +346,7 @@ vram_editor()
     if (!init) {
         ed.ReadFn             = vram_read_fn;
         ed.WriteFn            = vram_write_fn;
+        ed.BgColorFn          = vram_bg_color_fn;
         ed.HighlightColor     = SEL_HIGHLIGHT;
         ed.OptShowDataPreview = true;
         ed.OptShowOptions     = true;
@@ -650,6 +658,73 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
     ImGui::EndPopup();
 }
 
+// Right-click menu over the VRAM view. Its own function because a VRAM address
+// does not fit the 16-bit one the CPU menu is built around.
+void
+vram_context_menu(const MemoryEditor &ed, MemSelection &sel)
+{
+    static uint32_t clicked = 0;
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        if (ed.MouseHovered)
+            clicked = (uint32_t)ed.MouseHoveredAddr;
+        else if (ed.DataPreviewAddr != (size_t)-1)
+            clicked = (uint32_t)ed.DataPreviewAddr;
+        ImGui::OpenPopup("vram_ctx");
+    }
+    if (!ImGui::BeginPopup("vram_ctx")) {
+        return;
+    }
+
+    const size_t   n     = sel.count();
+    const uint32_t start = n ? (uint32_t)sel.lo : clicked;
+    const uint32_t end   = n ? (uint32_t)sel.hi : clicked;
+    const uint32_t len   = end - start + 1;
+
+    if (n > 1) {
+        ImGui::TextDisabled("$%05X-$%05X  (%d bytes)", (unsigned)start, (unsigned)end, (int)n);
+    } else {
+        ImGui::TextDisabled("$%05X", (unsigned)start);
+    }
+    ImGui::Separator();
+
+    if (ImGui::MenuItem("Copy address")) {
+        char buf[24];
+        if (n > 1)
+            snprintf(buf, sizeof buf, "$%05X-$%05X", (unsigned)start, (unsigned)end);
+        else
+            snprintf(buf, sizeof buf, "$%05X", (unsigned)start);
+        ImGui::SetClipboardText(buf);
+    }
+
+    ImGui::Separator();
+
+    const int existing = debug_wp_find(DEBUG_WP_SPACE_VRAM, start, DEBUG_BANK_ANY);
+    if (ImGui::MenuItem(existing >= 0 ? "Stop breaking on write" : "Break on write")) {
+        if (existing >= 0)
+            debug_wp_delete_at(existing);
+        else
+            DEBUGAddVramWatchPoint(start, len);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Halt the machine as soon as a program's store lands on %s\n"
+                          "through a VERA data port, including FX writes.\n\n"
+                          "A masked or transparent FX write that leaves the byte alone\n"
+                          "does not count, and neither do edits made here.\n"
+                          "(%d of %d in use.)",
+                          n > 1 ? "this range" : "this byte", debug_wp_count(), MAX_WP);
+    }
+
+    if (sel.active) {
+        ImGui::Separator();
+        if (ImGui::MenuItem("Clear selection")) {
+            sel.clear();
+        }
+    }
+
+    ImGui::EndPopup();
+}
+
 // Hover tooltip for the byte under the mouse (uses MemoryEditor's public
 // MouseHovered / MouseHoveredAddr). Shows the byte as hex/dec/signed/bin/ASCII
 // plus the 16-bit little-endian word at that address, for quick inspection.
@@ -859,8 +934,16 @@ render_vram_tab()
     render_search(ed, g_vram_search, vram_read_at, VRAM_SIZE);
 
     ImGui::Separator();
+    static MemSelection vsel;
+    vsel.apply(ed);
     ed.DrawContents(&g_dummy_base, VRAM_SIZE, 0x0000);
+    vsel.update(ed);
     mem_hover_tooltip(ed, vram_read_at, VRAM_SIZE, 5, 0);
+    vram_context_menu(ed, vsel);
+    if (vsel.count() > 1) {
+        ImGui::TextDisabled("Selected $%05X-$%05X (%d bytes) - right-click for actions.",
+                            (unsigned)vsel.lo, (unsigned)vsel.hi, (int)vsel.count());
+    }
 }
 
 // Banked-memory search: within the selected bank, or (all-banks) flat across
