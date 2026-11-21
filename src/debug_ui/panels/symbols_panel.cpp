@@ -85,12 +85,13 @@ symbols_panel_render(bool *p_open)
 
     const ImVec4 orange(1.0f, 0.78f, 0.35f, 1.0f);
 
-    if (!dbg_info_is_loaded() || dbg_info_symbol_count() == 0) {
+    if (dbg_info_symbol_count() == 0) {
         ImGui::TextColored(orange, "No symbols loaded.");
         ImGui::Spacing();
         ImGui::TextWrapped("Symbols come from cc65 .dbg address labels. Start with "
-                           "-dbgfile <prog.dbg> (and -srcpath if needed), or LOAD a "
-                           "program whose matching .dbg auto-loads.");
+                           "-dbgfile <prog.dbg> (and -srcpath if needed), LOAD a "
+                           "program whose matching .dbg auto-loads, or load an ld65 "
+                           "label file from Settings > Debug info.");
         dbgui_window_end();
         return;
     }

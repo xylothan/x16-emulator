@@ -102,8 +102,8 @@ class Mcp:
         return self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                                        "clientInfo": {"name": "test", "version": "1"}})
 
-    def call(self, name, **args):
-        r = self.rpc("tools/call", {"name": name, "arguments": args})
+    def call(self, tool, **args):
+        r = self.rpc("tools/call", {"name": tool, "arguments": args})
         return (r or {}).get("result", {})
 
     def exits(self, secs=10):
@@ -190,10 +190,10 @@ def test_tools():
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
-                   "get_vera_state"}
+                   "get_vera_state", "lookup_symbol", "list_symbols"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
-                  "type_text", "send_key", "joystick"}
+                  "type_text", "send_key", "joystick", "load_symbols"}
         case("every tool is listed", names == reading | losing | moving, str(names))
         for t in listed:
             s = t.get("inputSchema", {})
@@ -825,8 +825,8 @@ class HttpMcp:
         return self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                                        "clientInfo": {"name": "test", "version": "1"}})
 
-    def call(self, name, **args):
-        r = self.rpc("tools/call", {"name": name, "arguments": args})
+    def call(self, tool, **args):
+        r = self.rpc("tools/call", {"name": tool, "arguments": args})
         return (r or {}).get("result", {})
 
     def __enter__(self):
@@ -1727,6 +1727,147 @@ def test_read_watch():
         dap.close()
 
 
+def test_symbols():
+    print("symbols")
+
+    labels = ("al 000810 .start\n"
+              "al 000600 .fade\n"
+              "al 00A000 .banked\n"
+              "al 000700 .twice\n"
+              "al 000710 .twice\n"
+              "al 000900 .__CODE_RUN__\n")
+    other = "al 000620 .moved\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "prog.lbl")
+        with open(path, "w") as f:
+            f.write(labels)
+        empty = os.path.join(tmp, "empty.lbl")
+        with open(empty, "w") as f:
+            f.write("nothing useful here\n")
+
+        port = free_port()
+        with Mcp(["-debugport", str(port)]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+
+            case("a name means nothing before a load", is_error(m.call("read_memory", address="fade")))
+            case("a missing file is refused",
+                 is_error(m.call("load_symbols", path=os.path.join(tmp, "nope.lbl"))))
+            case("a file with no labels is refused", is_error(m.call("load_symbols", path=empty)))
+
+            d = data(m.call("load_symbols", path=path, bank=3))
+            case("labels load", d.get("labels") == 5 and d.get("bank") == 3, str(d))
+            d = data(m.call("list_symbols"))
+            names = [s["name"] for s in d.get("symbols", [])]
+            case("listed in address order, segment symbols dropped",
+                 names == ["fade", "twice", "twice", "start", "banked"], str(names))
+            d = data(m.call("list_symbols", filter="AN"))
+            case("a filter narrows it", [s["name"] for s in d.get("symbols", [])] == ["banked"], str(d))
+            d = data(m.call("list_symbols", start=1, count=2))
+            case("paged", len(d.get("symbols", [])) == 2 and d.get("total") == 5, str(d))
+
+            d = data(m.call("lookup_symbol", name="FADE"))
+            hit = (d.get("matches") or [{}])[0]
+            case("a name is found, whatever its case", hit.get("address") == 0x0600 and hit.get("bank") is None, str(d))
+            d = data(m.call("lookup_symbol", name="banked"))
+            case("with its bank", (d.get("matches") or [{}])[0].get("bank") == 3, str(d))
+            d = data(m.call("lookup_symbol", name="twice"))
+            case("every place a name resolves to", len(d.get("matches", [])) == 2, str(d))
+            d = data(m.call("lookup_symbol", name="start+4"))
+            case("an expression", (d.get("matches") or [{}])[0].get("address") == 0x0814, str(d))
+            d = data(m.call("lookup_symbol", address=0x0814))
+            case("an address finds its label", d.get("name") == "start" and d.get("offset") == 4, str(d))
+            case("neither is refused", is_error(m.call("lookup_symbol")))
+            case("both are refused", is_error(m.call("lookup_symbol", name="start", address=1)))
+
+            # A hex-looking word is the label, and $ is the number.
+            m.call("write_memory", address=0x0600, hex="5A")
+            d = data(m.call("read_memory", address="fade", length=1))
+            case("fade is the label", d.get("address") == "0x0600" and d.get("hex") == "5A", str(d))
+            d = data(m.call("read_memory", address="$fade", length=1))
+            case("$fade is the number", d.get("address") == "0xFADE", str(d))
+            d = data(m.call("read_memory", address="fade-$10", length=1))
+            case("an offset applies", d.get("address") == "0x05F0", str(d))
+            r = m.call("read_memory", address="beef")
+            case("an unknown hex word says how to write a number",
+                 is_error(r) and "$beef" in json.dumps(r), json.dumps(r)[:160])
+            r = m.call("read_memory", address="twice")
+            case("an ambiguous name is refused and lists where",
+                 is_error(r) and "$0700" in json.dumps(r) and "$0710" in json.dumps(r), json.dumps(r)[:200])
+            case("VRAM still reads bare hex",
+                 not is_error(m.call("read_memory", address="1B000", length=1, space="vram")))
+
+            # Banked symbols stay in their bank.
+            m.call("set_registers", ramBank=1)
+            case("a write to an unmapped bank is refused",
+                 is_error(m.call("write_memory", address="banked", hex="01")))
+            case("so is disassembling one", is_error(m.call("disassemble", address="banked")))
+            m.call("set_registers", ramBank=3)
+            case("mapped, it works", not is_error(m.call("write_memory", address="banked", hex="42")))
+            m.call("set_registers", ramBank=1)
+            m.call("write_memory", address=0xA000, hex="11")
+            case("a read by name goes to the symbol's bank, not the mapped one",
+                 data(m.call("read_memory", address="banked", length=1)).get("hex") == "42")
+            case("while the number reads the mapped bank",
+                 data(m.call("read_memory", address=0xA000, length=1)).get("hex") == "11")
+            m.call("set_breakpoint", address="banked")
+            bps = data(m.call("list_breakpoints")).get("breakpoints", [])
+            case("an exec breakpoint is pinned to it",
+                 any(b.get("pc", b.get("addr")) == 0xA000 and b.get("x16Bank") == 3 for b in bps), str(bps))
+            m.call("remove_breakpoint", address="banked")
+            case("a watch on a banked symbol is refused",
+                 is_error(m.call("set_breakpoint", address="banked", kind="write")))
+
+            # Breakpoints by name fire.
+            m.call("write_memory", address=0x0810, hex="EAEA80FE")
+            m.call("set_registers", pc=0x0810)
+            m.call("set_breakpoint", address="start+1")
+            last = data(m.call("get_status")).get("stopId")
+            m.call("continue")
+            r = data(m.call("wait_for_stop", sinceStopId=last))
+            case("a breakpoint by name stops there", r.get("pc") == 0x0811, str(r.get("pc")))
+            m.call("remove_breakpoint", address="start+1")
+
+            # Disassembly picks up the names without a .dbg.
+            r = m.call("disassemble", address=0x0810, count=2)
+            rows = data(r).get("instructions", [])
+            case("disassembly names the labelled row",
+                 len(rows) == 2 and rows[0].get("symbol") == "start" and "symbol" not in rows[1], str(rows)[:240])
+            case("and its text shows it", "start:" in json.dumps(r.get("content", "")), str(r.get("content"))[:200])
+            m.call("set_registers", ramBank=1)
+            rows = data(m.call("disassemble", address=0xA000, count=1)).get("instructions", [])
+            case("another bank's label is not shown", rows and "symbol" not in rows[0], str(rows)[:200])
+            m.call("set_registers", ramBank=3)
+            rows = data(m.call("disassemble", address=0xA000, count=1)).get("instructions", [])
+            case("its own bank's is", rows and rows[0].get("symbol") == "banked", str(rows)[:200])
+            m.call("set_registers", ramBank=1)
+
+            with open(path, "w") as f:
+                f.write(other)
+            d = data(m.call("load_symbols", path=path))
+            case("loading again replaces that file's labels", d.get("labels") == 1, str(d))
+            case("the old names are gone", is_error(m.call("read_memory", address="fade")))
+            case("and the new one works", not is_error(m.call("read_memory", address="moved")))
+
+            dap = Dap(port)
+            dap.session()
+            with open(path, "w") as f:
+                f.write(labels)
+            r = dap.request("x16/loadSymbols", {"path": path})
+            case("DAP loads labels", r.get("success") and r["body"].get("labels") == 5, str(r)[:200])
+            r = dap.request("readMemory", {"memoryReference": "sym:fade", "count": 1})
+            case("DAP reads through sym:", r.get("success") and r["body"].get("address") in ("0x600", "0x0600"), str(r)[:200])
+            r = dap.request("readMemory", {"memoryReference": "fade", "count": 1})
+            case("a bare token stays a number or an error in DAP",
+                 not (r.get("success") and r["body"].get("address") in ("0x600", "0x0600")), str(r)[:200])
+            r = dap.request("x16/lookupSymbol", {"name": "start"})
+            case("DAP looks up a name", r.get("success") and r["body"]["matches"][0]["address"] == 0x0810, str(r)[:200])
+            r = dap.request("x16/listSymbols", {"filter": "fade"})
+            case("DAP lists", r.get("success") and r["body"].get("total") == 1, str(r)[:200])
+            dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1736,7 +1877,7 @@ def main():
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
-                 test_vram_watch, test_read_watch):
+                 test_vram_watch, test_read_watch, test_symbols):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
