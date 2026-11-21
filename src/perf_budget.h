@@ -233,6 +233,7 @@ typedef enum {
 	PERF_OWNER_UI = 0,  // the ImGui Performance panel
 	PERF_OWNER_DAP,     // a debug adapter client
 	PERF_OWNER_CAPTURE, // a capture that opted in (profile_capture.h)
+	PERF_OWNER_MCP,     // an MCP client
 	PERF_OWNER_COUNT
 } perf_owner_t;
 
