@@ -728,7 +728,7 @@ draw_zone_editor(void)
 	// Picking a zone straight off a symbol is the reason to bother with a zone
 	// editor at all: nobody knows the address range of sprite_update by heart,
 	// and the .dbg already does.
-	if (dbg_info_is_loaded()) {
+	if (dbg_info_symbol_count() > 0) {
 		const int nsym = dbg_info_symbol_count();
 		if (ImGui::Button("From symbol...")) {
 			ImGui::OpenPopup("perf_symbol_pick");

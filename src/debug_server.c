@@ -1177,6 +1177,17 @@ static bool dap_parse_mem_ref(const char *s, bool *is_vram, uint32_t *out) {
     while (*s == ' ') s++;
 
     *is_vram = false;
+    // A symbol, spelled out because a bare token here has always been a number.
+    // One in a bank that is not mapped would read some other bank's bytes.
+    if (dap_has_prefix_i(s, "sym:")) {
+        dbg_resolved_t r;
+        char why[160];
+        if (!dbg_info_resolve(s + 4, &r, why, sizeof why)) return false;
+        if (r.bank >= 0 && r.addr <= 0xFFFF && debug_current_x16_bank((int)r.addr, 0) != r.bank)
+            return false;
+        *out = r.addr;
+        return true;
+    }
     if (dap_has_prefix_i(s, "vram:")) {
         *is_vram = true;
         s += 5;
@@ -4662,6 +4673,12 @@ static void dap_add_instruction(cJSON *arr, uint8_t bank, const code_map_line_t 
     cJSON_AddStringToObject(inst, "address", addr_str);
     cJSON_AddStringToObject(inst, "instruction", ln->text);
 
+    const char *symbol = NULL;
+    if (bank == 0 &&
+        dbg_info_addr_to_label_in_bank(ln->addr, debug_current_x16_bank(ln->addr, 0), &symbol) &&
+        symbol)
+        cJSON_AddStringToObject(inst, "symbol", symbol);
+
     // Build instructionBytes hex string
     char bytes_str[32] = "";
     int blen = 0;
@@ -5059,6 +5076,12 @@ static const char *dap_scan_hex(const char *s, unsigned long *out) {
 // armed $0101, both reported verified.
 static bool dap_parse_instruction_ref(const char *s, long offset, struct breakpoint *out) {
     if (!s) return false;
+    if (dap_has_prefix_i(s, "sym:")) {
+        dbg_resolved_t r;
+        char why[160];
+        if (!dbg_info_resolve(s + 4, &r, why, sizeof why)) return false;
+        return debug_bp_from_ref((long)r.addr, r.bank >= 0 ? r.bank : DEBUG_BANK_ANY, offset, out);
+    }
     unsigned long first, a;
     const char *p = dap_scan_hex(s, &first);
     if (!p) return false;
@@ -5923,6 +5946,157 @@ static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Symbols ─────────────────────────────────────────────────────────
+
+static void dap_add_bank_field(cJSON *o, int bank) {
+    if (bank >= 0) cJSON_AddNumberToObject(o, "bank", bank);
+    else           cJSON_AddNullToObject(o, "bank");
+}
+
+static int handle_x16_load_symbols(int seq, cJSON *args) {
+    static const char cmd[] = "x16/loadSymbols";
+    cJSON *pi = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    cJSON *bi = args ? cJSON_GetObjectItemCaseSensitive(args, "bank") : NULL;
+    if (!pi || !cJSON_IsString(pi) || !pi->valuestring[0]) {
+        send_dap_error_response(seq, cmd, "'path' is required: an ld65 -Ln label file");
+        return 0;
+    }
+    int bank = -1;
+    if (bi && !cJSON_IsNull(bi)) {
+        if (!cJSON_IsNumber(bi) || bi->valuedouble < 0 || bi->valuedouble > 255 ||
+            bi->valuedouble != (int)bi->valuedouble) {
+            send_dap_error_response(seq, cmd, "'bank' must be a bank number, 0-255");
+            return 0;
+        }
+        bank = (int)bi->valuedouble;
+    }
+    const int n = dbg_info_load_labels(pi->valuestring, bank);
+    if (n < 0) {
+        send_dap_error_response(seq, cmd, "cannot read that file");
+        return 0;
+    }
+    if (n == 0) {
+        send_dap_error_response(seq, cmd, "no labels in that file (expected lines like: al 00C000 .name)");
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "path", pi->valuestring);
+    cJSON_AddNumberToObject(body, "labels", n);
+    dap_add_bank_field(body, bank);
+    cJSON_AddNumberToObject(body, "totalSymbols", dbg_info_symbol_count());
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static int handle_x16_lookup_symbol(int seq, cJSON *args) {
+    static const char cmd[] = "x16/lookupSymbol";
+    cJSON *ni = args ? cJSON_GetObjectItemCaseSensitive(args, "name") : NULL;
+    cJSON *ai = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
+    if ((!ni) == (!ai) || (ni && !cJSON_IsString(ni))) {
+        send_dap_error_response(seq, cmd, "give either 'name' or 'address'");
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    if (ni) {
+        dbg_name_hit_t hits[16];
+        const int n = dbg_info_find_name(ni->valuestring, hits, 16);
+        cJSON *arr = cJSON_AddArrayToObject(body, "matches");
+        for (int i = 0; i < n; i++) {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "address", hits[i].addr);
+            dap_add_bank_field(o, hits[i].bank);
+            cJSON_AddStringToObject(o, "kind", hits[i].kind == DBG_NAME_EQUATE ? "equate" : "label");
+            cJSON_AddItemToArray(arr, o);
+        }
+        if (n == 0) {
+            // Not a plain name: it may still be an expression such as main+4.
+            dbg_resolved_t r;
+            char why[200];
+            if (!dbg_info_resolve(ni->valuestring, &r, why, sizeof why)) {
+                cJSON_Delete(body);
+                send_dap_error_response(seq, cmd, why);
+                return 0;
+            }
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "address", r.addr);
+            dap_add_bank_field(o, r.bank);
+            cJSON_AddStringToObject(o, "kind", "expression");
+            cJSON_AddItemToArray(arr, o);
+        }
+    } else {
+        uint32_t addr = 0;
+        bool is_vram = false;
+        if (cJSON_IsNumber(ai) && ai->valuedouble >= 0 && ai->valuedouble <= 0xFFFFFF) {
+            addr = (uint32_t)ai->valuedouble;
+        } else if (!cJSON_IsString(ai) || !dap_parse_mem_ref(ai->valuestring, &is_vram, &addr) ||
+                   is_vram || addr > 0xFFFFFF) {
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, "'address' must be a CPU address");
+            return 0;
+        }
+        const char *name = NULL;
+        dbg_addr_t at = 0;
+        cJSON_AddNumberToObject(body, "address", addr);
+        if (dbg_info_addr_to_label_nearest(addr, &name, &at) && name) {
+            cJSON_AddStringToObject(body, "name", name);
+            cJSON_AddNumberToObject(body, "labelAddress", at);
+            cJSON_AddNumberToObject(body, "offset", addr - at);
+        } else {
+            cJSON_AddNullToObject(body, "name");
+        }
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static bool dap_contains_i(const char *hay, const char *needle) {
+    const size_t n = strlen(needle);
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < n && hay[i] && tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i])) i++;
+        if (i == n) return true;
+    }
+    return n == 0;
+}
+
+static int handle_x16_list_symbols(int seq, cJSON *args) {
+    static const char cmd[] = "x16/listSymbols";
+    cJSON *fi = args ? cJSON_GetObjectItemCaseSensitive(args, "filter") : NULL;
+    cJSON *si = args ? cJSON_GetObjectItemCaseSensitive(args, "start") : NULL;
+    cJSON *ci = args ? cJSON_GetObjectItemCaseSensitive(args, "count") : NULL;
+    if ((fi && !cJSON_IsString(fi)) || (si && !cJSON_IsNumber(si)) || (ci && !cJSON_IsNumber(ci))) {
+        send_dap_error_response(seq, cmd, "'filter' is a string; 'start' and 'count' are numbers");
+        return 0;
+    }
+    const char *filter = fi ? fi->valuestring : "";
+    const int start = si && si->valuedouble > 0 ? (int)si->valuedouble : 0;
+    int count = ci ? (int)ci->valuedouble : 100;
+    if (count < 1) count = 1;
+    if (count > 1000) count = 1000;
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *arr  = cJSON_AddArrayToObject(body, "symbols");
+    int total = 0;
+    const int n = dbg_info_symbol_count();
+    for (int i = 0; i < n; i++) {
+        const char *name = NULL;
+        dbg_addr_t  addr = 0;
+        if (!dbg_info_symbol_at(i, &name, &addr) || !name || !dap_contains_i(name, filter)) continue;
+        if (total >= start && total < start + count) {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddStringToObject(o, "name", name);
+            cJSON_AddNumberToObject(o, "address", addr);
+            dap_add_bank_field(o, dbg_info_symbol_bank_at(i));
+            cJSON_AddItemToArray(arr, o);
+        }
+        total++;
+    }
+    cJSON_AddNumberToObject(body, "total", total);
+    cJSON_AddNumberToObject(body, "start", start);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // Run one request, whoever it came from. Returns 1 if execution mode was changed.
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
@@ -5979,6 +6153,9 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/hostPerf")) result = handle_x16_host_perf(seq, args);
     else if (!strcmp(cmd, "x16/capture")) result = handle_x16_capture(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
+    else if (!strcmp(cmd, "x16/loadSymbols")) result = handle_x16_load_symbols(seq, args);
+    else if (!strcmp(cmd, "x16/lookupSymbol")) result = handle_x16_lookup_symbol(seq, args);
+    else if (!strcmp(cmd, "x16/listSymbols")) result = handle_x16_list_symbols(seq, args);
     else if (!strcmp(cmd, "x16/sdcard"))    result = handle_x16_sdcard(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);
@@ -6058,6 +6235,7 @@ static const char *const callable_commands[] = {
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
+    "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
