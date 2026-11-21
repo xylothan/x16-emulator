@@ -41,6 +41,9 @@ pt-report*.txt
 # present -- it is here so a reviewer can check a citation.
 /tests/vera-rtl/
 
+# The Debug Adapter Protocol schema, fetched by tests/fetch_dap_schema.py.
+/tests/dap-schema/
+
 # Datasheets and tutorials, fetched by tests/refs/fetch_refs.py. Copyright
 # Western Design Center and Bruce Clark respectively, so downloaded rather
 # than committed. The tests cite page numbers; this is what makes a citation

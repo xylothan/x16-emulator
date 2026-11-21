@@ -1021,6 +1021,19 @@ which DAP extension you wire it up to, as no editor extension is bundled with th
 }
 ```
 
+#### Ending a session
+
+What Stop does depends on how the session began, as the protocol defines it:
+
+| Session began with | `terminate` or `disconnect` |
+| --- | --- |
+| `launch` | Closes the emulator |
+| `attach`, or neither | Ends the session and leaves the emulator running |
+
+`terminateDebuggee` on a `disconnect` overrides this in either direction. A dropped connection
+never closes the emulator. Use an `attach` configuration to keep the machine running after you
+stop debugging.
+
 #### What the server supports
 
 Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threads`, `stackTrace`,
@@ -1097,7 +1110,10 @@ A `hitCondition` of `"5"` stops on the fifth hit.
 
 #### Expressions you can evaluate
 
-These work in a watch or REPL window, in addition to plain registers and addresses:
+Reads work anywhere an editor evaluates, including hovers and watches. The commands that change
+the machine or its breakpoints (`reset`, `bp_add`, `bp_remove`, `bp_clear`, `watch_add`,
+`watch_remove`, `watch_clear`) run only from the debug console, so resting the mouse on a word
+cannot trigger one. An expression that is not recognised is an error.
 
 | Expression | Result |
 | --- | --- |
