@@ -73,10 +73,6 @@ extern bool headless;   // main.c
 static char recv_buf[RECV_BUF_SIZE];
 static int  recv_buf_len = 0;
 
-// Send buffer
-#define SEND_BUF_SIZE 65536
-static char send_buf[SEND_BUF_SIZE];
-
 // Server state
 static socket_t listen_sock = SOCKET_INVALID;
 static socket_t client_sock = SOCKET_INVALID;
@@ -217,6 +213,16 @@ static bool     dap_initialize_answered = false;
 // breakpoint can hit while the client is still configuring, and configurationDone
 // would then report the same halt a second time under a different reason.
 static bool     dap_stop_announced = false;
+// What the client said in initialize. Lines are held 1-based everywhere inside
+// and converted only where they cross the protocol.
+static int      dap_line_base = 1;
+static int      dap_col_base  = 1;
+static bool     dap_paths_are_uris = false;
+// launch asked to run without debugging: no breakpoint of this session is armed.
+static bool     dap_no_debug = false;
+
+static int dap_line_out(int line) { return line - 1 + dap_line_base; }
+static int dap_line_in(int line)  { return line + 1 - dap_line_base; }
 
 // Is there a local debugger UI whose user owns the run state?
 //
@@ -275,7 +281,7 @@ static void retry_unverified_breakpoints(void) {
                         cJSON_AddNumberToObject(bp, "id", dap_bps[i].dap_id);
                         cJSON_AddBoolToObject(bp, "verified", false);
                         cJSON_AddStringToObject(bp, "message", why);
-                        cJSON_AddNumberToObject(bp, "line", dap_bps[i].line);
+                        cJSON_AddNumberToObject(bp, "line", dap_line_out(dap_bps[i].line));
                         cJSON_AddItemToObject(body, "breakpoint", bp);
                         cJSON_AddStringToObject(body, "reason", "changed");
                         send_dap_event("breakpoint", body);
@@ -310,7 +316,7 @@ static void retry_unverified_breakpoints(void) {
                     cJSON *bp = cJSON_CreateObject();
                     cJSON_AddNumberToObject(bp, "id", dap_bps[i].dap_id);
                     cJSON_AddBoolToObject(bp, "verified", true);
-                    cJSON_AddNumberToObject(bp, "line", dap_bps[i].line);
+                    cJSON_AddNumberToObject(bp, "line", dap_line_out(dap_bps[i].line));
                     dap_add_bank_message(bp, bank_pin);
                     cJSON_AddItemToObject(body, "breakpoint", bp);
                     cJSON_AddStringToObject(body, "reason", "changed");
@@ -349,7 +355,7 @@ static void invalidate_breakpoints_in_range(uint32_t start, uint32_t end) {
                 cJSON_AddNumberToObject(bp, "id", dap_bps[i].dap_id);
                 cJSON_AddBoolToObject(bp, "verified", false);
                 cJSON_AddStringToObject(bp, "message", "Module unloaded");
-                cJSON_AddNumberToObject(bp, "line", dap_bps[i].line);
+                cJSON_AddNumberToObject(bp, "line", dap_line_out(dap_bps[i].line));
                 cJSON_AddItemToObject(body, "breakpoint", bp);
                 cJSON_AddStringToObject(body, "reason", "changed");
                 send_dap_event("breakpoint", body);
@@ -364,7 +370,7 @@ static void send_bp_changed(int id, int line, int x16Bank) {
     cJSON *bp = cJSON_CreateObject();
     cJSON_AddNumberToObject(bp, "id", id);
     cJSON_AddBoolToObject(bp, "verified", true);
-    if (line > 0) cJSON_AddNumberToObject(bp, "line", line);
+    if (line > 0) cJSON_AddNumberToObject(bp, "line", dap_line_out(line));
     dap_add_bank_message(bp, x16Bank);
     cJSON_AddItemToObject(body, "breakpoint", bp);
     cJSON_AddStringToObject(body, "reason", "changed");
@@ -475,6 +481,8 @@ static void platform_cleanup(void) {
 
 static void disconnect_client(void);
 static void dap_release_session_state(void);
+static void dap_release_breakpoints(void);
+static int  dap_refuse_breakpoints(int seq, const char *command, cJSON *args);
 
 // See debug_server_set_no_wait().
 static bool send_no_wait = false;
@@ -483,32 +491,89 @@ void debug_server_set_no_wait(bool on) {
     send_no_wait = on;
 }
 
+// Length of the valid UTF-8 sequence at p, or 0 if there is none.
+static int dap_utf8_len(const unsigned char *p, const unsigned char *end) {
+    const unsigned char c = p[0];
+    if (c < 0x80) return 1;
+    int n;
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF) {
+        n = 2;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        n = 3;
+        if (c == 0xE0) lo = 0xA0;   // overlong
+        if (c == 0xED) hi = 0x9F;   // surrogates
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        n = 4;
+        if (c == 0xF0) lo = 0x90;   // overlong
+        if (c == 0xF4) hi = 0x8F;   // past U+10FFFF
+    } else {
+        return 0;
+    }
+    if (end - p < n || p[1] < lo || p[1] > hi) return 0;
+    for (int i = 2; i < n; i++)
+        if ((p[i] & 0xC0) != 0x80) return 0;
+    return n;
+}
+
+// A copy of the text with each invalid byte replaced by U+FFFD, or NULL when it
+// is already valid. The protocol's content is UTF-8, and source files need not
+// be. Everything structural in JSON is ASCII, so this cannot damage the framing.
+static char *dap_utf8_repaired(const char *text, size_t len, size_t *out_len) {
+    const unsigned char *s = (const unsigned char *)text, *end = s + len, *p = s;
+    while (p < end) {
+        const int n = dap_utf8_len(p, end);
+        if (!n) break;
+        p += n;
+    }
+    if (p == end) return NULL;
+    unsigned char *out = (unsigned char *)malloc(len * 3 + 1);
+    if (!out) return NULL;
+    size_t o = (size_t)(p - s);
+    memcpy(out, s, o);
+    while (p < end) {
+        const int n = dap_utf8_len(p, end);
+        if (n) {
+            memcpy(out + o, p, (size_t)n);
+            o += (size_t)n;
+            p += n;
+        } else {
+            out[o++] = 0xEF; out[o++] = 0xBF; out[o++] = 0xBD;
+            p++;
+        }
+    }
+    out[o] = '\0';
+    *out_len = o;
+    return (char *)out;
+}
+
 static void send_dap_message(cJSON *json) {
     if (client_sock == SOCKET_INVALID) {
         cJSON_Delete(json);
         return;
     }
-    char *body = cJSON_PrintUnformatted(json);
-    if (body) {
-        int body_len = (int)strlen(body);
-        int header_len = snprintf(send_buf, sizeof(send_buf),
-                                  "Content-Length: %d\r\n\r\n", body_len);
-        if (header_len + body_len >= SEND_BUF_SIZE) {
-            // Too large to frame. Dropping it silently left the client waiting
-            // on a request_seq that would never be answered -- a source file
-            // over 64K is enough to do it, and the editor shows a tab that
-            // never finishes loading. The receive side already drops a client
-            // it cannot buffer; do the same rather than hang.
-            fprintf(stderr, "[dap] response of %d bytes exceeds the send buffer; dropping client\n",
-                    header_len + body_len);
-            cJSON_free(body);
+    char *printed = cJSON_PrintUnformatted(json);
+    if (printed) {
+        size_t body_len = strlen(printed);
+        char *repaired = dap_utf8_repaired(printed, body_len, &body_len);
+        const char *body = repaired ? repaired : printed;
+        char header[40];
+        const int header_len = snprintf(header, sizeof header, "Content-Length: %zu\r\n\r\n", body_len);
+        // Allocated per message: a source file or a large memory read can be
+        // any size, and a fixed buffer meant dropping the client over one.
+        char *send_buf = (char *)malloc((size_t)header_len + body_len);
+        if (!send_buf) {
+            fprintf(stderr, "[dap] no memory for a %zu byte message; dropping client\n", body_len);
+            free(repaired);
+            cJSON_free(printed);
             cJSON_Delete(json);
             disconnect_client();
             return;
         }
         {
+            memcpy(send_buf, header, (size_t)header_len);
             memcpy(send_buf + header_len, body, body_len);
-            int total = header_len + body_len;
+            int total = header_len + (int)body_len;
             int offset = 0;
             // A client that stops reading fills the socket buffer, and this is
             // the emulator's only thread. Retrying forever parks the machine on
@@ -537,7 +602,9 @@ static void send_dap_message(cJSON *json) {
                 }
             }
         }
-        cJSON_free(body);
+        free(send_buf);
+        free(repaired);
+        cJSON_free(printed);
     }
     cJSON_Delete(json);
 }
@@ -562,8 +629,23 @@ static void send_dap_error_response_full(int request_seq, const char *command, c
                                          const char *format, const char *key, cJSON *item) {
     cJSON *body = cJSON_CreateObject();
     cJSON *error_obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(error_obj, "id", 1);
-    cJSON_AddStringToObject(error_obj, "format", format);
+    // An id per message, derived from it so that the hundred-odd call sites
+    // need no table to keep in step.
+    uint32_t h = 2166136261u;
+    for (const char *s = command; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    h = (h ^ ':') * 16777619u;
+    for (const char *s = message; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    cJSON_AddNumberToObject(error_obj, "id", (double)(h % 0x7FFFFFFEu + 1));
+    // `format` treats {name} as a variable, so text that may contain a brace
+    // travels in a variable instead.
+    if (strchr(format, '{')) {
+        cJSON_AddStringToObject(error_obj, "format", "{text}");
+        cJSON *vars = cJSON_CreateObject();
+        cJSON_AddStringToObject(vars, "text", format);
+        cJSON_AddItemToObject(error_obj, "variables", vars);
+    } else {
+        cJSON_AddStringToObject(error_obj, "format", format);
+    }
     cJSON_AddItemToObject(body, "error", error_obj);
     if (key && item) cJSON_AddItemToObject(body, key, item);
     else if (item) cJSON_Delete(item);
@@ -633,8 +715,60 @@ static bool dap_stop_on_entry = false;
 
 // ─── DAP command handlers ───────────────────────────────────────────
 
+// A path from the client, as the emulator holds it. file: URIs are decoded when
+// the client said it uses them.
+static void dap_path_in(const char *s, char *out, size_t n) {
+    if (!dap_paths_are_uris || strncmp(s, "file://", 7) != 0) {
+        snprintf(out, n, "%s", s);
+        return;
+    }
+    s += 7;
+    const char *slash = strchr(s, '/');   // past any authority
+    s = slash ? slash : s + strlen(s);
+#ifdef _WIN32
+    if (s[0] == '/' && isalpha((unsigned char)s[1]) && (s[2] == ':' || !strncmp(s + 2, "%3A", 3)
+                                                        || !strncmp(s + 2, "%3a", 3)))
+        s++;
+#endif
+    size_t o = 0;
+    while (*s && o + 1 < n) {
+        if (s[0] == '%' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
+            char hex[3] = { s[1], s[2], 0 };
+            out[o++] = (char)strtoul(hex, NULL, 16);
+            s += 3;
+        } else {
+            out[o++] = *s++;
+        }
+    }
+    out[o] = '\0';
+}
+
+// A path for the client: `path` itself, or a file: URI in `buf`.
+static const char *dap_path_out(const char *path, char *buf, size_t n) {
+    if (!dap_paths_are_uris) return path;
+    const bool drive = isalpha((unsigned char)path[0]) && path[1] == ':';
+    if (path[0] != '/' && !drive) return path;   // relative: no URI can name it
+    size_t o = (size_t)snprintf(buf, n, "file://%s", drive ? "/" : "");
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        if (o + 4 >= n) return path;
+        const unsigned char c = (*p == '\\') ? '/' : *p;
+        if (isalnum(c) || strchr("-._~/:", c))
+            buf[o++] = (char)c;
+        else
+            o += (size_t)snprintf(buf + o, n - o, "%%%02X", c);
+    }
+    buf[o] = '\0';
+    return buf;
+}
+
 static int handle_dap_initialize(int seq, cJSON *args) {
-    (void)args;
+    cJSON *lb = args ? cJSON_GetObjectItemCaseSensitive(args, "linesStartAt1") : NULL;
+    cJSON *cb = args ? cJSON_GetObjectItemCaseSensitive(args, "columnsStartAt1") : NULL;
+    cJSON *pf = args ? cJSON_GetObjectItemCaseSensitive(args, "pathFormat") : NULL;
+    dap_line_base = (lb && cJSON_IsFalse(lb)) ? 0 : 1;
+    dap_col_base  = (cb && cJSON_IsFalse(cb)) ? 0 : 1;
+    dap_paths_are_uris = pf && cJSON_IsString(pf) && !strcmp(pf->valuestring, "uri");
+
     cJSON *caps = cJSON_CreateObject();
     cJSON_AddBoolToObject(caps, "supportsConfigurationDoneRequest", true);
     cJSON_AddBoolToObject(caps, "supportsSetVariable", true);
@@ -648,7 +782,6 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsSteppingGranularity", true);
     cJSON_AddBoolToObject(caps, "supportsGotoTargetsRequest", true);
     cJSON_AddBoolToObject(caps, "supportsSetExpression", false);
-    cJSON_AddBoolToObject(caps, "supportsValueFormattingOptions", true);
     cJSON_AddBoolToObject(caps, "supportsFunctionBreakpoints", true);
     // Newly implemented in this build:
     cJSON_AddBoolToObject(caps, "supportsDataBreakpoints", true);
@@ -693,6 +826,13 @@ static int handle_dap_launch(int seq, cJSON *args) {
         }
         cJSON *soe = cJSON_GetObjectItemCaseSensitive(args, "stopOnEntry");
         dap_stop_on_entry = (soe && cJSON_IsTrue(soe));
+        cJSON *nd = cJSON_GetObjectItemCaseSensitive(args, "noDebug");
+        dap_no_debug = nd && cJSON_IsTrue(nd);
+        if (dap_no_debug) {
+            // Breakpoints may have been set before launch arrived.
+            dap_release_breakpoints();
+            dap_stop_on_entry = false;
+        }
     }
     dap_launched = true;
     send_dap_response(seq, "launch", true, NULL);
@@ -780,25 +920,21 @@ static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_cur
         else                      snprintf(name_buf, sizeof(name_buf), nfmt, addr);
     }
     cJSON_AddStringToObject(frame, "name", name_buf);
-    cJSON_AddNumberToObject(frame, "line", has_source ? src_line : 0);
-    cJSON_AddNumberToObject(frame, "column", 1);
+    // Without a source the protocol wants both at 0, whatever the client's base.
+    cJSON_AddNumberToObject(frame, "line", has_source ? dap_line_out(src_line) : 0);
+    cJSON_AddNumberToObject(frame, "column", has_source ? dap_col_base : 0);
 
     if (has_source) {
+        char uri[1024];
         cJSON *source = cJSON_CreateObject();
-        cJSON_AddStringToObject(source, "path", src_file);
+        cJSON_AddStringToObject(source, "path", dap_path_out(src_file, uri, sizeof uri));
         const char *basename = strrchr(src_file, '/');
         if (!basename) basename = strrchr(src_file, '\\');
         cJSON_AddStringToObject(source, "name", basename ? basename + 1 : src_file);
         cJSON_AddItemToObject(frame, "source", source);
     } else {
-        cJSON *hint = cJSON_CreateObject();
-        cJSON_AddStringToObject(hint, "kind", is_current ? "normal" : "subtle");
-        cJSON_AddItemToObject(frame, "presentationHint", hint);
-        cJSON *source = cJSON_CreateObject();
-        cJSON_AddStringToObject(source, "name", name_buf);
-        cJSON_AddNumberToObject(source, "sourceReference", 0);
-        cJSON_AddStringToObject(source, "origin", "disassembly");
-        cJSON_AddItemToObject(frame, "source", source);
+        // instructionPointerReference below is what opens the disassembly.
+        cJSON_AddStringToObject(frame, "presentationHint", is_current ? "normal" : "subtle");
     }
 
     char instr_ref[16];
@@ -1405,7 +1541,7 @@ static void dap_add_refused_bp(cJSON *arr, int id, int line, const char *path, c
     cJSON_AddNumberToObject(bp, "id", id);
     cJSON_AddBoolToObject(bp, "verified", false);
     cJSON_AddStringToObject(bp, "message", why);
-    cJSON_AddNumberToObject(bp, "line", line);
+    if (line > 0) cJSON_AddNumberToObject(bp, "line", dap_line_out(line));
     cJSON *src = cJSON_CreateObject();
     cJSON_AddStringToObject(src, "path", path);
     cJSON_AddItemToObject(bp, "source", src);
@@ -1434,7 +1570,11 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
     cJSON *list = bps ? bps : lines;
 
     cJSON *path_item = cJSON_GetObjectItemCaseSensitive(source, "path");
-    const char *src_path = (path_item && cJSON_IsString(path_item)) ? path_item->valuestring : "";
+    // Replies echo the client's own spelling of the path.
+    const char *client_path = (path_item && cJSON_IsString(path_item)) ? path_item->valuestring : "";
+    char src_buf[1024];
+    dap_path_in(client_path, src_buf, sizeof src_buf);
+    const char *src_path = src_buf;
 
     // Drop this file's breakpoints, then restate what this owner still wants.
     //
@@ -1476,7 +1616,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         cJSON *bp_item = cJSON_GetArrayItem(list, i);
         cJSON *line_item = bps ? cJSON_GetObjectItemCaseSensitive(bp_item, "line") : bp_item;
         const bool has_line = line_item && cJSON_IsNumber(line_item);
-        int line = has_line ? (int)line_item->valuedouble : 0;
+        int line = has_line ? dap_line_in((int)line_item->valuedouble) : 0;
         int bp_id = next_dap_bp_id++;
 
         // Kept verbatim so the breakpoint can be re-armed exactly as asked for
@@ -1494,26 +1634,26 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         char why[200];
         int  cond_bank = -1;
         if (!has_line) {
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, "breakpoint has no line");
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, "breakpoint has no line");
             continue;
         }
         if (num_dap_bps >= MAX_DAP_BREAKPOINTS) {
             snprintf(why, sizeof why, "too many breakpoints (limit %d)", MAX_DAP_BREAKPOINTS);
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
             continue;
         }
         if (strlen(src_path) >= sizeof dap_bps[0].file) {
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, "source path is too long");
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, "source path is too long");
             continue;
         }
         if (!dap_check_condition(cond_str, &cond_bank, why, sizeof why)) {
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
             continue;
         }
         if (hit_str[0] && !dap_check_hit_condition(hit_str)) {
             snprintf(why, sizeof why,
                      "cannot parse hitCondition \"%.60s\" (expected N: stop from the Nth hit on)", hit_str);
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
             continue;
         }
 
@@ -1523,7 +1663,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         bool resolved = dbg_info_source_to_addr_bank(src_path, line, &addr, &seg_bank);
 
         if (resolved && !dap_bp_can_arm(addr, seg_bank, cond_str, hit_str, why, sizeof why)) {
-            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
             continue;
         }
 
@@ -1544,7 +1684,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
                 // Nothing was armed, so say so rather than reporting a verified
                 // breakpoint the machine will never stop on.
                 cJSON_Delete(result_bp);
-                dap_add_refused_bp(result_bps, bp_id, line, src_path,
+                dap_add_refused_bp(result_bps, bp_id, line, client_path,
                                    "Out of memory; breakpoint not armed");
                 continue;
             }
@@ -1553,7 +1693,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             dap_bps[num_dap_bps].addr = (uint16_t)(addr & 0xFFFF);
             dap_bps[num_dap_bps].bank = (uint8_t)(addr >> 16);
             dap_bps[num_dap_bps].x16Bank = bank_pin;
-            strncpy(dap_bps[num_dap_bps].file, src_path, sizeof(dap_bps[num_dap_bps].file) - 1);
+            memcpy(dap_bps[num_dap_bps].file, src_path, strlen(src_path) + 1);   // length checked above
             dap_bps[num_dap_bps].line = line;
             dap_bps[num_dap_bps].verified = true;
             strncpy(dap_bps[num_dap_bps].cond, cond_str, sizeof(dap_bps[num_dap_bps].cond) - 1);
@@ -1565,12 +1705,12 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
 
             cJSON_AddNumberToObject(result_bp, "id", bp_id);
             cJSON_AddBoolToObject(result_bp, "verified", true);
-            cJSON_AddNumberToObject(result_bp, "line", line);
+            cJSON_AddNumberToObject(result_bp, "line", dap_line_out(line));
             dap_add_bank_message(result_bp, bank_pin);
 
             // Add source info
             cJSON *bp_source = cJSON_CreateObject();
-            cJSON_AddStringToObject(bp_source, "path", src_path);
+            cJSON_AddStringToObject(bp_source, "path", client_path);
             cJSON_AddItemToObject(result_bp, "source", bp_source);
         } else {
             // Nothing describes this line yet -- typically the guest has not
@@ -1583,9 +1723,9 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             cJSON_AddBoolToObject(result_bp, "verified", false);
             cJSON_AddStringToObject(result_bp, "message",
                                     "No debug info for this line yet; will arm when it loads");
-            cJSON_AddNumberToObject(result_bp, "line", line);
+            cJSON_AddNumberToObject(result_bp, "line", dap_line_out(line));
             cJSON *bp_source = cJSON_CreateObject();
-            cJSON_AddStringToObject(bp_source, "path", src_path);
+            cJSON_AddStringToObject(bp_source, "path", client_path);
             cJSON_AddItemToObject(result_bp, "source", bp_source);
 
             // Store as pending — will set hardware BP when matching .dbg loads
@@ -1593,7 +1733,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             dap_bps[num_dap_bps].addr = 0;
             dap_bps[num_dap_bps].bank = 0;
             dap_bps[num_dap_bps].x16Bank = DEBUG_BANK_ANY;
-            strncpy(dap_bps[num_dap_bps].file, src_path, sizeof(dap_bps[num_dap_bps].file) - 1);
+            memcpy(dap_bps[num_dap_bps].file, src_path, strlen(src_path) + 1);   // length checked above
             dap_bps[num_dap_bps].line = line;
             dap_bps[num_dap_bps].verified = false;
             strncpy(dap_bps[num_dap_bps].cond, cond_str, sizeof(dap_bps[num_dap_bps].cond) - 1);
@@ -1634,18 +1774,31 @@ static int handle_dap_continue(int seq, cJSON *args) {
 // collide with a breakpoint the user set at the same address. That target
 // carries its owner, so a session teardown can retract a step it asked for
 // without touching one the user started at the keyboard.
+//
+// `granularity: instruction` is what a disassembly view sends. It has to be the
+// plain step: the auto step runs a whole source line in C code, so that view
+// could not otherwise move one instruction at a time.
+static bool dap_step_by_instruction(cJSON *args) {
+    cJSON *g = args ? cJSON_GetObjectItemCaseSensitive(args, "granularity") : NULL;
+    return g && cJSON_IsString(g) && !strcmp(g->valuestring, "instruction");
+}
+
 static int handle_dap_next(int seq, cJSON *args) {
-    (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    DEBUGStepOverAuto(DEBUG_OWNER_DAP_SOURCE);
+    if (dap_step_by_instruction(args))
+        DEBUGStepOver(DEBUG_OWNER_DAP_SOURCE);
+    else
+        DEBUGStepOverAuto(DEBUG_OWNER_DAP_SOURCE);
     send_dap_response(seq, "next", true, NULL);
     return 1;
 }
 
 static int handle_dap_step_in(int seq, cJSON *args) {
-    (void)args;
     dap_stop_announced = false;   // this request implies execution continues
-    DEBUGStepIntoAuto();
+    if (dap_step_by_instruction(args))
+        DEBUGStepInto();
+    else
+        DEBUGStepIntoAuto(DEBUG_OWNER_DAP_SOURCE);
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
 }
@@ -1740,13 +1893,15 @@ static int handle_dap_goto_targets(int seq, cJSON *args) {
     }
 
     cJSON *path = cJSON_GetObjectItemCaseSensitive(source, "path");
-    int line = line_item->valueint;
+    int line = dap_line_in(line_item->valueint);
 
     // Look up the address for this source line using debug info
     dbg_addr_t addr = 0;
     bool found = false;
     if (path && cJSON_IsString(path)) {
-        found = dbg_info_source_to_addr(path->valuestring, line, &addr);
+        char local[1024];
+        dap_path_in(path->valuestring, local, sizeof local);
+        found = dbg_info_source_to_addr(local, line, &addr);
     }
 
     cJSON *body = cJSON_CreateObject();
@@ -1758,7 +1913,7 @@ static int handle_dap_goto_targets(int seq, cJSON *args) {
         char label[32];
         snprintf(label, sizeof(label), "$%04X", addr);
         cJSON_AddStringToObject(target, "label", label);
-        cJSON_AddNumberToObject(target, "line", line);
+        cJSON_AddNumberToObject(target, "line", dap_line_out(line));
         cJSON_AddItemToArray(targets, target);
     }
 
@@ -2109,17 +2264,20 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
         return 0;
     }
     int offset = (offset_item && cJSON_IsNumber(offset_item)) ? (int)offset_item->valuedouble : 0;
-    int count = (int)count_item->valuedouble;
     const uint32_t addr_mask = is_vram ? 0x1FFFF : 0xFFFFFF;
     addr = (uint32_t)((int)addr + offset) & addr_mask;
-    if (count > 4096) count = 4096;
-    if (count < 0) count = 0;
+
+    // What lies past the top of the space is unreadable, and is reported as
+    // such: a short read with unreadableBytes 0 would say memory ends there.
+    const double asked = count_item->valuedouble;
+    const uint32_t room = addr_mask + 1 - addr;
+    const int count = asked <= 0 ? 0 : asked >= (double)room ? (int)room : (int)asked;
+    const double unreadable = asked > (double)count ? asked - (double)count : 0;
 
     // Build base64 data (DAP readMemory uses base64)
-    // For simplicity, send as hex-encoded data with unreadableBytes=0
     static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    unsigned char *raw = (unsigned char *)malloc(count);
-    char *b64 = (char *)malloc((count * 4 / 3) + 8);
+    unsigned char *raw = (unsigned char *)malloc((size_t)count + 1);
+    char *b64 = (char *)malloc(((size_t)count * 4 / 3) + 8);
     if (!raw || !b64) {
         free(raw); free(b64);
         send_dap_error_response(seq, "readMemory", "memory allocation failed");
@@ -2153,16 +2311,21 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
 
     cJSON *body = cJSON_CreateObject();
     char addr_str[16];
-    // Echoed in the space it was read from, so a client can page through VRAM by
-    // feeding this straight back with an offset.
-    if (is_vram)
-        snprintf(addr_str, sizeof(addr_str), "vram:0x%05X", addr & 0x1FFFF);
-    else if (is_gen2)
+    // `address` is a plain number by the protocol's definition. For VRAM the
+    // reference to page with travels beside it, since the number alone would
+    // read back as a CPU address.
+    if (is_vram) {
+        char ref[24];
+        snprintf(addr_str, sizeof(addr_str), "0x%05X", addr & 0x1FFFF);
+        snprintf(ref, sizeof ref, "vram:0x%05X", addr & 0x1FFFF);
+        cJSON_AddStringToObject(body, "x16MemoryReference", ref);
+    } else if (is_gen2 || addr > 0xFFFF) {
         snprintf(addr_str, sizeof(addr_str), "0x%06X", addr & 0xFFFFFF);
-    else
+    } else {
         snprintf(addr_str, sizeof(addr_str), "0x%04X", addr & 0xFFFF);
+    }
     cJSON_AddStringToObject(body, "address", addr_str);
-    cJSON_AddNumberToObject(body, "unreadableBytes", 0);
+    cJSON_AddNumberToObject(body, "unreadableBytes", unreadable);
     cJSON_AddStringToObject(body, "data", b64);
 
     free(raw);
@@ -3901,7 +4064,7 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
                     && dap_bps[j].x16Bank == bp->x16Bank) {
                     cJSON_AddNumberToObject(o, "dapId", dap_bps[j].dap_id);
                     cJSON_AddStringToObject(o, "file", dap_bps[j].file);
-                    cJSON_AddNumberToObject(o, "line", dap_bps[j].line);
+                    cJSON_AddNumberToObject(o, "line", dap_line_out(dap_bps[j].line));
                     break;
                 }
             }
@@ -4175,6 +4338,55 @@ static int handle_x16_sprite_mux_config(int seq, cJSON *args) {
     return 0;
 }
 
+// The most rows one disassemble request may ask for. Past it the request fails,
+// because a shorter reply would break "exactly this number".
+#define DAP_DISASM_MAX 65536
+
+static void dap_add_invalid_instruction(cJSON *arr, uint8_t bank, uint16_t at) {
+    char addr_str[16];
+    if (bank != 0 || is_gen2)
+        snprintf(addr_str, sizeof(addr_str), "0x%06X", ((uint32_t)bank << 16) | at);
+    else
+        snprintf(addr_str, sizeof(addr_str), "0x%04X", at);
+    cJSON *inst = cJSON_CreateObject();
+    cJSON_AddStringToObject(inst, "address", addr_str);
+    cJSON_AddStringToObject(inst, "instruction", "??");
+    cJSON_AddStringToObject(inst, "presentationHint", "invalid");
+    cJSON_AddItemToArray(arr, inst);
+}
+
+static void dap_add_instruction(cJSON *arr, uint8_t bank, const code_map_line_t *ln) {
+    cJSON *inst = cJSON_CreateObject();
+    char addr_str[16];
+    if (bank != 0 || is_gen2)
+        snprintf(addr_str, sizeof(addr_str), "0x%06X", ((uint32_t)bank << 16) | ln->addr);
+    else
+        snprintf(addr_str, sizeof(addr_str), "0x%04X", ln->addr);
+    cJSON_AddStringToObject(inst, "address", addr_str);
+    cJSON_AddStringToObject(inst, "instruction", ln->text);
+
+    // Build instructionBytes hex string
+    char bytes_str[32] = "";
+    int blen = 0;
+    for (int b = 0; b < ln->size && b < 4; b++) {
+        blen += snprintf(bytes_str + blen, sizeof(bytes_str) - blen, "%02X ", ln->bytes[b]);
+    }
+    if (blen > 0) bytes_str[blen - 1] = '\0'; // trim trailing space
+    cJSON_AddStringToObject(inst, "instructionBytes", bytes_str);
+
+    // Add source location if dbg info is available
+    const char *src_file = NULL;
+    int src_line = 0;
+    if (dbg_info_addr_to_source(ln->addr, &src_file, &src_line)) {
+        char uri[1024];
+        cJSON *source = cJSON_CreateObject();
+        cJSON_AddStringToObject(source, "path", dap_path_out(src_file, uri, sizeof uri));
+        cJSON_AddItemToObject(inst, "location", source);
+        cJSON_AddNumberToObject(inst, "line", dap_line_out(src_line));
+    }
+    cJSON_AddItemToArray(arr, inst);
+}
+
 static int handle_dap_disassemble(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "disassemble", "missing arguments");
@@ -4183,62 +4395,80 @@ static int handle_dap_disassemble(int seq, cJSON *args) {
     cJSON *ref_item = cJSON_GetObjectItemCaseSensitive(args, "memoryReference");
     cJSON *count_item = cJSON_GetObjectItemCaseSensitive(args, "instructionCount");
     cJSON *offset_item = cJSON_GetObjectItemCaseSensitive(args, "offset");
+    cJSON *insn_item = cJSON_GetObjectItemCaseSensitive(args, "instructionOffset");
 
     if (!ref_item || !cJSON_IsString(ref_item)) {
         send_dap_error_response(seq, "disassemble", "missing memoryReference");
         return 0;
     }
-
-    uint32_t ref = (uint32_t)strtoul(ref_item->valuestring, NULL, 0);
+    uint32_t ref = 0;
+    bool is_vram = false;
+    if (!dap_parse_mem_ref(ref_item->valuestring, &is_vram, &ref) || is_vram) {
+        send_dap_error_response(seq, "disassemble",
+                                "unparseable memoryReference (expected a CPU address like 0xC000)");
+        return 0;
+    }
+    const double asked = (count_item && cJSON_IsNumber(count_item)) ? count_item->valuedouble : 10;
+    if (asked > DAP_DISASM_MAX) {
+        send_dap_error_response(seq, "disassemble", "instructionCount is too large (limit 65536)");
+        return 0;
+    }
+    const int count = asked < 0 ? 0 : (int)asked;
     int offset = (offset_item && cJSON_IsNumber(offset_item)) ? (int)offset_item->valuedouble : 0;
-    int count = (count_item && cJSON_IsNumber(count_item)) ? (int)count_item->valuedouble : 10;
+    double insn_off = (insn_item && cJSON_IsNumber(insn_item)) ? insn_item->valuedouble : 0;
+    if (insn_off < -0x20000) insn_off = -0x20000;
+    if (insn_off >  0x20000) insn_off =  0x20000;
     uint32_t ref24 = (uint32_t)(((int)ref + offset)) & 0xFFFFFF;
     uint16_t addr = (uint16_t)(ref24 & 0xFFFF);
     uint8_t  bank = (uint8_t)(ref24 >> 16); // 65C816 program bank
-    if (count > 200) count = 200;
-    if (count < 0) count = 0;
 
     // Decode via the anchored code map so operand widths follow the recorded
     // 65C816 M/X/E flag state (the naive path assumed a fixed width and drifted).
     uint8_t rambank = memory_get_ram_bank();
     uint8_t rombank = memory_get_rom_bank();
     static code_map_line_t lines[200];
-    int n = code_map_disasm_forward(addr, bank, rambank, rombank, count, lines, 200, NULL);
+
+    // Find the first row. An offset that runs off either end of the bank leaves
+    // rows with nothing to show, which the protocol wants as invalid filler.
+    int  pad_front = 0;
+    bool past_end  = false;
+    uint16_t cur   = addr;
+    if (insn_off < 0) {
+        for (int back = (int)-insn_off; back > 0; back--) {
+            if (cur == 0) { pad_front = back; break; }
+            const uint16_t prev = code_map_prev_instruction(cur, bank, rambank, rombank);
+            if (prev >= cur) { pad_front = back; break; }
+            cur = prev;
+        }
+    } else {
+        for (int fwd = (int)insn_off; fwd > 0 && !past_end; ) {
+            uint16_t next = cur;
+            const int got = code_map_disasm_forward(cur, bank, rambank, rombank,
+                                                    fwd > 200 ? 200 : fwd, lines, 200, &next);
+            if (got <= 0 || next <= lines[got - 1].addr) past_end = true;
+            fwd -= got > 0 ? got : fwd;
+            cur = next;
+        }
+    }
 
     cJSON *instructions = cJSON_CreateArray();
-    for (int i = 0; i < n; i++) {
-        const code_map_line_t *ln = &lines[i];
-
-        cJSON *inst = cJSON_CreateObject();
-        char addr_str[16];
-        if (bank != 0 || is_gen2)
-            snprintf(addr_str, sizeof(addr_str), "0x%06X", ((uint32_t)bank << 16) | ln->addr);
-        else
-            snprintf(addr_str, sizeof(addr_str), "0x%04X", ln->addr);
-        cJSON_AddStringToObject(inst, "address", addr_str);
-        cJSON_AddStringToObject(inst, "instruction", ln->text);
-
-        // Build instructionBytes hex string
-        char bytes_str[32] = "";
-        int blen = 0;
-        for (int b = 0; b < ln->size && b < 4; b++) {
-            blen += snprintf(bytes_str + blen, sizeof(bytes_str) - blen, "%02X ", ln->bytes[b]);
+    int emitted = 0;
+    for (; emitted < count && emitted < pad_front; emitted++)
+        dap_add_invalid_instruction(instructions, bank, 0);
+    while (emitted < count && !past_end) {
+        uint16_t next = cur;
+        const int want = count - emitted > 200 ? 200 : count - emitted;
+        const int got = code_map_disasm_forward(cur, bank, rambank, rombank, want, lines, 200, &next);
+        if (got <= 0) break;
+        for (int i = 0; i < got && emitted < count; i++, emitted++) {
+            if (i > 0 && lines[i].addr <= lines[i - 1].addr) { past_end = true; break; }
+            dap_add_instruction(instructions, bank, &lines[i]);
         }
-        if (blen > 0) bytes_str[blen - 1] = '\0'; // trim trailing space
-        cJSON_AddStringToObject(inst, "instructionBytes", bytes_str);
-
-        // Add source location if dbg info is available
-        const char *src_file = NULL;
-        int src_line = 0;
-        if (dbg_info_addr_to_source(ln->addr, &src_file, &src_line)) {
-            cJSON *source = cJSON_CreateObject();
-            cJSON_AddStringToObject(source, "path", src_file);
-            cJSON_AddItemToObject(inst, "source", source);
-            cJSON_AddNumberToObject(inst, "line", src_line);
-        }
-
-        cJSON_AddItemToArray(instructions, inst);
+        if (next <= lines[got - 1].addr) past_end = true;   // ran off the top
+        cur = next;
     }
+    for (; emitted < count; emitted++)
+        dap_add_invalid_instruction(instructions, bank, 0xFFFF);
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddItemToObject(body, "instructions", instructions);
@@ -4984,9 +5214,10 @@ static int handle_dap_loaded_sources(int seq, cJSON *args) {
         if (dbg_info_file_at(i, &nm) && nm) {
             const char *base = nm;
             for (const char *p = nm; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
+            char uri[1024];
             cJSON *src = cJSON_CreateObject();
             cJSON_AddStringToObject(src, "name", base);
-            cJSON_AddStringToObject(src, "path", nm);
+            cJSON_AddStringToObject(src, "path", dap_path_out(nm, uri, sizeof uri));
             cJSON_AddItemToArray(arr, src);
         }
     }
@@ -4998,12 +5229,16 @@ static int handle_dap_loaded_sources(int seq, cJSON *args) {
 // ─── source (return file content by path) ────────────────────────────
 static int handle_dap_source(int seq, cJSON *args) {
     const char *path = NULL;
+    char local[1024];
     if (args) {
         cJSON *src = cJSON_GetObjectItemCaseSensitive(args, "source");
         if (src) {
             cJSON *p = cJSON_GetObjectItemCaseSensitive(src, "path");
             if (!p) p = cJSON_GetObjectItemCaseSensitive(src, "name");
-            if (p && cJSON_IsString(p)) path = p->valuestring;
+            if (p && cJSON_IsString(p)) {
+                dap_path_in(p->valuestring, local, sizeof local);
+                path = local;
+            }
         }
     }
     const source_file_t *sf = path ? source_view_get(path) : NULL;
@@ -5035,11 +5270,18 @@ static int handle_dap_source(int seq, cJSON *args) {
 // ─── breakpointLocations (which lines in a range map to code) ────────
 static int handle_dap_breakpoint_locations(int seq, cJSON *args) {
     const char *path = NULL; int line = 0, endLine = 0;
+    char local[1024];
     if (args) {
         cJSON *src = cJSON_GetObjectItemCaseSensitive(args, "source");
-        if (src) { cJSON *p = cJSON_GetObjectItemCaseSensitive(src, "path"); if (p && cJSON_IsString(p)) path = p->valuestring; }
-        cJSON *l  = cJSON_GetObjectItemCaseSensitive(args, "line");    if (l && cJSON_IsNumber(l))  line = (int)l->valuedouble;
-        cJSON *el = cJSON_GetObjectItemCaseSensitive(args, "endLine"); if (el && cJSON_IsNumber(el)) endLine = (int)el->valuedouble;
+        if (src) {
+            cJSON *p = cJSON_GetObjectItemCaseSensitive(src, "path");
+            if (p && cJSON_IsString(p)) {
+                dap_path_in(p->valuestring, local, sizeof local);
+                path = local;
+            }
+        }
+        cJSON *l  = cJSON_GetObjectItemCaseSensitive(args, "line");    if (l && cJSON_IsNumber(l))  line = dap_line_in((int)l->valuedouble);
+        cJSON *el = cJSON_GetObjectItemCaseSensitive(args, "endLine"); if (el && cJSON_IsNumber(el)) endLine = dap_line_in((int)el->valuedouble);
     }
     if (endLine < line) endLine = line;
     cJSON *body = cJSON_CreateObject();
@@ -5048,7 +5290,7 @@ static int handle_dap_breakpoint_locations(int seq, cJSON *args) {
         dbg_addr_t addr;
         if (dbg_info_source_to_addr(path, ln, &addr)) {
             cJSON *loc = cJSON_CreateObject();
-            cJSON_AddNumberToObject(loc, "line", ln);
+            cJSON_AddNumberToObject(loc, "line", dap_line_out(ln));
             cJSON_AddItemToArray(arr, loc);
         }
     }
@@ -5119,7 +5361,11 @@ static int dispatch_dap(const char *json_body) {
         step_finish("cancelled");
     }
 
-    if (!strcmp(cmd, "initialize"))         result = handle_dap_initialize(seq, args);
+    if (dap_no_debug &&
+        (!strcmp(cmd, "setBreakpoints") || !strcmp(cmd, "setFunctionBreakpoints") ||
+         !strcmp(cmd, "setInstructionBreakpoints") || !strcmp(cmd, "setDataBreakpoints")))
+        result = dap_refuse_breakpoints(seq, cmd, args);
+    else if (!strcmp(cmd, "initialize"))    result = handle_dap_initialize(seq, args);
     else if (!strcmp(cmd, "launch"))        result = handle_dap_launch(seq, args);
     else if (!strcmp(cmd, "configurationDone")) result = handle_dap_configuration_done(seq);
     else if (!strcmp(cmd, "threads"))       result = handle_dap_threads(seq);
@@ -5189,7 +5435,7 @@ static int dispatch_dap(const char *json_body) {
 // Everything the session installed in the machine. Run before resuming, so a
 // breakpoint set by a client that has gone cannot stop a headless emulator with
 // nobody left to notice.
-static void dap_release_session_state(void) {
+static void dap_release_breakpoints(void) {
     // Everything this session asked for, by name. Each entry goes only if no
     // other owner still wants it, so a -bp breakpoint or one the user set with
     // F9 at the same address survives -- without this file having to know that
@@ -5205,6 +5451,32 @@ static void dap_release_session_state(void) {
     num_func_bps  = 0;
     num_instr_bps = 0;
     num_data_bps  = 0;
+}
+
+// A noDebug session arms nothing, and says so for each entry it was sent.
+static int dap_refuse_breakpoints(int seq, const char *command, cJSON *args) {
+    cJSON *list = args ? cJSON_GetObjectItemCaseSensitive(args, "breakpoints") : NULL;
+    if (!list && args) list = cJSON_GetObjectItemCaseSensitive(args, "lines");
+    const int n = (list && cJSON_IsArray(list)) ? cJSON_GetArraySize(list) : 0;
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) {
+        cJSON *bp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(bp, "verified", false);
+        cJSON_AddStringToObject(bp, "message", "launched with noDebug");
+        cJSON_AddItemToArray(arr, bp);
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "breakpoints", arr);
+    send_dap_response(seq, command, true, body);
+    return 0;
+}
+
+static void dap_release_session_state(void) {
+    dap_release_breakpoints();
+    dap_line_base = 1;
+    dap_col_base  = 1;
+    dap_paths_are_uris = false;
+    dap_no_debug = false;
 
     // A step-over or step-out THIS session started has a breakpoint of its own,
     // and nothing else can retract it. One the local debugger started belongs to

@@ -1064,9 +1064,12 @@ writeMemory { "memoryReference": "vram:1B000", "data": "3q2+7w==" }
 ```
 
 VRAM addresses default to hex, with `$` and `0x` accepted too; a bare reference is still a CPU
-address. The echoed `address` keeps the prefix, so paging through VRAM by feeding it back with an
-`offset` stays in the right space. This is the only way to write VRAM over DAP, and unlike the
-`vram` console expression it is not capped at 128 bytes and returns binary rather than text.
+address. The reply's `address` is a plain number, as the protocol defines it, so a VRAM read also
+returns `x16MemoryReference` (`vram:0x1B000`). Page through VRAM with that and an `offset`, because
+the bare number would read the CPU map. This is the only way to write VRAM over DAP, and unlike the
+`vram` console expression it is not capped at 128 bytes and returns binary rather than text. A read
+that runs past the top of the address space returns what exists and counts the rest in
+`unreadableBytes`.
 
 A reference that cannot be parsed is now rejected. It used to fall back to address 0, so a typo
 answered `success: true` with the bytes from the wrong memory and nothing to say so.

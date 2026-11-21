@@ -350,11 +350,14 @@ vram = mem_bytes(read_mem(111, "vram:1B000", 16))
 expect("readMemory reads VRAM", vram is not None and len(vram) == 16)
 expect("VRAM and the same CPU address are different memory", cpu is not None and vram != cpu)
 
-# The echoed address has to come back in the space it was read from, or paging
-# through VRAM by feeding it back would silently land in the CPU map.
+# `address` is a plain number by the protocol's definition, so the reference for
+# paging through VRAM travels beside it. Feeding the bare number back would
+# silently land in the CPU map.
 r = read_mem(112, "vram:1B000", 4)
-expect("the echoed address keeps the vram: prefix",
-       r is not None and r.get("body", {}).get("address", "").lower().startswith("vram:"))
+expect("the echoed address is a plain number",
+       r is not None and r.get("body", {}).get("address", "").lower().startswith("0x"))
+expect("the VRAM reference to page with comes back beside it",
+       r is not None and r.get("body", {}).get("x16MemoryReference", "").lower().startswith("vram:"))
 
 # A round trip through the write path. $1F9C0 is in the sprite attribute area,
 # well clear of the text screen the READY prompt is sitting on.

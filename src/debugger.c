@@ -805,10 +805,10 @@ static bool DEBUGSourceStepContinue(void)
 
 /* What the UI and DAP call: by line where that means anything, by instruction
  * otherwise. */
-void DEBUGStepIntoAuto(void)
+void DEBUGStepIntoAuto(debug_owner_t owner)
 {
 	if (debug_source_step_available())
-		DEBUGBeginSourceStep(false, DEBUG_OWNER_UI);
+		DEBUGBeginSourceStep(false, owner);
 	else
 		DEBUGStepInto();
 }
@@ -840,10 +840,20 @@ debug_owner_t DEBUGStepOwner(void) {
 // this from a flag of its own; the state being asked about lives here, so the
 // question belongs here too.
 bool DEBUGCancelStepFor(debug_owner_t owner) {
-	if (DEBUGStepOwner() != owner)
-		return false;
-	DEBUGClearStepBreakPoint();
-	return true;
+	bool cancelled = false;
+	if (srcStepActive && srcStepOwner == owner) {
+		srcStepActive = false;
+		// Mid-line this is parked on a single-instruction step, which would
+		// otherwise retire into a stop nobody asked to see.
+		if (currentMode == DMODE_STEP)
+			currentMode = DMODE_STOP;
+		cancelled = true;
+	}
+	if (DEBUGStepOwner() == owner) {
+		DEBUGClearStepBreakPoint();
+		cancelled = true;
+	}
+	return cancelled;
 }
 
 // F5 — run until break.
