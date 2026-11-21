@@ -560,65 +560,12 @@ if bwstats and bwstats.get("success"):
     port = bwb.get("port", {})
     expect("the data port is reported", isinstance(port, dict) and "writeBytes" in port)
 
-# The data port is the part a program controls, and the debugger is NOT a
-# program. Two different paths have to be kept off the books, and only the
-# first is directly observable from here:
+# What the data port is charged with is pinned in section 20, on a stepped
+# frame, because that needs a save state and this part of the run must not
+# load one.
 #
-#   * writeMemory with a "vram:" reference reaches VRAM through
-#     video_space_write(), around the $9F23 path entirely. Checked below.
-#   * writeMemory to the CPU address $9F23 goes through real_write6502() with
-#     debugOn set, which raises video_set_debug_write() so the accounting
-#     declines it. That one cannot be pinned reliably from out here -- under
-#     -warp the frames roll far faster than requests arrive, so a burst of
-#     debugger pokes never lands in one frame whether it is charged or not.
-#     video.c carries the guard and the comment instead.
-#
-# If either were charged, opening a memory view would move the numbers the
-# developer is trying to read.
-send_dap(sock, {"seq": 140, "type": "request", "command": "x16/perfConfig",
-                "arguments": {"reset": True}})
-time.sleep(0.3)
-recv_dap(sock, 1)
-send_dap(sock, {"seq": 141, "type": "request", "command": "writeMemory",
-                "arguments": {"memoryReference": "vram:1B000",
-                              "data": base64.b64encode(bytes(64)).decode()}})
-time.sleep(0.5)
-recv_dap(sock, 1)
-
-# Sampling has to be generous here, and it is worth saying why. The bandwidth
-# figures are per-frame, and a machine sitting at the BASIC prompt touches VRAM
-# only when the cursor blinks -- measured at about 8 frames in 120. Under -warp
-# thousands of emulated frames pass between two requests, so each reply shows an
-# essentially random frame. One sample would be a coin toss; a hundred makes
-# missing the blink altogether vanishingly unlikely.
-#
-# Requests are pipelined in batches rather than sent one at a time because
-# recv_dap() blocks for its whole timeout, so a request-reply-request loop would
-# spend a minute here to gather what this gathers in seconds.
-debugger_charged = False
-guest_port_bytes = 0
-seq = 142
-for _ in range(5):
-    for _ in range(20):
-        send_dap(sock, {"seq": seq, "type": "request", "command": "x16/perfStats",
-                        "arguments": {"windows": [1], "includeZones": False}})
-        seq += 1
-        time.sleep(0.03)
-    for m in recv_dap(sock, 1):
-        if m.get("command") != "x16/perfStats":
-            continue
-        p = m.get("body", {}).get("bandwidth", {}).get("port", {})
-        guest_port_bytes = max(guest_port_bytes,
-                               p.get("writeBytes", 0) + p.get("readBytes", 0))
-        # 64 bytes landing in one frame could only be the DAP write above.
-        if p.get("writeBytes", 0) >= 64:
-            debugger_charged = True
-
-expect("a debugger VRAM write is not charged to the guest", not debugger_charged)
-expect("but the guest's own data-port traffic is", guest_port_bytes > 0)
-
 # Leave the machine as we found it.
-perf(seq, {"enabled": False})
+perf(140, {"enabled": False})
 
 
 #
@@ -1109,7 +1056,10 @@ def bk_read(timeout):
             if len(rest) >= n:
                 bk_buf[0] = rest[n:]
                 return json.loads(rest[:n])
-        bk_buf[0] += bk.recv(65536)
+        chunk = bk.recv(65536)
+        if not chunk:
+            raise ConnectionError("the emulator closed the DAP connection")
+        bk_buf[0] += chunk
 
 def bk_req(cmd, args=None):
     bk_seq[0] += 1
@@ -1580,15 +1530,17 @@ svb = sv.get("body", {})
 bk_case("x16/saveState at a frame boundary answers slot, size, frame, cycles, hash",
         sv.get("success") and svb.get("slot") == "t" and svb.get("size", 0) > 0
         and all(k in svb for k in ("frame", "framesTotal", "cycles", "hash")))
-orig = bk_rd(0x0400, 16)
-bk_wr(0x0400, bytes(range(0xA0, 0xB0)))
+# $0600, not $0400: the loop from section 16 is still what the CPU is running,
+# and overwriting it sends the machine off through whatever the bytes decode to.
+orig = bk_rd(0x0600, 16)
+bk_wr(0x0600, bytes(range(0xA0, 0xB0)))
 bk_step({"frames": 3})
 ld = bk_req("x16/loadState", {"slot": "t", "hash": True})
 ldb = ld.get("body", {})
 bk_case("x16/loadState puts back the frame, the cycle count and the machine (frame %s)" % ldb.get("frame"),
         ld.get("success") and ldb.get("frame") == svb.get("frame")
         and ldb.get("cycles") == svb.get("cycles") and ldb.get("hash") == svb.get("hash"))
-bk_case("and RAM written after the save is as it was", bk_rd(0x0400, 16) == orig)
+bk_case("and RAM written after the save is as it was", bk_rd(0x0600, 16) == orig)
 st = bk_req("x16/status", {"hash": True}).get("body", {})
 bk_case("after a load: paused at a frame boundary, same hash as the save",
         st.get("paused") is True and st.get("atFrameBoundary") is True and st.get("hash") == svb.get("hash"))
@@ -1614,13 +1566,13 @@ fvb = fv.get("body", {})
 bk_case("x16/saveState to a file answers path, size and the same hash as the slot",
         fv.get("success") and fvb.get("path") == ss_path and fvb.get("hash") == svb.get("hash")
         and os.path.getsize(ss_path) == svb.get("size"))
-bk_wr(0x0400, bytes(range(0xC0, 0xD0)))
+bk_wr(0x0600, bytes(range(0xC0, 0xD0)))
 bk_step({"frames": 2})
 fl = bk_req("x16/loadState", {"path": ss_path, "hash": True})
 flb = fl.get("body", {})
 bk_case("x16/loadState from the file puts the machine back (frame %s)" % flb.get("frame"),
         fl.get("success") and flb.get("path") == ss_path and flb.get("hash") == svb.get("hash")
-        and bk_rd(0x0400, 16) == orig)
+        and bk_rd(0x0600, 16) == orig)
 r = bk_req("x16/loadState", {"path": os.path.join(ss_dir, "none.x16s")})
 bk_case("x16/loadState refuses a file that is not there (%s)" % r.get("message"), not r.get("success"))
 with open(os.path.join(ss_dir, "bad.x16s"), "wb") as f:
@@ -1654,9 +1606,74 @@ del bk_events[:]
 bk_req("pause", {"threadId": 1})
 bk_wait_stop(3)
 
+# 20. What the data port is charged with.
+#
+# The port is the part a program controls, and the debugger is NOT a program.
+# Two different paths have to be kept off the books:
+#
+#   * writeMemory with a "vram:" reference reaches VRAM through
+#     video_space_write(), around the $9F23 path entirely.
+#   * writeMemory to the CPU address $9F23 goes through real_write6502() with
+#     debugOn set, which raises video_set_debug_write() so the accounting
+#     declines it.
+#
+# If either were charged, opening a memory view would move the numbers the
+# developer is trying to read.
+#
+# The figures are per-frame, so this runs one known frame rather than sampling a
+# free-running machine. At the BASIC prompt the guest touches the port only when
+# the cursor blinks, one frame in 20, and replies arrive at a nearly fixed stride
+# through those frames, so even a hundred of them can miss it. Here the machine
+# is parked on a frame boundary, both debugger writes land while it is stopped,
+# and a program makes exactly GUEST_WRITES port writes in the next frame. Any
+# other count means one side of the books is wrong.
+GUEST_WRITES = 16
+guest_program = [
+    0xA9, 0x00,          # LDA #$00
+    0x8D, 0x25, 0x9F,    # STA $9F25    ADDRSEL = 0, so the next three reach ADDR0
+    0x8D, 0x20, 0x9F,    # STA $9F20
+    0xA9, 0xB0,          # LDA #$B0
+    0x8D, 0x21, 0x9F,    # STA $9F21
+    0xA9, 0x11,          # LDA #$11
+    0x8D, 0x22, 0x9F,    # STA $9F22    $1B000, incrementing by 1
+    0xA2, GUEST_WRITES,  # LDX #GUEST_WRITES
+    0x8D, 0x23, 0x9F,    # loop: STA $9F23
+    0xCA,                # DEX
+    0xD0, 0xFA,          # BNE loop
+    0x4C, 0x1A, 0x04,    # JMP *
+]
+
+bk_eval("bp_clear")
+bk_step({"frames": 1})
+saved = bk_req("x16/saveState", {"slot": "port"})
+bk_req("x16/perfConfig", {"enabled": True, "reset": True})
+
+bk_req("writeMemory", {"memoryReference": "vram:1B000",
+                       "data": base64.b64encode(bytes(64)).decode()})
+bk_wr(0x9F23, [0])
+bk_wr(0x0400, guest_program)
+# Interrupts off before the first instruction, not by a SEI inside the program:
+# the frame's VSYNC is already pending, and the KERNAL's handler is what blinks
+# the cursor through this same port.
+bk_req("setVariable", {"variablesReference": 1, "name": "P", "value": "$24"})
+bk_req("setVariable", {"variablesReference": 1, "name": "PC", "value": "$0400"})
+
+bk_step({"frames": 1})
+port = bk_req("x16/perfStats", {"windows": [1], "includeZones": False}) \
+    .get("body", {}).get("bandwidth", {}).get("port", {})
+restored = bk_req("x16/loadState", {"slot": "port"})
+bk_req("x16/perfConfig", {"enabled": False})
+
+bk_case("the known frame runs from a saved state and is put back",
+        saved.get("success") is True and restored.get("success") is True)
+bk_case("a debugger VRAM write is not charged to the guest (%s written)" % port.get("writeBytes"),
+        port.get("writeBytes", GUEST_WRITES + 1) <= GUEST_WRITES)
+bk_case("but the guest's own data-port traffic is (%s written, %s read)"
+        % (port.get("writeBytes"), port.get("readBytes")),
+        port.get("writeBytes") == GUEST_WRITES and port.get("readBytes") == 0)
+
 # A disconnect drops a step in flight: the machine runs on rather than stopping
 # later for a client that is gone.
-bk_eval("bp_clear")
 bk_send("x16/step", {"frames": 1000000})
 time.sleep(0.1)
 bk_req("disconnect", {"terminateDebuggee": False})
