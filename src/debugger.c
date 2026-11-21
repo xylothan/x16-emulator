@@ -690,9 +690,14 @@ void DEBUGBreakOnWatchpoint(void) {
 		int      port    = -1;
 		if (debug_wp_last_access(&space, &address, &value, &port)) {
 			const bool vram = space == DEBUG_WP_SPACE_VRAM;
+			uint8_t access = DEBUG_WP_ACCESS_WRITE;
+			bool    fetch  = false;
+			debug_wp_last_access_kind(&access, &fetch);
 			lastStopAccess.has_access     = true;
 			lastStopAccess.space          = vram ? DEBUG_STOP_SPACE_VRAM : DEBUG_STOP_SPACE_CPU;
-			lastStopAccess.access         = DEBUG_STOP_ACCESS_WRITE;
+			lastStopAccess.access         = access == DEBUG_WP_ACCESS_READ ? DEBUG_STOP_ACCESS_READ
+			                                                               : DEBUG_STOP_ACCESS_WRITE;
+			lastStopAccess.fetch          = fetch;
 			lastStopAccess.address        = address;
 			lastStopAccess.x16Bank        = (!vram && bank_window_of((uint16_t)address))
 			                                    ? getCurrentBank((uint16_t)address, 0) : -1;

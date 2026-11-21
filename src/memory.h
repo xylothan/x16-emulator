@@ -59,6 +59,9 @@ extern "C" {
 #define X16_REG_R15H (direct_page_add(33))
 
 uint8_t read6502(uint16_t address, uint8_t bank);
+// read6502() for the instruction stream, so a read watch can tell code being
+// fetched from data being read.
+uint8_t fetch6502(uint16_t address, uint8_t bank);
 uint8_t real_read6502(uint16_t address, uint8_t bank, bool debugOn, int16_t x16Bank);
 void write6502(uint16_t address, uint8_t bank, uint8_t value);
 void real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn);

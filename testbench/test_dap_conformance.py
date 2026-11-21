@@ -712,8 +712,8 @@ def test_data_breakpoints():
         def data(**bp):
             return d.req("setDataBreakpoints", {"breakpoints": [bp]})
 
-        for label, bp in (("read access", {"dataId": "4096", "accessType": "read"}),
-                          ("readWrite access", {"dataId": "4096", "accessType": "readWrite"}),
+        for label, bp in (("an unknown access type", {"dataId": "4096", "accessType": "execute"}),
+                          ("read access on VRAM", {"dataId": "vram:04000", "accessType": "read"}),
                           ("a hitCondition", {"dataId": "4096", "hitCondition": "3"}),
                           ("an unreadable condition", {"dataId": "4096", "condition": "== banana"}),
                           ("a condition past a byte", {"dataId": "4096", "condition": "== 300"}),

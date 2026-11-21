@@ -2246,6 +2246,8 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
             debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_CONSOLE);
         if (added == DEBUG_ADD_FULL)
             snprintf(result, sizeof(result), "watchpoint table full (max %d)", MAX_WATCHPOINTS);
+        else if (added == DEBUG_ADD_CONFLICT)
+            snprintf(result, sizeof(result), "a read watch is already set at $%04X", addr);
         else
             snprintf(result, sizeof(result), "watchpoint added at $%04X len %d", addr, len);
     } else if (strncmp(expr, "watch_remove ", 13) == 0) {
@@ -2810,6 +2812,11 @@ static bool dap_arg_true(cJSON *args, const char *name) {
     return v && cJSON_IsTrue(v);
 }
 
+static const char *dap_wp_access_name(uint8_t access) {
+    if (access == DEBUG_WP_ACCESS_BOTH) return "readWrite";
+    return access == DEBUG_WP_ACCESS_READ ? "read" : "write";
+}
+
 void debug_server_add_stop_info(cJSON *body) {
     if (!DEBUGIsPaused()) return;
     debug_stop_info_t s;
@@ -2819,6 +2826,7 @@ void debug_server_add_stop_info(cJSON *body) {
     cJSON_AddStringToObject(o, "reason", s.reason);
     cJSON_AddStringToObject(o, "space", s.space == DEBUG_STOP_SPACE_VRAM ? "vram" : "cpu");
     cJSON_AddStringToObject(o, "access", s.access == DEBUG_STOP_ACCESS_READ ? "read" : "write");
+    cJSON_AddBoolToObject(o, "fetch", s.fetch);
     cJSON_AddNumberToObject(o, "address", s.address);
     if (s.x16Bank >= 0) cJSON_AddNumberToObject(o, "bank", s.x16Bank);
     else                cJSON_AddNullToObject(o, "bank");
@@ -4372,6 +4380,8 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
         cJSON_AddNumberToObject(o, "x16Bank", wp->x16Bank);
         cJSON_AddBoolToObject(o, "active", wp->active);
         cJSON_AddNumberToObject(o, "hits", wp->hits);
+        cJSON_AddStringToObject(o, "access", dap_wp_access_name(wp->access));
+        cJSON_AddBoolToObject(o, "excludeFetch", wp->exclude_fetch);
         cJSON_AddItemToObject(o, "owners", owners_bitmask_to_json(wp->owners));
         if (wp->has_value) {
             cJSON *filter = cJSON_CreateObject();
@@ -5395,28 +5405,29 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
     const int ref = (ref_i && cJSON_IsNumber(ref_i)) ? (int)ref_i->valuedouble : 0;
     cJSON *body = cJSON_CreateObject();
     char dataId[32], desc[64];
-    bool known = false;
+    bool known = false, vram = false;
     if (name_i && cJSON_IsString(name_i)) {
         uint32_t vaddr = 0, vlen = 1;
         uint16_t addr = 0, len = 1;
         if (dap_parse_vram_target(name_i->valuestring, &vaddr, &vlen)) {
             known = true;
+            vram  = true;
             if (vlen > 1) {
                 snprintf(dataId, sizeof dataId, "vram:%05X:%u", (unsigned)vaddr, (unsigned)vlen);
-                snprintf(desc, sizeof desc, "write VRAM $%05X-$%05X", (unsigned)vaddr,
+                snprintf(desc, sizeof desc, "VRAM $%05X-$%05X", (unsigned)vaddr,
                          (unsigned)(vaddr + vlen - 1));
             } else {
                 snprintf(dataId, sizeof dataId, "vram:%05X", (unsigned)vaddr);
-                snprintf(desc, sizeof desc, "write VRAM $%05X", (unsigned)vaddr);
+                snprintf(desc, sizeof desc, "VRAM $%05X", (unsigned)vaddr);
             }
         } else if (dap_data_target(name_i->valuestring, ref, &addr, &len)) {
             known = true;
             if (len > 1) {
                 snprintf(dataId, sizeof dataId, "%u:%u", addr, len);
-                snprintf(desc, sizeof desc, "write $%04X-$%04X", addr, (unsigned)(addr + len - 1));
+                snprintf(desc, sizeof desc, "$%04X-$%04X", addr, (unsigned)(addr + len - 1));
             } else {
                 snprintf(dataId, sizeof dataId, "%u", addr);
-                snprintf(desc, sizeof desc, "write $%04X", addr);
+                snprintf(desc, sizeof desc, "$%04X", addr);
             }
         }
     }
@@ -5425,6 +5436,10 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
         cJSON_AddStringToObject(body, "description", desc);
         cJSON *at = cJSON_CreateArray();
         cJSON_AddItemToArray(at, cJSON_CreateString("write"));
+        if (!vram) {
+            cJSON_AddItemToArray(at, cJSON_CreateString("read"));
+            cJSON_AddItemToArray(at, cJSON_CreateString("readWrite"));
+        }
         cJSON_AddItemToObject(body, "accessTypes", at);
         cJSON_AddBoolToObject(body, "canPersist", false);
     } else {
@@ -5456,9 +5471,11 @@ static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uin
 // Claim a watch, or say why not. A shared entry keeps its first owner's length
 // and filter, so one that differs from this request would be reported armed
 // while doing something else, and changing it would alter that owner's watch.
-static const char *dap_arm_watch(uint8_t space, uint32_t addr, uint32_t len, bool has_value, int op,
-                                 uint8_t value, debug_owner_t owner) {
-    const debug_wp_spec_t spec = { space, addr, len, DEBUG_BANK_ANY, has_value, op, value };
+static const char *dap_arm_watch(uint8_t space, uint8_t access, bool exclude_fetch, uint32_t addr,
+                                 uint32_t len, bool has_value, int op, uint8_t value,
+                                 debug_owner_t owner) {
+    const debug_wp_spec_t spec = { space, addr, len, DEBUG_BANK_ANY, has_value, op, value,
+                                   access, exclude_fetch };
     switch (debug_wp_add_ex(&spec, owner)) {
     case DEBUG_ADD_FULL:
         return "the watchpoint table is full";
@@ -5489,15 +5506,26 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         cJSON *rb = cJSON_CreateObject();
         const char *why = NULL;
         uint8_t  space = DEBUG_WP_SPACE_CPU;
+        uint8_t  access = DEBUG_WP_ACCESS_WRITE;
         uint32_t addr = 0, len = 1;
         bool has_value = false;
         int op = 0;
         uint32_t val = 0;
 
+        if (ac && cJSON_IsString(ac)) {
+            if (!strcmp(ac->valuestring, "read")) access = DEBUG_WP_ACCESS_READ;
+            else if (!strcmp(ac->valuestring, "readWrite")) access = DEBUG_WP_ACCESS_BOTH;
+            else if (strcmp(ac->valuestring, "write")) access = 0;
+        } else if (ac) {
+            access = 0;
+        }
+
         if (!id || !cJSON_IsString(id) || !dap_parse_data_id(id->valuestring, &space, &addr, &len))
             why = "not a dataId from dataBreakpointInfo";
-        else if (ac && (!cJSON_IsString(ac) || strcmp(ac->valuestring, "write")))
-            why = "only write access is supported";
+        else if (!access)
+            why = "accessType must be read, write or readWrite";
+        else if (space == DEBUG_WP_SPACE_VRAM && access != DEBUG_WP_ACCESS_WRITE)
+            why = "a VRAM watch catches writes only";
         else if (hc && (!cJSON_IsString(hc) || hc->valuestring[0]))
             why = "hitCondition is not supported on data breakpoints";
         else if (c && !cJSON_IsString(c))
@@ -5514,7 +5542,9 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         if (!why && num_data_bps >= MAX_WATCHPOINTS)
             why = "too many data breakpoints";
         if (!why)
-            why = dap_arm_watch(space, addr, len, has_value, op, (uint8_t)val, DEBUG_OWNER_DAP_SOURCE);
+            // A data breakpoint is on data, so bytes fetched as code do not count.
+            why = dap_arm_watch(space, access, true, addr, len, has_value, op, (uint8_t)val,
+                                DEBUG_OWNER_DAP_SOURCE);
 
         if (!why) {
             const int bp_id = next_dap_bp_id++;
@@ -5745,9 +5775,14 @@ static bool mcp_watch_range(cJSON *args, uint8_t *space, uint32_t *addr, uint32_
     return true;
 }
 
-static bool mcp_kind_is_write(cJSON *args) {
+// The access a watch kind asks for, or 0 for an exec breakpoint.
+static uint8_t mcp_watch_access(cJSON *args) {
     cJSON *k = cJSON_GetObjectItemCaseSensitive(args, "kind");
-    return k && cJSON_IsString(k) && !strcmp(k->valuestring, "write");
+    if (!k || !cJSON_IsString(k)) return 0;
+    if (!strcmp(k->valuestring, "write")) return DEBUG_WP_ACCESS_WRITE;
+    if (!strcmp(k->valuestring, "read")) return DEBUG_WP_ACCESS_READ;
+    if (!strcmp(k->valuestring, "access")) return DEBUG_WP_ACCESS_BOTH;
+    return 0;
 }
 
 static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
@@ -5759,7 +5794,8 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
     char why[200], where[24];
     cJSON *body;
 
-    if (mcp_kind_is_write(args)) {
+    const uint8_t access = mcp_watch_access(args);
+    if (access) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
         uint32_t val = 0;
@@ -5770,7 +5806,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
             return 0;
         }
         if (hit[0]) {
-            send_dap_error_response(seq, cmd, "a write watch takes no hit count");
+            send_dap_error_response(seq, cmd, "a watch takes no hit count");
             return 0;
         }
         if (has_value && len > 1) {
@@ -5783,7 +5819,9 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         }
         // Set again with the same values is fine; a different range or filter
         // would change what an earlier claim, even this client's, is watching.
-        const char *refused = dap_arm_watch(space, addr, len, has_value, op, (uint8_t)val, DEBUG_OWNER_MCP);
+        cJSON *xf = cJSON_GetObjectItemCaseSensitive(args, "excludeFetch");
+        const char *refused = dap_arm_watch(space, access, !(xf && cJSON_IsFalse(xf)), addr, len,
+                                            has_value, op, (uint8_t)val, DEBUG_OWNER_MCP);
         if (refused) {
             send_dap_error_response(seq, cmd, refused);
             return 0;
@@ -5791,7 +5829,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         const bool vram = space == DEBUG_WP_SPACE_VRAM;
         snprintf(where, sizeof where, vram ? "$%05X" : "$%04X", (unsigned)addr);
         body = cJSON_CreateObject();
-        cJSON_AddStringToObject(body, "kind", "write");
+        cJSON_AddStringToObject(body, "kind", cJSON_GetObjectItemCaseSensitive(args, "kind")->valuestring);
         cJSON_AddStringToObject(body, "space", vram ? "vram" : "cpu");
         cJSON_AddStringToObject(body, "address", where);
         cJSON_AddNumberToObject(body, "length", len);
@@ -5845,7 +5883,8 @@ static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
     char why[200];
     bool still_armed;
 
-    if (mcp_kind_is_write(args)) {
+    const uint8_t access = mcp_watch_access(args);
+    if (access) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
         if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) {
@@ -5853,7 +5892,11 @@ static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
             return 0;
         }
         if (!debug_wp_has_owner_ex(space, addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP)) {
-            send_dap_error_response(seq, cmd, "MCP has no write watch at this address");
+            send_dap_error_response(seq, cmd, "MCP has no watch at this address");
+            return 0;
+        }
+        if (debug_wp_at(debug_wp_find(space, addr, DEBUG_BANK_ANY))->access != access) {
+            send_dap_error_response(seq, cmd, "the watch at this address is of a different kind");
             return 0;
         }
         debug_wp_remove_ex(space, addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP);
@@ -6524,10 +6567,13 @@ void debug_server_notify_stopped(const char *reason) {
         if (stop.has_access) {
             const uint8_t space = stop.space == DEBUG_STOP_SPACE_VRAM ? DEBUG_WP_SPACE_VRAM
                                                                       : DEBUG_WP_SPACE_CPU;
+            const uint8_t access = stop.access == DEBUG_STOP_ACCESS_READ ? DEBUG_WP_ACCESS_READ
+                                                                         : DEBUG_WP_ACCESS_WRITE;
             for (int i = 0; i < num_data_bps; i++) {
                 if (data_bps[i].space == space &&
                     debug_wp_has_owner_ex(space, data_bps[i].addr, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE) &&
-                    debug_wp_fires_on_ex(space, data_bps[i].addr, DEBUG_BANK_ANY, stop.address, stop.value))
+                    debug_wp_fires_on_ex(space, access, stop.fetch, data_bps[i].addr, DEBUG_BANK_ANY,
+                                         stop.address, stop.value))
                     cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(data_bps[i].id));
             }
         }
