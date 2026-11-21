@@ -1299,6 +1299,17 @@ struct video_sprite_properties
 };
 
 #ifndef __EMSCRIPTEN__
+// The framebuffer stores pixels in BGRA but a PNG wants RGB.
+static void
+fill_png_buffer(void)
+{
+	for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
+		png_buffer[(i*3)+0] = framebuffer[(i*4)+2];
+		png_buffer[(i*3)+1] = framebuffer[(i*4)+1];
+		png_buffer[(i*3)+2] = framebuffer[(i*4)+0];
+	}
+}
+
 static void
 screenshot(void)
 {
@@ -1309,14 +1320,7 @@ screenshot(void)
 	if (!export_path(EXPORT_SCREENSHOT, name, path, sizeof path))
 		printf("WARNING: Couldn't make the screenshot folder %s\n", export_dir(EXPORT_SCREENSHOT));
 
-	memset(png_buffer, 0, SCREEN_WIDTH * SCREEN_HEIGHT * 3);
-
-	// The framebuffer stores pixels in BRGA but we want RGB:
-	for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
-		png_buffer[(i*3)+0] = framebuffer[(i*4)+2];
-		png_buffer[(i*3)+1] = framebuffer[(i*4)+1];
-		png_buffer[(i*3)+2] = framebuffer[(i*4)+0];
-	}
+	fill_png_buffer();
 
 	if (stbi_write_png(path, SCREEN_WIDTH, SCREEN_HEIGHT, 3, png_buffer, SCREEN_WIDTH*3)) {
 		printf("Wrote screenshot to %s\n", path);
@@ -1324,7 +1328,76 @@ screenshot(void)
 		printf("WARNING: Couldn't write screenshot to %s\n", path);
 	}
 }
+
+typedef struct {
+	uint8_t *data;
+	size_t   len, cap;
+	bool     failed;
+} png_sink;
+
+static void
+png_sink_write(void *context, void *data, int size)
+{
+	png_sink *s = (png_sink *)context;
+	if (s->failed) {
+		return;
+	}
+	if (s->len + (size_t)size > s->cap) {
+		size_t cap = s->cap ? s->cap : 64 * 1024;
+		while (cap < s->len + (size_t)size) {
+			cap *= 2;
+		}
+		uint8_t *grown = (uint8_t *)realloc(s->data, cap);
+		if (!grown) {
+			s->failed = true;
+			return;
+		}
+		s->data = grown;
+		s->cap  = cap;
+	}
+	memcpy(s->data + s->len, data, (size_t)size);
+	s->len += (size_t)size;
+}
+
+uint8_t *
+video_screenshot_png(size_t *out_len, int *out_w, int *out_h)
+{
+	png_sink sink = { NULL, 0, 0, false };
+	fill_png_buffer();
+	const int ok = stbi_write_png_to_func(png_sink_write, &sink, SCREEN_WIDTH, SCREEN_HEIGHT, 3,
+	                                      png_buffer, SCREEN_WIDTH * 3);
+	if (!ok || sink.failed) {
+		free(sink.data);
+		return NULL;
+	}
+	*out_len = sink.len;
+	*out_w   = SCREEN_WIDTH;
+	*out_h   = SCREEN_HEIGHT;
+	return sink.data;
+}
 #endif
+
+void
+video_get_text_layout(int layer, screen_text_layout_t *out)
+{
+	const uint8_t *r = reg_layer[layer];
+	out->enabled  = (reg_composer[0] & 3) != 0 && ((reg_composer[0] >> (4 + layer)) & 1);
+	out->is_text  = (r[0] & 0x07) == 0;  // tiles, one bit per pixel
+	out->map_base = (uint32_t)r[1] << 9;
+	out->map_w    = 32 << ((r[0] >> 4) & 3);
+	out->map_h    = 32 << ((r[0] >> 6) & 3);
+	out->tile_w   = 8 << (r[2] & 1);
+	out->tile_h   = 8 << ((r[2] >> 1) & 1);
+	out->hscroll  = r[3] | (r[4] & 0xf) << 8;
+	out->vscroll  = r[5] | (r[6] & 0xf) << 8;
+
+	int w, h;
+	video_get_active_layer_size(&w, &h);
+	out->columns = w / out->tile_w;
+	out->rows    = h / out->tile_h;
+	if (out->columns > out->map_w) out->columns = out->map_w;
+	if (out->rows > out->map_h)    out->rows    = out->map_h;
+}
 
 struct video_sprite_properties sprite_properties[128];
 
