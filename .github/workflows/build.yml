@@ -609,9 +609,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-15-intel is currently Sequoia.
+          # macos-15-intel and macos-15 (arm64) are both currently Sequoia.
           - { arch: x86_64, runner: macos-15-intel, python: '3.9',  package: x16emu_macos_intel }
-          - { arch: arm64,  runner: macos-14,       python: '3.10', package: x16emu_macos_m1 }
+          - { arch: arm64,  runner: macos-15,       python: '3.10', package: x16emu_macos_m1 }
     steps:
       - uses: actions/checkout@v4
       - name: Install Dependencies
