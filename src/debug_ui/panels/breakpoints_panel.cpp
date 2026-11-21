@@ -459,28 +459,50 @@ void
 draw_watchpoints()
 {
 	// --- Add ---------------------------------------------------------------
-	static int wp_addr = 0;
-	static int wp_len  = 1;
+	static int  wp_addr = 0;
+	static int  wp_len  = 1;
+	static bool wp_vram = false;
+
+	if (ImGui::RadioButton("CPU", !wp_vram)) wp_vram = false;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Watch the CPU's address space.");
+	ImGui::SameLine();
+	if (ImGui::RadioButton("VRAM", wp_vram)) wp_vram = true;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Watch VERA video memory: stop when a program's store lands there\n"
+		                  "through a data port, including FX writes.");
+	ImGui::SameLine();
+
+	const int wp_top = wp_vram ? 0x1FFFF : 0xFFFF;
+	if (wp_addr < 0) wp_addr = 0;
+	if (wp_addr > wp_top) wp_addr = wp_top;
 
 	ImGui::TextUnformatted("Break on write to $");
 	ImGui::SameLine(0.0f, 0.0f);
-	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
-	ImGui::InputScalar("##wpaddr", ImGuiDataType_S32, &wp_addr, nullptr, nullptr, "%04X",
+	ImGui::SetNextItemWidth(dbgui_field_width("1FFFF"));
+	ImGui::InputScalar("##wpaddr", ImGuiDataType_S32, &wp_addr, nullptr, nullptr,
+	                   wp_vram ? "%05X" : "%04X",
 	                   ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("First address to cover (hex).");
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(dbgui_field_width("65535") + ImGui::GetFrameHeight() * 2.0f);
+	ImGui::SetNextItemWidth(dbgui_field_width("131072") + ImGui::GetFrameHeight() * 2.0f);
 	ImGui::InputInt("len", &wp_len);
 	if (wp_len < 1) wp_len = 1;
-	if (wp_len > 0xFFFF) wp_len = 0xFFFF;
+	if (wp_len > wp_top + 1 - wp_addr) wp_len = wp_top + 1 - wp_addr;
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("How many consecutive bytes to cover. A write anywhere in the\n"
 		                  "range triggers the break.");
 	ImGui::SameLine();
 	ImGui::BeginDisabled(debug_wp_count() >= MAX_WATCHPOINTS);
 	if (ImGui::Button("Add")) {
-		DEBUGAddWatchPoint((uint16_t)(wp_addr & 0xFFFF), (uint16_t)wp_len);
+		const int add_addr = wp_addr < 0 ? 0 : (wp_addr > wp_top ? wp_top : wp_addr);
+		const int add_room = wp_top + 1 - add_addr;
+		const int add_len  = wp_len > add_room ? add_room : wp_len;
+		if (wp_vram)
+			DEBUGAddVramWatchPoint((uint32_t)add_addr, (uint32_t)add_len);
+		else
+			DEBUGAddWatchPoint((uint16_t)add_addr, (uint16_t)(add_len > 0xFFFF ? 0xFFFF : add_len));
 	}
 	ImGui::EndDisabled();
 	if (ImGui::IsItemHovered())
@@ -499,20 +521,21 @@ draw_watchpoints()
 	}
 
 	// --- List --------------------------------------------------------------
-	int remove_addr = -1;
-	int remove_bank = DEBUG_BANK_ANY;
+	int remove_index = -1;
 
-	if (ImGui::BeginTable("wp_table", 6,
+	if (ImGui::BeginTable("wp_table", 7,
 	        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
 	            DBGUI_TABLE_FLAGS_RESIZABLE)) {
 		ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_fit("On", ImGui::GetFrameHeight()));
+		ImGui::TableSetupColumn("Space",   ImGuiTableColumnFlags_WidthFixed,
+		                        dbgui_col_width("Space", "VRAM"));
 		ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed,
-		                        dbgui_col_width("Address", "$FFFF"));
+		                        dbgui_col_width("Address", "$1FFFF"));
 		ImGui::TableSetupColumn("Len",     ImGuiTableColumnFlags_WidthFixed,
-		                        dbgui_col_width("Len", "65535"));
+		                        dbgui_col_width("Len", "131072"));
 		ImGui::TableSetupColumn("Range",   ImGuiTableColumnFlags_WidthFixed,
-		                        dbgui_col_width("Range", "$FFFF-$FFFF"));
+		                        dbgui_col_width("Range", "$1FFFF-$1FFFF"));
 		ImGui::TableSetupColumn("Only when written value", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_fit("", dbgui_field_width("x")));
@@ -523,46 +546,49 @@ draw_watchpoints()
 			if (!w)
 				break;
 			// Edits go through the core's setters rather than writing the
-			// table, which is private to debug_core.c. They are keyed on the
-			// watchpoint's OWN bank, not DEBUG_BANK_ANY: a watch set on one
-			// RAM bank's $A100 would otherwise not be found, and the edit
-			// would silently do nothing.
-			const uint16_t w_addr = w->addr;
-			const int      w_bank = w->x16Bank;
+			// table, which is private to debug_core.c. They go by table index,
+			// which already names the entry's space and bank.
+			const bool w_vram = w->space == DEBUG_WP_SPACE_VRAM;
 			ImGui::PushID(i);
 			ImGui::TableNextRow();
 
 			ImGui::TableSetColumnIndex(0);
 			bool active = w->active;
 			if (ImGui::Checkbox("##on", &active))
-				debug_wp_set_active(w_addr, w_bank, active);
+				debug_wp_set_active_at(i, active);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Disable without deleting.");
 
 			ImGui::TableSetColumnIndex(1);
-			ImGui::Text("$%04X", w->addr);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Click to show this address in the Memory panel.");
-			if (ImGui::IsItemClicked())
-				debug_ui_request_goto(w->addr, 0);
+			ImGui::TextUnformatted(w_vram ? "VRAM" : "CPU");
 
 			ImGui::TableSetColumnIndex(2);
-			ImGui::Text("%u", (unsigned)w->len);
+			ImGui::Text(w_vram ? "$%05X" : "$%04X", (unsigned)w->addr);
+			if (!w_vram) {
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Click to show this address in the Memory panel.");
+				if (ImGui::IsItemClicked())
+					debug_ui_request_goto((uint16_t)w->addr, 0);
+			}
 
 			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%u", (unsigned)w->len);
+
+			ImGui::TableSetColumnIndex(4);
 			if (w->len > 1)
-				ImGui::TextDisabled("$%04X-$%04X", w->addr, (unsigned)(w->addr + w->len - 1));
+				ImGui::TextDisabled(w_vram ? "$%05X-$%05X" : "$%04X-$%04X", (unsigned)w->addr,
+				                    (unsigned)(w->addr + w->len - 1));
 			else
 				ImGui::TextDisabled("-");
 
 			// Optional filter: only break when the value being written matches.
-			ImGui::TableSetColumnIndex(4);
+			ImGui::TableSetColumnIndex(5);
 			bool has = w->has_value;
 			if (ImGui::Checkbox("##hasval", &has)) {
 				if (has)
-					debug_wp_set_value(w_addr, w_bank, w->op, w->value);
+					debug_wp_set_value_at(i, w->op, w->value);
 				else
-					debug_wp_clear_value(w_addr, w_bank);
+					debug_wp_clear_value_at(i);
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Only break when the value being written satisfies a test,\n"
@@ -574,7 +600,7 @@ draw_watchpoints()
 				if (ImGui::BeginCombo("##op", wp_op_name(op))) {
 					for (int k = 0; k < 6; k++) {
 						if (ImGui::Selectable(wp_op_name(k), op == k))
-							debug_wp_set_value(w_addr, w_bank, k, w->value);
+							debug_wp_set_value_at(i, k, w->value);
 					}
 					ImGui::EndCombo();
 				}
@@ -584,7 +610,7 @@ draw_watchpoints()
 				if (ImGui::InputScalar("##val", ImGuiDataType_S32, &val, nullptr, nullptr, "%02X",
 				                       ImGuiInputTextFlags_CharsHexadecimal |
 				                           ImGuiInputTextFlags_AutoSelectAll)) {
-					debug_wp_set_value(w_addr, w_bank, w->op, (uint8_t)(val & 0xFF));
+					debug_wp_set_value_at(i, w->op, (uint8_t)(val & 0xFF));
 				}
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip("Value to compare the written byte against (hex).");
@@ -593,10 +619,9 @@ draw_watchpoints()
 				ImGui::TextDisabled("any write");
 			}
 
-			ImGui::TableSetColumnIndex(5);
+			ImGui::TableSetColumnIndex(6);
 			if (ImGui::SmallButton("x")) {
-				remove_addr = w->addr;
-				remove_bank = w_bank;
+				remove_index = i;
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Delete this watchpoint.");
@@ -606,8 +631,8 @@ draw_watchpoints()
 		ImGui::EndTable();
 	}
 
-	if (remove_addr >= 0) {
-		debug_wp_delete((uint16_t)remove_addr, remove_bank);
+	if (remove_index >= 0) {
+		debug_wp_delete_at(remove_index);
 	}
 }
 

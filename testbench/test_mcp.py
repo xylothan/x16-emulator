@@ -1409,6 +1409,199 @@ def test_stop_details():
         dap.close()
 
 
+def run_planted(m, code):
+    """Run these opcodes from $0810 until a watch fires or they finish."""
+    end = 0x0810 + len(code) // 2
+    m.call("write_memory", address=0x0810, hex=code + "80FE")
+    m.call("set_registers", pc=0x0810)
+    m.call("set_breakpoint", address=end)
+    last = data(m.call("get_status")).get("stopId")
+    m.call("continue")
+    r = data(m.call("wait_for_stop", sinceStopId=last))
+    m.call("remove_breakpoint", address=end)
+    return r
+
+
+def watch_fired(r):
+    return r.get("stopReason") == "data breakpoint"
+
+
+def vram_hits(m, address):
+    for w in data(m.call("list_breakpoints")).get("watchpoints", []):
+        if w.get("space") == "vram" and w.get("addr") == address:
+            return w.get("hits")
+    return None
+
+
+def test_vram_watch():
+    print("VRAM watches")
+
+    STORE_P0 = "A95A8D239F"          # lda #$5A / sta $9F23
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        dap = Dap(port)
+        dap.session()
+        plant_loop(m)
+
+        # What gets refused.
+        case("a VRAM exec breakpoint is refused",
+             is_error(m.call("set_breakpoint", address=0x4000, space="vram")))
+        case("past the end of VRAM is refused",
+             is_error(m.call("set_breakpoint", address=0x20000, space="vram", kind="write")))
+        case("a range past the end is refused",
+             is_error(m.call("set_breakpoint", address=0x1FFFF, space="vram", kind="write", length=2)))
+        case("VRAM has no banks",
+             is_error(m.call("set_breakpoint", address=0x4000, space="vram", kind="write", bank=1)))
+        case("a vram: prefix is refused, as elsewhere",
+             is_error(m.call("set_breakpoint", address="vram:4000", kind="write")))
+        case("an unknown space is refused",
+             is_error(m.call("set_breakpoint", address=0x4000, space="rom", kind="write")))
+
+        # A plain store through each port.
+        d = data(m.call("set_breakpoint", address=0x04000, space="vram", kind="write"))
+        case("a VRAM watch is set", d.get("space") == "vram" and d.get("address") == "$04000", str(d))
+        set_vera(m, 0x05, 0)
+        set_vera(m, 0, 0x00, 0x40, 0x10)
+        r = run_planted(m, STORE_P0)
+        s = r.get("stop", {})
+        case("a store through port 0 fires", watch_fired(r), str(r.get("stopReason")))
+        case("it names VRAM", s.get("space") == "vram" and s.get("access") == "write", str(s))
+        case("and the address", s.get("address") == 0x04000, str(s))
+        case("and the value", s.get("value") == 0x5A)
+        case("and the port", s.get("dataPort") == 0)
+        case("and the instruction", s.get("accessingPc") == 0x0812, str(s.get("accessingPc")))
+        case("VRAM has no bank to report", s.get("bank") is None)
+        case("the byte is there", read_byte(m, 0x04000, "vram") == 0x5A)
+        case("a hit is counted", vram_hits(m, 0x04000) == 1, str(vram_hits(m, 0x04000)))
+
+        set_vera(m, 0x05, 1)
+        set_vera(m, 0, 0x00, 0x40, 0x10)
+        set_vera(m, 0x05, 0)
+        r = run_planted(m, "A9338D249F")     # lda #$33 / sta $9F24
+        s = r.get("stop", {})
+        case("a store through port 1 fires", watch_fired(r) and s.get("dataPort") == 1, str(s))
+        case("with its value", s.get("value") == 0x33)
+
+        # Writes that must not fire.
+        before = vram_hits(m, 0x04000)
+        set_vera(m, 0, 0x00, 0x40, 0x00)
+        m.call("write_memory", address=0x9F23, hex="77")
+        m.call("write_memory", address=0x04000, space="vram", hex="55")
+        case("a debugger write does not count", vram_hits(m, 0x04000) == before)
+        set_vera(m, 0, 0x01, 0x40, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("the next byte does not fire", not watch_fired(r), str(r.get("stopReason")))
+        r = run_planted(m, "A95A8D0040")     # sta $4000
+        case("a CPU store to the same number does not fire", not watch_fired(r), str(r.get("stopReason")))
+        m.call("set_breakpoint", address=0x4000, kind="write")
+        set_vera(m, 0, 0x00, 0x40, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("a VRAM store is not a CPU watch either", r.get("stop", {}).get("space") == "vram", str(r.get("stop")))
+        r = run_planted(m, "A95A8D0040")
+        case("and the CPU watch still works", r.get("stop", {}).get("space") == "cpu", str(r.get("stop")))
+        d = data(m.call("remove_breakpoint", address=0x4000, kind="write"))
+        case("removing the CPU watch leaves the VRAM one", d.get("stillArmed") is False and
+             vram_hits(m, 0x04000) is not None, str(d))
+
+        d = data(m.call("remove_breakpoint", address=0x04000, space="vram", kind="write"))
+        case("a VRAM watch comes off", d.get("removed") is True and d.get("stillArmed") is False, str(d))
+        set_vera(m, 0, 0x00, 0x40, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("and no longer fires", not watch_fired(r), str(r.get("stopReason")))
+
+        # Range and value filter.
+        m.call("set_breakpoint", address=0x05000, space="vram", kind="write", length=4)
+        set_vera(m, 0, 0x03, 0x50, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("a range fires on its last byte", r.get("stop", {}).get("address") == 0x05003, str(r.get("stop")))
+        set_vera(m, 0, 0x04, 0x50, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("and not past it", not watch_fired(r), str(r.get("stopReason")))
+        m.call("remove_breakpoint", address=0x05000, space="vram", kind="write")
+
+        m.call("set_breakpoint", address=0x05100, space="vram", kind="write", condition="== $5A")
+        set_vera(m, 0, 0x00, 0x51, 0x00)
+        r = run_planted(m, "A9128D239F")
+        case("a value filter holds off", not watch_fired(r), str(r.get("stopReason")))
+        r = run_planted(m, STORE_P0)
+        case("and fires on the value", watch_fired(r), str(r.get("stopReason")))
+        m.call("remove_breakpoint", address=0x05100, space="vram", kind="write")
+
+        # FX: cache writes, masks and transparency. DCSEL 2 holds FX_CTRL, 6 the cache.
+        set_vera(m, 0x05, 6 << 1)
+        set_vera(m, 0x09, 0x11, 0x22, 0x33, 0x44)
+        set_vera(m, 0x05, 2 << 1)
+        set_vera(m, 0x09, 0x40)
+        m.call("set_breakpoint", address=0x06001, space="vram", kind="write")
+        m.call("set_breakpoint", address=0x06003, space="vram", kind="write")
+        set_vera(m, 0, 0x00, 0x60, 0x00)
+        r = run_planted(m, "A9008D239F")     # mask 0: all four bytes
+        s = r.get("stop", {})
+        case("an FX cache write fires", watch_fired(r), str(r.get("stopReason")))
+        case("on the first watched byte", s.get("address") == 0x06001 and s.get("value") == 0x22, str(s))
+        case("all four bytes still landed", read_byte(m, 0x06003, "vram") == 0x44)
+        set_vera(m, 0, 0x00, 0x60, 0x00)
+        r = run_planted(m, "A9CC8D239F")     # mask 3 on bytes 1 and 3
+        case("a masked byte does not fire", not watch_fired(r), str(r.get("stop")))
+        m.call("remove_breakpoint", address=0x06001, space="vram", kind="write")
+        m.call("remove_breakpoint", address=0x06003, space="vram", kind="write")
+
+        set_vera(m, 0x09, 0x80)              # transparent writes
+        m.call("set_breakpoint", address=0x06100, space="vram", kind="write")
+        set_vera(m, 0, 0x00, 0x61, 0x00)
+        r = run_planted(m, "A9008D239F")
+        case("a transparent zero does not fire", not watch_fired(r), str(r.get("stop")))
+        r = run_planted(m, STORE_P0)
+        case("a non-zero byte does", watch_fired(r), str(r.get("stopReason")))
+        m.call("remove_breakpoint", address=0x06100, space="vram", kind="write")
+        m.call("set_breakpoint", address=0x1F9C0, space="vram", kind="write")
+        set_vera(m, 0, 0xC0, 0xF9, 0x01)
+        r = run_planted(m, "A9008D239F")
+        case("a transparent zero still reaching the PSG fires", watch_fired(r) and
+             r.get("stop", {}).get("value") == 0, str(r.get("stop")))
+        m.call("remove_breakpoint", address=0x1F9C0, space="vram", kind="write")
+
+        # The 2-bit poke is a separate path through the port write.
+        set_vera(m, 0x09, 0x00)
+        set_vera(m, 0x05, 0x01)
+        set_vera(m, 0, 0x00, 0x62, 0x00)
+        set_vera(m, 0x05, (2 << 1) | 1)
+        set_vera(m, 0x09, 0x06, 0x01)
+        m.call("set_breakpoint", address=0x06201, space="vram", kind="write")
+        r = run_planted(m, "A9018D209FA9008D249F")   # sta $9F20 picks the byte, sta $9F24 pokes
+        s = r.get("stop", {})
+        case("a 2-bit poke fires", watch_fired(r) and s.get("address") == 0x06201, str(s))
+        case("through port 1", s.get("dataPort") == 1, str(s))
+        m.call("remove_breakpoint", address=0x06201, space="vram", kind="write")
+        set_vera(m, 0x09, 0x00, 0x00)
+        set_vera(m, 0x05, 0)
+
+        # DAP sees the same watch.
+        info = dap.request("dataBreakpointInfo", {"name": "vram:07000:2"})["body"]
+        case("DAP offers a VRAM range", info.get("dataId") == "vram:07000:2", str(info))
+        case("a bad VRAM name has no dataId",
+             dap.request("dataBreakpointInfo", {"name": "vram:20000"})["body"].get("dataId") is None)
+        set_r = dap.request("setDataBreakpoints", {"breakpoints": [{"dataId": info["dataId"]}]})
+        rows = set_r["body"]["breakpoints"]
+        case("DAP arms it", rows and rows[0].get("verified") is True, str(rows))
+        dap.events.clear()
+        set_vera(m, 0, 0x01, 0x70, 0x10)
+        r = run_planted(m, STORE_P0)
+        case("it fires", watch_fired(r) and r.get("stop", {}).get("address") == 0x07001, str(r.get("stop")))
+        ev = dap.event("stopped")
+        while ev and ev["body"].get("reason") != "data breakpoint":
+            ev = dap.event("stopped")
+        case("the stopped event names the breakpoint",
+             (ev or {}).get("body", {}).get("hitBreakpointIds") == [rows[0].get("id")], str(ev)[:200])
+        case("and the VRAM access", (ev or {}).get("body", {}).get("stop", {}).get("space") == "vram")
+        dap.request("setDataBreakpoints", {"breakpoints": []})
+        wps = data(m.call("list_breakpoints")).get("watchpoints", [])
+        case("clearing DAP's list takes it off", not wps, str(wps))
+        dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1417,7 +1610,8 @@ def main():
     EXE, ROM = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
-                 test_http, test_lease, test_vision, test_vera_state, test_stop_details):
+                 test_http, test_lease, test_vision, test_vera_state, test_stop_details,
+                 test_vram_watch):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

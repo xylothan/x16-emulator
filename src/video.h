@@ -210,6 +210,12 @@ typedef enum {
 typedef void (*video_vram_tap_fn)(uint32_t address, uint8_t value, video_vram_region_t region,
                                   bool fx4);
 extern video_vram_tap_fn video_vram_write_tap;
+
+// A guest store has landed in VRAM, through data port `port`. Called once per
+// byte that actually changed hands, so a masked or transparent FX write is not
+// reported. NULL unless a VRAM watch is armed.
+typedef void (*video_vram_watch_fn)(uint32_t address, uint8_t value, int port);
+extern video_vram_watch_fn video_vram_watch_hook;
 void video_update_title(const char* window_title);
 
 uint8_t via1_read(uint8_t reg, bool debug);
