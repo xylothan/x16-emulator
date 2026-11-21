@@ -15,6 +15,8 @@ static inline int  mcp_server_init_stdio(void) { return -1; }
 static inline int  mcp_server_poll(void) { return 0; }
 static inline bool mcp_server_is_enabled(void) { return false; }
 static inline void mcp_server_shutdown(void) { }
+static inline void mcp_server_note_stopped(void) { }
+static inline void mcp_server_note_resumed(void) { }
 
 #else
 
@@ -29,6 +31,11 @@ int  mcp_server_poll(void);
 
 bool mcp_server_is_enabled(void);
 void mcp_server_shutdown(void);
+
+// The machine stopped, or was set going. Told as it happens, because a stop and
+// a resume can both land between two polls and each stop has to be counted.
+void mcp_server_note_stopped(void);
+void mcp_server_note_resumed(void);
 
 #endif // HAS_DAP
 
