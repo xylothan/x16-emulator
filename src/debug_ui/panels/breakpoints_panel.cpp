@@ -438,15 +438,15 @@ draw_breakpoints()
 }
 
 // ---------------------------------------------------------------------------
-// Watchpoints — break when the program WRITES to an address or range.
+// Watchpoints — break when the program touches an address or range.
 //
 // These are a different trigger from the PC breakpoints above (which fire when
 // execution reaches an address), but they are the same idea to a user: a
 // condition that stops the machine. They used to be creatable from the memory
 // view with no way to see or manage them, which is why they live here now.
 //
-// Note the trigger is a write, not a change: storing the same value back still
-// fires. The optional value filter narrows that.
+// Note a write watch triggers on the write, not a change: storing the same value
+// back still fires. The optional value filter narrows that.
 // ---------------------------------------------------------------------------
 const char *
 wp_op_name(int op)
@@ -462,6 +462,9 @@ draw_watchpoints()
 	static int  wp_addr = 0;
 	static int  wp_len  = 1;
 	static bool wp_vram = false;
+	static bool wp_read = false;
+	static bool wp_write = true;
+	static bool wp_no_fetch = true;
 
 	if (ImGui::RadioButton("CPU", !wp_vram)) wp_vram = false;
 	if (ImGui::IsItemHovered())
@@ -471,13 +474,36 @@ draw_watchpoints()
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Watch VERA video memory: stop when a program's store lands there\n"
 		                  "through a data port, including FX writes.");
+
+	// VRAM watches catch writes only. The toggles stay on screen and show that.
 	ImGui::SameLine();
+	bool show_read = wp_read && !wp_vram;
+	ImGui::BeginDisabled(wp_vram);
+	if (ImGui::Checkbox("Read", &show_read)) wp_read = show_read;
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip(wp_vram ? "VRAM watches catch writes only."
+		                          : "Stop when the program reads the address.");
+	ImGui::SameLine();
+	bool show_write = wp_write || wp_vram;
+	ImGui::BeginDisabled(wp_vram);
+	if (ImGui::Checkbox("Write", &show_write)) wp_write = show_write;
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("Stop when the program writes the address.");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(wp_vram || !wp_read);
+	ImGui::Checkbox("Exclude fetch", &wp_no_fetch);
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("A read watch ignores bytes the CPU fetches as instructions,\n"
+		                  "so it stops on data reads only. Needs Read.");
 
 	const int wp_top = wp_vram ? 0x1FFFF : 0xFFFF;
 	if (wp_addr < 0) wp_addr = 0;
 	if (wp_addr > wp_top) wp_addr = wp_top;
 
-	ImGui::TextUnformatted("Break on write to $");
+	ImGui::TextUnformatted("Address $");
 	ImGui::SameLine(0.0f, 0.0f);
 	ImGui::SetNextItemWidth(dbgui_field_width("1FFFF"));
 	ImGui::InputScalar("##wpaddr", ImGuiDataType_S32, &wp_addr, nullptr, nullptr,
@@ -491,10 +517,10 @@ draw_watchpoints()
 	if (wp_len < 1) wp_len = 1;
 	if (wp_len > wp_top + 1 - wp_addr) wp_len = wp_top + 1 - wp_addr;
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("How many consecutive bytes to cover. A write anywhere in the\n"
+		ImGui::SetTooltip("How many consecutive bytes to cover. An access anywhere in the\n"
 		                  "range triggers the break.");
 	ImGui::SameLine();
-	ImGui::BeginDisabled(debug_wp_count() >= MAX_WATCHPOINTS);
+	ImGui::BeginDisabled(debug_wp_count() >= MAX_WATCHPOINTS || (!wp_vram && !wp_read && !wp_write));
 	if (ImGui::Button("Add")) {
 		const int add_addr = wp_addr < 0 ? 0 : (wp_addr > wp_top ? wp_top : wp_addr);
 		const int add_room = wp_top + 1 - add_addr;
@@ -502,12 +528,14 @@ draw_watchpoints()
 		if (wp_vram)
 			DEBUGAddVramWatchPoint((uint32_t)add_addr, (uint32_t)add_len);
 		else
-			DEBUGAddWatchPoint((uint16_t)add_addr, (uint16_t)(add_len > 0xFFFF ? 0xFFFF : add_len));
+			DEBUGAddCpuWatch((uint16_t)add_addr, (uint32_t)(add_len > 0xFFFF ? 0xFFFF : add_len),
+			                 (uint8_t)((wp_read ? DEBUG_WP_ACCESS_READ : 0) | (wp_write ? DEBUG_WP_ACCESS_WRITE : 0)),
+			                 wp_no_fetch);
 	}
 	ImGui::EndDisabled();
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("You can also right-click a byte (or a drag-selected range)\n"
-		                  "in the Memory panel and choose \"Break on write\".");
+		                  "in the Memory panel and choose a \"Break on\" item.");
 	ImGui::SameLine();
 	ImGui::TextDisabled("(%d / %d used)", debug_wp_count(), MAX_WATCHPOINTS);
 
@@ -516,14 +544,14 @@ draw_watchpoints()
 	if (debug_wp_count() == 0) {
 		ImGui::TextDisabled("None set.");
 		ImGui::SetItemTooltip("Add one above, or right-click an address (or a drag-selected\n"
-		                      "range) in the Memory panel and choose \"Break on write\".");
+		                      "range) in the Memory panel and choose a \"Break on\" item.");
 		return;
 	}
 
 	// --- List --------------------------------------------------------------
 	int remove_index = -1;
 
-	if (ImGui::BeginTable("wp_table", 7,
+	if (ImGui::BeginTable("wp_table", 9,
 	        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
 	            DBGUI_TABLE_FLAGS_RESIZABLE)) {
 		ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed,
@@ -536,7 +564,11 @@ draw_watchpoints()
 		                        dbgui_col_width("Len", "131072"));
 		ImGui::TableSetupColumn("Range",   ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_width("Range", "$1FFFF-$1FFFF"));
-		ImGui::TableSetupColumn("Only when written value", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Access",  ImGuiTableColumnFlags_WidthFixed,
+		                        dbgui_col_width("Access", "RW+fetch"));
+		ImGui::TableSetupColumn("Hits",    ImGuiTableColumnFlags_WidthFixed,
+		                        dbgui_col_width("Hits", "9999999"));
+		ImGui::TableSetupColumn("Only when value", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_fit("", dbgui_field_width("x")));
 		ImGui::TableHeadersRow();
@@ -581,8 +613,20 @@ draw_watchpoints()
 			else
 				ImGui::TextDisabled("-");
 
-			// Optional filter: only break when the value being written matches.
 			ImGui::TableSetColumnIndex(5);
+			{
+				const bool r = (w->access & DEBUG_WP_ACCESS_READ) != 0;
+				const bool wr = (w->access & DEBUG_WP_ACCESS_WRITE) != 0;
+				ImGui::Text("%s%s%s", r ? "R" : "", wr ? "W" : "", r && !w->exclude_fetch ? "+fetch" : "");
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("R reads, W writes. +fetch also counts bytes fetched as instructions.");
+
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%u", (unsigned)w->hits);
+
+			// Optional filter: only break when the value moved matches.
+			ImGui::TableSetColumnIndex(7);
 			bool has = w->has_value;
 			if (ImGui::Checkbox("##hasval", &has)) {
 				if (has)
@@ -591,8 +635,8 @@ draw_watchpoints()
 					debug_wp_clear_value_at(i);
 			}
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Only break when the value being written satisfies a test,\n"
-				                  "rather than on every write.");
+				ImGui::SetTooltip("Only break when the byte read or written satisfies a test,\n"
+				                  "rather than on every access.");
 			if (w->has_value) {
 				ImGui::SameLine();
 				ImGui::SetNextItemWidth(dbgui_combo_width(">="));
@@ -613,13 +657,13 @@ draw_watchpoints()
 					debug_wp_set_value_at(i, w->op, (uint8_t)(val & 0xFF));
 				}
 				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Value to compare the written byte against (hex).");
+					ImGui::SetTooltip("Value to compare the byte against (hex).");
 			} else {
 				ImGui::SameLine();
-				ImGui::TextDisabled("any write");
+				ImGui::TextDisabled("any value");
 			}
 
-			ImGui::TableSetColumnIndex(6);
+			ImGui::TableSetColumnIndex(8);
 			if (ImGui::SmallButton("x")) {
 				remove_index = i;
 			}
@@ -663,7 +707,7 @@ breakpoints_panel_render(bool *p_open)
 		}
 
 		char wp_hdr[80];
-		snprintf(wp_hdr, sizeof wp_hdr, "Memory writes (%d)###wp", debug_wp_count());
+		snprintf(wp_hdr, sizeof wp_hdr, "Memory watches (%d)###wp", debug_wp_count());
 		const bool wp_open = ImGui::CollapsingHeader(wp_hdr, ImGuiTreeNodeFlags_DefaultOpen);
 		ImGui::SetItemTooltip("Break when the program writes to an address - the way to find\n"
 		                      "what is clobbering a value.\n\n"

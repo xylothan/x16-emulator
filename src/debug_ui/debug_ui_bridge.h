@@ -211,7 +211,16 @@ void debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x
 // Owned by DEBUG_OWNER_UI, like the breakpoints above: -wp on the command line
 // and a DAP client's data breakpoints can name the same address, and none of
 // them should be able to disarm another's.
-static inline bool DEBUGAddWatchPoint(uint16_t addr, uint16_t len) { return debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_UI) != DEBUG_ADD_FULL; }
+static inline bool DEBUGAddWatchPoint(uint16_t addr, uint16_t len) {
+    const debug_add_result_t added = debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_UI);
+    return added == DEBUG_ADD_CREATED || added == DEBUG_ADD_EXISTED;
+}
+static inline bool DEBUGAddCpuWatch(uint16_t addr, uint32_t len, uint8_t access, bool exclude_fetch) {
+    const debug_wp_spec_t spec = { DEBUG_WP_SPACE_CPU, addr, len, DEBUG_BANK_ANY, false, 0, 0,
+                                   access, exclude_fetch };
+    const debug_add_result_t added = debug_wp_add_ex(&spec, DEBUG_OWNER_UI);
+    return added == DEBUG_ADD_CREATED || added == DEBUG_ADD_EXISTED;
+}
 static inline bool DEBUGRemoveWatchPoint(uint16_t addr) { return debug_wp_delete(addr, DEBUG_BANK_ANY); }
 static inline bool DEBUGCheckWatchPoint(uint16_t addr) { return debug_wp_covers(addr); }
 static inline bool DEBUGAddVramWatchPoint(uint32_t addr, uint32_t len) {

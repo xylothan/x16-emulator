@@ -303,8 +303,9 @@ MUTATIONS = [
     {
         "name": "a watchpoint swallows the store",
         "file": "src/memory.c",
-        "find": "\t\tDEBUGBreakOnWatchpoint();\n\t}",
-        "into": "\t\tDEBUGBreakOnWatchpoint();\n\t\treturn;\n\t}",
+        # Anchored on the write check: the read paths break the same way.
+        "find": "debug_wp_check_write(address, value)) {\n\t\tDEBUGBreakOnWatchpoint();\n\t}",
+        "into": "debug_wp_check_write(address, value)) {\n\t\tDEBUGBreakOnWatchpoint();\n\t\treturn;\n\t}",
         "count": 1,
         "caught_by": ["watchpoint_purity"],
     },

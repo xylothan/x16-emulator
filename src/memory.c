@@ -205,9 +205,8 @@ static uint8_t x16_bank_of(uint16_t address) {
 	}
 }
 
-uint8_t
-read6502(uint16_t address, uint8_t bank) {
-	if (!is_gen2) bank = 0;
+static inline uint8_t
+guest_read(uint16_t address, uint8_t bank) {
 	// Report access to uninitialized RAM (if option selected)
 	if (reportUninitializedAccess) {
 		if (bank == 0) {
@@ -238,6 +237,29 @@ read6502(uint16_t address, uint8_t bank) {
     }
 
 	return real_read6502(address, bank, false, USE_CURRENT_X16_BANK);
+}
+
+// The check comes after the read, so a watched I/O register has its side effect
+// and the watch sees the value the program received. Debugger reads go through
+// debug_read6502() and never arrive here.
+uint8_t
+read6502(uint16_t address, uint8_t bank) {
+	if (!is_gen2) bank = 0;
+	const uint8_t value = guest_read(address, bank);
+	if (debug_wp_armed_cpu_read > 0 && bank == 0 && debug_wp_check_read(address, value, false)) {
+		DEBUGBreakOnWatchpoint();
+	}
+	return value;
+}
+
+uint8_t
+fetch6502(uint16_t address, uint8_t bank) {
+	if (!is_gen2) bank = 0;
+	const uint8_t value = guest_read(address, bank);
+	if (debug_wp_armed_cpu_read > 0 && bank == 0 && debug_wp_check_read(address, value, true)) {
+		DEBUGBreakOnWatchpoint();
+	}
+	return value;
 }
 
 // Which device an I/O-page address belongs to, for the trace. Kept here rather
