@@ -189,7 +189,8 @@ def test_tools():
         listed = (r or {}).get("result", {}).get("tools", [])
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
-                   "wait_for_stop", "perf_stats", "get_screen", "screenshot"}
+                   "wait_for_stop", "perf_stats", "get_screen", "screenshot",
+                   "get_vera_state"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
                   "type_text", "send_key", "joystick"}
@@ -1282,6 +1283,132 @@ def test_vision():
         case("a screenshot arrives whole over HTTP", png is not None and png_rgb(png)[:2] == (640, 480))
 
 
+def set_vera(m, reg, *values):
+    """Write VERA registers from $9F20 + reg, one byte at a time."""
+    for i, v in enumerate(values):
+        m.call("write_memory", address=0x9F20 + reg + i, hex="%02X" % v)
+
+
+def test_vera_state():
+    print("VERA state")
+
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        dap = Dap(port)
+        dap.session()
+        plant_loop(m)
+
+        m.call("write_memory", address=0x12340, hex="AB", space="vram")
+        m.call("write_memory", address=0x00080, hex="5A", space="vram")
+        set_vera(m, 5, 0x00)                  # ADDRSEL 0
+        set_vera(m, 0, 0x40, 0x23, 0x27)      # $12340, nibble, nibble step, code 4
+        set_vera(m, 5, 0x01)                  # ADDRSEL 1
+        set_vera(m, 0, 0x80, 0x00, 0x18)      # $00080, code 3
+        set_vera(m, 6, 0x85)                  # IEN 5, line bit 8
+        set_vera(m, 8, 0x42)
+
+        set_vera(m, 5, 2 << 1)
+        set_vera(m, 9, 0xC4, 0x42, 0x81, 0x19)
+        set_vera(m, 5, 3 << 1)
+        set_vera(m, 9, 0x34, 0x12, 0x00, 0x41)
+        set_vera(m, 5, 4 << 1)
+        set_vera(m, 9, 0x78, 0x83, 0x56, 0x02)
+        set_vera(m, 5, 5 << 1)
+        set_vera(m, 9, 0xAB, 0xCD)
+        set_vera(m, 5, 6 << 1)
+        set_vera(m, 9, 0x11, 0x22, 0x33, 0x44)
+        set_vera(m, 5, 2 << 1)
+        set_vera(m, 0xC, 0x59)                # accumulate
+        set_vera(m, 5, (6 << 1) | 1)          # leave DCSEL and ADDRSEL somewhere else
+
+        before = dap.request("x16/status", {"hash": True})["body"].get("hash")
+        v = data(m.call("get_vera_state"))
+        over_dap = dap.request("x16/vera")["body"]
+        after = dap.request("x16/status", {"hash": True})["body"].get("hash")
+        case("reading VERA state changes no machine state", before == after and before is not None)
+        case("the same state over DAP", all(over_dap.get(k) == v.get(k) for k in over_dap), str(over_dap)[:200])
+
+        ports = v.get("ports", [{}, {}])
+        case("port 0 address", ports[0].get("address") == 0x12340, str(ports[0]))
+        case("port 0 step", ports[0].get("incrementCode") == 4 and ports[0].get("increment") == 2)
+        case("port 0 prefetch", ports[0].get("prefetch") == 0xAB)
+        case("port 0 nibble", ports[0].get("nibble") is True and ports[0].get("nibbleIncrement") is True)
+        case("port 1 address", ports[1].get("address") == 0x00080, str(ports[1]))
+        case("port 1 steps backward", ports[1].get("incrementCode") == 3 and ports[1].get("increment") == -1)
+        case("port 1 prefetch", ports[1].get("prefetch") == 0x5A)
+        case("port 1 nibble", ports[1].get("nibble") is False and ports[1].get("nibbleIncrement") is False)
+        case("selectors", v.get("addrsel") == 1 and v.get("dcsel") == 6)
+        case("interrupts", v.get("ien") == 5 and v.get("irqLine") == 0x142, str((v.get("ien"), v.get("irqLine"))))
+        case("the scanline is on the screen", 0 <= v.get("scanline", -1) < 525)
+
+        fx = v.get("fx", {})
+        want = {
+            "addr1Mode": 0, "fourBitMode": True, "hop16": False, "cacheByteCycling": False,
+            "cacheFill": False, "cacheWrite": True, "transparentWrites": True,
+            "affineTileBase": 0x8000, "affineClip": True, "twoBitPoly": False,
+            "affineMapBase": 0x10000, "affineMapSize": 8,
+            "cacheIncrementMode": True, "cacheNibbleIndex": False, "cacheByteIndex": 2,
+            "multiplier": True, "subtract": False,
+            "xIncrement16_16": 0x91A00, "yIncrement16_16": -2064384,
+            "xPosition16_16": 0x0378AB80, "yPosition16_16": 0x0256CD00,
+            "cache": [0x11, 0x22, 0x33, 0x44], "accumulator": 0x2211 * 0x4433,
+        }
+        for k, expected in want.items():
+            case(f"FX {k}", fx.get(k) == expected, f"{fx.get(k)!r} != {expected!r}")
+        dap.close()
+
+
+def test_stop_details():
+    print("stop details")
+
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        dap = Dap(port)
+        dap.session()
+        plant_loop(m)
+        case("no stop details before a watch fires", "stop" not in data(m.call("get_status")))
+
+        # lda #$5A / sta $0600 / lda #$77 / sta $A000 / bra *
+        m.call("write_memory", address=0x0810, hex="A95A8D0006A9778D00A080FE")
+        m.call("set_registers", pc=0x0810, ramBank=3)
+        m.call("set_breakpoint", address=0x0600, kind="write")
+        m.call("set_breakpoint", address=0xA000, kind="write")
+        last = data(m.call("get_status")).get("stopId")
+        dap.events.clear()
+        m.call("continue")
+        r = data(m.call("wait_for_stop", sinceStopId=last))
+        s = r.get("stop", {})
+        case("a watch stop says so", r.get("stopReason") == "data breakpoint", str(r.get("stopReason")))
+        case("which address", s.get("address") == 0x0600, str(s))
+        case("what was written", s.get("value") == 0x5A)
+        case("how", s.get("access") == "write" and s.get("space") == "cpu")
+        case("by which instruction", s.get("accessingPc") == 0x0812, str(s.get("accessingPc")))
+        case("no bank where none applies", s.get("bank") is None and s.get("accessingBank") is None)
+        case("no data port", s.get("dataPort") is None)
+        case("the PC has moved past it", r.get("pc") == 0x0815, str(r.get("pc")))
+        ev = dap.event("stopped")
+        while ev and ev["body"].get("reason") != "data breakpoint":   # the pause that set it up
+            ev = dap.event("stopped")
+        case("the stopped event carries it", (ev or {}).get("body", {}).get("stop") == s, str(ev)[:200])
+        status = dap.request("x16/status")["body"]
+        case("x16/status carries it", status.get("stop") == s)
+
+        last = data(m.call("get_status")).get("stopId")
+        m.call("continue")
+        s = data(m.call("wait_for_stop", sinceStopId=last)).get("stop", {})
+        case("a banked address reports its bank", s.get("address") == 0xA000 and s.get("bank") == 3, str(s))
+        case("the next watch replaces the last", s.get("value") == 0x77)
+
+        step = data(m.call("step"))
+        case("a step clears it", "stop" not in step, str(step.get("stop")))
+        case("and it stays clear", "stop" not in data(m.call("get_status")))
+        dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1290,7 +1417,7 @@ def main():
     EXE, ROM = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
-                 test_http, test_lease, test_vision):
+                 test_http, test_lease, test_vision, test_vera_state, test_stop_details):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

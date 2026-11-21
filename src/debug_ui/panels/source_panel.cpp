@@ -465,6 +465,17 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
         ImGui::TextColored(orange, "%s   line %d / %d", src_basename(file), pcLine, lineCount);
     else
         ImGui::TextColored(orange, "%s   %d lines", src_basename(file), lineCount);
+    if (isPcFile && DEBUGIsPaused()) {
+        debug_stop_info_t stop;
+        DEBUGGetStopInfo(&stop);
+        if (stop.has_access) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("   %s $%02X %s $%04X, from $%04X",
+                                stop.access == DEBUG_STOP_ACCESS_READ ? "read" : "wrote", stop.value,
+                                stop.access == DEBUG_STOP_ACCESS_READ ? "at" : "to",
+                                (unsigned)stop.address, stop.accessing_pc);
+        }
+    }
     ImGui::Separator();
 
     // Follow: recenter on the current line when the PC moves (PC tab only).
