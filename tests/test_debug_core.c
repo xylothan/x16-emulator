@@ -825,6 +825,58 @@ main(void)
 		check(debug_wp_armed_cpu_write == 0, "clearing the table resets the counts");
 	}
 
+	// ── Read watches, and what counts as a read ─────────────────────────────
+	{
+		reset_all();
+		debug_wp_spec_t rd = { DEBUG_WP_SPACE_CPU, 0x0600, 2, DEBUG_BANK_ANY, false, 0, 0,
+		                       DEBUG_WP_ACCESS_READ, true };
+
+		check(debug_wp_add_ex(&rd, DEBUG_OWNER_MCP) == DEBUG_ADD_CREATED, "adds a read watch");
+		check(debug_wp_armed_cpu_read == 1 && debug_wp_armed_cpu_write == 0,
+		      "it arms the read path and leaves the write path alone");
+		check(debug_wp_check_read(0x0601, 0x12, false), "a data read fires it");
+		check(!debug_wp_check_read(0x0601, 0x12, true), "an instruction fetch does not");
+		check(!debug_wp_check_write(0x0601, 0x12), "a write does not");
+		check(!debug_wp_check_read(0x0602, 0x12, false), "a read past the range does not");
+
+		uint8_t access = 0;
+		bool    fetch  = true;
+		check(debug_wp_last_access_kind(&access, &fetch) && access == DEBUG_WP_ACCESS_READ && !fetch,
+		      "the hit records that it was a data read");
+		check(debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_READ, false, 0x0600,
+		                           DEBUG_BANK_ANY, 0x0601, 0x12),
+		      "the stop can be matched to the watch");
+		check(!debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0x0600,
+		                            DEBUG_BANK_ANY, 0x0601, 0x12),
+		      "but not as a write");
+		check(debug_wp_add_for(0x0600, 2, DEBUG_BANK_ANY, DEBUG_OWNER_CLI) == DEBUG_ADD_CONFLICT,
+		      "a write owner cannot share a read-only watch");
+		debug_wp_spec_t both = rd;
+		both.access = DEBUG_WP_ACCESS_BOTH;
+		check(debug_wp_add_ex(&both, DEBUG_OWNER_UI) == DEBUG_ADD_CONFLICT,
+		      "nor can a different access");
+		debug_wp_spec_t with_fetch = rd;
+		with_fetch.exclude_fetch = false;
+		check(debug_wp_add_ex(&with_fetch, DEBUG_OWNER_UI) == DEBUG_ADD_CONFLICT,
+		      "nor a different fetch rule");
+
+		debug_wp_clear_all();
+		with_fetch.addr = 0x0700;
+		with_fetch.access = DEBUG_WP_ACCESS_BOTH;
+		debug_wp_add_ex(&with_fetch, DEBUG_OWNER_MCP);
+		check(debug_wp_armed_cpu_read == 1 && debug_wp_armed_cpu_write == 1, "read-write arms both paths");
+		check(debug_wp_check_read(0x0700, 0, true), "with fetches included, a fetch fires");
+		check(debug_wp_check_write(0x0700, 0), "and so does a write");
+
+		debug_wp_spec_t vram = { DEBUG_WP_SPACE_VRAM, 0x0800, 1, DEBUG_BANK_ANY, false, 0, 0,
+		                         DEBUG_WP_ACCESS_READ, true };
+		debug_wp_add_ex(&vram, DEBUG_OWNER_MCP);
+		const int at = debug_wp_find(DEBUG_WP_SPACE_VRAM, 0x0800, DEBUG_BANK_ANY);
+		check(at >= 0 && debug_wp_at(at)->access == DEBUG_WP_ACCESS_WRITE, "a VRAM watch is write only");
+		debug_wp_clear_all();
+		check(debug_wp_armed_cpu_read == 0, "clearing resets the read count");
+	}
+
 	// ── One bank-selector rule, for breakpoints and watchpoints alike ───────
 	// A bank selector says one of two things: "whichever bank is mapped"
 	// (DEBUG_BANK_ANY) or "this specific bank". For an address outside a banked

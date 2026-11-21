@@ -470,9 +470,11 @@ src_render_body(const char *file, bool isPcFile, int pcLine, bool pcMoved)
         DEBUGGetStopInfo(&stop);
         if (stop.has_access) {
             ImGui::SameLine();
-            ImGui::TextDisabled("   %s $%02X %s $%04X, from $%04X",
+            ImGui::TextDisabled("   %s $%02X %s %s$%0*X, from $%04X",
                                 stop.access == DEBUG_STOP_ACCESS_READ ? "read" : "wrote", stop.value,
                                 stop.access == DEBUG_STOP_ACCESS_READ ? "at" : "to",
+                                stop.space == DEBUG_STOP_SPACE_VRAM ? "VRAM " : "",
+                                stop.space == DEBUG_STOP_SPACE_VRAM ? 5 : 4,
                                 (unsigned)stop.address, stop.accessing_pc);
         }
     }

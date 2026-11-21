@@ -134,6 +134,14 @@ static bool addressing_is_acc = false;
 
 //externally supplied functions
 extern uint8_t read6502(uint16_t address, uint8_t bank);
+// The same read, for a byte of the instruction stream.
+extern uint8_t fetch6502(uint16_t address, uint8_t bank);
+
+// An immediate operand is read through `ea` like any data, but it is part of the
+// instruction. Set by the immediate addressing modes and cleared before each
+// opcode. Comparing `ea` with the PC instead would misfile code that reads its
+// own operand bytes, which is what a read watch is often set to catch.
+static bool operand_is_immediate = false;
 extern void write6502(uint16_t address, uint8_t bank, uint8_t value);
 extern void stop6502(uint16_t address, uint8_t bank);
 extern void vp6502();
@@ -189,17 +197,22 @@ static uint8_t wrappedBankByte(uint32_t addr) {
     }
 }
 
+static inline uint8_t operand_read(uint32_t address, uint8_t bank) {
+    return operand_is_immediate ? fetch6502((uint16_t)address, bank)
+                                : read6502((uint16_t)address, bank);
+}
+
 static uint16_t getvalue(bool use16Bit) {
     if (addressing_is_acc) {
         return use16Bit ? regs.c : (uint16_t)regs.a;
     } else if (use16Bit) {
-        return ((uint16_t)read6502(ea, bank_byte(ea)) | ((uint16_t)read6502(ea+1, wrappedBankByte(ea)) << 8));
+        return ((uint16_t)operand_read(ea, bank_byte(ea)) | ((uint16_t)operand_read(ea+1, wrappedBankByte(ea)) << 8));
     }
-    return read6502(ea, bank_byte(ea));
+    return operand_read(ea, bank_byte(ea));
 }
 
 static uint16_t MAYBE_UNUSED getvalue16() {
-    return((uint16_t)read6502(ea, bank_byte(ea)) | ((uint16_t)read6502(ea+1, wrappedBankByte(ea)) << 8));
+    return((uint16_t)operand_read(ea, bank_byte(ea)) | ((uint16_t)operand_read(ea+1, wrappedBankByte(ea)) << 8));
 }
 
 static void putvalue(uint16_t saveval, bool use16Bit) {
@@ -250,7 +263,8 @@ void exec6502(uint32_t tickcount) {
     clockgoal6502 += tickcount;
 
     while (clockticks6502 < clockgoal6502) {
-        opcode = read6502(regs.pc++, regs.k);
+        operand_is_immediate = false;
+        opcode = fetch6502(regs.pc++, regs.k);
 
         cpu_pin_status_flags();
 
@@ -291,7 +305,8 @@ void step6502() {
 
     opcode_addr = regs.pc;
 
-    opcode = read6502(regs.pc++, regs.k);
+    operand_is_immediate = false;
+    opcode = fetch6502(regs.pc++, regs.k);
 
     cpu_pin_status_flags();
 

@@ -92,6 +92,14 @@ cpu_bus_address(uint16_t address, uint8_t bank)
 	return ((uint32_t)bank << 16) | address;
 }
 
+uint8_t read6502(uint16_t address, uint8_t bank);
+
+uint8_t
+fetch6502(uint16_t address, uint8_t bank)
+{
+	return read6502(address, bank);
+}
+
 uint8_t
 read6502(uint16_t address, uint8_t bank)
 {

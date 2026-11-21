@@ -302,12 +302,16 @@ void debug_core_free(void);
 // Which memory a watchpoint is on. The same number means different bytes in
 // each: VRAM is reached only through VERA's data ports.
 enum { DEBUG_WP_SPACE_CPU = 0, DEBUG_WP_SPACE_VRAM = 1 };
+// What a watchpoint fires on, as bits. VRAM watches are write only.
+enum { DEBUG_WP_ACCESS_WRITE = 1, DEBUG_WP_ACCESS_READ = 2, DEBUG_WP_ACCESS_BOTH = 3 };
 
 struct watchpoint {
 	uint32_t addr;      // 16-bit in CPU space, 17-bit in VRAM
 	uint32_t len;       // 1 = a single byte, >1 = a range starting at addr
 	uint8_t  space;     // DEBUG_WP_SPACE_*
-	uint32_t hits;      // writes that have fired it since it was created
+	uint32_t hits;      // accesses that have fired it since it was created
+	uint8_t  access;    // DEBUG_WP_ACCESS_*
+	bool     exclude_fetch; // a read watch ignores bytes fetched as instructions
 	int      x16Bank;   // bank selector, as for a breakpoint (see DEBUG_BANK_ANY)
 	bool     active;
 	bool     has_value; // when set, only fire if the written value compares true
@@ -353,6 +357,8 @@ typedef struct {
 	bool     has_value;
 	int      op;
 	uint8_t  value;
+	uint8_t  access;        // DEBUG_WP_ACCESS_*; 0 means write
+	bool     exclude_fetch; // only meaningful with read access
 } debug_wp_spec_t;
 debug_add_result_t debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner);
 
@@ -371,6 +377,7 @@ bool debug_wp_delete_at(int index);
 // How many enabled watches each store path has to consider. Read directly by
 // the hot paths, so a watch on one memory costs the other nothing.
 extern int debug_wp_armed_cpu_write;
+extern int debug_wp_armed_cpu_read;
 extern int debug_wp_armed_vram;
 // Called after any change to the table. NULL unless something needs to know;
 // debug_core cannot reach video.c itself, because its tests link without it.
@@ -379,13 +386,19 @@ extern void (*debug_wp_changed)(void);
 // A guest store landed in VRAM through data port `port`. True if a watch fires,
 // and recorded for debug_wp_last_access().
 bool debug_wp_check_vram(uint32_t addr, uint8_t value, int port);
+// The CPU read a byte; `fetch` says it was part of the instruction stream. True
+// if a watch fires, and recorded for debug_wp_last_access().
+bool debug_wp_check_read(uint16_t addr, uint8_t value, bool fetch);
 // Does an enabled VRAM watch cover this address? For a UI marking watched bytes.
 bool debug_wp_covers_vram(uint32_t addr);
 // The access that most recently fired a watch, in either space. `port` is -1
 // for a CPU store.
 bool debug_wp_last_access(uint8_t *space, uint32_t *addr, uint8_t *value, int *port);
-// debug_wp_fires_on() with the space spelled out.
-bool debug_wp_fires_on_ex(uint8_t space, uint32_t wp_addr, int x16Bank, uint32_t addr, uint8_t value);
+// Whether that access was a read or a write, and an instruction fetch.
+bool debug_wp_last_access_kind(uint8_t *access, bool *fetch);
+// debug_wp_fires_on() with the space and the kind of access spelled out.
+bool debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr, int x16Bank,
+                          uint32_t addr, uint8_t value);
 
 // Only fire when the value being written compares true against `value`, so
 // "stop when this becomes zero" does not stop on every other write to it.

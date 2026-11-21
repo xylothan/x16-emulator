@@ -530,7 +530,7 @@ def test_breakpoints():
         case("a banked breakpoint", d.get("address") == "04:C000", str(d))
         case("it is removed by the same key", data(m.call("remove_breakpoint", address="04:C000")).get("removed") is True)
         for label, args in (("a bad address", {"address": "banana"}),
-                            ("a bad kind", {"address": 0, "kind": "read"}),
+                            ("a bad kind", {"address": 0, "kind": "touch"}),
                             ("a bad condition", {"address": 0x900, "condition": "A ?? 3"}),
                             ("a bad hit count", {"address": 0x900, "hitCondition": "often"}),
                             ("a bank outside a window", {"address": 0x0900, "bank": 3}),
@@ -1602,6 +1602,131 @@ def test_vram_watch():
         dap.close()
 
 
+def watch_hits(m, address):
+    for w in data(m.call("list_breakpoints")).get("watchpoints", []):
+        if w.get("space") == "cpu" and w.get("addr") == address:
+            return w.get("hits")
+    return None
+
+
+def test_read_watch():
+    print("read watches")
+
+    LOAD = "AD0006"           # lda $0600
+    STORE = "A95A8D0006"      # lda #$5A / sta $0600
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        dap = Dap(port)
+        dap.session()
+        plant_loop(m)
+        m.call("write_memory", address=0x0600, hex="A5")
+
+        d = data(m.call("set_breakpoint", address=0x0600, kind="read"))
+        case("a read watch is set", d.get("kind") == "read" and d.get("space") == "cpu", str(d))
+        wps = data(m.call("list_breakpoints")).get("watchpoints", [])
+        case("listed as read, fetches excluded",
+             len(wps) == 1 and wps[0].get("access") == "read" and wps[0].get("excludeFetch") is True, str(wps))
+        r = run_planted(m, LOAD)
+        s = r.get("stop", {})
+        case("a load fires it", watch_fired(r), str(r.get("stopReason")))
+        case("it says read", s.get("access") == "read" and s.get("space") == "cpu", str(s))
+        case("and not a fetch", s.get("fetch") is False, str(s))
+        case("with the address and value", s.get("address") == 0x0600 and s.get("value") == 0xA5, str(s))
+        case("by that instruction", s.get("accessingPc") == 0x0810, str(s.get("accessingPc")))
+        case("the instruction finished", r.get("pc") == 0x0813 and
+             data(m.call("get_registers"))["cpu"].get("a") == 0xA5, str(r.get("pc")))
+
+        r = run_planted(m, STORE)
+        case("a store does not fire a read watch", not watch_fired(r), str(r.get("stop")))
+        before = watch_hits(m, 0x0600)
+        m.call("read_memory", address=0x0600, count=4)
+        m.call("disassemble", address=0x0600, count=2)
+        case("a debugger read does not count", watch_hits(m, 0x0600) == before)
+        case("a watch of another kind stays put",
+             is_error(m.call("remove_breakpoint", address=0x0600, kind="write")))
+        case("a different kind at the same address is refused",
+             is_error(m.call("set_breakpoint", address=0x0600, kind="write")))
+        m.call("remove_breakpoint", address=0x0600, kind="read")
+        r = run_planted(m, LOAD)
+        case("removed, it no longer fires", not watch_fired(r), str(r.get("stopReason")))
+
+        # A write watch is untouched by reads.
+        m.call("set_breakpoint", address=0x0600, kind="write")
+        r = run_planted(m, LOAD)
+        case("a load does not fire a write watch", not watch_fired(r), str(r.get("stopReason")))
+        m.call("remove_breakpoint", address=0x0600, kind="write")
+
+        # Read-write catches both, and a read-modify-write stops on its read.
+        m.call("set_breakpoint", address=0x0600, kind="access")
+        r = run_planted(m, LOAD)
+        case("access fires on a load", r.get("stop", {}).get("access") == "read", str(r.get("stop")))
+        r = run_planted(m, STORE)
+        case("and on a store", r.get("stop", {}).get("access") == "write", str(r.get("stop")))
+        m.call("write_memory", address=0x0600, hex="10")
+        r = run_planted(m, "EE0006")     # inc $0600
+        case("a read-modify-write stops on its read",
+             r.get("stop", {}).get("access") == "read" and r.get("stop", {}).get("value") == 0x10, str(r.get("stop")))
+        case("and still completes", read_byte(m, 0x0600) == 0x11)
+        m.call("remove_breakpoint", address=0x0600, kind="access")
+
+        # Fetches. $0811 is the operand of the first instruction.
+        m.call("set_breakpoint", address=0x0811, kind="read")
+        r = run_planted(m, "A900")       # lda #$00: its operand is the watched byte
+        case("an immediate operand is a fetch", not watch_fired(r), str(r.get("stop")))
+        r = run_planted(m, "AD0006")     # its operand byte is fetched as an address
+        case("an address operand is a fetch", not watch_fired(r), str(r.get("stop")))
+        r = run_planted(m, "AD1108")     # lda $0811 reads its own operand as data
+        s = r.get("stop", {})
+        case("code reading its own operand is a data read", watch_fired(r) and s.get("fetch") is False, str(s))
+        case("with the operand's value", s.get("value") == 0x11, str(s))
+        m.call("remove_breakpoint", address=0x0811, kind="read")
+        m.call("set_breakpoint", address=0x0811, kind="read", excludeFetch=False)
+        r = run_planted(m, "A900")
+        s = r.get("stop", {})
+        case("with fetches included, it fires", watch_fired(r) and s.get("fetch") is True, str(s))
+        m.call("remove_breakpoint", address=0x0811, kind="read")
+
+        # Value filter.
+        m.call("write_memory", address=0x0600, hex="12")
+        m.call("set_breakpoint", address=0x0600, kind="read", condition="== $5A")
+        r = run_planted(m, LOAD)
+        case("a value filter holds off", not watch_fired(r), str(r.get("stopReason")))
+        m.call("write_memory", address=0x0600, hex="5A")
+        r = run_planted(m, LOAD)
+        case("and fires on the value", watch_fired(r), str(r.get("stopReason")))
+        m.call("remove_breakpoint", address=0x0600, kind="read")
+
+        # What gets refused.
+        case("VRAM read is refused",
+             is_error(m.call("set_breakpoint", address=0x4000, space="vram", kind="read")))
+        case("excludeFetch needs a read kind",
+             is_error(m.call("set_breakpoint", address=0x0600, kind="write", excludeFetch=True)))
+        case("an unknown kind is refused",
+             is_error(m.call("set_breakpoint", address=0x0600, kind="touch")))
+
+        # DAP.
+        info = dap.request("dataBreakpointInfo", {"name": "$0600"})["body"]
+        case("DAP offers read and readWrite",
+             set(info.get("accessTypes", [])) == {"read", "write", "readWrite"}, str(info))
+        vinfo = dap.request("dataBreakpointInfo", {"name": "vram:04000"})["body"]
+        case("VRAM offers write only", vinfo.get("accessTypes") == ["write"], str(vinfo))
+        rows = dap.request("setDataBreakpoints", {"breakpoints": [
+            {"dataId": info["dataId"], "accessType": "read"}]})["body"]["breakpoints"]
+        case("DAP arms a read watch", rows and rows[0].get("verified") is True, str(rows))
+        dap.events.clear()
+        r = run_planted(m, LOAD)
+        case("it fires", r.get("stop", {}).get("access") == "read", str(r.get("stop")))
+        ev = dap.event("stopped")
+        while ev and ev["body"].get("reason") != "data breakpoint":
+            ev = dap.event("stopped")
+        case("the stopped event names it",
+             (ev or {}).get("body", {}).get("hitBreakpointIds") == [rows[0].get("id")], str(ev)[:200])
+        dap.request("setDataBreakpoints", {"breakpoints": []})
+        dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1611,7 +1736,7 @@ def main():
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
-                 test_vram_watch):
+                 test_vram_watch, test_read_watch):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
