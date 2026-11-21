@@ -442,7 +442,7 @@ if(WIN32)
 endif()
 
 if(USE_DAP)
-    list(APPEND X16_SOURCES src/debug_server.c)
+    list(APPEND X16_SOURCES src/debug_server.c src/mcp_server.c)
 endif()
 
 # --- Main Executable Target ---
