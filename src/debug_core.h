@@ -357,6 +357,12 @@ const struct watchpoint *debug_wp_at(int index);
 // debug_wp_count() first and skip this entirely when nothing is being watched.
 bool debug_wp_check_write(uint16_t addr, uint8_t value);
 
+// The write that most recently made debug_wp_check_write() answer yes, so a
+// front end can say which watch stopped the machine. False until one has.
+bool debug_wp_last_hit(uint16_t *addr, uint8_t *value);
+// Would the watchpoint at (wp_addr, x16Bank) fire on this write? Changes nothing.
+bool debug_wp_fires_on(uint16_t wp_addr, int x16Bank, uint16_t addr, uint8_t value);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
