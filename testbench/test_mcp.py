@@ -772,8 +772,10 @@ class HttpMcp:
         full_env = dict(os.environ)
         full_env.update(env or {})
         cmd = [EXE, "-rom", ROM, "-mcp", str(self.port), "-hidden", "-warp", "-zeroram"] + list(extra)
-        self.p = subprocess.Popen(cmd, cwd=self.dir.name, stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=full_env)
+        self.log = os.path.join(self.dir.name, "emulator.log")
+        with open(self.log, "wb") as log:
+            self.p = subprocess.Popen(cmd, cwd=self.dir.name, stdin=subprocess.DEVNULL,
+                                      stdout=log, stderr=subprocess.STDOUT, env=full_env)
         self.next_id = 1
         self.sock = self.connect()
 
@@ -786,7 +788,9 @@ class HttpMcp:
                 return s
             except OSError:
                 time.sleep(0.05)
-        raise RuntimeError("the HTTP port never opened")
+        with open(self.log, "rb") as log:
+            tail = log.read()[-400:].decode("utf-8", "replace")
+        raise RuntimeError(f"the HTTP port never opened (exit {self.p.poll()}): {tail}")
 
     def raw(self, data):
         """One request on its own connection."""
