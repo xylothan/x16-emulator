@@ -1832,6 +1832,20 @@ static Uint32 env_ms(const char *name, Uint32 fallback) {
 
 static const dbg_frontend_t mcp_frontend = { mcp_holds_run_state, on_frames_done };
 
+// Why the last socket call failed, for a message a person can act on.
+static const char *mcp_sock_error(void) {
+#ifdef _WIN32
+    static char text[160];
+    const int code = WSAGetLastError();
+    if (!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, (DWORD)code,
+                        0, text, sizeof text, NULL))
+        snprintf(text, sizeof text, "error %d", code);
+    return text;
+#else
+    return strerror(errno);
+#endif
+}
+
 int mcp_server_init_http(int port) {
     if (enabled) return 0;
 #ifdef _WIN32
@@ -1841,7 +1855,11 @@ int mcp_server_init_http(int port) {
     signal(SIGPIPE, SIG_IGN);   // a client hanging up is an error return, not an exit
 #endif
     listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_sock == MCP_NO_SOCK) return -1;
+    if (listen_sock == MCP_NO_SOCK) {
+        fprintf(stderr, "[mcp] socket: %s
+", mcp_sock_error());
+        return -1;
+    }
     const int on = 1;
 #ifdef _WIN32
     // SO_REUSEADDR on Windows would let another process share this port.
@@ -1856,6 +1874,8 @@ int mcp_server_init_http(int port) {
     addr.sin_port = htons((uint16_t)port);
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof addr) != 0 ||
         listen(listen_sock, 8) != 0) {
+        fprintf(stderr, "[mcp] cannot listen on 127.0.0.1:%d: %s
+", port, mcp_sock_error());
         MCP_CLOSE_SOCK(listen_sock);
         listen_sock = MCP_NO_SOCK;
         return -1;
