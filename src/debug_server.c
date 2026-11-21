@@ -1633,6 +1633,37 @@ static bool dap_parse_eval_addr(const char *expr, uint32_t *addr) {
     return true;
 }
 
+// vera_line LINE: both layers as they stood when that display scanline was
+// drawn. The scroll registers are one generation behind the row at a split (see
+// video_get_layer_line_state), so the row is reported rather than left for the
+// reader to work out from them. On failure `out` holds the error message.
+static bool dap_eval_vera_line(const char *arg, char *out, size_t size) {
+    const unsigned count = video_get_scanline_count();
+    char *end = NULL;
+    unsigned long line = 0;
+    if (isdigit((unsigned char)arg[0])) line = strtoul(arg, &end, 10);
+    if (!end || *end || line >= count) {
+        snprintf(out, size, "vera_line takes a decimal scanline from 0 to %u", count - 1);
+        return false;
+    }
+    int len = snprintf(out, size, "line %lu:", line);
+    for (uint8_t layer = 0; layer < 2; layer++) {
+        uint8_t r[7];
+        bool enabled = false;
+        uint16_t row = 0;
+        if (!video_get_layer_line_state(layer, (uint16_t)line, r, NULL, &enabled, &row)) {
+            snprintf(out, size, "scanline %lu has not been rendered", line);
+            return false;
+        }
+        len += snprintf(out + len, size - len,
+                        "%s L%u %s row %u config $%02X map $%02X tile $%02X hscroll $%04X vscroll $%04X",
+                        layer ? " |" : "", (unsigned)layer, enabled ? "on" : "off", (unsigned)row,
+                        r[0], r[1], r[2], (unsigned)(r[3] | (r[4] << 8)),
+                        (unsigned)(r[5] | (r[6] << 8)));
+    }
+    return true;
+}
+
 static int handle_dap_evaluate(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "evaluate", "missing arguments");
@@ -1657,6 +1688,8 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     // Parse expression: $XXXX = memory peek, register names, bp_* commands
     char result[1024] = "";
     uint32_t peek_addr = 0;
+    dbg_addr_t sym_val = 0;
+    int sym_bank = -1;
 
     // Breakpoint management via evaluate. bp_add and bp_remove take the same
     // address forms as an instructionReference, so "bb:aaaa" pins a bank. They
@@ -1832,13 +1865,27 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
             uint8_t val = video_space_read((addr + i) & 0x1FFFF);
             len += snprintf(result + len, sizeof(result) - len, " %02X", val);
         }
-    } else if (strncmp(expr, "vera_reg", 8) == 0) {
-        // vera_reg — dump all VERA registers ($9F20-$9F3F)
+    } else if (!strncmp(expr, "vera_line", 9) && (expr[9] == ' ' || !expr[9])) {
+        if (!dap_eval_vera_line(expr[9] ? expr + 10 : "", result, sizeof(result))) {
+            send_dap_error_response(seq, "evaluate", result);
+            return 0;
+        }
+    } else if (!strcmp(expr, "vera_reg")) {
+        // vera_reg — dump all VERA registers ($9F20-$9F3F). Exact, so that a
+        // program's own label beginning with these letters still resolves below.
         int len = 0;
         for (int i = 0; i < 32 && len < (int)sizeof(result) - 10; i++) {
             uint8_t val = vera_read_dbg((uint8_t)i);
             len += snprintf(result + len, sizeof(result) - len, "%02X ", val);
         }
+    } else if (dbg_info_label_to_addr_bank(expr, &sym_val, &sym_bank)) {
+        // Last, so a register or command of the same name keeps its meaning.
+        if (sym_bank >= 0)
+            snprintf(result, sizeof(result), "$%02X:%04X (label)", (unsigned)sym_bank, (unsigned)sym_val);
+        else
+            snprintf(result, sizeof(result), "$%04X (label)", (unsigned)sym_val);
+    } else if (dbg_info_equate_to_value(expr, &sym_val)) {
+        snprintf(result, sizeof(result), "$%04X (%u, equate)", (unsigned)sym_val, (unsigned)sym_val);
     } else {
         send_dap_error_response(seq, "evaluate", "unknown expression");
         return 0;

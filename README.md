@@ -1122,12 +1122,15 @@ cannot trigger one. An expression that is not recognised is an error.
 | `regs_all` | A one-line summary of every register |
 | `vram ADDR [COUNT]` | VERA VRAM bytes, from a 17-bit hex address (capped at 128; for bulk or binary access use `readMemory` with a `vram:` reference) |
 | `vera_reg` | All 32 VERA registers |
-| `vera_line LINE` | The layer registers that actually rendered that display scanline — the way to catch a raster split |
+| `vera_line LINE` | Both layers as they stood when that display scanline (decimal, 0–479) was drawn: on or off, the row shown, and their registers. The way to catch a raster split. A line not drawn yet is an error, and under `-warp` this is the last frame drawn, one in 64 |
 | `bp_add ADDR`, `bp_remove ADDR`, `bp_list`, `bp_clear` | Manage breakpoints |
 | `watch_add ADDR [LEN]`, `watch_remove ADDR`, `watch_list`, `watch_clear` | Manage write watchpoints |
 | `reset` | Reset the machine |
 
-cc65 labels and equates from a loaded `.dbg` resolve too.
+A name from a loaded `.dbg` evaluates too: a label to its address, an equate to its value. Case
+does not matter. A register or command of the same name takes priority, so `x` is always the X
+register. Bank constants (`RAM_BANK*`, `BANK_*` or `*_BANK`, valued 0–255) are kept for bank
+mapping and do not evaluate.
 
 #### Scripting input for automated tests
 
