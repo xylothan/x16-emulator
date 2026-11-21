@@ -1241,6 +1241,69 @@ static cJSON *tool_list_symbols(cJSON *args) {
     return tool_forward("x16/listSymbols", args);
 }
 
+// hash_memory and dump_memory take the same range as read_memory.
+static cJSON *tool_range(const char *command, cJSON *args, bool to_file) {
+    char err[200], ref[48];
+    bool vram;
+    int length, bank, sym_bank;
+    if (!arg_space(args, &vram, err, sizeof err) ||
+        !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err) ||
+        !arg_int(args, "length", 0, 1, 0x100000, &length, err, sizeof err) ||
+        !arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
+        return tool_fail(err);
+    if (!length) return tool_fail("'length' is required");
+    if (vram && bank >= 0)
+        return tool_fail("VRAM has no banks: leave out 'bank' when 'space' is \"vram\"");
+    if (bank < 0) bank = sym_bank;
+
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "memoryReference", ref);
+    cJSON_AddNumberToObject(call, "count", length);
+    if (bank >= 0) cJSON_AddNumberToObject(call, "x16Bank", bank);
+    if (to_file) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(args, "path");
+        cJSON *o = cJSON_GetObjectItemCaseSensitive(args, "overwrite");
+        if (p) cJSON_AddItemToObject(call, "path", cJSON_Duplicate(p, 1));
+        if (o) cJSON_AddItemToObject(call, "overwrite", cJSON_Duplicate(o, 1));
+    }
+    cJSON *result = tool_forward(command, call);
+    cJSON_Delete(call);
+    return result;
+}
+
+static cJSON *tool_hash_memory(cJSON *args) {
+    return tool_range("x16/hashMemory", args, false);
+}
+
+static cJSON *tool_dump_memory(cJSON *args) {
+    return tool_range("x16/dumpMemory", args, true);
+}
+
+static cJSON *tool_set_warp(cJSON *args) {
+    return tool_forward("x16/setWarp", args);
+}
+
+static cJSON *tool_mouse(cJSON *args) {
+    return tool_forward("x16/mouse", args);
+}
+
+static cJSON *tool_load_prg(cJSON *args) {
+    cJSON *p = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    cJSON *call = cJSON_CreateObject();
+    if (p) cJSON_AddItemToObject(call, "path", cJSON_Duplicate(p, 1));
+    if (args && cJSON_HasObjectItem(args, "address")) {
+        char err[200], ref[48];
+        if (!arg_address(args, false, ref, sizeof ref, err, sizeof err)) {
+            cJSON_Delete(call);
+            return tool_fail(err);
+        }
+        cJSON_AddStringToObject(call, "address", ref);
+    }
+    cJSON *result = tool_forward("x16/loadPrg", call);
+    cJSON_Delete(call);
+    return result;
+}
+
 static cJSON *tool_type_text(cJSON *args) {
     cJSON *t = args ? cJSON_GetObjectItemCaseSensitive(args, "text") : NULL;
     if (!t || !cJSON_IsString(t)) return tool_fail("'text' is required");
@@ -1557,6 +1620,52 @@ static const mcp_tool_t tools[] = {
       "up down left right a b x y start select l r.",
       PAD_ITEM,
       TOOL_CONTROL, tool_joystick },
+    { "mouse",
+      "Move the mouse by 'dx' and 'dy' (down is positive) and set the held 'buttons', the "
+      "whole state: left, right, middle. The program sees it once the KERNAL mouse is on, "
+      "which the reply reports as 'kernalMouse'.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"dx\":{\"type\":\"integer\",\"minimum\":-255,\"maximum\":255},"
+      "\"dy\":{\"type\":\"integer\",\"minimum\":-255,\"maximum\":255},"
+      "\"wheel\":{\"type\":\"integer\",\"minimum\":-7,\"maximum\":7},"
+      "\"buttons\":{\"type\":\"array\",\"items\":{\"enum\":[\"left\",\"right\",\"middle\"]}}"
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_mouse },
+    { "set_warp",
+      "Turn warp on or off. Asking for the state it is already in changes nothing.",
+      "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"}},"
+      "\"required\":[\"enabled\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_warp },
+    { "hash_memory",
+      "CRC-32 and SHA-256 of a range of CPU memory or VRAM, read without side effects: no "
+      "read watch fires and VERA's data port does not move. Up to 1 MiB.",
+      "{\"type\":\"object\",\"properties\":{" ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1048576},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"space\":{\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
+      "},\"required\":[\"address\",\"length\"],\"additionalProperties\":false}",
+      TOOL_READ, tool_hash_memory },
+    { "dump_memory",
+      "Write a range of CPU memory or VRAM to a host file, read without side effects. The "
+      "file must be inside -fsroot, or the dump folder when there is no -fsroot. An existing "
+      "file is replaced only with 'overwrite'. Up to 1 MiB.",
+      "{\"type\":\"object\",\"properties\":{" ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1048576},"
+      "\"path\":{\"type\":\"string\"},"
+      "\"overwrite\":{\"type\":\"boolean\",\"default\":false},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"space\":{\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
+      "},\"required\":[\"address\",\"length\",\"path\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_dump_memory },
+    { "load_prg",
+      "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
+      "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "
+      "program pointers, so set the PC for machine code, and use LOAD for a BASIC program.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"path\":{\"type\":\"string\"},"
+      "\"address\":{\"type\":[\"string\",\"number\"]}"
+      "},\"required\":[\"path\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_load_prg },
     { "save_state",
       "Save the machine to a named slot in memory. It must be paused at a frame boundary: "
       "run_frames with frames 1 gets it to one.",

@@ -336,6 +336,8 @@ set(X16_SOURCES
     src/sdcard_fat.c
     src/main.c
     src/export_paths.c
+    src/host_write_path.c
+    src/mem_hash.c
     src/profile_run.c
     src/debugger.c
     src/dbg_info.c
