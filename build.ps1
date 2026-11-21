@@ -57,6 +57,9 @@ param(
     # Boot the emulator and run testbench/test_dap.py against it.
     [switch]$DapTest,
 
+    # Run testbench/test_mcp.py, which starts its own emulators.
+    [switch]$McpTest,
+
     # Path to rom.bin. Otherwise the usual places are searched.
     [string]$Rom,
 
@@ -407,7 +410,7 @@ if ($Target) { $targets += $Target }
 elseif ($Tests) { $targets += 'unit_tests' }
 else { $targets += 'x16emu' }
 
-if ($targets -contains 'x16emu' -or $Run -or $DapTest) {
+if ($targets -contains 'x16emu' -or $Run -or $DapTest -or $McpTest) {
     if ($targets -notcontains 'x16emu') { $targets += 'x16emu' }
     Stop-RunningEmulator -ExePath $exePath
 }
@@ -428,7 +431,7 @@ if ($buildStatus -ne 0) {
     }
 }
 
-if (-not $Tests -and -not $Run -and -not $DapTest) {
+if (-not $Tests -and -not $Run -and -not $DapTest -and -not $McpTest) {
     Write-Step "Done"
     if (Test-Path $exePath) { Write-Note $exePath }
     exit 0
@@ -467,6 +470,17 @@ if ($Run) {
     Write-Note "$exePath $($runArgs -join ' ')"
     & $exePath @runArgs
     exit $LASTEXITCODE
+}
+
+if ($McpTest) {
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Fail "-McpTest needs python on PATH."
+    }
+    Write-Step "Running testbench/test_mcp.py"
+    & python (Join-Path $RepoRoot 'testbench\test_mcp.py') $exePath $romPath
+    if ($LASTEXITCODE -ne 0) { Fail "MCP test reported failures." }
+    Write-Step "MCP test passed"
+    exit 0
 }
 
 if ($DapTest) {

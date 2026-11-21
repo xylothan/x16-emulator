@@ -275,6 +275,10 @@ jobs:
           SDL_AUDIODRIVER: dummy
           X16_DAP_SCHEMA_REQUIRED: 1
         run: xvfb-run -a python testbench/test_dap_conformance.py build/x16emu pinned_rom/rom.bin
+      - name: Check the MCP server
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: xvfb-run -a python testbench/test_mcp.py build/x16emu pinned_rom/rom.bin
   # The Windows builds we point people at. Everything is linked statically,
   # including the CRT, so each package is a single self-contained x16emu.exe
   # with no redistributable to install. The MinGW jobs in windows-legacy still
