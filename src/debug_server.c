@@ -4781,6 +4781,34 @@ static void try_accept(void) {
 
 // ─── DAP framing: Content-Length parser ─────────────────────────────
 
+// DAP borrows its framing from HTTP, so an HTTP POST otherwise parses as a DAP
+// message: the request line is skipped as an unknown header and the request's
+// own Content-Length frames its body. A web page can make a browser send that
+// to a loopback port. A request line is never a "Name: value" field, whatever
+// its method, and browsers always send Host.
+static bool dap_header_block_is_http(const char *line, const char *end) {
+    while (line < end) {
+        const char *eol = memchr(line, '\n', (size_t)(end - line));
+        if (!eol) eol = end;
+        const char *stop = eol;
+        if (stop > line && stop[-1] == '\r') stop--;
+
+        if (stop > line) {
+            const char *p = line;
+            while (p < stop && (isalnum((unsigned char)*p) || *p == '-' || *p == '_')) p++;
+            if (p == line || p == stop || *p != ':') return true;
+
+            size_t name_len = (size_t)(p - line);
+            if ((name_len == 4 && dap_has_prefix_i(line, "host")) ||
+                (name_len == 6 && dap_has_prefix_i(line, "origin"))) {
+                return true;
+            }
+        }
+        line = eol + 1;
+    }
+    return false;
+}
+
 // Try to extract a complete DAP message from the receive buffer.
 // Copies the JSON body into `out` (NUL-terminated) and sets *consumed.
 // Returns false if no complete message is available yet.
@@ -4798,6 +4826,13 @@ static bool try_extract_dap_message(char *out, size_t out_size, int *consumed) {
     if (!header_end) return false;
 
     int header_size = (int)(header_end - recv_buf) + 4; // include \r\n\r\n
+
+    if (dap_header_block_is_http(recv_buf, header_end)) {
+        fprintf(stderr, "[dap] HTTP request on the DAP port; dropping client\n");
+        disconnect_client();
+        *consumed = 0;
+        return false;
+    }
 
     // Parse Content-Length
     int content_length = -1;
