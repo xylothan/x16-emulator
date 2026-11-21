@@ -2057,6 +2057,18 @@ note_port_traffic(bool write, uint8_t vram_bytes)
 
 video_vram_tap_fn video_vram_write_tap = NULL;
 
+video_vram_watch_fn video_vram_watch_hook = NULL;
+// The data port the store being carried out came through.
+static int vram_watch_port = 0;
+
+// A debugger poke through the port is not the guest writing.
+static inline void
+note_vram_watch(uint32_t address, uint8_t value)
+{
+	if (video_vram_watch_hook && !debug_port_write)
+		video_vram_watch_hook(address & 0x1FFFF, value, vram_watch_port);
+}
+
 static bool
 in_area(uint32_t a, uint32_t base, uint32_t size)
 {
@@ -3937,19 +3949,26 @@ video_space_write(uint32_t address, uint8_t value)
 void
 fx_video_space_write(uint32_t address, bool nibble, uint8_t value)
 {
+	bool stored = false;
 	if (fx_4bit_mode) {
 		if (nibble) {
 			if (!fx_trans_writes || (value & 0x0f) > 0) {
 				video_ram[address & 0x1FFFF] = (video_ram[address & 0x1FFFF] & 0xf0) | (value & 0x0f);
+				stored = true;
 			}
 		} else {
 			if (!fx_trans_writes || (value & 0xf0) > 0) {
 				video_ram[address & 0x1FFFF] = (video_ram[address & 0x1FFFF] & 0x0f) | (value & 0xf0);
+				stored = true;
 			}
 		}
 	} else {
-		if (!fx_trans_writes || value > 0) video_ram[address & 0x1FFFF] = value;
+		if (!fx_trans_writes || value > 0) {
+			video_ram[address & 0x1FFFF] = value;
+			stored = true;
+		}
 	}
+	bool side_effect = true;
 	if (address >= ADDR_PSG_START && address < ADDR_PSG_END) {
 		audio_render();
 		psg_writereg(address & 0x3f, value);
@@ -3958,7 +3977,15 @@ fx_video_space_write(uint32_t address, bool nibble, uint8_t value)
 		video_palette.dirty = true;
 	} else if (address >= ADDR_SPRDATA_START && address < ADDR_SPRDATA_END) {
 		sprite_attr_write(address, value);
+	} else {
+		side_effect = false;
 	}
+	// A transparent write skips VRAM but still reaches the PSG, palette and
+	// sprite registers, so it is reported there with the value they received.
+	if (stored)
+		note_vram_watch(address, video_ram[address & 0x1FFFF]);
+	else if (side_effect)
+		note_vram_watch(address, value);
 }
 
 void
@@ -3979,6 +4006,8 @@ fx_vram_cache_write(uint32_t address, uint8_t value, uint8_t mask)
 				// Do nothing
 				break;
 		}
+		if (mask != 3)
+			note_vram_watch(address, video_ram[address & 0x1FFFF]);
 	}
 }
 
@@ -4362,6 +4391,9 @@ void video_write(uint8_t reg, uint8_t value) {
 						video_ram[io_addr[1] & 0x1FFFF] = (fx_cache[fx_cache_byte_index] & 0x03) | (io_rddata[1] & 0xfc);
 						break;
 				}
+				// The poke is an addr1 mode, so it always goes out on port 1.
+				vram_watch_port = 1;
+				note_vram_watch(io_addr[1], video_ram[io_addr[1] & 0x1FFFF]);
 				break; // break out of the enclosing switch statement early, too
 			}
 
@@ -4369,6 +4401,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				video_step(MHZ, 0, true); // potential midline raster effect
 			bool nibble = fx_nibble_bit[reg - 3];
 			uint32_t address = get_and_inc_address(reg - 3, true);
+			vram_watch_port = reg - 3;
 			if (log_video) {
 				printf("WRITE video_space[$%X] = $%02X\n", address, value);
 			}

@@ -771,6 +771,60 @@ main(void)
 		      "the removed ones do not");
 	}
 
+	// ── A VRAM watch is a separate memory at the same numbers ───────────────
+	{
+		reset_all();
+		const debug_wp_spec_t vram = { DEBUG_WP_SPACE_VRAM, 0x0400, 4, DEBUG_BANK_ANY, false, 0, 0 };
+
+		check(debug_wp_add_ex(&vram, DEBUG_OWNER_MCP) == DEBUG_ADD_CREATED, "adds a VRAM watch");
+		check(debug_wp_armed_vram == 1 && debug_wp_armed_cpu_write == 0,
+		      "it arms the VRAM path and leaves the CPU path alone");
+		check(!debug_wp_check_write(0x0400, 0), "a CPU store to the same number does not fire it");
+		check(!debug_wp_covers(0x0400), "nor does it mark the CPU byte as watched");
+		check(debug_wp_covers_vram(0x0403) && !debug_wp_covers_vram(0x0404),
+		      "it covers its own range in VRAM");
+
+		check(debug_wp_add(0x0400, 1, DEBUG_BANK_ANY) >= 0, "the same number can be watched in the CPU map");
+		check(debug_wp_armed_vram == 1 && debug_wp_armed_cpu_write == 1, "each path counts its own");
+		check(!debug_wp_check_vram(0x0404, 0, 0), "a VRAM store past the range does not fire");
+		check(debug_wp_check_vram(0x0402, 0x7E, 1), "a VRAM store inside it fires");
+
+		uint8_t  space = 0, value = 0;
+		uint32_t addr = 0;
+		int      port = -1;
+		uint16_t cpu_addr = 0;
+		check(debug_wp_last_access(&space, &addr, &value, &port) && space == DEBUG_WP_SPACE_VRAM &&
+		          addr == 0x0402 && value == 0x7E && port == 1,
+		      "the hit records where, what and through which port");
+		check(!debug_wp_last_hit(&cpu_addr, &value), "a VRAM hit is not reported as a CPU one");
+		const int at = debug_wp_find(DEBUG_WP_SPACE_VRAM, 0x0400, DEBUG_BANK_ANY);
+		check(at >= 0 && debug_wp_at(at)->hits == 1, "it counts the hit");
+
+		check(debug_wp_add_ex(&vram, DEBUG_OWNER_DAP_SOURCE) == DEBUG_ADD_EXISTED,
+		      "an identical request shares the watch");
+		debug_wp_spec_t other = vram;
+		other.len = 8;
+		check(debug_wp_add_ex(&other, DEBUG_OWNER_UI) == DEBUG_ADD_CONFLICT,
+		      "a different range is refused");
+		check(debug_wp_at(at)->len == 4, "and the watch is unchanged");
+
+		debug_wp_set_active_at(at, false);
+		check(debug_wp_armed_vram == 0 && !debug_wp_check_vram(0x0402, 0, 0),
+		      "disabling it disarms the VRAM path");
+		debug_wp_set_active_at(at, true);
+		check(debug_wp_armed_vram == 1, "enabling it arms the path again");
+
+		check(debug_wp_remove_ex(DEBUG_WP_SPACE_VRAM, 0x0400, DEBUG_BANK_ANY, DEBUG_OWNER_MCP) &&
+		          debug_wp_armed_vram == 1,
+		      "the other owner keeps it armed");
+		check(debug_wp_remove_ex(DEBUG_WP_SPACE_VRAM, 0x0400, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE) &&
+		          debug_wp_armed_vram == 0,
+		      "the last owner takes it off");
+		check(debug_wp_exists(0x0400, DEBUG_BANK_ANY), "the CPU watch is still there");
+		debug_wp_clear_all();
+		check(debug_wp_armed_cpu_write == 0, "clearing the table resets the counts");
+	}
+
 	// ── One bank-selector rule, for breakpoints and watchpoints alike ───────
 	// A bank selector says one of two things: "whichever bank is mapped"
 	// (DEBUG_BANK_ANY) or "this specific bank". For an address outside a banked

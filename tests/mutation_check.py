@@ -693,8 +693,8 @@ MUTATIONS = [
         # A watchpoint answers "when does the program touch this?". Breaking on
         # the debugger's own edit answers a question nobody asked, and stops
         # the machine while someone is typing into it.
-        "find": "if (!debugOn && debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
-        "into": "if (debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "find": "if (!debugOn && debug_wp_armed_cpu_write > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
+        "into": "if (debug_wp_armed_cpu_write > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
         "count": 1,
         "caught_by": ["debug_write_path"],
     },

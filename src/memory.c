@@ -408,7 +408,7 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 	// A debug write is not a store the program made, so it reports nothing: a
 	// watchpoint answers "when does the program touch this?", and breaking on
 	// the debugger's own edit answers a question nobody asked.
-	if (!debugOn && debug_wp_count() > 0 && bank == 0 && debug_wp_check_write(address, value)) {
+	if (!debugOn && debug_wp_armed_cpu_write > 0 && bank == 0 && debug_wp_check_write(address, value)) {
 		DEBUGBreakOnWatchpoint();
 	}
 

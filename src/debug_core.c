@@ -718,19 +718,58 @@ debug_core_free(void)
 static struct watchpoint watchPoints[MAX_WATCHPOINTS];
 static int               numWatchpoints = 0;
 
-// Watchpoints are identified by (addr, bank selector), exactly like
-// breakpoints. Keying on the address alone would silently throw away the
-// second of two watches on the same address in different banks -- the very
-// case bank awareness exists for.
-static int
-wp_find(uint16_t addr, int x16Bank)
+int debug_wp_armed_cpu_write = 0;
+int debug_wp_armed_vram      = 0;
+void (*debug_wp_changed)(void) = NULL;
+
+// Every function that changes the table ends here, so the counts the store
+// paths read cannot fall out of step with it.
+static void
+wp_table_changed(void)
 {
-	x16Bank = normalise_bank(x16Bank, addr, 0);
+	int cpu = 0, vram = 0;
 	for (int i = 0; i < numWatchpoints; i++) {
-		if (watchPoints[i].addr == addr && watchPoints[i].x16Bank == x16Bank)
+		if (!watchPoints[i].active)
+			continue;
+		if (watchPoints[i].space == DEBUG_WP_SPACE_VRAM)
+			vram++;
+		else
+			cpu++;
+	}
+	debug_wp_armed_cpu_write = cpu;
+	debug_wp_armed_vram      = vram;
+	if (debug_wp_changed)
+		debug_wp_changed();
+}
+
+// VRAM has no banks, so its entries all carry DEBUG_BANK_ANY.
+static int
+wp_key_bank(uint8_t space, uint32_t addr, int x16Bank)
+{
+	return space == DEBUG_WP_SPACE_VRAM ? DEBUG_BANK_ANY
+	                                    : normalise_bank(x16Bank, (uint16_t)addr, 0);
+}
+
+// Watchpoints are identified by (space, addr, bank selector). Keying on the
+// address alone would silently throw away the second of two watches on the same
+// address in different banks -- the very case bank awareness exists for -- and
+// would treat $0400 in the CPU map and $00400 in VRAM as one watch.
+int
+debug_wp_find(uint8_t space, uint32_t addr, int x16Bank)
+{
+	x16Bank = wp_key_bank(space, addr, x16Bank);
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (watchPoints[i].space == space && watchPoints[i].addr == addr &&
+		    watchPoints[i].x16Bank == x16Bank)
 			return i;
 	}
 	return -1;
+}
+
+static int
+wp_find(uint16_t addr, int x16Bank)
+{
+	return debug_wp_find(DEBUG_WP_SPACE_CPU, addr, x16Bank);
 }
 
 int
@@ -779,12 +818,17 @@ debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 	struct watchpoint *w = &watchPoints[numWatchpoints];
 	w->addr      = addr;
 	w->len       = len;
+	w->space     = DEBUG_WP_SPACE_CPU;
+	w->hits      = 0;
 	w->x16Bank   = normalise_bank(x16Bank, addr, 0);
 	w->active    = true;
 	w->has_value = false;
 	w->value     = 0;
 	w->op        = BPCMP_EQ;
-	return numWatchpoints++;
+	w->owners    = 0;
+	const int created = numWatchpoints++;
+	wp_table_changed();
+	return created;
 }
 
 static void
@@ -794,6 +838,7 @@ wp_erase(int idx)
 		watchPoints[i] = watchPoints[i + 1];
 	}
 	numWatchpoints--;
+	wp_table_changed();
 }
 
 debug_add_result_t
@@ -818,6 +863,8 @@ debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
 	struct watchpoint *w = &watchPoints[numWatchpoints];
 	w->addr      = addr;
 	w->len       = len;
+	w->space     = DEBUG_WP_SPACE_CPU;
+	w->hits      = 0;
 	w->x16Bank   = normalise_bank(x16Bank, addr, 0);
 	w->active    = true;
 	w->has_value = false;
@@ -825,21 +872,108 @@ debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
 	w->op        = BPCMP_EQ;
 	w->owners    = bit;
 	numWatchpoints++;
+	wp_table_changed();
+	return DEBUG_ADD_CREATED;
+}
+
+debug_add_result_t
+debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+	const uint32_t len = spec->len ? spec->len : 1;
+
+	int idx = debug_wp_find(spec->space, spec->addr, spec->x16Bank);
+	if (idx >= 0) {
+		struct watchpoint *w = &watchPoints[idx];
+		if (w->len != len || !w->active || w->has_value != spec->has_value ||
+		    (spec->has_value && (w->op != spec->op || w->value != spec->value)))
+			return DEBUG_ADD_CONFLICT;
+		w->owners |= bit;
+		return DEBUG_ADD_EXISTED;
+	}
+	if (numWatchpoints >= MAX_WATCHPOINTS)
+		return DEBUG_ADD_FULL;
+
+	struct watchpoint *w = &watchPoints[numWatchpoints];
+	w->addr      = spec->addr;
+	w->len       = len;
+	w->space     = spec->space;
+	w->hits      = 0;
+	w->x16Bank   = wp_key_bank(spec->space, spec->addr, spec->x16Bank);
+	w->active    = true;
+	w->has_value = spec->has_value;
+	w->value     = spec->has_value ? spec->value : 0;
+	w->op        = spec->has_value ? spec->op : BPCMP_EQ;
+	w->owners    = bit;
+	numWatchpoints++;
+	wp_table_changed();
 	return DEBUG_ADD_CREATED;
 }
 
 bool
-debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner)
+debug_wp_remove_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner)
 {
 	const uint16_t bit = owner_bit(owner);
 
-	int idx = wp_find(addr, x16Bank);
+	int idx = debug_wp_find(space, addr, x16Bank);
 	if (idx < 0 || !(watchPoints[idx].owners & bit))
 		return false;
 
 	watchPoints[idx].owners &= (uint16_t)~bit;
 	if (watchPoints[idx].owners == 0)
 		wp_erase(idx);
+	return true;
+}
+
+bool
+debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner)
+{
+	return debug_wp_remove_ex(DEBUG_WP_SPACE_CPU, addr, x16Bank, owner);
+}
+
+bool
+debug_wp_has_owner_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner)
+{
+	int idx = debug_wp_find(space, addr, x16Bank);
+	return idx >= 0 && (watchPoints[idx].owners & owner_bit(owner)) != 0;
+}
+
+bool
+debug_wp_set_active_at(int index, bool active)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	watchPoints[index].active = active;
+	wp_table_changed();
+	return true;
+}
+
+bool
+debug_wp_set_value_at(int index, int op, uint8_t value)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	watchPoints[index].has_value = true;
+	watchPoints[index].op        = op;
+	watchPoints[index].value     = value;
+	return true;
+}
+
+bool
+debug_wp_clear_value_at(int index)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	watchPoints[index].has_value = false;
+	return true;
+}
+
+bool
+debug_wp_delete_at(int index)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	wp_erase(index);
 	return true;
 }
 
@@ -874,14 +1008,14 @@ debug_wp_delete(uint16_t addr, int x16Bank)
 bool
 debug_wp_has_owner(uint16_t addr, int x16Bank, debug_owner_t owner)
 {
-	int idx = wp_find(addr, x16Bank);
-	return idx >= 0 && (watchPoints[idx].owners & owner_bit(owner)) != 0;
+	return debug_wp_has_owner_ex(DEBUG_WP_SPACE_CPU, addr, x16Bank, owner);
 }
 
 void
 debug_wp_clear_all(void)
 {
 	numWatchpoints = 0;
+	wp_table_changed();
 }
 
 bool
@@ -903,6 +1037,7 @@ debug_wp_set_active(uint16_t addr, int x16Bank, bool active)
 	if (idx < 0)
 		return false;
 	watchPoints[idx].active = active;
+	wp_table_changed();
 	return true;
 }
 
@@ -938,7 +1073,15 @@ wp_bank_ok(const struct watchpoint *w)
 static bool
 wp_covers_addr(const struct watchpoint *w, uint16_t addr)
 {
-	return w->active && addr >= w->addr && (uint32_t)addr < (uint32_t)w->addr + w->len;
+	return w->active && w->space == DEBUG_WP_SPACE_CPU &&
+	       addr >= w->addr && (uint32_t)addr < w->addr + w->len;
+}
+
+static bool
+wp_covers_vram(const struct watchpoint *w, uint32_t addr)
+{
+	return w->active && w->space == DEBUG_WP_SPACE_VRAM &&
+	       addr >= w->addr && addr < w->addr + w->len;
 }
 
 bool
@@ -968,20 +1111,61 @@ wp_value_passes(const struct watchpoint *w, uint8_t value)
 }
 
 static bool     wpLastHitValid = false;
-static uint16_t wpLastHitAddr  = 0;
+static uint8_t  wpLastHitSpace = DEBUG_WP_SPACE_CPU;
+static uint32_t wpLastHitAddr  = 0;
 static uint8_t  wpLastHitValue = 0;
+static int      wpLastHitPort  = -1;
 
+static void
+wp_record_hit(uint8_t space, uint32_t addr, uint8_t value, int port)
+{
+	wpLastHitValid = true;
+	wpLastHitSpace = space;
+	wpLastHitAddr  = addr;
+	wpLastHitValue = value;
+	wpLastHitPort  = port;
+}
+
+// The whole table is walked rather than stopping at the first match, so that
+// overlapping watches each count the write.
 bool
 debug_wp_check_write(uint16_t addr, uint8_t value)
 {
+	bool fired = false;
 	for (int i = 0; i < numWatchpoints; i++) {
-		const struct watchpoint *w = &watchPoints[i];
+		struct watchpoint *w = &watchPoints[i];
 		if (wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value)) {
-			wpLastHitValid = true;
-			wpLastHitAddr  = addr;
-			wpLastHitValue = value;
-			return true;
+			w->hits++;
+			fired = true;
 		}
+	}
+	if (fired)
+		wp_record_hit(DEBUG_WP_SPACE_CPU, addr, value, -1);
+	return fired;
+}
+
+bool
+debug_wp_check_vram(uint32_t addr, uint8_t value, int port)
+{
+	bool fired = false;
+	for (int i = 0; i < numWatchpoints; i++) {
+		struct watchpoint *w = &watchPoints[i];
+		if (wp_covers_vram(w, addr) && wp_value_passes(w, value)) {
+			w->hits++;
+			fired = true;
+		}
+	}
+	if (fired)
+		wp_record_hit(DEBUG_WP_SPACE_VRAM, addr, value, port);
+	return fired;
+}
+
+bool
+debug_wp_covers_vram(uint32_t addr)
+{
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (wp_covers_vram(&watchPoints[i], addr))
+			return true;
 	}
 	return false;
 }
@@ -989,11 +1173,36 @@ debug_wp_check_write(uint16_t addr, uint8_t value)
 bool
 debug_wp_last_hit(uint16_t *addr, uint8_t *value)
 {
-	if (!wpLastHitValid)
+	if (!wpLastHitValid || wpLastHitSpace != DEBUG_WP_SPACE_CPU)
 		return false;
-	*addr  = wpLastHitAddr;
+	*addr  = (uint16_t)wpLastHitAddr;
 	*value = wpLastHitValue;
 	return true;
+}
+
+bool
+debug_wp_last_access(uint8_t *space, uint32_t *addr, uint8_t *value, int *port)
+{
+	if (!wpLastHitValid)
+		return false;
+	*space = wpLastHitSpace;
+	*addr  = wpLastHitAddr;
+	*value = wpLastHitValue;
+	*port  = wpLastHitPort;
+	return true;
+}
+
+bool
+debug_wp_fires_on_ex(uint8_t space, uint32_t wp_addr, int x16Bank, uint32_t addr, uint8_t value)
+{
+	const int idx = debug_wp_find(space, wp_addr, x16Bank);
+	if (idx < 0)
+		return false;
+	const struct watchpoint *w = &watchPoints[idx];
+	if (space == DEBUG_WP_SPACE_VRAM)
+		return wp_covers_vram(w, addr) && wp_value_passes(w, value);
+	return addr <= 0xFFFF && wp_covers_addr(w, (uint16_t)addr) && wp_bank_ok(w) &&
+	       wp_value_passes(w, value);
 }
 
 bool
