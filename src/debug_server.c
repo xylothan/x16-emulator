@@ -4,6 +4,7 @@
 
 #include <SDL.h>
 #include "debug_server.h"
+#include "screen_text.h"
 #include "debug_server_call.h"
 #include "mcp_server.h"
 #include "dbg_info.h"
@@ -2313,6 +2314,26 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     return 0;
 }
 
+// Base64, for the requests that carry binary. Returns NULL if out of memory.
+static char *dap_base64(const uint8_t *data, size_t len) {
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char *out = (char *)malloc((len + 2) / 3 * 4 + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        const size_t left = len - i;
+        unsigned t = (unsigned)data[i] << 16;
+        if (left > 1) t |= (unsigned)data[i + 1] << 8;
+        if (left > 2) t |= data[i + 2];
+        out[o++] = alphabet[(t >> 18) & 0x3F];
+        out[o++] = alphabet[(t >> 12) & 0x3F];
+        out[o++] = left > 1 ? alphabet[(t >> 6) & 0x3F] : '=';
+        out[o++] = left > 2 ? alphabet[t & 0x3F] : '=';
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static int handle_dap_read_memory(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "readMemory", "missing arguments");
@@ -2356,12 +2377,8 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
         x16_bank = (int)bank_item->valuedouble;
     }
 
-    // Build base64 data (DAP readMemory uses base64)
-    static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     unsigned char *raw = (unsigned char *)malloc((size_t)count + 1);
-    char *b64 = (char *)malloc(((size_t)count * 4 / 3) + 8);
-    if (!raw || !b64) {
-        free(raw); free(b64);
+    if (!raw) {
         send_dap_error_response(seq, "readMemory", "memory allocation failed");
         return 0;
     }
@@ -2376,20 +2393,12 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
                          : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), x16_bank);
     }
 
-    // Base64 encode
-    int b64_len = 0;
-    for (int i = 0; i < count; i += 3) {
-        int remaining = count - i;
-        unsigned int triplet = raw[i] << 16;
-        if (remaining > 1) triplet |= raw[i + 1] << 8;
-        if (remaining > 2) triplet |= raw[i + 2];
-
-        b64[b64_len++] = b64chars[(triplet >> 18) & 0x3F];
-        b64[b64_len++] = b64chars[(triplet >> 12) & 0x3F];
-        b64[b64_len++] = (remaining > 1) ? b64chars[(triplet >> 6) & 0x3F] : '=';
-        b64[b64_len++] = (remaining > 2) ? b64chars[triplet & 0x3F] : '=';
+    char *b64 = dap_base64(raw, (size_t)count);
+    if (!b64) {
+        free(raw);
+        send_dap_error_response(seq, "readMemory", "memory allocation failed");
+        return 0;
     }
-    b64[b64_len] = '\0';
 
     cJSON *body = cJSON_CreateObject();
     char addr_str[16];
@@ -2837,6 +2846,95 @@ static int handle_x16_status(int seq, cJSON *args) {
 
 static bool dap_at_frame_boundary(void) {
     return DEBUGIsPaused() && frame_end_seen && clockticks6502 == frame_end_ticks;
+}
+
+// ─── x16/screen, x16/screenshot: what the machine is showing ────────
+//
+// x16/screen reads the text layer back out of VRAM. x16/screenshot is the picture
+// as it stands: VERA draws it a scanline at a time, so it is only a whole frame
+// at a frame boundary, and under warp most frames are not drawn at all. The reply
+// says both, rather than a client taking a torn or old image for the current one.
+
+static int handle_x16_screen(int seq, cJSON *args) {
+    cJSON *cs = args ? cJSON_GetObjectItemCaseSensitive(args, "charset") : NULL;
+    cJSON *ly = args ? cJSON_GetObjectItemCaseSensitive(args, "layer") : NULL;
+
+    screen_charset_t charset = SCREEN_CHARSET_PETSCII_UPPER;
+    if (cs && (!cJSON_IsString(cs) || !screen_charset_parse(cs->valuestring, &charset))) {
+        send_dap_error_response(seq, "x16/screen",
+                                "'charset' must be \"petscii-upper\", \"petscii-lower\" or \"iso\"");
+        return 0;
+    }
+    if (ly && (!cJSON_IsNumber(ly) || (ly->valuedouble != 0 && ly->valuedouble != 1))) {
+        send_dap_error_response(seq, "x16/screen", "'layer' must be 0 or 1");
+        return 0;
+    }
+
+    screen_text_layout_t layout;
+    int layer = -1;
+    if (ly) {
+        layer = (int)ly->valuedouble;
+        video_get_text_layout(layer, &layout);
+        if (!layout.enabled || !layout.is_text) {
+            send_dap_error_response(seq, "x16/screen", !layout.enabled ? "that layer is not being displayed"
+                                                                       : "that layer is not in text mode");
+            return 0;
+        }
+    } else {
+        // Layer 1 first: it is the one the KERNAL's text screen uses.
+        for (int i = 1; i >= 0 && layer < 0; i--) {
+            video_get_text_layout(i, &layout);
+            if (layout.enabled && layout.is_text) layer = i;
+        }
+        if (layer < 0) {
+            send_dap_error_response(seq, "x16/screen", "neither layer is showing text; use x16/screenshot");
+            return 0;
+        }
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "layer", layer);
+    cJSON_AddStringToObject(body, "charset", screen_charset_name(charset));
+    cJSON_AddNumberToObject(body, "columns", layout.columns);
+    cJSON_AddNumberToObject(body, "rows", layout.rows);
+    cJSON *lines = cJSON_AddArrayToObject(body, "lines");
+    for (int row = 0; row < layout.rows; row++) {
+        char line[SCREEN_TEXT_LINE_MAX];
+        screen_text_line(&layout, row, charset, video_space_read, line);
+        cJSON_AddItemToArray(lines, cJSON_CreateString(line));
+    }
+    send_dap_response(seq, "x16/screen", true, body);
+    return 0;
+}
+
+static int handle_x16_screenshot(int seq, cJSON *args) {
+    (void)args;
+    if (headless) {
+        send_dap_error_response(seq, "x16/screenshot",
+                                "a -testbench run has no video, so no picture; use -hidden instead");
+        return 0;
+    }
+    size_t len = 0;
+    int w = 0, h = 0;
+    uint8_t *png = video_screenshot_png(&len, &w, &h);
+    char *b64 = png ? dap_base64(png, len) : NULL;
+    free(png);
+    if (!b64) {
+        send_dap_error_response(seq, "x16/screenshot", "could not encode the picture");
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "data", b64);
+    free(b64);
+    cJSON_AddStringToObject(body, "mimeType", "image/png");
+    cJSON_AddNumberToObject(body, "width", w);
+    cJSON_AddNumberToObject(body, "height", h);
+    cJSON_AddBoolToObject(body, "paused", DEBUGIsPaused());
+    cJSON_AddNumberToObject(body, "frame", (double)machine_frames);
+    cJSON_AddBoolToObject(body, "atFrameBoundary", dap_at_frame_boundary());
+    cJSON_AddBoolToObject(body, "warp", warp_mode);
+    send_dap_response(seq, "x16/screenshot", true, body);
+    return 0;
 }
 
 // Where a request's state goes or comes from: a slot or a file, one of the two.
@@ -5669,6 +5767,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "readMemory"))    result = handle_dap_read_memory(seq, args);
     else if (!strcmp(cmd, "writeMemory"))   result = handle_dap_write_memory(seq, args);
     else if (!strcmp(cmd, "x16/status"))    result = handle_x16_status(seq, args);
+    else if (!strcmp(cmd, "x16/screen"))    result = handle_x16_screen(seq, args);
+    else if (!strcmp(cmd, "x16/screenshot")) result = handle_x16_screenshot(seq, args);
     else if (!strcmp(cmd, "x16/registers")) result = handle_x16_registers(seq, args);
     else if (!strcmp(cmd, "x16/sendKey"))   result = handle_x16_send_key(seq, args);
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
@@ -5759,7 +5859,7 @@ static const char *const callable_commands[] = {
     "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
-    "x16/saveState", "x16/loadState", "x16/perfStats",
+    "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
 };
 

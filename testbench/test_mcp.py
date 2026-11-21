@@ -8,15 +8,18 @@ Every line it writes to stdout under stdio must be one JSON-RPC message: anythin
 else would break a real client.
 """
 
+import base64
 import json
 import os
 import queue
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import zlib
 
 passed = 0
 failed = 0
@@ -33,9 +36,9 @@ def case(name, ok, detail=""):
 
 
 class Mcp:
-    def __init__(self, extra=()):
+    def __init__(self, extra=(), warp=True):
         self.dir = tempfile.TemporaryDirectory()
-        cmd = [EXE, "-rom", ROM, "-mcp", "-hidden", "-warp", "-zeroram"] + list(extra)
+        cmd = [EXE, "-rom", ROM, "-mcp", "-hidden", "-zeroram"] + (["-warp"] if warp else []) + list(extra)
         self.p = subprocess.Popen(cmd, cwd=self.dir.name, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.lines = queue.Queue()
@@ -186,7 +189,7 @@ def test_tools():
         listed = (r or {}).get("result", {}).get("tools", [])
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
-                   "wait_for_stop", "perf_stats"}
+                   "wait_for_stop", "perf_stats", "get_screen", "screenshot"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
                   "type_text", "send_key", "joystick"}
@@ -1114,6 +1117,169 @@ def test_lease():
         case("with the lease gone, Stop ends a launched machine again", ended)
 
 
+def png_rgb(raw):
+    """Width, height and rows of RGB bytes, from an 8-bit non-interlaced PNG."""
+    if raw[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat, w, h = 8, b"", 0, 0
+    while pos < len(raw):
+        n = struct.unpack(">I", raw[pos:pos + 4])[0]
+        kind, body = raw[pos + 4:pos + 8], raw[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if (depth, ctype, interlace) != (8, 2, 0):
+                raise ValueError("unexpected PNG format")
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + n
+    out = zlib.decompress(idat)
+    stride, rows, prev, p = w * 3, [], bytearray(w * 3), 0
+    for _ in range(h):
+        f, line = out[p], bytearray(out[p + 1:p + 1 + stride])
+        p += 1 + stride
+        for i in range(stride):
+            a = line[i - 3] if i >= 3 else 0
+            b = prev[i]
+            c = prev[i - 3] if i >= 3 else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pred = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                line[i] = (line[i] + pred) & 255
+        rows.append(line)
+        prev = line
+    return w, h, rows
+
+
+def image_of(result):
+    """The PNG bytes in a tool result, or None."""
+    for item in result.get("content", []):
+        if item.get("type") == "image" and item.get("mimeType") == "image/png":
+            return base64.b64decode(item["data"])
+    return None
+
+
+def read_byte(m, address, space="cpu"):
+    return int(data(m.call("read_memory", address=address, length=1, space=space)).get("hex", "00"), 16)
+
+
+def cell_matches_font(m, rows, col, row):
+    """Whether one 8x8 text cell of the picture is the glyph VRAM says is there."""
+    mapbase = read_byte(m, 0x9F35) << 9
+    tilebase = (read_byte(m, 0x9F36) & 0xFC) << 9
+    width = 32 << ((read_byte(m, 0x9F34) >> 4) & 3)
+    code = read_byte(m, mapbase + 2 * (row * width + col), "vram")
+    colours = {True: set(), False: set()}
+    for y in range(8):
+        bits = read_byte(m, tilebase + code * 8 + y, "vram")
+        for x in range(8):
+            start = (col * 8 + x) * 3
+            colours[bool(bits & (0x80 >> x))].add(bytes(rows[row * 8 + y][start:start + 3]))
+    return len(colours[True]) == 1 and len(colours[False]) == 1 and colours[True] != colours[False]
+
+
+def test_vision():
+    print("screen")
+
+    port = free_port()
+    with Mcp(["-debugport", str(port)], warp=False) as m:
+        m.init()
+        at = None
+        end = time.time() + 40
+        while at is None and time.time() < end:
+            lines = data(m.call("get_screen")).get("lines") or []
+            at = next((i for i, l in enumerate(lines) if l.startswith("READY.")), None)
+            if at is None:
+                time.sleep(0.25)
+        case("get_screen reads the BASIC prompt", at is not None)
+        if at is None:
+            return
+
+        dap = Dap(port)
+        dap.session()
+        m.call("pause")
+        m.call("run_frames", frames=1)
+
+        before = dap.request("x16/status", {"hash": True, "screenHash": True})["body"]
+        screen = m.call("get_screen")
+        shot = m.call("screenshot")
+        over_dap = dap.request("x16/screenshot")
+        dap_screen = dap.request("x16/screen")
+        after = dap.request("x16/status", {"hash": True, "screenHash": True})["body"]
+        case("looking at the screen changes no machine state", before.get("hash") == after.get("hash"))
+        case("nor the picture", before.get("screenHash") == after.get("screenHash"))
+
+        s = data(screen)
+        case("the screen says what it decoded",
+             s.get("layer") == 1 and s.get("charset") == "petscii-upper" and
+             s.get("rows") == len(s.get("lines", [])) and s.get("columns", 0) > 0, str({k: s.get(k) for k in ("layer", "charset", "rows", "columns")}))
+        case("the text content is the lines", "READY." in screen["content"][0]["text"])
+        case("the same text over DAP", dap_screen.get("body", {}).get("lines") == s.get("lines"))
+        case("no line ends in a space", not any(l.endswith(" ") for l in s.get("lines", [])))
+
+        meta = data(shot)
+        png = image_of(shot)
+        case("screenshot is an image", png is not None)
+        case("the image is not repeated in structuredContent", "data" not in meta)
+        case("a frame boundary is reported", meta.get("atFrameBoundary") is True, str(meta))
+        case("warp is reported", meta.get("warp") is False)
+        case("the result carries the machine state", meta.get("paused") is True and "stopId" in meta)
+
+        body = (over_dap or {}).get("body", {})
+        dap_png = base64.b64decode(body.get("data", ""))
+        case("x16/screenshot is the same image", dap_png == png)
+        case("x16/screenshot says it is a PNG", body.get("mimeType") == "image/png")
+        case("x16/screenshot reports the boundary", body.get("atFrameBoundary") is True)
+
+        w, h, rows = png_rgb(png)
+        case("the image is 640 by 480", (w, h) == (640, 480))
+        case("80 columns on the boot screen", s.get("columns") == 80, str(s.get("columns")))
+        for col in range(6):
+            case(f"the picture shows READY. at column {col}", cell_matches_font(m, rows, col, at))
+
+        m.call("step")
+        case("a stepped machine is not at a boundary",
+             data(m.call("screenshot")).get("atFrameBoundary") is False)
+        m.call("run_frames", frames=1)
+
+        case("an unknown charset is refused", is_error(m.call("get_screen", charset="ebcdic")))
+        case("an unknown layer is refused", is_error(m.call("get_screen", layer=2)))
+        case("a layer that is off is refused", is_error(m.call("get_screen", layer=0)))
+        case("screenshot takes no arguments", is_error(m.call("screenshot", scale=2)))
+
+        lower = data(m.call("get_screen", charset="petscii-lower")).get("lines", [])
+        case("the lower-case set reads the same cells", lower[at].startswith("ready."), lower[at] if at < len(lower) else "")
+
+        config = read_byte(m, 0x9F34)
+        m.call("write_memory", address=0x9F34, hex="%02X" % (config | 1))
+        case("a screen with no text layer is refused", is_error(m.call("get_screen")))
+        case("so is asking for that layer", is_error(m.call("get_screen", layer=1)))
+        case("a screenshot still works", image_of(m.call("screenshot")) is not None)
+        m.call("write_memory", address=0x9F34, hex="%02X" % config)
+        case("text is back with the layer", any(l.startswith("READY.") for l in data(m.call("get_screen")).get("lines", [])))
+        dap.close()
+
+    with Mcp() as m:
+        m.init()
+        time.sleep(0.5)
+        case("warp is reported when on", data(m.call("screenshot")).get("warp") is True)
+
+    with Mcp(["-testbench"]) as m:
+        m.init()
+        case("a run with no video has no picture", is_error(m.call("screenshot")))
+
+    with HttpMcp() as h:
+        h.init()
+        time.sleep(0.5)
+        png = image_of(h.call("screenshot"))
+        case("a screenshot arrives whole over HTTP", png is not None and png_rgb(png)[:2] == (640, 480))
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1122,7 +1288,7 @@ def main():
     EXE, ROM = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
-                 test_http, test_lease):
+                 test_http, test_lease, test_vision):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
