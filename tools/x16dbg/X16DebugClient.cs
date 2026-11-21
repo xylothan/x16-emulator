@@ -54,10 +54,10 @@ public class X16DebugClient : IDisposable
             ["supportsReadMemoryRequest"] = true,
         };
 
+        // Listen before asking: the event follows the response immediately.
+        var initialized = WaitForEventAsync("initialized", 5000);
         var initResponse = await SendRequestAsync("initialize", initArgs);
-
-        // Wait for the "initialized" event from the server
-        await WaitForEventAsync("initialized", 5000);
+        await initialized;
 
         // Complete configuration
         await SendRequestAsync("configurationDone");
@@ -73,7 +73,10 @@ public class X16DebugClient : IDisposable
     public async Task<JsonNode> SendRequestAsync(string command, JsonNode? arguments = null, int timeoutMs = 10000)
     {
         int seq;
-        var tcs = new TaskCompletionSource<JsonNode>();
+        // Not on the listener's thread: the caller goes on to wait at the prompt,
+        // and no event sent after this response would be read until the next
+        // command. The protocol sends stopped after the response to pause or step.
+        var tcs = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         lock (_lock)
         {
@@ -103,7 +106,7 @@ public class X16DebugClient : IDisposable
     /// </summary>
     public Task<JsonNode> WaitForEventAsync(string eventName, int timeoutMs = 10000)
     {
-        var tcs = new TaskCompletionSource<JsonNode>();
+        var tcs = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
         Action<JsonNode>? handler = null;
         handler = (evt) =>
         {

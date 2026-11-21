@@ -197,6 +197,11 @@ static uint8_t  instr_bp_banks[128];
 static int      num_instr_bps = 0;
 
 static bool     dap_session_active = false;
+// The session began with launch, so the machine's lifetime is the client's. One
+// that attached found the machine running and must leave it running.
+static bool     dap_launched = false;
+// The protocol allows no event until the initialize request has been answered.
+static bool     dap_initialize_answered = false;
 // Whether the stop the machine is currently sitting in has been announced. A
 // breakpoint can hit while the client is still configuring, and configurationDone
 // would then report the same halt a second time under a different reason.
@@ -516,13 +521,14 @@ static void send_dap_response(int request_seq, const char *command, bool success
 }
 
 // An error response whose body carries one more item, key and value (taken
-// over), beside the error; key NULL for none.
-static void send_dap_error_response_with(int request_seq, const char *command, const char *message,
-                                         const char *key, cJSON *item) {
+// over), beside the error; key NULL for none. `message` is the short form a
+// client can match on, `format` the text it shows.
+static void send_dap_error_response_full(int request_seq, const char *command, const char *message,
+                                         const char *format, const char *key, cJSON *item) {
     cJSON *body = cJSON_CreateObject();
     cJSON *error_obj = cJSON_CreateObject();
     cJSON_AddNumberToObject(error_obj, "id", 1);
-    cJSON_AddStringToObject(error_obj, "format", message);
+    cJSON_AddStringToObject(error_obj, "format", format);
     cJSON_AddItemToObject(body, "error", error_obj);
     if (key && item) cJSON_AddItemToObject(body, key, item);
     else if (item) cJSON_Delete(item);
@@ -538,11 +544,20 @@ static void send_dap_error_response_with(int request_seq, const char *command, c
     send_dap_message(resp);
 }
 
+static void send_dap_error_response_with(int request_seq, const char *command, const char *message,
+                                         const char *key, cJSON *item) {
+    send_dap_error_response_full(request_seq, command, message, message, key, item);
+}
+
 static void send_dap_error_response(int request_seq, const char *command, const char *message) {
     send_dap_error_response_with(request_seq, command, message, NULL, NULL);
 }
 
 static void send_dap_event(const char *event_name, cJSON *body) {
+    if (!dap_initialize_answered) {
+        cJSON_Delete(body);
+        return;
+    }
     cJSON *event = cJSON_CreateObject();
     cJSON_AddNumberToObject(event, "seq", dap_seq++);
     cJSON_AddStringToObject(event, "type", "event");
@@ -617,6 +632,9 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsX16SpriteMuxStats", true);
     send_dap_response(seq, "initialize", true, caps);
 
+    // Sending can drop the client, and a session must not start for nobody.
+    if (client_sock == SOCKET_INVALID) return 0;
+    dap_initialize_answered = true;
     dap_session_active = true;
 
     // Per the DAP spec this follows the initialize response immediately: a
@@ -641,6 +659,7 @@ static int handle_dap_launch(int seq, cJSON *args) {
         cJSON *soe = cJSON_GetObjectItemCaseSensitive(args, "stopOnEntry");
         dap_stop_on_entry = (soe && cJSON_IsTrue(soe));
     }
+    dap_launched = true;
     send_dap_response(seq, "launch", true, NULL);
 
     send_dap_event_thread_started();
@@ -1452,9 +1471,13 @@ static int handle_dap_step_out(int seq, cJSON *args) {
 static int handle_dap_pause(int seq, cJSON *args) {
     (void)args;
     const bool wasRunning = (currentMode != DMODE_STOP);
+    // The protocol wants the response first, and the break below announces the
+    // stop. Sending can drop the client, and halting after that would strand a
+    // headless machine with nobody able to resume it.
+    send_dap_response(seq, "pause", true, NULL);
+    if (client_sock == SOCKET_INVALID) return 0;
     // Emits the stopped event itself on the RUN->STOP transition.
     DEBUGBreakToDebugger();
-    send_dap_response(seq, "pause", true, NULL);
     // Already halted -- a previous client left it that way, or a breakpoint got
     // there first. There is no transition for DEBUGBreakToDebugger() to report,
     // and the protocol still owes this request a stopped event; without one the
@@ -1465,9 +1488,16 @@ static int handle_dap_pause(int seq, cJSON *args) {
     return 1;
 }
 
+static void dap_quit_emulator(void) {
+    SDL_Event quit_event;
+    quit_event.type = SDL_QUIT;
+    SDL_PushEvent(&quit_event);
+}
+
 static int handle_dap_disconnect(int seq, cJSON *args) {
-    // Default to terminating since the emulator is always launched for debugging
-    bool terminate = true;
+    // A launched machine ends with its session. One the client attached to, or
+    // never claimed at all, was not the client's to end.
+    bool terminate = dap_launched;
     if (args) {
         cJSON *term_item = cJSON_GetObjectItemCaseSensitive(args, "terminateDebuggee");
         if (term_item && cJSON_IsBool(term_item)) {
@@ -1477,9 +1507,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
     send_dap_response(seq, "disconnect", true, NULL);
 
     if (terminate) {
-        SDL_Event quit_event;
-        quit_event.type = SDL_QUIT;
-        SDL_PushEvent(&quit_event);
+        dap_quit_emulator();
     } else {
         // Keep emulator running — prevent disconnect_client from killing it
         dap_session_active = false;
@@ -1562,19 +1590,47 @@ static int handle_dap_goto(int seq, cJSON *args) {
         return 0;
     }
 
-    uint16_t addr = (uint16_t)target_id->valueint;
-    regs.pc = addr;
+    // The stopped event below has to describe a real stop.
+    if (currentMode != DMODE_STOP) {
+        send_dap_error_response_full(seq, "goto", "notStopped",
+                                     "the machine is running; pause it first", NULL, NULL);
+        return 0;
+    }
+
+    // A target above $FFFF carries a 65C816 program bank.
+    const uint32_t target = (uint32_t)target_id->valueint;
+    regs.pc = (uint16_t)target;
+    if (regs.is65c816 && target > 0xFFFF) regs.k = (uint8_t)(target >> 16);
 
     send_dap_response(seq, "goto", true, NULL);
-
-    // Send stopped event at new location
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "reason", "goto");
-    cJSON_AddNumberToObject(body, "threadId", 1);
-    cJSON_AddBoolToObject(body, "allThreadsStopped", true);
-    send_dap_event("stopped", body);
-
+    debug_server_notify_stopped("goto");
     return 0;
+}
+
+// The console commands that change the machine or the breakpoint tables. A
+// hover or a watch re-evaluates on its own, so these must never run from one:
+// resting the mouse on the word "reset" reset the machine.
+static bool dap_eval_changes_state(const char *expr) {
+    return !strncmp(expr, "bp_add ", 7) || !strncmp(expr, "bp_remove ", 10) ||
+           !strcmp(expr, "bp_clear") || !strcmp(expr, "reset") ||
+           !strncmp(expr, "watch_add ", 10) || !strncmp(expr, "watch_remove ", 13) ||
+           !strcmp(expr, "watch_clear");
+}
+
+// "$hex", "0xhex" or hex with a leading zero, all of it. Text that merely starts
+// like an address used to read as whatever digits it began with, so hovering on
+// a name such as $ZZZZ showed the byte at $0000.
+static bool dap_parse_eval_addr(const char *expr, uint32_t *addr) {
+    const char *digits = expr;
+    if (expr[0] == '$') digits = expr + 1;
+    else if (expr[0] == '0' && (expr[1] == 'x' || expr[1] == 'X')) digits = expr + 2;
+    if (!isxdigit((unsigned char)digits[0])) return false;
+    if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) return false;
+    char *end;
+    const unsigned long v = strtoul(digits, &end, 16);
+    if (*end) return false;
+    *addr = (uint32_t)v & 0xFFFFFF;
+    return true;
 }
 
 static int handle_dap_evaluate(int seq, cJSON *args) {
@@ -1589,8 +1645,18 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     }
     const char *expr = expr_item->valuestring;
 
+    // A missing context is a console too: not every client sends one.
+    cJSON *ctx_item = cJSON_GetObjectItemCaseSensitive(args, "context");
+    const bool from_console = !ctx_item || !cJSON_IsString(ctx_item) ||
+                              !strcmp(ctx_item->valuestring, "repl");
+    if (!from_console && dap_eval_changes_state(expr)) {
+        send_dap_error_response(seq, "evaluate", "this command only runs from the debug console");
+        return 0;
+    }
+
     // Parse expression: $XXXX = memory peek, register names, bp_* commands
-    char result[1024] = "???";
+    char result[1024] = "";
+    uint32_t peek_addr = 0;
 
     // Breakpoint management via evaluate. bp_add and bp_remove take the same
     // address forms as an instructionReference, so "bb:aaaa" pins a bank. They
@@ -1684,16 +1750,10 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     } else if (strcmp(expr, "reset") == 0) {
         machine_reset();
         snprintf(result, sizeof(result), "CPU reset");
-    } else if (expr[0] == '$' || expr[0] == '0') {
+    } else if ((expr[0] == '$' || expr[0] == '0') && dap_parse_eval_addr(expr, &peek_addr)) {
         // Memory address (24-bit: high byte is the 65C816 bank byte).
-        uint32_t addr;
-        if (expr[0] == '$') {
-            addr = (uint32_t)strtoul(expr + 1, NULL, 16);
-        } else {
-            addr = (uint32_t)strtoul(expr, NULL, 16);
-        }
-        addr &= 0xFFFFFF;
-        uint8_t val = debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), USE_CURRENT_X16_BANK);
+        uint8_t val = debug_read6502((uint16_t)(peek_addr & 0xFFFF), (uint8_t)(peek_addr >> 16),
+                                     USE_CURRENT_X16_BANK);
         snprintf(result, sizeof(result), "$%02X (%d)", val, val);
     } else if (!strcmp(expr, "A") || !strcmp(expr, "a")) {
         if (regs.is65c816 && !regs.e && !(regs.status & FLAG_MEMORY_WIDTH))
@@ -1779,6 +1839,9 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
             uint8_t val = vera_read_dbg((uint8_t)i);
             len += snprintf(result + len, sizeof(result) - len, "%02X ", val);
         }
+    } else {
+        send_dap_error_response(seq, "evaluate", "unknown expression");
+        return 0;
     }
 
     cJSON *body = cJSON_CreateObject();
@@ -3949,6 +4012,46 @@ static int handle_dap_disassemble(int seq, cJSON *args) {
 // ─── DAP command dispatch ───────────────────────────────────────────
 
 // ─── setVariable ─────────────────────────────────────────────────────
+
+// $hex, 0xhex or decimal, and nothing else: anything unreadable used to store 0
+// and report success. Also takes a value as the variables view shows it, since
+// that is the text an editor offers for editing: "$12 (18)" or "$35 [nv-BdIzC]".
+// If the two halves of the first form disagree, there is no telling which was
+// meant, so it is refused.
+static bool dap_parse_value(const char *s, uint32_t *out) {
+    while (isspace((unsigned char)*s)) s++;
+    int base = 10;
+    if (*s == '$') {
+        base = 16;
+        s++;
+    } else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s += 2;
+    }
+    if (base == 16 ? !isxdigit((unsigned char)*s) : !isdigit((unsigned char)*s)) return false;
+    if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) return false;
+
+    char *end;
+    const unsigned long long v = strtoull(s, &end, base);
+    if (v > 0xFFFFFFFFULL) return false;      // an overflow reads as the maximum
+    while (isspace((unsigned char)*end)) end++;
+    if (*end == '(') {
+        if (!isdigit((unsigned char)end[1])) return false;
+        char *close;
+        const unsigned long long shown = strtoull(end + 1, &close, 10);
+        if (*close != ')' || shown != v) return false;
+        end = close + 1;
+    } else if (*end == '[') {
+        end = strchr(end, ']');
+        if (!end) return false;
+        end++;
+    }
+    while (isspace((unsigned char)*end)) end++;
+    if (*end) return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
 static int handle_dap_set_variable(int seq, cJSON *args) {
     if (!args) { send_dap_error_response(seq, "setVariable", "missing arguments"); return 0; }
     cJSON *ref_i  = cJSON_GetObjectItemCaseSensitive(args, "variablesReference");
@@ -3957,26 +4060,49 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
     int ref = (ref_i && cJSON_IsNumber(ref_i)) ? (int)ref_i->valuedouble : 0;
     const char *name   = (name_i && cJSON_IsString(name_i)) ? name_i->valuestring : "";
     const char *valstr = (val_i && cJSON_IsString(val_i)) ? val_i->valuestring : "";
-    uint32_t v = dap_parse_num(valstr);
+    uint32_t v;
+    if (!dap_parse_value(valstr, &v)) {
+        send_dap_error_response(seq, "setVariable", "not a number (use $hex, 0xhex or decimal)");
+        return 0;
+    }
     bool ok = true;
     bool a16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_MEMORY_WIDTH);
     bool x16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_INDEX_WIDTH);
+    // What the target actually holds afterwards, which is what gets reported: a
+    // value wider than the register is cut down to fit.
+    uint32_t stored = 0;
+    int digits = 2;
 
     if (ref == VARREF_REGISTERS) {
-        if      (!strcmp(name, "PC")) regs.pc = (uint16_t)v;
-        else if (!strcmp(name, "A"))  { if (a16) regs.c = (uint16_t)v; else regs.a = (uint8_t)v; }
-        else if (!strcmp(name, "X"))  { if (x16) regs.x = (uint16_t)v; else regs.xl = (uint8_t)v; }
-        else if (!strcmp(name, "Y"))  { if (x16) regs.y = (uint16_t)v; else regs.yl = (uint8_t)v; }
-        else if (!strcmp(name, "SP")) regs.sp = regs.is65c816 ? (uint16_t)v : (uint16_t)((regs.sp & 0xFF00) | (v & 0xFF));
-        else if (!strcmp(name, "D"))  regs.dp = (uint16_t)v;
-        else if (!strcmp(name, "DBR")) regs.db = (uint8_t)v;
-        else if (!strcmp(name, "PBR")) regs.k = (uint8_t)v;
-        else if (name[0] == 'P')      regs.status = (uint8_t)v; // "P (Status)"
-        else if (!strcmp(name, "RAM Bank")) memory_set_ram_bank((uint8_t)v);
-        else if (!strcmp(name, "ROM Bank")) memory_set_rom_bank((uint8_t)v);
+        if      (!strcmp(name, "PC")) { regs.pc = (uint16_t)v; stored = regs.pc; digits = 4; }
+        else if (!strcmp(name, "A"))  {
+            if (a16) { regs.c = (uint16_t)v; stored = regs.c; digits = 4; }
+            else     { regs.a = (uint8_t)v;  stored = regs.a; }
+        }
+        else if (!strcmp(name, "X"))  {
+            if (x16) { regs.x = (uint16_t)v; stored = regs.x; digits = 4; }
+            else     { regs.xl = (uint8_t)v; stored = regs.xl; }
+        }
+        else if (!strcmp(name, "Y"))  {
+            if (x16) { regs.y = (uint16_t)v; stored = regs.y; digits = 4; }
+            else     { regs.yl = (uint8_t)v; stored = regs.yl; }
+        }
+        else if (!strcmp(name, "SP")) {
+            regs.sp = regs.is65c816 ? (uint16_t)v : (uint16_t)((regs.sp & 0xFF00) | (v & 0xFF));
+            if (regs.is65c816 && !regs.e) { stored = regs.sp; digits = 4; }
+            else                            stored = (uint8_t)regs.sp;
+        }
+        else if (!strcmp(name, "D"))   { regs.dp = (uint16_t)v; stored = regs.dp; digits = 4; }
+        else if (!strcmp(name, "DBR")) { regs.db = (uint8_t)v; stored = regs.db; }
+        else if (!strcmp(name, "PBR")) { regs.k = (uint8_t)v; stored = regs.k; }
+        else if (name[0] == 'P')       { regs.status = (uint8_t)v; stored = regs.status; } // "P (Status)"
+        else if (!strcmp(name, "RAM Bank")) { memory_set_ram_bank((uint8_t)v); stored = memory_get_ram_bank(); }
+        else if (!strcmp(name, "ROM Bank")) { memory_set_rom_bank((uint8_t)v); stored = memory_get_rom_bank(); }
         else ok = false;
     } else if (ref == VARREF_STACK) {
-        debug_write6502((uint16_t)dap_parse_num(name), 0, (uint8_t)v); // name is "$XXXX"
+        const uint16_t a = (uint16_t)dap_parse_num(name); // name is "$XXXX"
+        debug_write6502(a, 0, (uint8_t)v);
+        stored = debug_read6502(a, 0, USE_CURRENT_X16_BANK);
     } else if (ref == VARREF_VREGS) {
         // name is "Rn" (n = 0..15) → 16-bit little-endian at direct-page + $02 + 2*n.
         if ((name[0] == 'R' || name[0] == 'r') && name[1]) {
@@ -3985,6 +4111,9 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
                 uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * n));
                 debug_write6502(a, 0, (uint8_t)(v & 0xFF));
                 debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
+                stored = (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
+                         ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
+                digits = 4;
             } else ok = false;
         } else ok = false;
     } else {
@@ -3993,7 +4122,7 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
 
     if (!ok) { send_dap_error_response(seq, "setVariable", "cannot set this variable"); return 0; }
     char result[40];
-    snprintf(result, sizeof result, "$%X (%u)", v, v);
+    snprintf(result, sizeof result, "$%0*X (%u)", digits, stored, stored);
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "value", result);
     cJSON_AddNumberToObject(body, "variablesReference", 0);
@@ -4001,10 +4130,19 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
     return 0;
 }
 
-// ─── terminate (end debugging; keep the emulator running) ────────────
+// ─── terminate (Stop: ends a launched machine, detaches from any other) ──
 static int handle_dap_terminate(int seq, cJSON *args) {
     (void)args;
+    const bool launched = dap_launched;
     send_dap_response(seq, "terminate", true, NULL);
+    if (launched) {
+        // The shutdown path sends exited and terminated.
+        dap_quit_emulator();
+        return 0;
+    }
+    // Sending can drop the client, and dropping it has already done the rest.
+    if (client_sock == SOCKET_INVALID) return 1;
+
     dap_session_active = false;
     // Released before resuming, for the same reason as the disconnect request:
     // running on with this client's breakpoints still armed halts the machine
@@ -4015,9 +4153,10 @@ static int handle_dap_terminate(int seq, cJSON *args) {
     // when there is no local debugger whose user owns the run state. Otherwise
     // "Stop Debugging" in the editor runs the emulator out from under someone
     // who is halted in the SDL debug window inspecting it.
-    if (!dap_local_ui_owns_run_state()) {
+    if (currentMode == DMODE_STOP && !dap_local_ui_owns_run_state()) {
         currentMode = DMODE_RUN;
     }
+    send_dap_event("terminated", NULL);
     return 1;
 }
 
@@ -4027,6 +4166,7 @@ static int handle_dap_attach(int seq, cJSON *args) {
         cJSON *dbg_file = cJSON_GetObjectItemCaseSensitive(args, "dbgFile");
         if (dbg_file && cJSON_IsString(dbg_file)) dbg_info_load(dbg_file->valuestring);
     }
+    dap_launched = false;
     send_dap_response(seq, "attach", true, NULL);
     send_dap_event_thread_started();
     return 0;
@@ -4598,10 +4738,12 @@ static int dispatch_dap(const char *json_body) {
     printf("[dap] << %s (seq=%d)\n", cmd, seq);
 
     // Another request taking over execution ends a step in flight. Answer it
-    // now, rather than leave it to complete at some unrelated later stop.
+    // now, rather than leave it to complete at some unrelated later stop. A goto
+    // on a running machine is refused, so it takes nothing over.
     if (step.pending &&
         (!strcmp(cmd, "continue") || !strcmp(cmd, "next") || !strcmp(cmd, "stepIn") ||
-         !strcmp(cmd, "stepOut") || !strcmp(cmd, "restart") || !strcmp(cmd, "goto") ||
+         !strcmp(cmd, "stepOut") || !strcmp(cmd, "restart") ||
+         (!strcmp(cmd, "goto") && currentMode == DMODE_STOP) ||
          !strcmp(cmd, "terminate"))) {
         step_finish("cancelled");
     }
@@ -4700,6 +4842,7 @@ static void dap_release_session_state(void) {
 
     dap_stop_on_entry = false;
     dap_stop_announced = false;
+    dap_launched = false;
     // A step nobody is waiting for must not stop the machine some frames from
     // now, with no client left to resume it.
     step.pending = false;
@@ -4775,6 +4918,7 @@ static void try_accept(void) {
     client_sock = new_sock;
     recv_buf_len = 0;
     dap_seq = 1;
+    dap_initialize_answered = false;
     printf("[dap] Client connected from %s:%d\n",
            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 }
@@ -5016,6 +5160,9 @@ void debug_server_note_resumed(void) {
 
 void debug_server_notify_stopped(const char *reason) {
     if (!server_enabled || client_sock == SOCKET_INVALID) return;
+    // Too early to send, so not announced either: configurationDone then reports
+    // this stop to the client.
+    if (!dap_initialize_answered) return;
     // An x16/step reply says why the step ended; the client asked not to be
     // sent the event as well. Not announced, so nothing owes a continued later.
     if (step.pending && !step.events) return;

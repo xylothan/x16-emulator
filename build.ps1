@@ -501,6 +501,12 @@ if ($DapTest) {
     }
 
     if ($dapStatus -ne 0) { Fail "DAP testbench reported failures." }
+
+    # Starts its own private emulators, because the right outcome of many of its
+    # cases is that the process exits.
+    Write-Step "Running testbench/test_dap_conformance.py"
+    & python (Join-Path $RepoRoot 'testbench\test_dap_conformance.py') $exePath $romPath
+    if ($LASTEXITCODE -ne 0) { Fail "DAP conformance test reported failures." }
     Write-Step "DAP testbench passed"
     exit 0
 }
