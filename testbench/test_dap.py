@@ -995,6 +995,99 @@ except OSError as e:
     print("  FAIL server still usable after an oversized frame: %s" % e)
     failed += 1
 
+# 15b. The port speaks DAP, not HTTP.
+#
+# HTTP's Content-Length means the same as DAP's, so a POST was framed as a
+# request and run. Anything a web page can make the browser send must close the
+# connection without being dispatched, and the next client must be unaffected.
+HTTP_PROBE_ADDR = "0x7F00"
+
+def http_case(name, ok, detail=""):
+    global passed, failed
+    if ok:
+        print("  PASS %s" % name)
+        passed += 1
+    else:
+        print("  FAIL %s%s" % (name, ": " + detail if detail else ""))
+        failed += 1
+
+def read_probe_byte():
+    c = socket.create_connection(('127.0.0.1', PORT), timeout=5)
+    try:
+        send_dap(c, {"seq": 1, "type": "request", "command": "initialize",
+                     "arguments": {"adapterID": "test"}})
+        send_dap(c, {"seq": 2, "type": "request", "command": "readMemory",
+                     "arguments": {"memoryReference": HTTP_PROBE_ADDR, "count": 1}})
+        for m in recv_dap(c, 1):
+            if m.get("command") == "readMemory" and m.get("success"):
+                return base64.b64decode(m["body"]["data"])[0]
+    finally:
+        c.close()
+        time.sleep(0.2)
+    return None
+
+def send_raw_and_wait_for_close(raw):
+    """Returns (closed by the server, bytes the server sent)."""
+    c = socket.create_connection(('127.0.0.1', PORT), timeout=5)
+    data = b""
+    closed = False
+    try:
+        c.sendall(raw)
+        c.settimeout(2)
+        while True:
+            chunk = c.recv(4096)
+            if not chunk:
+                closed = True
+                break
+            data += chunk
+    except ConnectionError:
+        closed = True
+    except socket.timeout:
+        pass
+    finally:
+        c.close()
+        time.sleep(0.2)
+    return closed, data
+
+probe_before = read_probe_byte()
+http_case("HTTP guard: read the probe byte", probe_before is not None)
+if probe_before is not None:
+    write = json.dumps({"seq": 1, "type": "request", "command": "writeMemory",
+                        "arguments": {"memoryReference": HTTP_PROBE_ADDR,
+                                      "data": base64.b64encode(bytes([probe_before ^ 0xFF])).decode()}})
+    frame = "Content-Length: %d\r\n\r\n%s" % (len(write), write)
+    http_requests = [
+        ("POST with Origin",
+         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://example.invalid\r\n"
+         "Content-Type: text/plain\r\n" + frame),
+        ("POST without Origin", "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n" + frame),
+        ("request line only", "POST / HTTP/1.1\r\n" + frame),
+        ("unlisted method", "BREW /a:b HTTP/1.1\r\n" + frame),
+        ("blank line before the request", "\r\nPOST / HTTP/1.1\r\n" + frame),
+        ("Host with no request line", "Host: 127.0.0.1\r\n" + frame),
+        ("lower-case origin", "origin: https://example.invalid\r\n" + frame),
+        ("frame placed after empty HTTP body",
+         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n" + frame),
+    ]
+    for name, raw in http_requests:
+        closed, data = send_raw_and_wait_for_close(raw.encode())
+        http_case("HTTP guard: %s is dropped with no reply" % name, closed and not data,
+                  "closed=%s, %d bytes back" % (closed, len(data)))
+    probe_after = read_probe_byte()
+    http_case("HTTP guard: nothing was dispatched", probe_after == probe_before,
+              "probe byte went from %s to %s" % (probe_before, probe_after))
+
+# A header DAP does not use is still a header.
+extra = json.dumps({"seq": 1, "type": "request", "command": "initialize",
+                    "arguments": {"adapterID": "test"}})
+extra_client = socket.create_connection(('127.0.0.1', PORT), timeout=5)
+extra_client.sendall(("Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+                      "Content-Length: %d\r\n\r\n%s" % (len(extra), extra)).encode())
+check("HTTP guard: an extra non-HTTP header is accepted",
+      recv_dap(extra_client, 1), "response", "initialize")
+extra_client.close()
+time.sleep(0.2)
+
 # 16. Bank-qualified breakpoints.
 #
 # A loop at $0400 maps RAM bank 1 and calls $A000, then bank 2 and calls $A000.
