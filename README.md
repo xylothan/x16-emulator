@@ -300,6 +300,7 @@ the display backend.
 | `-render <driver>` | Selects a renderer. On MSVC Windows builds, `-render dx12` selects the native DirectX 12 main-output backend; if it cannot initialize, the emulator reports the reason and falls back to SDL. With `-imgui`, the debugger window is then drawn natively too, sharing that backend's D3D12 device, command queue and descriptor heap — and falling back to SDL on its own if that fails, without disturbing the main output. `-render direct3d12` remains SDL's built-in Direct3D 12 renderer. Use `-render list` to see the native and SDL drivers compiled into the current build. |
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, I/O ports and file access, and the performance budget. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
+| `-mcp [<port>]` | Starts the Model Context Protocol server so an agent can drive the debugger: over stdin and stdout with no port, or at `http://127.0.0.1:<port>/mcp` with one. Works alongside `-debugport`. See [Driving the machine with MCP](#driving-the-machine-with-mcp). |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
 | `-dbgauto` / `-no-dbgauto` | Whether to merge the `.dbg` beside each program the machine loads. Follows the debugger unless forced either way. |
@@ -1043,7 +1044,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1433,6 +1434,53 @@ when a session that paused it goes away — deliberately, so a headless machine 
 halted with nobody able to restart it. Commands that only inspect are fine, and memory, VRAM and
 joystick state persist either way, but anything that depends on staying stopped (`break`,
 `setreg`, stepping) belongs in interactive mode, where one session stays open.
+
+### Driving the machine with MCP
+
+`-mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io/), so an agent can run
+and inspect the machine. Each tool is a thin wrapper over a debug server request, so it behaves as
+the same request does over DAP, and the two can be used at once.
+
+```
+x16emu -mcp -hidden ...      # stdio: the agent launches the emulator
+x16emu -mcp 9100 ...         # HTTP: the agent attaches at http://127.0.0.1:9100/mcp
+x16emu -mcp 9100 -debugport  # an agent and an editor on the same machine
+```
+
+Under stdio the protocol owns stdout, so the emulator's own output moves to stderr, and it exits
+when the client closes stdin. Over HTTP it listens on loopback only and refuses requests that come
+from a web page. An HTTP client holds a lease that any tool call renews: after 10 idle minutes the
+server releases that client's breakpoints and watches, and resumes the machine if nobody else is
+debugging it.
+
+| Tools | |
+| --- | --- |
+| Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble` |
+| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
+| Input | `type_text`, `send_key`, `joystick` |
+| Screen | `get_screen`, `screenshot` |
+| Other | `save_state`, `load_state`, `perf_stats` |
+
+Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
+moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` answer when the
+machine stops. At `timeoutMs` they answer `completed: false` and the machine keeps going, so a
+client carries on with `wait_for_stop`, passing the last `stopId`.
+
+Breakpoints belong to whoever set them: removing one leaves it armed if an editor or the command
+line also holds it.
+
+#### Reading the screen
+
+`get_screen` (`x16/screen`) returns the text layer as one string per row, read from VRAM. VERA does
+not record which character set the font is, so it assumes PETSCII upper case and graphics unless
+told otherwise with `charset` (`petscii-upper`, `petscii-lower` or `iso`). A code with no text
+equivalent, such as a PETSCII graphic, comes back as U+FFFD.
+
+`screenshot` (`x16/screenshot`) returns the picture as a PNG, with `atFrameBoundary` and `warp`.
+VERA draws a scanline at a time, so a picture taken mid-frame can be torn: pause, then
+`run_frames` with `frames: 1` for a whole one. Under `-warp` only one frame in 64 is drawn, so the
+picture can be up to 63 frames old.
 
 Web Site
 --------
