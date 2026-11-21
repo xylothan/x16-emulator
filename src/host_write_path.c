@@ -1,5 +1,5 @@
 // Commander X16 Emulator — where a debugger client may write a host file.
-#if defined(__linux__) && !defined(_XOPEN_SOURCE)
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700 // realpath, lstat under -std=c11
 #endif
 
