@@ -380,6 +380,12 @@ mouse_button_up(int num)
 	buttons &= (1 << num) ^ 0xff;
 }
 
+uint8_t
+mouse_buttons(void)
+{
+	return buttons;
+}
+
 void
 mouse_move(int x, int y)
 {
