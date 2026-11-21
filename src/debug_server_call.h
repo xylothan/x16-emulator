@@ -38,4 +38,8 @@ void debug_server_set_frontend(const dbg_frontend_t *frontend);
 // machine someone else moved. Returns the handler's "mode changed".
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply);
 
+// The other front end has gone. Let go of everything it armed, as a DAP session
+// ending does, and resume a stopped machine if nobody is left who could.
+void debug_server_release_frontend(void);
+
 #endif

@@ -442,7 +442,7 @@ if(WIN32)
 endif()
 
 if(USE_DAP)
-    list(APPEND X16_SOURCES src/debug_server.c src/mcp_server.c)
+    list(APPEND X16_SOURCES src/debug_server.c src/mcp_server.c src/mcp_http.c)
 endif()
 
 # --- Main Executable Target ---
@@ -777,6 +777,10 @@ x16_add_test(sprite_trace
 # SDL to link.
 x16_add_test(perf_budget
     SOURCES tests/test_perf_budget.c tests/support/harness.c src/perf_budget.c)
+
+# Which HTTP requests the MCP server accepts, with no sockets involved.
+x16_add_test(mcp_http
+    SOURCES tests/test_mcp_http.c src/mcp_http.c)
 
 # host_prof.c takes its clock as a function pointer, so a hand-advanced fake
 # clock makes every expected number exact.

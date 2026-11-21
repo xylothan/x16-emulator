@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Checks the MCP server, over the same pipes a real client uses.
+"""Checks the MCP server, over the same pipes and sockets a real client uses.
 
     python testbench/test_mcp.py <x16emu> <rom.bin>
 
-Each case launches a private emulator with -mcp. Every line it writes to stdout
-must be one JSON-RPC message: anything else would break a real client.
+Each case launches a private emulator with -mcp, or -mcp <port> on a free port.
+Every line it writes to stdout under stdio must be one JSON-RPC message: anything
+else would break a real client.
 """
 
 import json
@@ -723,6 +724,392 @@ def test_coexistence():
         dap.close()
 
 
+def read_response(sock):
+    """One HTTP response: (status, headers with lowercase names, body)."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return None, {}, b""
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split()[1])
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    need = int(headers.get("content-length", 0))
+    while len(body) < need:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return status, headers, body[:need]
+
+
+def post_bytes(port, body, extra="", content_type="application/json", path="/mcp", host=None):
+    host = host if host is not None else f"127.0.0.1:{port}"
+    return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\n{extra}"
+            f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+
+
+def rpc_body(rid, method, params=None):
+    msg = {"jsonrpc": "2.0", "id": rid, "method": method}
+    if params is not None:
+        msg["params"] = params
+    return json.dumps(msg).encode()
+
+
+def tool_body(rid, name, **args):
+    return rpc_body(rid, "tools/call", {"name": name, "arguments": args})
+
+
+class HttpMcp:
+    def __init__(self, extra=(), env=None):
+        self.port = free_port()
+        self.dir = tempfile.TemporaryDirectory()
+        full_env = dict(os.environ)
+        full_env.update(env or {})
+        cmd = [EXE, "-rom", ROM, "-mcp", str(self.port), "-hidden", "-warp", "-zeroram"] + list(extra)
+        self.p = subprocess.Popen(cmd, cwd=self.dir.name, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=full_env)
+        self.next_id = 1
+        self.sock = self.connect()
+
+    def connect(self):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=15)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                return s
+            except OSError:
+                time.sleep(0.05)
+        raise RuntimeError("the HTTP port never opened")
+
+    def raw(self, data):
+        """One request on its own connection."""
+        s = self.connect()
+        try:
+            s.sendall(data)
+            return read_response(s)
+        finally:
+            s.close()
+
+    def rpc(self, method, params=None):
+        rid = self.next_id
+        self.next_id += 1
+        for attempt in range(2):
+            try:
+                self.sock.sendall(post_bytes(self.port, rpc_body(rid, method, params)))
+                status, _, body = read_response(self.sock)
+                if status is not None:
+                    return json.loads(body) if body else None
+            except OSError:
+                pass
+            # An idle connection may have been closed; a client just opens another.
+            self.sock.close()
+            self.sock = self.connect()
+        return None
+
+    def init(self):
+        return self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                       "clientInfo": {"name": "test", "version": "1"}})
+
+    def call(self, name, **args):
+        r = self.rpc("tools/call", {"name": name, "arguments": args})
+        return (r or {}).get("result", {})
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        if self.p.poll() is None:
+            self.p.kill()
+        self.p.wait(5)
+        try:
+            self.dir.cleanup()
+        except OSError:
+            pass
+
+
+def test_http():
+    print("HTTP")
+    with HttpMcp() as m:
+        port = m.port
+        r = m.init()
+        res = (r or {}).get("result", {})
+        case("initialize over HTTP", res.get("protocolVersion") == "2025-11-25", str(r))
+        names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
+        case("the same tools", {"pause", "run_frames", "set_breakpoint"} <= names, str(names))
+        case("a tool call", "frame" in data(m.call("get_status")))
+        case("it outlives stdin closing, since stdin is not its transport", m.p.poll() is None)
+
+        status, headers, body = m.raw(post_bytes(port, tool_body(1, "get_status")))
+        case("a reply is 200 JSON", status == 200 and headers.get("content-type") == "application/json",
+             f"{status} {headers}")
+        case("a reply is not cached", headers.get("cache-control") == "no-store", str(headers))
+        note = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode()
+        status, headers, body = m.raw(post_bytes(port, note))
+        case("a notification is 202 with no body", status == 202 and body == b"", f"{status} {body!r}")
+        status, _, body = m.raw(post_bytes(port, b"this is not json"))
+        case("a parse error is a 400", status == 400 and json.loads(body)["error"]["code"] == -32700,
+             f"{status} {body!r}")
+        status, _, body = m.raw(post_bytes(port, b'{"jsonrpc":"2.0","id":1,"method":"ping"}\x00junk'))
+        case("a NUL in the body is refused", status == 400, f"{status} {body!r}")
+        status, _, body = m.raw(post_bytes(port, rpc_body(7, "no/such")))
+        case("an unknown method is still a 200", status == 200 and json.loads(body)["error"]["code"] == -32601,
+             f"{status} {body!r}")
+
+        bare = f"Host: 127.0.0.1:{port}\r\n"
+        refusals = (
+            ("GET", f"GET /mcp HTTP/1.1\r\n{bare}\r\n".encode(), 405),
+            ("DELETE", f"DELETE /mcp HTTP/1.1\r\n{bare}\r\n".encode(), 405),
+            ("OPTIONS", f"OPTIONS /mcp HTTP/1.1\r\n{bare}Origin: http://x\r\n\r\n".encode(), 403),
+            ("OPTIONS anywhere", f"OPTIONS /x HTTP/1.1\r\n{bare}\r\n".encode(), 403),
+            ("an Origin", post_bytes(port, b"{}", "Origin: http://example.com\r\n"), 403),
+            ("a foreign Host", post_bytes(port, b"{}", host="evil.example"), 403),
+            ("another port in Host", post_bytes(port, b"{}", host=f"127.0.0.1:{port + 1}"), 403),
+            ("text/plain", post_bytes(port, b"{}", content_type="text/plain"), 415),
+            ("an unsupported revision", post_bytes(port, b"{}", "MCP-Protocol-Version: 2026-07-28\r\n"), 400),
+            ("a body over 64 KB", post_bytes(port, b"x" * 65537), 413),
+            ("another path", post_bytes(port, b"{}", path="/other"), 404),
+            ("chunked", f"POST /mcp HTTP/1.1\r\n{bare}Content-Type: application/json\r\n"
+                        "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n".encode(), 501),
+        )
+        for label, raw, want in refusals:
+            status, headers, body = m.raw(raw)
+            case(f"{label} is {want}", status == want, f"{status} {body!r}")
+            case(f"{label} sends no CORS headers",
+                 not [h for h in headers if h.startswith("access-control-")], str(headers))
+            case(f"{label} closes", headers.get("connection") == "close", str(headers))
+        status, headers, _ = m.raw(f"GET /mcp HTTP/1.1\r\n{bare}\r\n".encode())
+        case("a 405 says what is allowed", headers.get("allow") == "POST", str(headers))
+        status, _, body = m.raw(post_bytes(port, b"{}", "MCP-Protocol-Version: 2026-07-28\r\n"))
+        err = json.loads(body).get("error", {}) if body else {}
+        case("a newer revision gets a plain error to fall back on",
+             err.get("code") == -32600 and json.loads(body).get("id") is None, str(body))
+        for version in ("2025-11-25", "2025-06-18", "2025-03-26"):
+            status, _, _ = m.raw(post_bytes(port, rpc_body(1, "ping"), f"MCP-Protocol-Version: {version}\r\n"))
+            case(f"revision {version} is accepted", status == 200, str(status))
+
+        shaped = post_bytes(port, tool_body(1, "pause"), "Origin: https://example.com\r\n",
+                            content_type="text/plain")
+        status, _, _ = m.raw(shaped)
+        case("a browser-shaped POST is refused", status == 403, str(status))
+        case("and did nothing", data(m.call("get_status")).get("paused") is False)
+
+        s = m.connect()
+        whole = post_bytes(port, rpc_body(5, "ping"))
+        s.sendall(whole[:30])
+        time.sleep(0.05)
+        s.sendall(whole[30:-3])
+        time.sleep(0.05)
+        s.sendall(whole[-3:])
+        status, _, body = read_response(s)
+        case("a request arriving in pieces", status == 200 and json.loads(body).get("id") == 5, f"{status} {body!r}")
+        s.sendall(post_bytes(port, rpc_body(6, "ping")))
+        status, _, body = read_response(s)
+        case("the connection is reused", status == 200 and json.loads(body).get("id") == 6, f"{status} {body!r}")
+        s.close()
+
+        s = m.connect()
+        body_bytes = rpc_body(8, "ping")
+        s.sendall(f"POST /mcp HTTP/1.1\r\n{bare}Content-Type: application/json\r\nExpect: 100-continue\r\n"
+                  f"Content-Length: {len(body_bytes)}\r\n\r\n".encode())
+        first = s.recv(1024)
+        case("Expect: 100-continue", first.startswith(b"HTTP/1.1 100"), repr(first))
+        s.sendall(body_bytes)
+        status, _, body = read_response(s)
+        case("and the request then runs", status == 200 and json.loads(body).get("id") == 8, f"{status} {body!r}")
+        s.close()
+
+        s = m.connect()
+        s.sendall(post_bytes(port, rpc_body(11, "ping")) + post_bytes(port, rpc_body(12, "ping")))
+        got = b""
+        deadline = time.time() + 10
+        while got.count(b'"result"') < 2 and time.time() < deadline:
+            got += s.recv(65536)
+        case("requests sent ahead are answered in order",
+             0 <= got.find(b'"id":11') < got.find(b'"id":12'), repr(got[:200]))
+        s.close()
+
+        held = [m.connect() for _ in range(3)]   # with m.sock, all four slots
+        for h in held:
+            h.sendall(post_bytes(port, rpc_body(1, "ping")))
+            read_response(h)
+        spare = m.connect()
+        status, _, _ = read_response(spare)
+        case("a fifth connection is turned away", status == 503, str(status))
+        spare.close()
+        for h in held:
+            h.close()
+        time.sleep(0.1)
+        case("the slots come back", "frame" in data(m.call("get_status")))
+
+        waiting = m.connect()
+        waiting.sendall(post_bytes(port, tool_body(21, "wait_for_stop", timeoutMs=20000)))
+        time.sleep(0.2)
+        d = data(m.call("pause"))
+        case("another connection can pause", d.get("paused") is True, str(d))
+        status, _, body = read_response(waiting)
+        got = json.loads(body) if body else {}
+        case("a wait is answered on its own connection",
+             status == 200 and got.get("id") == 21 and data(got.get("result", {})).get("completed") is True,
+             f"{status} {body!r}")
+        waiting.close()
+
+        m.call("continue")
+        waiting = m.connect()
+        waiting.sendall(post_bytes(port, tool_body(22, "wait_for_stop", timeoutMs=20000)))
+        time.sleep(0.2)
+        waiting.close()
+        time.sleep(0.2)
+        d = data(m.call("wait_for_stop", timeoutMs=10))
+        case("a client hanging up cancels its wait", d.get("reason") == "timeout", str(d))
+        case("and the machine carries on", d.get("paused") is False, str(d))
+
+        waiting = m.connect()
+        waiting.sendall(post_bytes(port, tool_body(23, "wait_for_stop", timeoutMs=20000)))
+        time.sleep(0.2)
+        cancel = json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                             "params": {"requestId": 23}}).encode()
+        status, _, _ = m.raw(post_bytes(port, cancel))
+        case("a cancel over HTTP is accepted", status == 202, str(status))
+        waiting.settimeout(5)
+        try:
+            ended = waiting.recv(1024) == b""
+        except OSError:
+            ended = True
+        case("the cancelled request gets no response", ended)
+        waiting.close()
+        case("the machine is still running", data(m.call("get_status")).get("paused") is False)
+
+        flood = m.connect()
+        flood.settimeout(0.2)
+        request = post_bytes(port, rpc_body(30, "tools/list"))
+        sent = 0
+        try:
+            for _ in range(400):
+                flood.sendall(request)
+                sent += 1
+        except OSError:
+            pass
+        before = data(m.call("get_status")).get("frame", 0)
+        time.sleep(0.5)
+        after = data(m.call("get_status")).get("frame", 0)
+        case("a client that stops reading does not stall emulation", sent > 0 and after > before,
+             f"sent {sent}, frames {before} to {after}")
+        flood.close()
+
+    with HttpMcp(env={"X16_MCP_IDLE_MS": "300"}) as m:
+        m.init()
+        s = m.connect()
+        s.settimeout(5)
+        try:
+            closed = s.recv(16) == b""
+        except OSError:
+            closed = True
+        case("an idle connection is closed", closed)
+        s.close()
+        case("a client just reconnects", "frame" in data(m.call("get_status")))
+
+        waiting = m.connect()
+        waiting.sendall(post_bytes(m.port, tool_body(40, "wait_for_stop", timeoutMs=1000)))
+        status, _, body = read_response(waiting)
+        case("a wait is not idle", status == 200 and data(json.loads(body)["result"]).get("reason") == "timeout",
+             f"{status} {body!r}")
+        waiting.close()
+
+    with HttpMcp() as first:
+        second = subprocess.Popen([EXE, "-rom", ROM, "-mcp", str(first.port), "-hidden"], cwd=first.dir.name,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            code = second.wait(15)
+        except subprocess.TimeoutExpired:
+            second.kill()
+            second.wait(5)
+            code = None
+        case("a port in use is an error", code not in (None, 0), str(code))
+    for bad in ("banana", "0", "70000"):
+        p = subprocess.run([EXE, "-rom", ROM, "-mcp", bad, "-hidden"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        case(f"-mcp {bad} is refused", p.returncode != 0, str(p.returncode))
+
+
+def test_lease():
+    print("lease")
+    lease = {"X16_MCP_LEASE_MS": "700"}
+
+    dap_port = free_port()
+    with HttpMcp(["-debugport", str(dap_port)], env=lease) as m:
+        m.init()
+        time.sleep(0.4)
+        plant_loop(m)
+        m.call("set_breakpoint", address=LOOP + 2)
+        for _ in range(8):   # calling keeps it for longer than one lease
+            time.sleep(0.2)
+            m.call("get_status")
+        case("calls renew the lease", "mcp" in owners_at(m, LOOP + 2))
+
+        time.sleep(1.2)
+        dap = Dap(dap_port)
+        r = dap.request("x16/status")
+        case("an expired lease resumes a headless machine",
+             (r or {}).get("body", {}).get("paused") is False, str(r))
+        r = dap.request("x16/listBreakpoints")
+        left = [b for b in (r or {}).get("body", {}).get("breakpoints", []) if "mcp" in b.get("owners", [])]
+        case("and releases its breakpoints", not left, str(left))
+
+        dap.session()
+        r = dap.request("setInstructionBreakpoints",
+                        {"breakpoints": [{"instructionReference": "0x0950"}]})
+        case("a DAP breakpoint goes in", (r or {}).get("body", {}).get("breakpoints", [{}])[0].get("verified") is True,
+             str(r))
+        m.call("pause")
+        m.call("set_breakpoint", address=0x0960)
+        dap.events.clear()
+        time.sleep(1.2)
+        r = dap.request("x16/status")
+        case("with a DAP client attached, a stop is left for it",
+             (r or {}).get("body", {}).get("paused") is True, str(r))
+        r = dap.request("x16/listBreakpoints")
+        pcs = {b.get("pc") for b in (r or {}).get("body", {}).get("breakpoints", [])}
+        case("DAP breakpoints survive a lease expiring", 0x0950 in pcs, str(pcs))
+        case("while MCP's went", 0x0960 not in pcs, str(pcs))
+        d = data(m.call("continue"))
+        case("a client can come back after expiry", d.get("paused") is False, str(d))
+        dap.close()
+
+    dap_port = free_port()
+    with HttpMcp(["-debugport", str(dap_port)], env=lease) as m:
+        m.init()
+        m.call("get_status")
+        dap = Dap(dap_port)
+        dap.session("launch")
+        dap.request("disconnect", {})
+        dap.close()
+        time.sleep(0.3)
+        case("a live lease keeps a launch session's Stop from quitting", m.p.poll() is None)
+
+        time.sleep(1.0)
+        dap = Dap(dap_port)
+        dap.session("launch")
+        dap.request("disconnect", {})
+        dap.close()
+        try:
+            m.p.wait(10)
+            ended = True
+        except subprocess.TimeoutExpired:
+            ended = False
+        case("with the lease gone, Stop ends a launched machine again", ended)
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -730,7 +1117,8 @@ def main():
         return 2
     EXE, ROM = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
-                 test_run_control, test_state_tools, test_breakpoints, test_coexistence):
+                 test_run_control, test_state_tools, test_breakpoints, test_coexistence,
+                 test_http, test_lease):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

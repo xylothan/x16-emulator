@@ -1,10 +1,23 @@
 // Commander X16 Emulator — Model Context Protocol server
 //
-// Two small threads move bytes and touch nothing else: one blocks on stdin and
-// queues complete lines, the other blocks on stdout and drains a queue of
-// replies. Everything that reads or changes the machine runs on the emulation
-// thread, from mcp_server_poll. A client that stops reading therefore never
-// stalls emulation, and neither does a client that sends nothing.
+// Over stdio, two small threads move bytes and touch nothing else: one blocks on
+// stdin and queues complete lines, the other blocks on stdout and drains a queue
+// of replies. Over HTTP, non-blocking sockets are serviced from the poll.
+// Everything that reads or changes the machine runs on the emulation thread,
+// from mcp_server_poll. A client that stops reading therefore never stalls
+// emulation, and neither does a client that sends nothing.
+
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+#else
+  #include <arpa/inet.h>
+  #include <errno.h>
+  #include <netinet/in.h>
+  #include <netinet/tcp.h>
+  #include <sys/select.h>
+  #include <sys/socket.h>
+#endif
 
 #include <SDL.h>
 #include <math.h>
@@ -14,6 +27,7 @@
 #include <cjson/cJSON.h>
 
 #include "mcp_server.h"
+#include "mcp_http.h"
 #include "debug_server_call.h"
 #include "debugger.h"
 #include "version.h"
@@ -28,6 +42,11 @@
   #define MCP_NULL_DEVICE       "NUL"
   #define MCP_OPEN              _open
   #define MCP_O_WRONLY          _O_WRONLY
+  typedef SOCKET mcp_sock_t;
+  #define MCP_NO_SOCK           INVALID_SOCKET
+  #define MCP_CLOSE_SOCK        closesocket
+  #define MCP_WOULD_BLOCK       (WSAGetLastError() == WSAEWOULDBLOCK)
+  #define MCP_SHUT_WRITE        SD_SEND
 #else
   #include <fcntl.h>
   #include <signal.h>
@@ -39,6 +58,11 @@
   #define MCP_NULL_DEVICE       "/dev/null"
   #define MCP_OPEN              open
   #define MCP_O_WRONLY          O_WRONLY
+  typedef int mcp_sock_t;
+  #define MCP_NO_SOCK           (-1)
+  #define MCP_CLOSE_SOCK        close
+  #define MCP_WOULD_BLOCK       (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR)
+  #define MCP_SHUT_WRITE        SHUT_WR
 #endif
 
 #define MCP_MAX_LINE       (1024 * 1024)
@@ -50,6 +74,10 @@
 #define MCP_WAIT_DEFAULT   5000                // ms a long-running call waits
 #define MCP_WAIT_LIMIT     30000
 #define MCP_FRAMES_LIMIT   1000000000
+#define MCP_MAX_CONNS      4
+#define MCP_IDLE_MS        30000               // an HTTP connection with nothing to do
+#define MCP_DRAIN_MS       1000                // reading off a refused request's body
+#define MCP_LEASE_MS       (10 * 60 * 1000)    // an HTTP client with no calls
 
 #define RPC_PARSE_ERROR      (-32700)
 #define RPC_INVALID_REQUEST  (-32600)
@@ -91,6 +119,41 @@ static bool       out_stop = false;
 static uint32_t   stop_id = 0;
 static bool       was_stopped = false;
 
+// One HTTP client connection. A request is answered before the next is read, so
+// one that is waiting on the machine holds its place in the stream.
+typedef struct {
+    mcp_sock_t sock;
+    char      *in;
+    size_t     in_len;
+    char      *out;
+    size_t     out_len, out_off, out_cap;
+    Uint32     touched;        // last time bytes moved
+    Uint32     drain_until;
+    bool       fresh;          // bytes arrived that have not been looked at
+    bool       keep_alive;     // of the request being answered
+    bool       waiting;        // a deferred call answers on this connection
+    bool       closing;        // close once the reply has gone
+    bool       half_closed;    // reply sent; discarding whatever is still coming
+    bool       sent_continue;
+    bool       peer_closed;
+    bool       dead;           // released at the end of the poll, never mid-request
+} http_conn;
+
+static bool       http_mode = false;
+static int        http_port = 0;
+static mcp_sock_t listen_sock = MCP_NO_SOCK;
+static http_conn  conns[MCP_MAX_CONNS];
+static http_conn *reply_conn = NULL;     // where a reply to this request goes
+static int        reply_status = 200;
+static bool       replied = false;
+static Uint32     idle_ms = MCP_IDLE_MS;
+
+// HTTP has no connection to hang a session on, so a client holds the machine for
+// as long as it keeps calling.
+static bool       lease_live = false;
+static Uint32     lease_end = 0;
+static Uint32     lease_ms = MCP_LEASE_MS;
+
 // The one call that answers later: a step, a run of frames, or a wait for a
 // stop. Other requests are still served while it waits, on the machine it is
 // waiting for, so a client can pause what it started.
@@ -101,6 +164,7 @@ static struct {
     cJSON      *id;
     Uint32      deadline;
     uint32_t    since;       // WAIT_STOP: answered once stop_id has passed this
+    http_conn  *conn;        // HTTP: the connection owed the answer
 } waiter;
 
 static const cJSON *current_id = NULL;   // the request being handled
@@ -242,11 +306,18 @@ static void out_send(char *text) {
 
 // ─── JSON-RPC ───────────────────────────────────────────────────────
 
+static void http_answer(const char *json, size_t len);
+
 static void rpc_send(cJSON *msg) {
     char *printed = cJSON_PrintUnformatted(msg);
     cJSON_Delete(msg);
     if (!printed) return;
     const size_t len = strlen(printed);
+    if (http_mode) {
+        http_answer(printed, len);
+        cJSON_free(printed);
+        return;
+    }
     char *text = (char *)malloc(len + 2);
     if (text) {
         memcpy(text, printed, len + 1);
@@ -270,6 +341,8 @@ static void rpc_result(const cJSON *id, cJSON *result) {
 }
 
 static void rpc_error(const cJSON *id, int code, const char *message) {
+    // With no id there was no readable request, which over HTTP is a 400.
+    if (!id) reply_status = 400;
     cJSON *msg = cJSON_CreateObject();
     cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
     rpc_add_id(msg, id);
@@ -602,6 +675,7 @@ static void waiter_clear(void) {
     cJSON_Delete(waiter.id);
     waiter.id = NULL;
     waiter.kind = WAIT_NONE;
+    waiter.conn = NULL;
 }
 
 static cJSON *wait_begin(wait_kind_t kind, int timeout_ms, uint32_t since) {
@@ -609,6 +683,7 @@ static cJSON *wait_begin(wait_kind_t kind, int timeout_ms, uint32_t since) {
     if (!waiter.id) return tool_fail("out of memory");
     waiter.kind = kind;
     waiter.since = since;
+    waiter.conn = reply_conn;
     waiter.deadline = SDL_GetTicks() + (Uint32)timeout_ms;
     return NULL;   // the reply comes from the poll
 }
@@ -631,8 +706,19 @@ static cJSON *wait_result(bool completed, const char *reason) {
     return tool_ok(data, NULL);
 }
 
+// This can run in the middle of another connection's request, whose reply is
+// still to come.
 static void waiter_answer(cJSON *result) {
+    http_conn *const saved_conn = reply_conn;
+    const int  saved_status = reply_status;
+    const bool saved_replied = replied;
+    reply_conn = waiter.conn;
+    reply_status = 200;
+    if (waiter.conn) waiter.conn->waiting = false;
     rpc_result(waiter.id, result);
+    reply_conn = saved_conn;
+    reply_status = saved_status;
+    replied = saved_replied;
     waiter_clear();
 }
 
@@ -672,7 +758,24 @@ static void on_frames_done(cJSON *body) {
 }
 
 static bool mcp_holds_run_state(void) {
-    return enabled;
+    return enabled && (!http_mode || lease_live);
+}
+
+static void lease_renew(void) {
+    if (!http_mode) return;
+    lease_live = true;
+    lease_end = SDL_GetTicks() + lease_ms;
+}
+
+static void lease_poll(void) {
+    if (!lease_live) return;
+    if (waiter.kind != WAIT_NONE) {   // a call in progress is not an idle client
+        lease_renew();
+        return;
+    }
+    if (!SDL_TICKS_PASSED(SDL_GetTicks(), lease_end)) return;
+    lease_live = false;
+    debug_server_release_frontend();
 }
 
 // ─── Run control ────────────────────────────────────────────────────
@@ -1319,16 +1422,12 @@ static const mcp_tool_t tools[] = {
 
 // ─── Methods ────────────────────────────────────────────────────────
 
-static const char *const protocol_versions[] = {
-    "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
-};
-
 static void handle_initialize(const cJSON *id, cJSON *params) {
     cJSON *pv = params ? cJSON_GetObjectItemCaseSensitive(params, "protocolVersion") : NULL;
-    const char *version = protocol_versions[0];
+    const char *version = mcp_protocol_versions[0];
     if (pv && cJSON_IsString(pv)) {
-        for (size_t i = 0; i < sizeof protocol_versions / sizeof protocol_versions[0]; i++) {
-            if (!strcmp(pv->valuestring, protocol_versions[i])) version = protocol_versions[i];
+        for (int i = 0; i < mcp_protocol_version_count; i++) {
+            if (!strcmp(pv->valuestring, mcp_protocol_versions[i])) version = mcp_protocol_versions[i];
         }
     }
     cJSON *result = cJSON_CreateObject();
@@ -1415,6 +1514,7 @@ static void handle_tools_call(const cJSON *id, cJSON *params) {
         rpc_result(id, tool_fail(msg));
         return;
     }
+    lease_renew();
     current_id = id;
     cJSON *result = tool->run(args);
     current_id = NULL;
@@ -1425,8 +1525,14 @@ static void handle_tools_call(const cJSON *id, cJSON *params) {
 // machine carries on, since stopping it is what pause is for.
 static void handle_cancelled(cJSON *params) {
     cJSON *rid = params ? cJSON_GetObjectItemCaseSensitive(params, "requestId") : NULL;
-    if (rid && waiter.kind != WAIT_NONE && cJSON_Compare(rid, waiter.id, true))
+    if (rid && waiter.kind != WAIT_NONE && cJSON_Compare(rid, waiter.id, true)) {
+        // An HTTP request is still open, and closing it is how it gets no answer.
+        if (waiter.conn) {
+            waiter.conn->waiting = false;
+            waiter.conn->closing = true;
+        }
         waiter_clear();
+    }
 }
 
 static void handle_line(const char *line) {
@@ -1479,7 +1585,302 @@ static void handle_line(const char *line) {
     cJSON_Delete(msg);
 }
 
+// ─── HTTP ───────────────────────────────────────────────────────────
+
+static void conn_flush(http_conn *c) {
+    while (c->out_off < c->out_len) {
+        const size_t left = c->out_len - c->out_off;
+        const int n = (int)send(c->sock, c->out + c->out_off,
+                                (int)(left > (1u << 20) ? (1u << 20) : left), 0);
+        if (n > 0) {
+            c->out_off += (size_t)n;
+            c->touched = SDL_GetTicks();
+            continue;
+        }
+        if (n < 0 && MCP_WOULD_BLOCK) return;
+        c->dead = true;
+        return;
+    }
+    c->out_off = c->out_len = 0;
+    if (c->closing && !c->half_closed) {
+        // Closing outright with a request body still unread would reset the
+        // connection and can destroy the response on its way to the client.
+        shutdown(c->sock, MCP_SHUT_WRITE);
+        c->half_closed = true;
+        c->drain_until = SDL_GetTicks() + MCP_DRAIN_MS;
+    }
+}
+
+static void conn_queue(http_conn *c, const char *data, size_t n) {
+    if (c->dead) return;
+    if (c->out_len + n > MCP_MAX_OUT_BYTES) {
+        c->dead = true;   // nobody is reading
+        return;
+    }
+    if (c->out_len + n > c->out_cap) {
+        size_t cap = c->out_cap ? c->out_cap : 4096;
+        while (cap < c->out_len + n) cap *= 2;
+        char *grown = (char *)realloc(c->out, cap);
+        if (!grown) {
+            c->dead = true;
+            return;
+        }
+        c->out = grown;
+        c->out_cap = cap;
+    }
+    memcpy(c->out + c->out_len, data, n);
+    c->out_len += n;
+}
+
+static void http_write(http_conn *c, int status, const char *json, size_t len) {
+    if (!c->keep_alive) c->closing = true;
+    char head[256];
+    const int n = snprintf(head, sizeof head,
+        "HTTP/1.1 %d %s\r\n%s%sContent-Length: %lu\r\nCache-Control: no-store\r\nConnection: %s\r\n\r\n",
+        status, mcp_http_reason(status),
+        json ? "Content-Type: application/json\r\n" : "",
+        status == 405 ? "Allow: POST\r\n" : "",
+        (unsigned long)len, c->keep_alive ? "keep-alive" : "close");
+    conn_queue(c, head, (size_t)n);
+    if (json) conn_queue(c, json, len);
+    conn_flush(c);
+}
+
+static void http_answer(const char *json, size_t len) {
+    if (!reply_conn) return;
+    replied = true;
+    http_write(reply_conn, reply_status, json, len);
+}
+
+static void conn_refuse(http_conn *c, int status, const char *message) {
+    c->keep_alive = false;
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+    cJSON_AddNullToObject(msg, "id");
+    cJSON *err = cJSON_CreateObject();
+    cJSON_AddNumberToObject(err, "code", RPC_INVALID_REQUEST);
+    cJSON_AddStringToObject(err, "message", message);
+    cJSON_AddItemToObject(msg, "error", err);
+    char *printed = cJSON_PrintUnformatted(msg);
+    cJSON_Delete(msg);
+    http_write(c, status, printed, printed ? strlen(printed) : 0);
+    cJSON_free(printed);
+}
+
+static void http_dispatch(http_conn *c, const mcp_http_request_t *rq) {
+    c->keep_alive = rq->keep_alive;
+    if (rq->body_len && memchr(rq->body, '\0', rq->body_len)) {
+        conn_refuse(c, 400, "the body is not JSON");
+        return;
+    }
+    char *text = (char *)malloc(rq->body_len + 1);
+    if (!text) {
+        conn_refuse(c, 500, "out of memory");
+        return;
+    }
+    memcpy(text, rq->body, rq->body_len);
+    text[rq->body_len] = '\0';
+
+    reply_conn = c;
+    reply_status = 200;
+    replied = false;
+    handle_line(text);
+    free(text);
+    reply_conn = NULL;
+
+    if (replied) return;
+    if (waiter.conn == c) c->waiting = true;   // it answers when the machine does
+    else                  http_write(c, 202, NULL, 0);
+}
+
+static void conn_service(http_conn *c) {
+    while (c->fresh && !c->waiting && !c->closing && !c->dead) {
+        mcp_http_request_t rq;
+        const mcp_http_state_t st = mcp_http_parse(c->in, c->in_len, http_port, &rq);
+        if (st == MCP_HTTP_INCOMPLETE) {
+            if (rq.expects_continue && !c->sent_continue) {
+                static const char go[] = "HTTP/1.1 100 Continue\r\n\r\n";
+                c->sent_continue = true;
+                conn_queue(c, go, sizeof go - 1);
+                conn_flush(c);
+            }
+            c->fresh = false;
+            return;
+        }
+        if (st == MCP_HTTP_REFUSED) {
+            conn_refuse(c, rq.status, rq.message);
+            return;
+        }
+        c->sent_continue = false;
+        http_dispatch(c, &rq);
+        memmove(c->in, c->in + rq.consumed, c->in_len - rq.consumed);
+        c->in_len -= rq.consumed;
+    }
+}
+
+static void conn_read(http_conn *c) {
+    if (c->closing) {
+        char discard[1024];
+        const int n = (int)recv(c->sock, discard, sizeof discard, 0);
+        if (n == 0 || (n < 0 && !MCP_WOULD_BLOCK)) c->dead = true;
+        return;
+    }
+    const size_t space = MCP_HTTP_MAX_REQUEST - c->in_len;
+    if (!space) return;   // requests sent ahead wait for this one to be answered
+    const int n = (int)recv(c->sock, c->in + c->in_len, (int)space, 0);
+    if (n > 0) {
+        c->in_len += (size_t)n;
+        c->fresh = true;
+        c->touched = SDL_GetTicks();
+    } else if (n == 0) {
+        c->peer_closed = true;
+    } else if (!MCP_WOULD_BLOCK) {
+        c->dead = true;
+    }
+}
+
+static void conn_release(http_conn *c) {
+    // A client that hung up on a wait has cancelled it. The machine carries on.
+    if (waiter.conn == c) waiter_clear();
+    MCP_CLOSE_SOCK(c->sock);
+    free(c->in);
+    free(c->out);
+    memset(c, 0, sizeof *c);
+    c->sock = MCP_NO_SOCK;
+}
+
+static void sock_set_nonblocking(mcp_sock_t s) {
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(s, FIONBIO, &mode);
+#else
+    const int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+static void http_accept(void) {
+    const mcp_sock_t s = accept(listen_sock, NULL, NULL);
+    if (s == MCP_NO_SOCK) return;
+#ifndef _WIN32
+    if (s >= FD_SETSIZE) {   // select could not watch it
+        MCP_CLOSE_SOCK(s);
+        return;
+    }
+#endif
+    sock_set_nonblocking(s);
+    const int on = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&on, sizeof on);
+
+    for (int i = 0; i < MCP_MAX_CONNS; i++) {
+        http_conn *c = &conns[i];
+        if (c->sock != MCP_NO_SOCK) continue;
+        c->in = (char *)malloc(MCP_HTTP_MAX_REQUEST);
+        if (!c->in) break;
+        c->sock = s;
+        c->touched = SDL_GetTicks();
+        return;
+    }
+    static const char busy[] =
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    (void)!send(s, busy, (int)sizeof busy - 1, 0);
+    MCP_CLOSE_SOCK(s);
+}
+
+static void http_poll(void) {
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(listen_sock, &rd);
+    mcp_sock_t high = listen_sock;
+    for (int i = 0; i < MCP_MAX_CONNS; i++) {
+        if (conns[i].sock == MCP_NO_SOCK) continue;
+        FD_SET(conns[i].sock, &rd);
+        if (conns[i].sock > high) high = conns[i].sock;
+    }
+    struct timeval now_only = { 0, 0 };
+    const int ready = select((int)high + 1, &rd, NULL, NULL, &now_only);
+    if (ready > 0 && FD_ISSET(listen_sock, &rd)) http_accept();
+
+    const Uint32 now = SDL_GetTicks();
+    for (int i = 0; i < MCP_MAX_CONNS; i++) {
+        http_conn *c = &conns[i];
+        if (c->sock == MCP_NO_SOCK) continue;
+        if (ready > 0 && FD_ISSET(c->sock, &rd)) conn_read(c);
+        conn_service(c);
+        if (!c->dead) conn_flush(c);
+        // Nothing more can arrive, so once its answers are out it is finished.
+        // One still waiting on the machine has nobody left to tell.
+        if (c->peer_closed && (c->waiting || c->out_len == c->out_off)) c->dead = true;
+        if (c->half_closed && SDL_TICKS_PASSED(now, c->drain_until)) c->dead = true;
+        if (!c->waiting && SDL_TICKS_PASSED(now, c->touched + idle_ms)) c->dead = true;
+    }
+    // Last, and for everyone: a reply to one connection can come out of another's
+    // request.
+    for (int i = 0; i < MCP_MAX_CONNS; i++) {
+        if (conns[i].sock != MCP_NO_SOCK && conns[i].dead) conn_release(&conns[i]);
+    }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────
+
+static Uint32 env_ms(const char *name, Uint32 fallback) {
+    const char *v = SDL_getenv(name);
+    if (!v || !*v) return fallback;
+    const long ms = strtol(v, NULL, 10);
+    return ms > 0 ? (Uint32)ms : fallback;
+}
+
+static const dbg_frontend_t mcp_frontend = { mcp_holds_run_state, on_frames_done };
+
+int mcp_server_init_http(int port) {
+    if (enabled) return 0;
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+#else
+    signal(SIGPIPE, SIG_IGN);   // a client hanging up is an error return, not an exit
+#endif
+    listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_sock == MCP_NO_SOCK) return -1;
+    const int on = 1;
+#ifdef _WIN32
+    // SO_REUSEADDR on Windows would let another process share this port.
+    setsockopt(listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&on, sizeof on);
+#else
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof on);
+#endif
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)port);
+    if (bind(listen_sock, (struct sockaddr *)&addr, sizeof addr) != 0 ||
+        listen(listen_sock, 8) != 0) {
+        MCP_CLOSE_SOCK(listen_sock);
+        listen_sock = MCP_NO_SOCK;
+        return -1;
+    }
+    sock_set_nonblocking(listen_sock);
+    for (int i = 0; i < MCP_MAX_CONNS; i++) conns[i].sock = MCP_NO_SOCK;
+    idle_ms  = env_ms("X16_MCP_IDLE_MS", MCP_IDLE_MS);
+    lease_ms = env_ms("X16_MCP_LEASE_MS", MCP_LEASE_MS);
+    http_port = port;
+    http_mode = true;
+    enabled = true;
+    debug_server_set_frontend(&mcp_frontend);
+    printf("[mcp] Model Context Protocol server listening on http://127.0.0.1:%d/mcp\n", port);
+    return 0;
+}
+
+int mcp_server_sockets(uintptr_t *out, int max) {
+    if (!enabled || !http_mode) return 0;
+    int n = 0;
+    if (n < max) out[n++] = (uintptr_t)listen_sock;
+    for (int i = 0; i < MCP_MAX_CONNS && n < max; i++) {
+        if (conns[i].sock != MCP_NO_SOCK) out[n++] = (uintptr_t)conns[i].sock;
+    }
+    return n;
+}
 
 int mcp_server_init_stdio(void) {
     if (enabled) return 0;
@@ -1515,8 +1916,7 @@ int mcp_server_init_stdio(void) {
     SDL_DetachThread(writer);
 
     enabled = true;
-    static const dbg_frontend_t frontend = { mcp_holds_run_state, on_frames_done };
-    debug_server_set_frontend(&frontend);
+    debug_server_set_frontend(&mcp_frontend);
     return 0;
 }
 
@@ -1540,6 +1940,12 @@ int mcp_server_poll(void) {
     track_stops();
 
     const int mode_before = currentMode;
+    if (http_mode) {
+        waiter_poll();
+        http_poll();
+        lease_poll();
+        return currentMode != mode_before;
+    }
     for (int n = 0; n < MCP_LINES_PER_POLL; n++) {
         SDL_LockMutex(lock);
         in_line *l = in_head;
@@ -1576,6 +1982,19 @@ void mcp_server_shutdown(void) {
     enabled = false;
     debug_server_set_frontend(NULL);
     waiter_clear();
+    if (http_mode) {
+        for (int i = 0; i < MCP_MAX_CONNS; i++) {
+            if (conns[i].sock == MCP_NO_SOCK) continue;
+            conn_flush(&conns[i]);
+            conn_release(&conns[i]);
+        }
+        MCP_CLOSE_SOCK(listen_sock);
+        listen_sock = MCP_NO_SOCK;
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return;
+    }
     // Let replies already queued reach the client, without trusting it to read.
     SDL_LockMutex(lock);
     const Uint32 deadline = SDL_GetTicks() + 500;

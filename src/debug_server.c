@@ -5790,6 +5790,35 @@ int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
     return result;
 }
 
+void debug_server_release_frontend(void) {
+    for (int i = 0; i < debug_bp_count(); ) {
+        const struct breakpoint *b = debug_bp_at(i);
+        if (!(b->owners & (1u << DEBUG_OWNER_MCP))) {
+            i++;
+            continue;
+        }
+        const int     pc = b->pc, x16 = b->x16Bank;
+        const uint8_t bank = b->bank;
+        debug_bp_remove_for(pc, bank, x16, DEBUG_OWNER_MCP);
+        // Gone, so its condition goes too. Still here, someone else holds it.
+        if (debug_bp_find(pc, bank, x16) < 0) debug_bp_forget(pc, bank, x16);
+        else                                  i++;
+    }
+    debug_wp_clear_owner(DEBUG_OWNER_MCP);
+    DEBUGCancelStepFor(DEBUG_OWNER_MCP);
+    if (step.pending && step.caller != DBG_CALLER_DAP) {
+        step.pending = false;
+        audio_events_end();
+    }
+    perf_budget_arm(PERF_OWNER_MCP, false);
+    vera_bandwidth_arm(VERA_BW_OWNER_MCP, false);
+
+    // A headless machine is never left halted with nobody able to restart it.
+    if (currentMode == DMODE_STOP && client_sock == SOCKET_INVALID &&
+        !dap_other_owner_of_run_state())
+        DEBUGContinue();
+}
+
 // ─── Connection management ──────────────────────────────────────────
 
 // Everything the session installed in the machine. Run before resuming, so a
@@ -6293,25 +6322,37 @@ void debug_server_frame_end(void) {
 }
 
 bool debug_server_wait(uint32_t timeout_ms) {
-    if (!server_enabled) return false;
+    uintptr_t mcp_socks[MCP_SERVER_MAX_SOCKETS];
+    const int num_mcp = mcp_server_sockets(mcp_socks, MCP_SERVER_MAX_SOCKETS);
+    if (!server_enabled && !num_mcp) return false;
 
     // Before a client connects, the listening socket turns readable when one
     // does. After, only the client matters: try_accept() ignores the listener
     // while a session is open, so waking for it would just spin.
-    const socket_t s = (client_sock != SOCKET_INVALID) ? client_sock : listen_sock;
-    if (s == SOCKET_INVALID) {
+    const socket_t s = !server_enabled ? SOCKET_INVALID
+                     : (client_sock != SOCKET_INVALID) ? client_sock : listen_sock;
+    if (s == SOCKET_INVALID && !num_mcp) {
         SDL_Delay(timeout_ms);
         return true;
     }
 
     fd_set rd;
     FD_ZERO(&rd);
-    FD_SET(s, &rd);
+    socket_t high = 0;
+    if (s != SOCKET_INVALID) {
+        FD_SET(s, &rd);
+        high = s;
+    }
+    for (int i = 0; i < num_mcp; i++) {
+        const socket_t m = (socket_t)mcp_socks[i];
+        FD_SET(m, &rd);
+        if (m > high) high = m;
+    }
     struct timeval tv;
     tv.tv_sec  = (long)(timeout_ms / 1000);
     tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
     // The first argument is ignored by Winsock; POSIX wants the highest fd + 1.
-    const int r = select((int)s + 1, &rd, NULL, NULL, &tv);
+    const int r = select((int)high + 1, &rd, NULL, NULL, &tv);
     if (r < 0) {
         // EINTR or a socket that just died. Do not turn the paused loop into a
         // spin; the next poll will notice a dead socket and drop it.
