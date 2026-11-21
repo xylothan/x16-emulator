@@ -1856,8 +1856,7 @@ int mcp_server_init_http(int port) {
 #endif
     listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listen_sock == MCP_NO_SOCK) {
-        fprintf(stderr, "[mcp] socket: %s
-", mcp_sock_error());
+        fprintf(stderr, "[mcp] socket: %s\n", mcp_sock_error());
         return -1;
     }
     const int on = 1;
@@ -1874,8 +1873,7 @@ int mcp_server_init_http(int port) {
     addr.sin_port = htons((uint16_t)port);
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof addr) != 0 ||
         listen(listen_sock, 8) != 0) {
-        fprintf(stderr, "[mcp] cannot listen on 127.0.0.1:%d: %s
-", port, mcp_sock_error());
+        fprintf(stderr, "[mcp] cannot listen on 127.0.0.1:%d: %s\n", port, mcp_sock_error());
         MCP_CLOSE_SOCK(listen_sock);
         listen_sock = MCP_NO_SOCK;
         return -1;
