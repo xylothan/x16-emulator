@@ -227,8 +227,8 @@ debug_info_draw_page(void)
     const bool any = dbg_info_is_loaded() && nl > 0;
     ImGui::SeparatorText(any ? "Replace with" : "Load");
     if (any)
-        ImGui::TextWrapped("Replacing throws away all the debug info loaded now and loads only the file "
-                           "chosen. Use it when the wrong build's .dbg was loaded: names, source lines and "
+        ImGui::TextWrapped("Replacing throws away the .dbg info loaded now and loads only the file "
+                           "chosen; label files stay. Use it when the wrong build's .dbg was loaded: names, source lines and "
                            "source breakpoints all come from it.");
     if (s_found.empty()) {
         ImGui::TextDisabled("No other .dbg files beside the loaded one, the program, or the host folder.");
@@ -302,6 +302,107 @@ debug_info_draw_page(void)
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled("%s", s_msg.c_str());
         ImGui::PopTextWrapPos();
+    }
+
+    // Label files sit beside .dbg files rather than replacing them.
+    ImGui::SeparatorText("Label files");
+    {
+        static char        s_label_path[1024] = "";
+        static bool        s_label_any        = true;
+        static int         s_label_bank       = 0;
+        static std::string s_label_msg;
+
+        const auto load = [](const char *path, int bank) {
+            char      buf[1200];
+            const int n = dbg_info_load_labels(path, bank);
+            if (n > 0)
+                snprintf(buf, sizeof buf, "Loaded %d labels from %s.", n, path);
+            else if (n == 0)
+                snprintf(buf, sizeof buf, "No labels in %s (expected lines like: al 00C000 .name).", path);
+            else
+                snprintf(buf, sizeof buf, "Could not read %s.", path);
+            s_label_msg = buf;
+        };
+
+        int remove = -1, reload = -1;
+        for (int i = 0; i < dbg_info_label_file_count(); i++) {
+            const char *p = nullptr;
+            int         b = -1, n = 0;
+            if (!dbg_info_label_file_at(i, &p, &b, &n))
+                continue;
+            ImGui::PushID(i);
+            ImGui::BulletText("%s", p);
+            ImGui::SameLine();
+            if (b >= 0)
+                ImGui::TextDisabled("(%d labels, bank %d)", n, b);
+            else
+                ImGui::TextDisabled("(%d labels, any bank)", n);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reload"))
+                reload = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove"))
+                remove = i;
+            ImGui::PopID();
+        }
+        if (dbg_info_label_file_count() == 0)
+            ImGui::TextDisabled("None loaded. ld65 writes one with -Ln.");
+        if (reload >= 0) {
+            const char *p = nullptr;
+            int         b = -1;
+            if (dbg_info_label_file_at(reload, &p, &b, nullptr)) {
+                const std::string again = p;
+                load(again.c_str(), b);
+            }
+        } else if (remove >= 0) {
+            const char *p = nullptr;
+            if (dbg_info_label_file_at(remove, &p, nullptr, nullptr)) {
+                const std::string gone = p;
+                dbg_info_unload_labels(gone.c_str());
+            }
+        }
+
+        ImGui::Checkbox("Any bank", &s_label_any);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A label file records no bank. Clear this to say which RAM or ROM\n"
+                              "bank its labels at $A000 and up belong to.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(s_label_any);
+        ImGui::SetNextItemWidth(dbgui_text_width("255") + ImGui::GetStyle().FramePadding.x * 2);
+        ImGui::InputInt("Bank##labels", &s_label_bank, 0, 0);
+        ImGui::EndDisabled();
+        if (s_label_bank < 0) s_label_bank = 0;
+        if (s_label_bank > 255) s_label_bank = 255;
+        const int chosen_bank = s_label_any ? -1 : s_label_bank;
+        if (file_dialog_available()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Browse for a label file...")) {
+                char              picked[1024];
+                const std::string from = browse_from();
+                if (file_dialog_open("Load labels", "ld65 label files (*.lbl;*.sym;*.txt)", "*.lbl;*.sym;*.txt",
+                                     from.c_str(), picked, sizeof picked)) {
+                    snprintf(s_label_path, sizeof s_label_path, "%s", picked);
+                    load(picked, chosen_bank);
+                }
+            }
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Label file");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-dbgui_text_width("Load labels") - ImGui::GetStyle().FramePadding.x * 2 -
+                                ImGui::GetStyle().ItemSpacing.x);
+        const bool label_enter = ImGui::InputTextWithHint("##labelpath", "C:\\path\\to\\program.lbl", s_label_path,
+                                                          sizeof s_label_path, ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!s_label_path[0]);
+        if (ImGui::Button("Load labels") || (label_enter && s_label_path[0]))
+            load(s_label_path, chosen_bank);
+        ImGui::EndDisabled();
+        if (!s_label_msg.empty()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", s_label_msg.c_str());
+            ImGui::PopTextWrapPos();
+        }
     }
 
     ImGui::Spacing();

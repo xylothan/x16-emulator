@@ -1458,6 +1458,7 @@ debugging it.
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
+| Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Input | `type_text`, `send_key`, `joystick` |
 | Screen | `get_screen`, `screenshot` |
 | VERA | `get_vera_state` |

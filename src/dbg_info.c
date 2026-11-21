@@ -1,4 +1,5 @@
 #include "dbg_info.h"
+#include "al_labels.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,6 +100,8 @@ typedef struct {
 	int      seg;     /* owning segment id, -1 if the record named none */
 	long     raw_id;  /* the record's id within its own file, for marking scopes */
 	bool     is_scope; /* this label opens a .proc/.scope: a routine, not a local */
+	int      label_file; /* index into label_files, -1 for a .dbg symbol */
+	int      bank;     /* a label file's bank; .dbg symbols get theirs from `seg` */
 } dbg_sym_t;
 
 /* The `sym=` of every type=scope record in the file being loaded: the labels
@@ -111,6 +114,17 @@ static int   scope_head_cap;
 static dbg_sym_t       *syms;
 static int              sym_count;
 static int              sym_cap;
+
+/* Label files loaded separately from any .dbg. */
+typedef struct {
+	char *path;
+	int   bank;
+	int   labels;
+} dbg_label_file_t;
+
+static dbg_label_file_t *label_files;
+static int               label_file_count;
+static int               label_file_cap;
 
 /* `RAM_BANK_x` / `x_BANK` equates (type=equ, small value) harvested while
  * parsing. Used to associate banked segments ($A000-$BFFF) with a RAM bank —
@@ -743,6 +757,8 @@ static bool parse_sym_record(const char *p)
 	syms[sym_count].seg      = seg >= 0 ? (int)seg + id_base_seg : -1;
 	syms[sym_count].raw_id   = parse_int_key(p, "id");
 	syms[sym_count].is_scope = false;
+	syms[sym_count].label_file = -1;
+	syms[sym_count].bank     = -1;
 	sym_count++;
 	return true;
 }
@@ -1047,7 +1063,8 @@ static int sym_cmp(const void *a, const void *b)
 	const dbg_sym_t *sb = (const dbg_sym_t *)b;
 	if (sa->addr != sb->addr)
 		return (sa->addr < sb->addr) ? -1 : 1;
-	return 0;
+	/* At one address, .dbg symbols sort ahead of label-file ones. */
+	return (sa->label_file >= 0) - (sb->label_file >= 0);
 }
 
 static void build_addr_map(void)
@@ -1331,9 +1348,30 @@ int dbg_info_load(const char *path)
 
 /* ---- Symbol (label) lookups ------------------------------------------------ */
 
+/* Symbols exist without a .dbg once a label file is in, and `loaded` must stay
+ * false for those: it tells the source views that line records exist. */
+static bool have_symbols(void)
+{
+	return loaded || label_file_count > 0;
+}
+
+/* From a label-file entry, step back to a .dbg symbol at the same address if
+ * there is one. They sort first, so this cannot pass one. */
+static int prefer_dbg_symbol(int i)
+{
+	while (syms[i].label_file >= 0 && i > 0 && syms[i - 1].addr == syms[i].addr)
+		i--;
+	return i;
+}
+
+static int symbol_bank(int i)
+{
+	return syms[i].label_file >= 0 ? syms[i].bank : seg_observed_bank(syms[i].seg, syms[i].addr);
+}
+
 bool dbg_info_addr_to_label(dbg_addr_t addr, const char **name)
 {
-	if (!loaded || sym_count == 0)
+	if (!have_symbols() || sym_count == 0)
 		return false;
 
 	/* syms are sorted by address (build_addr_map). */
@@ -1342,7 +1380,7 @@ bool dbg_info_addr_to_label(dbg_addr_t addr, const char **name)
 		int mid = lo + (hi - lo) / 2;
 		if (syms[mid].addr == addr) {
 			if (name)
-				*name = syms[mid].name;
+				*name = syms[prefer_dbg_symbol(mid)].name;
 			return true;
 		} else if (syms[mid].addr < addr) {
 			lo = mid + 1;
@@ -1353,9 +1391,34 @@ bool dbg_info_addr_to_label(dbg_addr_t addr, const char **name)
 	return false;
 }
 
+bool dbg_info_addr_to_label_in_bank(dbg_addr_t addr, int bank, const char **name)
+{
+	if (!have_symbols() || sym_count == 0)
+		return false;
+
+	/* First entry at this address; .dbg symbols sort ahead of label files. */
+	int lo = 0, hi = sym_count;
+	while (lo < hi) {
+		const int mid = lo + (hi - lo) / 2;
+		if (syms[mid].addr < addr)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	for (int i = lo; i < sym_count && syms[i].addr == addr; i++) {
+		const int b = symbol_bank(i);
+		if (b < 0 || b == bank) {
+			if (name)
+				*name = syms[i].name;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr_t *label_addr)
 {
-	if (!loaded || sym_count == 0)
+	if (!have_symbols() || sym_count == 0)
 		return false;
 
 	/* syms are sorted by address (build_addr_map): find the LAST symbol at or
@@ -1373,6 +1436,7 @@ bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr
 	}
 	if (best < 0)
 		return false;
+	best = prefer_dbg_symbol(best);
 	if (name)
 		*name = syms[best].name;
 	if (label_addr)
@@ -1387,16 +1451,20 @@ bool dbg_info_label_to_addr(const char *name, dbg_addr_t *addr)
 
 bool dbg_info_label_to_addr_bank(const char *name, dbg_addr_t *addr, int *ram_bank)
 {
-	if (!loaded || !name || !name[0])
+	if (!have_symbols() || !name || !name[0])
 		return false;
 
-	for (int i = 0; i < sym_count; i++) {
-		if (strcasecmp(syms[i].name, name) == 0) {
-			if (addr)
-				*addr = syms[i].addr;
-			if (ram_bank)
-				*ram_bank = seg_observed_bank(syms[i].seg, syms[i].addr);
-			return true;
+	/* A .dbg symbol wins whichever address sorts first. */
+	for (int from_file = 0; from_file < 2; from_file++) {
+		for (int i = 0; i < sym_count; i++) {
+			if ((syms[i].label_file >= 0) == (from_file != 0) &&
+			    strcasecmp(syms[i].name, name) == 0) {
+				if (addr)
+					*addr = syms[i].addr;
+				if (ram_bank)
+					*ram_bank = symbol_bank(i);
+				return true;
+			}
 		}
 	}
 	return false;
@@ -1434,12 +1502,12 @@ bool dbg_info_name_to_value(const char *name, dbg_addr_t *val, int *kind)
 
 int dbg_info_symbol_count(void)
 {
-	return loaded ? sym_count : 0;
+	return have_symbols() ? sym_count : 0;
 }
 
 bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr)
 {
-	if (!loaded || index < 0 || index >= sym_count)
+	if (!have_symbols() || index < 0 || index >= sym_count)
 		return false;
 	if (name)
 		*name = syms[index].name;
@@ -1450,16 +1518,344 @@ bool dbg_info_symbol_at(int index, const char **name, dbg_addr_t *addr)
 
 int dbg_info_symbol_bank_at(int index)
 {
-	if (!loaded || index < 0 || index >= sym_count)
+	if (!have_symbols() || index < 0 || index >= sym_count)
 		return -1;
-	return seg_observed_bank(syms[index].seg, syms[index].addr);
+	return symbol_bank(index);
 }
 
 bool dbg_info_symbol_is_scope_at(int index)
 {
-	if (!loaded || index < 0 || index >= sym_count)
+	if (!have_symbols() || index < 0 || index >= sym_count)
 		return false;
 	return syms[index].is_scope;
+}
+
+/* ---- Label files ----------------------------------------------------------- */
+
+static int label_file_find(const char *path)
+{
+	for (int i = 0; i < label_file_count; i++) {
+		if (!strcmp(label_files[i].path, path))
+			return i;
+	}
+	return -1;
+}
+
+/* Take one file's labels out of the table. Its entry stays, for a reload. */
+static void label_file_drop_symbols(int file)
+{
+	int dst = 0;
+	for (int i = 0; i < sym_count; i++) {
+		if (syms[i].label_file == file)
+			free(syms[i].name);
+		else
+			syms[dst++] = syms[i];
+	}
+	sym_count = dst;
+}
+
+int dbg_info_load_labels_text(const char *path, const char *text, int bank)
+{
+	if (!path || !text)
+		return -1;
+
+	/* Counted first, so a file with no labels leaves the old ones in place. */
+	int found = 0;
+	for (const char *p = text; *p; ) {
+		const char *eol = strchr(p, '\n');
+		const char *end = eol ? eol : p + strlen(p);
+		uint32_t    v;
+		const char *name;
+		size_t      len;
+		if (al_parse_line(p, end, &v, &name, &len) && !al_is_segment_symbol(name, len))
+			found++;
+		p = eol ? eol + 1 : end;
+	}
+	if (!found)
+		return 0;
+
+	int file = label_file_find(path);
+	if (file >= 0) {
+		label_file_drop_symbols(file);
+	} else {
+		char *copy = (char *)malloc(strlen(path) + 1);
+		if (!copy)
+			return -1;
+		strcpy(copy, path);
+		if (!GROW_ARRAY(label_files, label_file_count, label_file_cap, dbg_label_file_t)) {
+			free(copy);
+			return -1;
+		}
+		file = label_file_count++;
+		label_files[file].path = copy;
+	}
+	label_files[file].bank   = bank;
+	label_files[file].labels = 0;
+
+	for (const char *p = text; *p; ) {
+		const char *eol = strchr(p, '\n');
+		const char *end = eol ? eol : p + strlen(p);
+		uint32_t    v;
+		const char *name;
+		size_t      len;
+		if (al_parse_line(p, end, &v, &name, &len) && !al_is_segment_symbol(name, len)) {
+			char *copy = (char *)malloc(len + 1);
+			if (!copy || !GROW_ARRAY(syms, sym_count, sym_cap, dbg_sym_t)) {
+				free(copy);
+				break;
+			}
+			memcpy(copy, name, len);
+			copy[len] = '\0';
+			dbg_sym_t *s = &syms[sym_count++];
+			s->name       = copy;
+			s->addr       = (dbg_addr_t)v;
+			s->seg        = -1;
+			s->raw_id     = -1;
+			s->is_scope   = false;
+			s->label_file = file;
+			s->bank       = v >= 0xA000 && v <= 0xFFFF ? bank : -1;
+			label_files[file].labels++;
+		}
+		p = eol ? eol + 1 : end;
+	}
+
+	/* The address lookups binary-search this. */
+	qsort(syms, (size_t)sym_count, sizeof(dbg_sym_t), sym_cmp);
+	changes++;
+	return label_files[file].labels;
+}
+
+int dbg_info_load_labels(const char *path, int bank)
+{
+	if (!path)
+		return -1;
+	FILE *f;
+#ifdef _WIN32
+	if (fopen_s(&f, path, "rb") != 0 || !f)
+		return -1;
+#else
+	f = fopen(path, "rb");
+	if (!f)
+		return -1;
+#endif
+	/* A label file is text and small. Anything huge is the wrong file. */
+	enum { MAX_LABEL_FILE = 32 * 1024 * 1024 };
+	long size = -1;
+	if (fseek(f, 0, SEEK_END) == 0)
+		size = ftell(f);
+	if (size < 0 || size > MAX_LABEL_FILE || fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		return -1;
+	}
+	char *text = (char *)malloc((size_t)size + 1);
+	if (!text) {
+		fclose(f);
+		return -1;
+	}
+	const size_t got = fread(text, 1, (size_t)size, f);
+	fclose(f);
+	text[got] = '\0';
+	const int n = dbg_info_load_labels_text(path, text, bank);
+	free(text);
+	return n;
+}
+
+bool dbg_info_unload_labels(const char *path)
+{
+	const int file = path ? label_file_find(path) : -1;
+	if (file < 0)
+		return false;
+	label_file_drop_symbols(file);
+	free(label_files[file].path);
+	for (int i = file; i < label_file_count - 1; i++)
+		label_files[i] = label_files[i + 1];
+	label_file_count--;
+	for (int i = 0; i < sym_count; i++) {
+		if (syms[i].label_file > file)
+			syms[i].label_file--;
+	}
+	changes++;
+	return true;
+}
+
+int dbg_info_label_file_count(void)
+{
+	return label_file_count;
+}
+
+bool dbg_info_label_file_at(int index, const char **path, int *bank, int *labels)
+{
+	if (index < 0 || index >= label_file_count)
+		return false;
+	if (path)
+		*path = label_files[index].path;
+	if (bank)
+		*bank = label_files[index].bank;
+	if (labels)
+		*labels = label_files[index].labels;
+	return true;
+}
+
+/* ---- Names to addresses ---------------------------------------------------- */
+
+static int name_hit_add(dbg_name_hit_t *out, int n, int max, dbg_addr_t addr, int bank, int kind)
+{
+	for (int i = 0; i < n; i++) {
+		if (out[i].addr == addr && out[i].bank == bank)
+			return n;
+	}
+	if (n >= max)
+		return n;
+	out[n].addr = addr;
+	out[n].bank = bank;
+	out[n].kind = kind;
+	return n + 1;
+}
+
+int dbg_info_find_name(const char *name, dbg_name_hit_t *out, int max)
+{
+	if (!name || !name[0] || max <= 0)
+		return 0;
+	int n = 0;
+	if (have_symbols()) {
+		for (int from_file = 0; from_file < 2 && n == 0; from_file++) {
+			for (int i = 0; i < sym_count; i++) {
+				if ((syms[i].label_file >= 0) == (from_file != 0) &&
+				    strcasecmp(syms[i].name, name) == 0)
+					n = name_hit_add(out, n, max, syms[i].addr, symbol_bank(i), DBG_NAME_LABEL);
+			}
+		}
+	}
+	if (n == 0 && loaded) {
+		for (int i = 0; i < equ_count; i++) {
+			if (strcasecmp(equs[i].name, name) == 0)
+				n = name_hit_add(out, n, max, equs[i].val, -1, DBG_NAME_EQUATE);
+		}
+	}
+	return n;
+}
+
+/* $hex or 0xhex, and plain decimal only where `decimal` allows it. */
+static bool parse_number(const char *s, bool decimal, uint32_t *out)
+{
+	int base = decimal ? 10 : 0;
+	if (s[0] == '$') {
+		s++;
+		base = 16;
+	} else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+		base = 16;
+	}
+	if (!base || !isxdigit((unsigned char)s[0]))
+		return false;
+	char *end;
+	unsigned long long v = strtoull(s, &end, base);
+	if (*end || v > 0xFFFFFFFFull)
+		return false;
+	*out = (uint32_t)v;
+	return true;
+}
+
+static bool all_hex(const char *s)
+{
+	if (!*s)
+		return false;
+	for (; *s; s++) {
+		if (!isxdigit((unsigned char)*s))
+			return false;
+	}
+	return true;
+}
+
+bool dbg_info_resolve(const char *text, dbg_resolved_t *out, char *err, size_t errn)
+{
+	char buf[128];
+	while (text && *text == ' ')
+		text++;
+	if (!text || !*text || strlen(text) >= sizeof buf) {
+		snprintf(err, errn, "no address given");
+		return false;
+	}
+	strcpy(buf, text);
+	for (size_t l = strlen(buf); l > 0 && buf[l - 1] == ' '; l--)
+		buf[l - 1] = '\0';
+
+	/* bank:addr, both hex with or without a $. */
+	char *colon = strchr(buf, ':');
+	if (colon) {
+		*colon = '\0';
+		const char *b = buf[0] == '$' ? buf + 1 : buf;
+		const char *a = colon[1] == '$' ? colon + 2 : colon + 1;
+		if (!all_hex(b) || !all_hex(a) || strlen(b) > 2 || strlen(a) > 4) {
+			snprintf(err, errn, "expected bank:address in hex, e.g. 04:C000");
+			return false;
+		}
+		out->bank = (int)strtoul(b, NULL, 16);
+		out->addr = (uint32_t)strtoul(a, NULL, 16);
+		return true;
+	}
+
+	/* The offset. Not at position 0, where it would have no base. */
+	long long offset = 0;
+	char *sign = strpbrk(buf + 1, "+-");
+	if (sign) {
+		const bool negative = *sign == '-';
+		char *off = sign + 1;
+		while (*off == ' ')
+			off++;
+		uint32_t v;
+		if (!parse_number(off, true, &v)) {
+			snprintf(err, errn, "cannot read the offset \"%s\"", off);
+			return false;
+		}
+		offset = negative ? -(long long)v : (long long)v;
+		*sign = '\0';
+		for (size_t l = strlen(buf); l > 0 && buf[l - 1] == ' '; l--)
+			buf[l - 1] = '\0';
+	}
+
+	uint32_t base = 0;
+	int      bank = -1;
+	if (buf[0] == '$' || (buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X'))) {
+		if (!parse_number(buf, false, &base)) {
+			snprintf(err, errn, "cannot read the number \"%s\"", buf);
+			return false;
+		}
+	} else {
+		dbg_name_hit_t hits[8];
+		const int n = dbg_info_find_name(buf, hits, 8);
+		if (n == 0) {
+			if (all_hex(buf))
+				snprintf(err, errn, "no symbol \"%s\"; write a number as $%s or 0x%s", buf, buf, buf);
+			else
+				snprintf(err, errn, "no symbol \"%s\"", buf);
+			return false;
+		}
+		if (n > 1) {
+			size_t used = (size_t)snprintf(err, errn, "\"%s\" is ambiguous:", buf);
+			for (int i = 0; i < n && i < 4 && used < errn; i++) {
+				if (hits[i].bank >= 0)
+					used += (size_t)snprintf(err + used, errn - used, " %02X:%04X",
+					                         (unsigned)hits[i].bank, (unsigned)hits[i].addr);
+				else
+					used += (size_t)snprintf(err + used, errn - used, " $%04X", (unsigned)hits[i].addr);
+			}
+			if (used < errn)
+				snprintf(err + used, errn - used, "%s; use bank:address", n > 4 ? " ..." : "");
+			return false;
+		}
+		base = hits[0].addr;
+		bank = hits[0].bank;
+	}
+
+	const long long result = (long long)base + offset;
+	if (result < 0 || result > 0xFFFFFF) {
+		snprintf(err, errn, "\"%s\" is outside the address space", text);
+		return false;
+	}
+	out->addr = (uint32_t)result;
+	out->bank = bank;
+	return true;
 }
 
 /* How much a line record's own type recommends it for DISPLAY. cc65 records the
@@ -2147,7 +2543,8 @@ void dbg_info_unload_range(dbg_addr_t start, dbg_addr_t end)
 	// (freeing their names). The array stays sorted by address.
 	int sdst = 0;
 	for (int src = 0; src < sym_count; src++) {
-		if (syms[src].addr < start || syms[src].addr > end) {
+		/* A label file is not a loaded module: it stays until it is unloaded. */
+		if (syms[src].label_file >= 0 || syms[src].addr < start || syms[src].addr > end) {
 			syms[sdst++] = syms[src];
 		} else {
 			free(syms[src].name);
@@ -2318,7 +2715,7 @@ const char *dbg_info_loaded_at(int index)
 	return (index >= 0 && index < owner_count) ? owners[index] : NULL;
 }
 
-void dbg_info_free(void)
+static void free_records(bool keep_labels)
 {
 	changes++;
 	for (int i = 0; i < owner_count; i++)
@@ -2382,12 +2779,30 @@ void dbg_info_free(void)
 	id_base_file = id_base_seg = id_base_span = id_base_line = 0;
 	next_id_file = next_id_seg = next_id_span = next_id_line = 0;
 
-	for (int i = 0; i < sym_count; i++)
-		free(syms[i].name);
-	free(syms);
-	syms = NULL;
-	sym_count = 0;
-	sym_cap = 0;
+	if (keep_labels) {
+		int kept = 0;
+		for (int i = 0; i < sym_count; i++) {
+			if (syms[i].label_file >= 0)
+				syms[kept++] = syms[i];
+			else
+				free(syms[i].name);
+		}
+		sym_count = kept;
+	} else {
+		for (int i = 0; i < sym_count; i++)
+			free(syms[i].name);
+		free(syms);
+		syms = NULL;
+		sym_count = 0;
+		sym_cap = 0;
+
+		for (int i = 0; i < label_file_count; i++)
+			free(label_files[i].path);
+		free(label_files);
+		label_files = NULL;
+		label_file_count = 0;
+		label_file_cap = 0;
+	}
 
 	for (int i = 0; i < equ_count; i++)
 		free(equs[i].name);
@@ -2399,4 +2814,14 @@ void dbg_info_free(void)
 	dbg_dir[0] = '\0';
 	loaded = false;
 	has_high_level_lines = false;
+}
+
+void dbg_info_free(void)
+{
+	free_records(false);
+}
+
+void dbg_info_free_keep_labels(void)
+{
+	free_records(true);
 }

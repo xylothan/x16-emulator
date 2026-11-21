@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -119,8 +120,11 @@ dbg_bank_result_t dbg_info_addr_to_source_banked_ex(dbg_addr_t addr, int ram_ban
  * $A000-$BFFF. (Banks are also seeded from RAM_BANK_* equates in the .dbg.) */
 void dbg_info_note_bank_load(dbg_addr_t load_addr, uint32_t size, uint8_t ram_bank);
 
-// Free all loaded debug info
+// Free all loaded debug info, label files included.
 void dbg_info_free(void);
+// Free what came from .dbg files and keep the label files, for replacing a .dbg
+// without losing labels that were loaded separately.
+void dbg_info_free_keep_labels(void);
 
 // A count that moves whenever what is loaded changes -- a load, an unload, a
 // free -- so something built from the debug info can tell it is stale.
@@ -187,6 +191,55 @@ int  dbg_info_symbol_bank_at(int index);
 // True when label `index` opens a .proc or .scope (a cc65 `scope` record of
 // type=scope names it): a routine, rather than a local label inside one.
 bool dbg_info_symbol_is_scope_at(int index);
+
+// ---- Label files (ld65 -Ln, VICE "al" format) --------------------------------
+// A program built without a .dbg can still have names. Labels join the same
+// table as .dbg symbols, so disassembly, the Symbols panel and the profiler see
+// them, but dbg_info_is_loaded() stays false for them: they carry no source
+// lines. A .dbg symbol wins over a label of the same name, and at the same
+// address.
+//
+// The file records no bank, so `bank` says which RAM or ROM bank its labels at
+// $A000 and up belong to; -1 means whichever is mapped. They stay until the
+// file is reloaded (which replaces only that file's labels) or unloaded, and
+// are not dropped when a program LOADs over their addresses.
+//
+// Returns how many labels were read, 0 if there were none (and nothing changes),
+// or -1 if the file cannot be read.
+int  dbg_info_load_labels(const char *path, int bank);
+// The same, from text already in memory; `path` names the file for reloading.
+int  dbg_info_load_labels_text(const char *path, const char *text, int bank);
+bool dbg_info_unload_labels(const char *path);
+int  dbg_info_label_file_count(void);
+// `path` is internal storage. Any of the out pointers may be NULL.
+bool dbg_info_label_file_at(int index, const char **path, int *bank, int *labels);
+
+// The label exactly at `addr` that belongs to `bank` or to no bank in particular.
+// Two banks can hold different code at one address, and naming the other bank's
+// routine is worse than naming nothing.
+bool dbg_info_addr_to_label_in_bank(dbg_addr_t addr, int bank, const char **name);
+
+// One place a name resolves to.
+typedef struct {
+	dbg_addr_t addr;
+	int        bank; // the RAM or ROM bank it belongs to, -1 when none is known
+	int        kind; // DBG_NAME_LABEL or DBG_NAME_EQUATE
+} dbg_name_hit_t;
+
+// Every distinct place `name` resolves to (case-insensitive), up to `max`.
+// Ranked by source: .dbg labels, else label-file labels, else equates.
+int dbg_info_find_name(const char *name, dbg_name_hit_t *out, int max);
+
+typedef struct {
+	uint32_t addr;
+	int      bank; // -1 unless the text or the symbol names one
+} dbg_resolved_t;
+
+// Read an address written as `name`, `name+offset`, `name-offset`, `$hex`,
+// `0xhex` or `bank:addr` (hex). A bare token is always a name: `fade` and `beef`
+// are valid labels as well as valid hex. An offset may be decimal, $hex or 0xhex.
+// On failure, `err` says why; an ambiguous name lists where it could be.
+bool dbg_info_resolve(const char *text, dbg_resolved_t *out, char *err, size_t errn);
 
 // ---- Source-file enumeration (for the debugger's file picker) ---------------
 // Maximum path length used by dbg_info_scan_dbg_files().

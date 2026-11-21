@@ -63,7 +63,7 @@ callstack_panel_render(bool *p_open)
         }
     }
 
-    if (!dbg_info_is_loaded()) {
+    if (!dbg_info_is_loaded() && dbg_info_symbol_count() == 0) {
         ImGui::TextDisabled("(no .dbg loaded — addresses only; load debug info for source/symbols)");
     }
     ImGui::TextDisabled("Heuristic unwind (JSR-based). Click a frame to go there.");
@@ -103,9 +103,12 @@ callstack_panel_render(bool *p_open)
             uint16_t    label_at = 0;
             if (dbg_info_addr_to_label(f.addr, &label) && label) {
                 snprintf(buf, sizeof buf, "$%04X  %s%s", f.addr, label, nosrc);
-            } else if (has_src && debug_ui_addr_to_label_nearest(f.addr, &label, &label_at) && label) {
+            } else if ((has_src || !dbg_info_is_loaded()) &&
+                       debug_ui_addr_to_label_nearest(f.addr, &label, &label_at) && label &&
+                       (has_src || (uint16_t)(f.addr - label_at) < 0x400)) {
                 // Only when the address is really covered by the debug info -
-                // the nearest label of an uncovered address is meaningless.
+                // the nearest label of an uncovered address is meaningless. A
+                // label file has no coverage to ask, so it must at least be close.
                 snprintf(buf, sizeof buf, "$%04X  %s+%u", f.addr, label,
                          (unsigned)(f.addr - label_at));
             } else {
