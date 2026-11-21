@@ -4,6 +4,7 @@
 
 #include <SDL.h>
 #include "debug_server.h"
+#include "debug_server_call.h"
 #include "dbg_info.h"
 #include "debugger.h"
 #include "disasm.h"
@@ -79,6 +80,18 @@ static socket_t client_sock = SOCKET_INVALID;
 static bool     server_enabled = false;
 static int      server_port = 0;
 
+// Who the request being handled came from. While reply_sink is set, the two
+// response functions store the result there instead of writing to the socket.
+// Events are never sunk, so an attached editor still hears about the machine.
+static dbg_caller_t   current_caller = DBG_CALLER_DAP;
+static dbg_reply_t   *reply_sink = NULL;
+static bool           reply_answered = false;
+static dbg_frontend_t frontend = { NULL, NULL };
+
+static bool frontend_holds_run_state(void) {
+    return frontend.holds_run_state && frontend.holds_run_state();
+}
+
 // DAP sequence counter (for events we send)
 static int dap_seq = 1;
 
@@ -138,6 +151,7 @@ typedef struct {
 
 static struct {
     bool        pending;
+    dbg_caller_t caller;       // who gets the deferred reply
     int         seq;
     uint32_t    frames_left;
     uint32_t    frames_run;
@@ -224,22 +238,48 @@ static bool     dap_no_debug = false;
 static int dap_line_out(int line) { return line - 1 + dap_line_base; }
 static int dap_line_in(int line)  { return line + 1 - dap_line_base; }
 
-// Is there a local debugger UI whose user owns the run state?
+// Does anyone other than this DAP session own the run state?
 //
-// When there is, a client connecting or going away must not resume the machine:
-// somebody is sitting at a breakpoint looking at it. When there is not -- a
-// headless -debugport run -- nothing else can ever resume it, so a session
+// When someone does, a client connecting or going away must not resume the
+// machine: somebody is sitting at a breakpoint looking at it. When nobody does
+// -- a headless -debugport run -- nothing else can ever resume it, so a session
 // ending has to.
 //
-// Both front ends count, and both need their own test. -imgui does not set
+// Both local UIs count, and both need their own test. -imgui does not set
 // debug_window_enabled, and -debugport sets debugger_enabled by itself, so
 // neither flag alone answers the question: testing only the first ignored the
 // graphical debugger entirely and resumed the machine out from under it.
 static bool
-dap_local_ui_owns_run_state(void)
+dap_other_owner_of_run_state(void)
 {
 	return (debug_window_enabled && debugger_enabled)
-	       || (imgui_debugger_enabled && video_debug_ui_available());
+	       || (imgui_debugger_enabled && video_debug_ui_available())
+	       || frontend_holds_run_state();
+}
+
+// A handler's reply can drop a DAP client, and then there is nobody left to act
+// for. A reply to any other caller never touches the socket, so its absence of
+// a DAP client means nothing.
+static bool dap_reply_lost(void) {
+    return current_caller == DBG_CALLER_DAP && client_sock == SOCKET_INVALID;
+}
+
+// Owners for what a request arms, so that each front end releases only its own.
+static debug_owner_t caller_step_owner(void) {
+    return current_caller == DBG_CALLER_MCP ? DEBUG_OWNER_MCP : DEBUG_OWNER_DAP_SOURCE;
+}
+static perf_owner_t caller_perf_owner(void) {
+    return current_caller == DBG_CALLER_MCP ? PERF_OWNER_MCP : PERF_OWNER_DAP;
+}
+static vera_bw_owner_t caller_bw_owner(void) {
+    return current_caller == DBG_CALLER_MCP ? VERA_BW_OWNER_MCP : VERA_BW_OWNER_DAP;
+}
+
+// A DAP request is answered by its own response. One from elsewhere leaves the
+// editor believing the machine is halted, so the flag stays set and the resume
+// hook sends it a continued event.
+static void note_request_resumes(void) {
+    if (current_caller == DBG_CALLER_DAP) dap_stop_announced = false;
 }
 
 // Forward declarations
@@ -609,7 +649,19 @@ static void send_dap_message(cJSON *json) {
     cJSON_Delete(json);
 }
 
+static void sink_reply(bool success, cJSON *body, const char *message) {
+    if (reply_sink->body) cJSON_Delete(reply_sink->body);
+    reply_sink->success = success;
+    reply_sink->body = body;
+    snprintf(reply_sink->message, sizeof reply_sink->message, "%s", message ? message : "");
+    reply_answered = true;
+}
+
 static void send_dap_response(int request_seq, const char *command, bool success, cJSON *body) {
+    if (reply_sink) {
+        sink_reply(success, body, NULL);
+        return;
+    }
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddNumberToObject(resp, "seq", dap_seq++);
     cJSON_AddStringToObject(resp, "type", "response");
@@ -627,6 +679,17 @@ static void send_dap_response(int request_seq, const char *command, bool success
 // client can match on, `format` the text it shows.
 static void send_dap_error_response_full(int request_seq, const char *command, const char *message,
                                          const char *format, const char *key, cJSON *item) {
+    if (reply_sink) {
+        cJSON *extra = NULL;
+        if (key && item) {
+            extra = cJSON_CreateObject();
+            cJSON_AddItemToObject(extra, key, item);
+        } else if (item) {
+            cJSON_Delete(item);
+        }
+        sink_reply(false, extra, format);
+        return;
+    }
     cJSON *body = cJSON_CreateObject();
     cJSON *error_obj = cJSON_CreateObject();
     // An id per message, derived from it so that the hundred-odd call sites
@@ -801,7 +864,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     send_dap_response(seq, "initialize", true, caps);
 
     // Sending can drop the client, and a session must not start for nobody.
-    if (client_sock == SOCKET_INVALID) return 0;
+    if (dap_reply_lost()) return 0;
     dap_initialize_answered = true;
     dap_session_active = true;
 
@@ -849,7 +912,7 @@ static int handle_dap_configuration_done(int seq) {
     // rather than allowed to freeze the emulator -- so there may be no session
     // left to configure. Carrying on would halt a headless machine with nobody
     // able to resume it.
-    if (client_sock == SOCKET_INVALID) {
+    if (dap_reply_lost()) {
         dap_stop_on_entry = false;
         return 0;
     }
@@ -1784,29 +1847,29 @@ static bool dap_step_by_instruction(cJSON *args) {
 }
 
 static int handle_dap_next(int seq, cJSON *args) {
-    dap_stop_announced = false;   // this request implies execution continues
+    note_request_resumes();   // this request implies execution continues
     if (dap_step_by_instruction(args))
-        DEBUGStepOver(DEBUG_OWNER_DAP_SOURCE);
+        DEBUGStepOver(caller_step_owner());
     else
-        DEBUGStepOverAuto(DEBUG_OWNER_DAP_SOURCE);
+        DEBUGStepOverAuto(caller_step_owner());
     send_dap_response(seq, "next", true, NULL);
     return 1;
 }
 
 static int handle_dap_step_in(int seq, cJSON *args) {
-    dap_stop_announced = false;   // this request implies execution continues
+    note_request_resumes();   // this request implies execution continues
     if (dap_step_by_instruction(args))
         DEBUGStepInto();
     else
-        DEBUGStepIntoAuto(DEBUG_OWNER_DAP_SOURCE);
+        DEBUGStepIntoAuto(caller_step_owner());
     send_dap_response(seq, "stepIn", true, NULL);
     return 1;
 }
 
 static int handle_dap_step_out(int seq, cJSON *args) {
     (void)args;
-    dap_stop_announced = false;   // this request implies execution continues
-    DEBUGStepOut(DEBUG_OWNER_DAP_SOURCE);
+    note_request_resumes();   // this request implies execution continues
+    DEBUGStepOut(caller_step_owner());
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
 }
@@ -1818,7 +1881,7 @@ static int handle_dap_pause(int seq, cJSON *args) {
     // stop. Sending can drop the client, and halting after that would strand a
     // headless machine with nobody able to resume it.
     send_dap_response(seq, "pause", true, NULL);
-    if (client_sock == SOCKET_INVALID) return 0;
+    if (dap_reply_lost()) return 0;
     // Emits the stopped event itself on the RUN->STOP transition.
     DEBUGBreakToDebugger();
     // Already halted -- a previous client left it that way, or a breakpoint got
@@ -1839,8 +1902,9 @@ static void dap_quit_emulator(void) {
 
 static int handle_dap_disconnect(int seq, cJSON *args) {
     // A launched machine ends with its session. One the client attached to, or
-    // never claimed at all, was not the client's to end.
-    bool terminate = dap_launched;
+    // never claimed at all, was not the client's to end, and neither is one
+    // that another front end is still using, unless the client says so outright.
+    bool terminate = dap_launched && !frontend_holds_run_state();
     if (args) {
         cJSON *term_item = cJSON_GetObjectItemCaseSensitive(args, "terminateDebuggee");
         if (term_item && cJSON_IsBool(term_item)) {
@@ -1862,7 +1926,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
         dap_release_session_state();
         // Resume only when there is no interactive debugger UI to drive the run
         // state; otherwise leave it as the user left it (see disconnect_client).
-        if (currentMode == DMODE_STOP && !dap_local_ui_owns_run_state()) {
+        if (currentMode == DMODE_STOP && !dap_other_owner_of_run_state()) {
             currentMode = DMODE_RUN;
         }
     }
@@ -2975,7 +3039,21 @@ static void step_finish(const char *reason) {
         cJSON_AddItemToObject(body, "pcm", pcm);
     }
     if (step.hash) dap_add_state_hash(body);
+
+    if (step.caller != DBG_CALLER_DAP) {
+        if (frontend.step_done) frontend.step_done(body);
+        else cJSON_Delete(body);
+        return;
+    }
+    // This can run in the middle of another front end's request, whose
+    // `continue` is what cancelled the step. The reply is still the DAP client's.
+    dbg_reply_t *const sink = reply_sink;
+    const dbg_caller_t caller = current_caller;
+    reply_sink = NULL;
+    current_caller = DBG_CALLER_DAP;
     send_dap_response(step.seq, "x16/step", true, body);
+    reply_sink = sink;
+    current_caller = caller;
 }
 
 // Called from every poll. Completes a step once the machine has parked, for
@@ -3150,11 +3228,14 @@ static int handle_x16_step(int seq, cJSON *args) {
     }
 
     step.pending     = true;
+    step.caller      = current_caller;
     step.seq         = seq;
     step.frames_left = frames;
     step.frames_run  = 0;
     step.by_frames   = false;
-    step.events      = ev && cJSON_IsTrue(ev);
+    // An editor watching a step it did not ask for still has to see it happen.
+    step.events      = (ev && cJSON_IsTrue(ev)) ||
+                       (current_caller != DBG_CALLER_DAP && client_sock != SOCKET_INVALID);
     step.hash        = dap_arg_true(args, "hash");
     step.audio       = audio;
     step.num_reads   = num_reads;
@@ -3755,11 +3836,11 @@ static int handle_x16_perf_stats(int seq, cJSON *args) {
     // A client asking for statistics is a client that wants them collected.
     // Arming here rather than making it a separate round trip means the common
     // case -- attach, poll, read -- just works.
-    if (!perf_budget_owner_wants(PERF_OWNER_DAP) && !perf_budget_is_enabled()) {
-        perf_budget_arm(PERF_OWNER_DAP, true);
+    if (!perf_budget_owner_wants(caller_perf_owner()) && !perf_budget_is_enabled()) {
+        perf_budget_arm(caller_perf_owner(), true);
     }
-    if (!vera_bandwidth_owner_wants(VERA_BW_OWNER_DAP) && !vera_bandwidth_is_enabled()) {
-        vera_bandwidth_arm(VERA_BW_OWNER_DAP, true);
+    if (!vera_bandwidth_owner_wants(caller_bw_owner()) && !vera_bandwidth_is_enabled()) {
+        vera_bandwidth_arm(caller_bw_owner(), true);
     }
 
     cJSON *body = cJSON_CreateObject();
@@ -4003,7 +4084,7 @@ static const char *bp_cmp_name(int op) {
 // silently dropped.
 static cJSON *owners_bitmask_to_json(uint16_t owners) {
     static const char *names[] = {
-        "cli", "ui", "dapSource", "dapFunction", "dapInstruction", "dapConsole", "step"
+        "cli", "ui", "dapSource", "dapFunction", "dapInstruction", "dapConsole", "step", "mcp"
     };
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < DEBUG_OWNER_COUNT; i++) {
@@ -4600,7 +4681,8 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
 // ─── terminate (Stop: ends a launched machine, detaches from any other) ──
 static int handle_dap_terminate(int seq, cJSON *args) {
     (void)args;
-    const bool launched = dap_launched;
+    // A machine another front end is still using outlives this session.
+    const bool launched = dap_launched && !frontend_holds_run_state();
     send_dap_response(seq, "terminate", true, NULL);
     if (launched) {
         // The shutdown path sends exited and terminated.
@@ -4608,7 +4690,7 @@ static int handle_dap_terminate(int seq, cJSON *args) {
         return 0;
     }
     // Sending can drop the client, and dropping it has already done the rest.
-    if (client_sock == SOCKET_INVALID) return 1;
+    if (dap_reply_lost()) return 1;
 
     dap_session_active = false;
     // Released before resuming, for the same reason as the disconnect request:
@@ -4620,7 +4702,7 @@ static int handle_dap_terminate(int seq, cJSON *args) {
     // when there is no local debugger whose user owns the run state. Otherwise
     // "Stop Debugging" in the editor runs the emulator out from under someone
     // who is halted in the SDL debug window inspecting it.
-    if (currentMode == DMODE_STOP && !dap_local_ui_owns_run_state()) {
+    if (currentMode == DMODE_STOP && !dap_other_owner_of_run_state()) {
         currentMode = DMODE_RUN;
     }
     send_dap_event("terminated", NULL);
@@ -5324,31 +5406,9 @@ static int handle_dap_step_in_targets(int seq, cJSON *args) {
     return 0;
 }
 
-// Process a single DAP message. Returns 1 if execution mode was changed.
-static int dispatch_dap(const char *json_body) {
-    cJSON *root = cJSON_Parse(json_body);
-    if (!root) {
-        fprintf(stderr, "[dap] Failed to parse JSON: %.80s\n", json_body);
-        return 0;
-    }
-
-    cJSON *type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
-    cJSON *seq_item = cJSON_GetObjectItemCaseSensitive(root, "seq");
-    cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(root, "command");
-    cJSON *args = cJSON_GetObjectItemCaseSensitive(root, "arguments");
-
-    if (!type_item || !cJSON_IsString(type_item) || strcmp(type_item->valuestring, "request") != 0) {
-        // Only handle requests
-        cJSON_Delete(root);
-        return 0;
-    }
-
-    int seq = (seq_item && cJSON_IsNumber(seq_item)) ? (int)seq_item->valuedouble : 0;
-    const char *cmd = (cmd_item && cJSON_IsString(cmd_item)) ? cmd_item->valuestring : "";
-
+// Run one request, whoever it came from. Returns 1 if execution mode was changed.
+static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
-
-    printf("[dap] << %s (seq=%d)\n", cmd, seq);
 
     // Another request taking over execution ends a step in flight. Answer it
     // now, rather than leave it to complete at some unrelated later stop. A goto
@@ -5426,7 +5486,79 @@ static int dispatch_dap(const char *json_body) {
         send_dap_error_response(seq, cmd, "command not supported");
     }
 
+    return result;
+}
+
+// Process a single DAP message. Returns 1 if execution mode was changed.
+static int dispatch_dap(const char *json_body) {
+    cJSON *root = cJSON_Parse(json_body);
+    if (!root) {
+        fprintf(stderr, "[dap] Failed to parse JSON: %.80s\n", json_body);
+        return 0;
+    }
+
+    cJSON *type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
+    cJSON *seq_item = cJSON_GetObjectItemCaseSensitive(root, "seq");
+    cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(root, "command");
+    cJSON *args = cJSON_GetObjectItemCaseSensitive(root, "arguments");
+
+    if (!type_item || !cJSON_IsString(type_item) || strcmp(type_item->valuestring, "request") != 0) {
+        // Only handle requests
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    int seq = (seq_item && cJSON_IsNumber(seq_item)) ? (int)seq_item->valuedouble : 0;
+    const char *cmd = (cmd_item && cJSON_IsString(cmd_item)) ? cmd_item->valuestring : "";
+
+    printf("[dap] << %s (seq=%d)\n", cmd, seq);
+
+    const int result = dispatch_request(seq, cmd, args);
     cJSON_Delete(root);
+    return result;
+}
+
+// ─── Calls from another front end ───────────────────────────────────
+
+void debug_server_set_frontend(const dbg_frontend_t *f) {
+    frontend.holds_run_state = f ? f->holds_run_state : NULL;
+    frontend.step_done       = f ? f->step_done : NULL;
+}
+
+// Named one by one. Session, configuration and breakpoint-table requests would
+// reach into a DAP client's state, and evaluate is a console with its own
+// breakpoint commands.
+static const char *const callable_commands[] = {
+    "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
+    "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
+    "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
+    "x16/saveState", "x16/loadState", "x16/perfStats",
+};
+
+int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
+    memset(reply, 0, sizeof *reply);
+
+    bool allowed = false;
+    for (size_t i = 0; i < sizeof callable_commands / sizeof callable_commands[0]; i++) {
+        if (!strcmp(command, callable_commands[i])) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed || reply_sink) {
+        snprintf(reply->message, sizeof reply->message, "%s is not available here", command);
+        return 0;
+    }
+
+    reply_sink = reply;
+    reply_answered = false;
+    current_caller = DBG_CALLER_MCP;
+    const int result = dispatch_request(0, command, args);
+    reply_sink = NULL;
+    current_caller = DBG_CALLER_DAP;
+
+    reply->deferred = !reply_answered;
+    if (reply->deferred) reply->success = true;
     return result;
 }
 
@@ -5488,9 +5620,12 @@ static void dap_release_session_state(void) {
     dap_stop_announced = false;
     dap_launched = false;
     // A step nobody is waiting for must not stop the machine some frames from
-    // now, with no client left to resume it.
-    step.pending = false;
-    audio_events_end();
+    // now, with no client left to resume it. One another front end asked for
+    // still has someone waiting.
+    if (!(step.pending && step.caller != DBG_CALLER_DAP)) {
+        step.pending = false;
+        audio_events_end();
+    }
 
     // Let go of anything this session armed for polling, so a client that
     // asked for statistics and then disconnected does not strand the
@@ -5535,7 +5670,7 @@ static void disconnect_client(void) {
             // debugger_enabled by writing $9FB0, which suppresses the overlay,
             // and leaving the machine stopped for a window nobody can see would
             // strand it.
-            bool has_ui = dap_local_ui_owns_run_state();
+            bool has_ui = dap_other_owner_of_run_state();
             if (currentMode == DMODE_STOP && !has_ui) {
                 printf("[dap] Session ended, resuming emulator\n");
                 currentMode = DMODE_RUN;

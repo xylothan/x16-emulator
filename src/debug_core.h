@@ -55,6 +55,7 @@ typedef enum {
 	DEBUG_OWNER_DAP_INSTRUCTION,// DAP setInstructionBreakpoints
 	DEBUG_OWNER_DAP_CONSOLE,    // bp_add / watch_add typed in the debug console
 	DEBUG_OWNER_STEP,           // the debugger's own step-over/step-out target
+	DEBUG_OWNER_MCP,            // an MCP client
 	DEBUG_OWNER_COUNT
 } debug_owner_t;
 
