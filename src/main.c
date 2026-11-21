@@ -2048,6 +2048,15 @@ main(int argc, char **argv)
 #ifdef __EMSCRIPTEN__
 	emscripten_set_main_loop(emscripten_main_loop, 0, 0);
 #endif
+#ifdef HAS_DAP
+	// -testbench takes its commands from stdin and holds the machine while it
+	// waits for them, so an MCP client would share that pipe or never be answered.
+	if (testbench && mcp_server_is_enabled()) {
+		fprintf(stderr, "-mcp cannot be combined with -testbench\n");
+		return 1;
+	}
+#endif
+
 	// The graphical debugger needs a window, and headless mode never opens one:
 	// video_init() below is skipped entirely, so the self-disable inside it
 	// never runs. Clearing the flag here keeps the invariant the rest of the
