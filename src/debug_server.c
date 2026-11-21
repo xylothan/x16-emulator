@@ -5220,7 +5220,8 @@ static bool dap_parse_data_id(const char *s, uint16_t *addr, uint16_t *len) {
 // Claim a watch, or say why not. A shared entry keeps its first owner's length
 // and filter, so one that differs from this request would be reported armed
 // while doing something else, and changing it would alter that owner's watch.
-static const char *dap_arm_watch(uint16_t addr, uint16_t len, bool has_value, int op, uint8_t value) {
+static const char *dap_arm_watch(uint16_t addr, uint16_t len, bool has_value, int op, uint8_t value,
+                                 debug_owner_t owner) {
     const int key = debug_normalise_bank(DEBUG_BANK_ANY, addr, 0);
     for (int i = 0; i < debug_wp_count(); i++) {
         const struct watchpoint *w = debug_wp_at(i);
@@ -5230,7 +5231,7 @@ static const char *dap_arm_watch(uint16_t addr, uint16_t len, bool has_value, in
             return "another watch at this address has a different range, filter or state";
         break;
     }
-    const debug_add_result_t added = debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE);
+    const debug_add_result_t added = debug_wp_add_for(addr, len, DEBUG_BANK_ANY, owner);
     if (added == DEBUG_ADD_FULL) return "the watchpoint table is full";
     if (added == DEBUG_ADD_CREATED && has_value) debug_wp_set_value(addr, DEBUG_BANK_ANY, op, value);
     return NULL;
@@ -5280,7 +5281,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         if (!why && num_data_bps >= MAX_WATCHPOINTS)
             why = "too many data breakpoints";
         if (!why)
-            why = dap_arm_watch(addr, len, has_value, op, (uint8_t)val);
+            why = dap_arm_watch(addr, len, has_value, op, (uint8_t)val, DEBUG_OWNER_DAP_SOURCE);
 
         if (!why) {
             const int bp_id = next_dap_bp_id++;
@@ -5419,6 +5420,210 @@ static int handle_dap_step_in_targets(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Breakpoints one at a time, for MCP ─────────────────────────────
+//
+// DAP's breakpoint requests each replace a whole list that belongs to the client,
+// so they are not callable. These add and remove a single claim under MCP's own
+// owner, leaving anything another owner holds at the same address armed.
+
+// The core key a request names. A condition can pin the bank too.
+static bool mcp_bp_key(cJSON *args, const char *cond, struct breakpoint *bp,
+                       char *why, size_t whyn) {
+    cJSON *ad = cJSON_GetObjectItemCaseSensitive(args, "address");
+    cJSON *xb = cJSON_GetObjectItemCaseSensitive(args, "bank");
+    int cond_bank = -1;
+    if (!ad || !cJSON_IsString(ad) || !dap_parse_instruction_ref(ad->valuestring, 0, bp)) {
+        snprintf(why, whyn, "unreadable address (expected e.g. $C000, or 04:C000 for a bank)");
+        return false;
+    }
+    if (!dap_check_condition(cond, &cond_bank, why, whyn)) return false;
+
+    int want = bp->x16Bank;
+    if (xb) {
+        const int b = (int)xb->valuedouble;
+        if (want != DEBUG_BANK_ANY && want != b) {
+            snprintf(why, whyn, "'bank' disagrees with the bank in the address");
+            return false;
+        }
+        want = b;
+    }
+    if (cond_bank != -1) {
+        const int cb = (cond_bank == DAP_BANK_TERM_ANY) ? DEBUG_BANK_ANY : cond_bank;
+        if (want != DEBUG_BANK_ANY && cb != want) {
+            snprintf(why, whyn, "the condition's bank disagrees with the breakpoint's bank");
+            return false;
+        }
+        want = cb;
+    }
+    if (want != DEBUG_BANK_ANY && debug_normalise_bank(want, bp->pc, bp->bank) == DEBUG_BANK_ANY) {
+        snprintf(why, whyn, "$%04X is not in a banked window, so a bank cannot apply",
+                 (unsigned)bp->pc);
+        return false;
+    }
+    bp->x16Bank = debug_normalise_bank(want, bp->pc, bp->bank);
+    return true;
+}
+
+// A watch covers one CPU address range in every bank.
+static bool mcp_watch_range(cJSON *args, uint16_t *addr, uint16_t *len, char *why, size_t whyn) {
+    cJSON *ad = cJSON_GetObjectItemCaseSensitive(args, "address");
+    cJSON *ln = cJSON_GetObjectItemCaseSensitive(args, "length");
+    struct breakpoint bp;
+    if (!ad || !cJSON_IsString(ad) || !dap_parse_instruction_ref(ad->valuestring, 0, &bp) ||
+        bp.bank != 0 || bp.x16Bank != DEBUG_BANK_ANY) {
+        snprintf(why, whyn, "a write watch takes a 16-bit CPU address, e.g. $0400");
+        return false;
+    }
+    if (cJSON_HasObjectItem(args, "bank")) {
+        snprintf(why, whyn, "a write watch covers every bank, so it takes no 'bank'");
+        return false;
+    }
+    const int l = ln ? (int)ln->valuedouble : 1;
+    if (l < 1 || bp.pc + l > 0x10000) {
+        snprintf(why, whyn, "the watched range runs past $FFFF");
+        return false;
+    }
+    *addr = (uint16_t)bp.pc;
+    *len  = (uint16_t)l;
+    return true;
+}
+
+static bool mcp_kind_is_write(cJSON *args) {
+    cJSON *k = cJSON_GetObjectItemCaseSensitive(args, "kind");
+    return k && cJSON_IsString(k) && !strcmp(k->valuestring, "write");
+}
+
+static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
+    static const char cmd[] = "mcp/setBreakpoint";
+    cJSON *ci = cJSON_GetObjectItemCaseSensitive(args, "condition");
+    cJSON *hi = cJSON_GetObjectItemCaseSensitive(args, "hitCondition");
+    const char *cond = (ci && cJSON_IsString(ci)) ? ci->valuestring : "";
+    const char *hit  = (hi && cJSON_IsString(hi)) ? hi->valuestring : "";
+    char why[200], where[24];
+    cJSON *body;
+
+    if (mcp_kind_is_write(args)) {
+        uint16_t addr = 0, len = 1;
+        uint32_t val = 0;
+        int op = 0;
+        const bool has_value = cond[0] != '\0';
+        if (!mcp_watch_range(args, &addr, &len, why, sizeof why)) {
+            send_dap_error_response(seq, cmd, why);
+            return 0;
+        }
+        if (hit[0]) {
+            send_dap_error_response(seq, cmd, "a write watch takes no hit count");
+            return 0;
+        }
+        if (has_value && len > 1) {
+            send_dap_error_response(seq, cmd, "a value condition applies to a single byte");
+            return 0;
+        }
+        if (has_value && (!dap_parse_simple_cmp(cond, &op, &val) || val > 0xFF)) {
+            send_dap_error_response(seq, cmd, "cannot parse condition (expected a byte comparison, e.g. == $05)");
+            return 0;
+        }
+        // Set again with the same values is fine; a different range or filter
+        // would change what an earlier claim, even this client's, is watching.
+        const char *refused = dap_arm_watch(addr, len, has_value, op, (uint8_t)val, DEBUG_OWNER_MCP);
+        if (refused) {
+            send_dap_error_response(seq, cmd, refused);
+            return 0;
+        }
+        snprintf(where, sizeof where, "$%04X", (unsigned)addr);
+        body = cJSON_CreateObject();
+        cJSON_AddStringToObject(body, "kind", "write");
+        cJSON_AddStringToObject(body, "address", where);
+        cJSON_AddNumberToObject(body, "length", len);
+        send_dap_response(seq, cmd, true, body);
+        return 0;
+    }
+
+    struct breakpoint bp;
+    if (!mcp_bp_key(args, cond, &bp, why, sizeof why)) {
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+    if (hit[0] && !dap_check_hit_condition(hit)) {
+        send_dap_error_response(seq, cmd, "cannot parse hitCondition (expected N: stop from the Nth hit on)");
+        return 0;
+    }
+    const dbg_addr_t a24 = ((dbg_addr_t)bp.bank << 16) | (dbg_addr_t)bp.pc;
+    // Setting it again may change this client's own condition, so its claim is
+    // set aside for the comparison: what is left belongs to someone else.
+    const bool had = debug_bp_has_owner(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+    if (had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+    if (dap_bp_cond_conflicts(a24, bp.x16Bank, cond, hit)) {
+        if (had) debug_bp_add_for(bp, DEBUG_OWNER_MCP);
+        snprintf(why, sizeof why, "another breakpoint at $%04X has a different condition or hit count",
+                 (unsigned)bp.pc);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+    dap_apply_bp_condition(a24, cond, hit, bp.x16Bank);
+    const debug_add_result_t added = debug_bp_add_for(bp, DEBUG_OWNER_MCP);
+    if (added == DEBUG_ADD_FULL) {
+        if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
+            debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
+        send_dap_error_response(seq, cmd, "the breakpoint table is full");
+        return 0;
+    }
+    // A new entry must not inherit a dump left on the record. One someone else
+    // already holds keeps whatever it does.
+    if (added == DEBUG_ADD_CREATED) debug_bp_clear_dump(bp.pc, bp.bank, bp.x16Bank);
+
+    dap_fmt_bp(where, sizeof where, bp.pc, bp.bank, bp.x16Bank);
+    body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "kind", "exec");
+    cJSON_AddStringToObject(body, "address", where);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
+    static const char cmd[] = "mcp/removeBreakpoint";
+    char why[200];
+    bool still_armed;
+
+    if (mcp_kind_is_write(args)) {
+        uint16_t addr = 0, len = 1;
+        if (!mcp_watch_range(args, &addr, &len, why, sizeof why)) {
+            send_dap_error_response(seq, cmd, why);
+            return 0;
+        }
+        if (!debug_wp_has_owner(addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP)) {
+            send_dap_error_response(seq, cmd, "MCP has no write watch at this address");
+            return 0;
+        }
+        debug_wp_remove_for(addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP);
+        still_armed = false;
+        const int key = debug_normalise_bank(DEBUG_BANK_ANY, addr, 0);
+        for (int i = 0; i < debug_wp_count(); i++) {
+            const struct watchpoint *w = debug_wp_at(i);
+            if (w && w->addr == addr && w->x16Bank == key) still_armed = true;
+        }
+    } else {
+        struct breakpoint bp;
+        if (!mcp_bp_key(args, "", &bp, why, sizeof why)) {
+            send_dap_error_response(seq, cmd, why);
+            return 0;
+        }
+        if (!debug_bp_has_owner(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP)) {
+            send_dap_error_response(seq, cmd, "MCP has no breakpoint at this address");
+            return 0;
+        }
+        debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+        still_armed = debug_bp_find(bp.pc, bp.bank, bp.x16Bank) >= 0;
+        if (!still_armed) debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "removed", true);
+    // Someone else's claim at the same address keeps it armed.
+    cJSON_AddBoolToObject(body, "stillArmed", still_armed);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // Run one request, whoever it came from. Returns 1 if execution mode was changed.
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
@@ -5494,6 +5699,10 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "setFunctionBreakpoints")) {
         result = handle_dap_set_function_breakpoints(seq, args);
     }
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/setBreakpoint"))
+        result = handle_mcp_set_breakpoint(seq, args);
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/removeBreakpoint"))
+        result = handle_mcp_remove_breakpoint(seq, args);
     else {
         fprintf(stderr, "[dap] Unhandled command: %s\n", cmd);
         send_dap_error_response(seq, cmd, "command not supported");
@@ -5546,6 +5755,7 @@ static const char *const callable_commands[] = {
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats",
+    "mcp/setBreakpoint", "mcp/removeBreakpoint",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -5948,6 +6158,7 @@ int debug_server_poll(void) {
 }
 
 void debug_server_note_resumed(void) {
+    mcp_server_note_resumed();
     // A resume the client did not ask for -- someone pressed F5 or F10 in the
     // SDL debug window while a session was attached. It is still watching a
     // machine it believes is halted, so tell it. Resumes that came from a DAP
@@ -5960,6 +6171,7 @@ void debug_server_note_resumed(void) {
 }
 
 void debug_server_notify_stopped(const char *reason) {
+    mcp_server_note_stopped();
     if (!server_enabled || client_sock == SOCKET_INVALID) return;
     // Too early to send, so not announced either: configurationDone then reports
     // this stop to the client.
