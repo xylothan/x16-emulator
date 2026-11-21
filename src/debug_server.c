@@ -63,6 +63,7 @@ extern bool headless;   // main.c
   #include <fcntl.h>
   #include <unistd.h>
   #include <errno.h>
+  #include <signal.h>
   typedef int socket_t;
   #define SOCKET_INVALID (-1)
   #define CLOSE_SOCKET close
@@ -505,6 +506,10 @@ static bool platform_init(void) {
         }
         wsa_initialized = true;
     }
+#else
+    // A client vanishing just before an event is sent has to be an error from
+    // send(), which drops that client. The default action ends the emulator.
+    signal(SIGPIPE, SIG_IGN);
 #endif
     return true;
 }

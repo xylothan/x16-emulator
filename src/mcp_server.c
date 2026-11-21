@@ -30,6 +30,7 @@
   #define MCP_O_WRONLY          _O_WRONLY
 #else
   #include <fcntl.h>
+  #include <signal.h>
   #include <unistd.h>
   #define MCP_READ(fd, buf, n)  read((fd), (buf), (n))
   #define MCP_WRITE(fd, buf, n) write((fd), (buf), (n))
@@ -1482,6 +1483,9 @@ static void handle_line(const char *line) {
 
 int mcp_server_init_stdio(void) {
     if (enabled) return 0;
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);   // a client hanging up is an error return, not an exit
+#endif
     fflush(stdout);
     out_fd = MCP_DUP(1);
     if (out_fd < 0) return -1;
