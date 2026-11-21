@@ -1269,9 +1269,11 @@ def test_vision():
         time.sleep(0.5)
         case("warp is reported when on", data(m.call("screenshot")).get("warp") is True)
 
-    with Mcp(["-testbench"]) as m:
-        m.init()
-        case("a run with no video has no picture", is_error(m.call("screenshot")))
+    for mode in ([], [str(free_port())]):
+        p = subprocess.run([EXE, "-rom", ROM, "-mcp"] + mode + ["-testbench"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+        case(f"-mcp {'with a port ' if mode else ''}refuses -testbench",
+             p.returncode == 1 and b"-testbench" in p.stderr, repr(p.stderr[-120:]))
 
     with HttpMcp() as h:
         h.init()
