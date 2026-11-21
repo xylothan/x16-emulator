@@ -974,7 +974,7 @@ debug_ui_draw_control_bar(void)
                     "Execute one source line, entering any call. Without C debug\n"
                     "info, or with \"Step by line\" off, one instruction.\n"
                     "Only while the machine is halted."))
-        DEBUGStepIntoAuto();
+        DEBUGStepIntoAuto(DEBUG_OWNER_UI);
     ImGui::SameLine();
     if (ctrl_button("Step Over", paused,
                     "Step Over  (F10)\n"

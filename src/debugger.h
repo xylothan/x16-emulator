@@ -57,7 +57,7 @@ void DEBUGStepOut(debug_owner_t owner);     // run to the current routine's retu
 // step whenever stepping by line would mean nothing -- the preference is off,
 // the .dbg carries no high-level (C) line info, or the PC is not on a line at
 // all -- so an assembly project steps exactly as it always did.
-void DEBUGStepIntoAuto(void);
+void DEBUGStepIntoAuto(debug_owner_t owner);
 void DEBUGStepOverAuto(debug_owner_t owner);
 
 // Whether stepping by line is wanted. On by default; only consulted where the
