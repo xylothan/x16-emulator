@@ -749,6 +749,199 @@ def test_data_breakpoints():
         case("the other watch is unchanged", d.breakpoints() == before)
 
 
+# --- views and wire format --------------------------------------------------
+
+def session(init, kind_args):
+    """An emulator whose initialize carried `init`."""
+    e = Emu(kind=None, handshake=False)
+    e.d.req("initialize", dict({"adapterID": "conformance"}, **init))
+    e.d.req("attach" if "noDebug" not in kind_args else "launch", kind_args)
+    e.d.req("configurationDone")
+    return e
+
+
+def top_frame(d):
+    return d.req("stackTrace", {"threadId": 1})["body"]["stackFrames"][0]
+
+
+def test_stack_frames():
+    print("stack frames")
+    with Emu() as e:
+        d = e.d
+        plant(d)
+        f = top_frame(d)
+        case("no source: line and column are 0", f.get("line") == 0 and f.get("column") == 0, str(f))
+        case("no source: the field is absent", "source" not in f, str(f))
+        case("presentationHint is a string", isinstance(f.get("presentationHint"), str), str(f))
+        case("the disassembly is still reachable", bool(f.get("instructionPointerReference")), str(f))
+
+
+def test_line_base():
+    print("zero-based lines")
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        with session({"linesStartAt1": False, "columnsStartAt1": False}, {"dbgFile": dbg}) as e:
+            d = e.d
+            plant(d)
+            r = d.req("setBreakpoints", {"source": {"path": src}, "breakpoints": [{"line": 1}]})
+            b = r["body"]["breakpoints"][0]
+            case("line 1 is the second source line", b.get("verified") is True and b.get("line") == 1, str(b))
+            entry = d.breakpoints()["breakpoints"][0]
+            case("it armed at that line's address", entry.get("pc") == 0x0803, str(entry))
+            set_reg(d, "PC", "$0803")
+            f = top_frame(d)
+            case("frames use the same base", f.get("line") == 1 and f.get("column") == 0, str(f))
+            r = d.req("breakpointLocations", {"source": {"path": src}, "line": 0, "endLine": 1})
+            lines = sorted(b["line"] for b in r["body"]["breakpoints"])
+            case("breakpointLocations too", lines == [0, 1], str(lines))
+            r = d.req("gotoTargets", {"source": {"path": src}, "line": 1})
+            case("gotoTargets too", r["success"] and r["body"]["targets"][0]["line"] == 1, str(r))
+
+
+def test_uri_paths():
+    print("uri paths")
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        uri = Path(src).as_uri()
+        with session({"pathFormat": "uri"}, {"dbgFile": dbg}) as e:
+            d = e.d
+            plant(d)
+            r = d.req("setBreakpoints", {"source": {"path": uri}, "breakpoints": [{"line": 1}]})
+            b = r["body"]["breakpoints"][0]
+            case("a file: URI finds the file", b.get("verified") is True, str(b))
+            case("the reply echoes the client's spelling", b.get("source", {}).get("path") == uri, str(b))
+            f = top_frame(d)
+            case("frames carry a URI", f.get("source", {}).get("path", "").startswith("file://"), str(f))
+            r = d.req("source", {"source": {"path": uri}, "sourceReference": 0})
+            case("source reads through a URI", bool(r and r["success"]) and "first();" in r["body"]["content"], str(r)[:200])
+
+
+def test_no_debug():
+    print("noDebug")
+    with session({}, {"noDebug": True}) as e:
+        d = e.d
+        for cmd, args in (("setBreakpoints", {"source": {"path": "x.c"}, "breakpoints": [{"line": 1}]}),
+                          ("setFunctionBreakpoints", {"breakpoints": [{"name": "x"}]}),
+                          ("setInstructionBreakpoints", {"breakpoints": [{"instructionReference": "0x0800"}]}),
+                          ("setDataBreakpoints", {"breakpoints": [{"dataId": "4096"}]})):
+            r = d.req(cmd, args)
+            case(f"{cmd} is refused", refused(r), str(r and r.get("body")))
+        case("nothing armed", nothing_armed(d))
+        case("the machine runs", not d.status().get("paused"))
+
+
+def test_disassemble():
+    print("disassemble")
+    with Emu() as e:
+        d = e.d
+        plant(d)
+
+        def dis(**args):
+            r = d.req("disassemble", dict({"memoryReference": "0x0800", "instructionCount": 4}, **args))
+            return r["body"]["instructions"] if r and r["success"] else None
+
+        def addr(row):
+            return int(row["address"], 16)
+
+        got = dis()
+        case("exactly the count", got is not None and len(got) == 4, str(got and len(got)))
+        case("from the reference", bool(got) and addr(got[0]) == 0x0800, str(got and got[0]))
+        got = dis(instructionCount=500)
+        case("past the old 200 row cap", got is not None and len(got) == 500, str(got and len(got)))
+        got = dis(instructionOffset=2)
+        case("a positive instructionOffset", bool(got) and addr(got[0]) == 0x0802, str(got and got[0]))
+        got = dis(instructionOffset=-2)
+        case("a negative instructionOffset", bool(got) and addr(got[0]) == 0x07FE or
+             (bool(got) and addr(got[0]) < 0x0800), str(got and got[0]))
+        got = dis(memoryReference="0x0001", instructionOffset=-10, instructionCount=12)
+        case("padding before $0000 keeps the count", got is not None and len(got) == 12, str(got and len(got)))
+        case("the padding is marked invalid", bool(got) and got[0].get("presentationHint") == "invalid", str(got and got[0]))
+        got = dis(memoryReference="0xFFFE", instructionCount=20)
+        case("padding past $FFFF keeps the count", got is not None and len(got) == 20, str(got and len(got)))
+        case("the tail is marked invalid", bool(got) and got[-1].get("presentationHint") == "invalid", str(got and got[-1]))
+        for ref in ("banana", "vram:1000"):
+            r = d.req("disassemble", {"memoryReference": ref, "instructionCount": 1})
+            case(f"refused: {ref}", bool(r) and r["success"] is False, str(r))
+        r = d.req("disassemble", {"memoryReference": "0x0800", "instructionCount": 70000})
+        case("refused: more rows than it will send", bool(r) and r["success"] is False, str(r)[:200])
+
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            plant(e.d)
+            r = e.d.req("disassemble", {"memoryReference": "0x0800", "instructionCount": 1})
+            row = r["body"]["instructions"][0]
+            case("the source goes in location", "location" in row and "source" not in row, str(row))
+
+
+def test_read_memory():
+    print("readMemory")
+    with Emu() as e:
+        d = e.d
+        d.pause()
+
+        def read(ref, count):
+            r = d.req("readMemory", {"memoryReference": ref, "count": count}, timeout=20)
+            b = r["body"] if r and r["success"] else {}
+            return len(base64.b64decode(b.get("data", ""))), b.get("unreadableBytes", 0)
+
+        case("past the old 4096 cap", read("0x0000", 5000) == (5000, 0), str(read("0x0000", 5000)))
+        case("a reply over 64K arrives whole", read("vram:0", 0x20000) == (0x20000, 0))
+        case("the end of VRAM is unreadable, not short", read("vram:1FFFE", 8) == (2, 6), str(read("vram:1FFFE", 8)))
+        case("a zero count", read("0x0000", 0) == (0, 0), str(read("0x0000", 0)))
+
+
+def test_wire_format():
+    print("wire format")
+    with tempfile.TemporaryDirectory() as t:
+        path = os.path.join(t, "latin1.c")
+        with open(path, "wb") as f:
+            f.write(b"caf\xe9 \xed\xa0\x80 ok\n")
+        with Emu() as e:
+            d = e.d
+            # The client parses every frame as UTF-8 and would raise on a bad one.
+            r = d.req("source", {"source": {"path": path}, "sourceReference": 0})
+            case("invalid UTF-8 arrives as U+FFFD", bool(r and r["success"]) and "�" in r["body"]["content"], str(r)[:200])
+            case("the valid text survives", bool(r and r["success"]) and "ok" in r["body"]["content"])
+
+            a = d.req("readMemory", {"memoryReference": "banana", "count": 1})
+            b = d.req("nosuchcommand")
+            ida, idb = a["body"]["error"]["id"], b["body"]["error"]["id"]
+            case("different errors, different ids", ida != idb, f"{ida} {idb}")
+            again = d.req("nosuchcommand")
+            case("the same error, the same id", again["body"]["error"]["id"] == idb)
+            r = d.req("x16/joystick", {"index": 0, "buttons": ["{nope}"]})
+            err = r["body"]["error"]
+            case("a brace travels in a variable",
+                 err["format"] == "{text}" and "{nope}" in err.get("variables", {}).get("text", ""), str(err))
+
+            caps = d.req("initialize", {"adapterID": "x"})
+            case("no value formatting is claimed",
+                 "supportsValueFormattingOptions" not in ((caps or {}).get("body") or {}), str(caps)[:120])
+
+
+def test_step_granularity():
+    print("step granularity")
+    with tempfile.TemporaryDirectory() as t:
+        _, dbg = write_debug_info(t)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            d = e.d
+            plant(d)
+
+            def step(cmd, **args):
+                set_reg(d, "PC", "$0800")
+                start = len(d.msgs)
+                d.req(cmd, dict({"threadId": 1}, **args))
+                d.wait_event("stopped", start, 4)
+                return int(str(d.var("PC")).lstrip("$").split()[0], 16)
+
+            for cmd in ("next", "stepIn"):
+                pc = step(cmd)
+                case(f"{cmd} moves a source line", pc == 0x0803, hex(pc))
+                pc = step(cmd, granularity="instruction")
+                case(f"{cmd} by instruction moves one", pc == 0x0801, hex(pc))
+
+
 # --- main -------------------------------------------------------------------
 
 def main():
@@ -769,7 +962,9 @@ def main():
     for test in (test_evaluate_contexts, test_disconnect, test_terminate, test_dropped_socket,
                  test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
                  test_source_breakpoints, test_function_breakpoints, test_instruction_stop,
-                 test_data_breakpoints):
+                 test_data_breakpoints, test_stack_frames, test_line_base, test_uri_paths,
+                 test_no_debug, test_disassemble, test_read_memory, test_wire_format,
+                 test_step_granularity):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

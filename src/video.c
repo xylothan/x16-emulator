@@ -2997,7 +2997,7 @@ video_imgui_debug_key(SDL_Keysym ks)
 				if (shift) {
 					DEBUGStepOut(DEBUG_OWNER_UI);
 				} else {
-					DEBUGStepIntoAuto();
+					DEBUGStepIntoAuto(DEBUG_OWNER_UI);
 				}
 			}
 			break;
