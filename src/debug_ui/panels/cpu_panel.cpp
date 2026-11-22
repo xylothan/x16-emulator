@@ -905,6 +905,9 @@ void
 cpu_panel_render(bool *p_open)
 {
     if (ImGui::Begin("CPU", p_open)) {
+        // The machine does not run during this call, so a difference is an edit.
+        struct regs before;
+        memcpy(&before, &regs, sizeof before);
         dbgui_window_zoom("cpu");
         draw_registers();
         draw_vregs();
@@ -913,6 +916,8 @@ cpu_panel_render(bool *p_open)
         draw_stack();
         draw_watch();
         draw_emulation_confirm_popup();
+        if (memcmp(&before, &regs, sizeof before) != 0)
+            debug_server_note_registers_changed();
     }
     dbgui_window_end();
 }

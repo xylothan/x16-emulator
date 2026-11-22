@@ -6,6 +6,7 @@
 #include "debug_server.h"
 #include "screen_text.h"
 #include "debug_server_call.h"
+#include "dap_refresh.h"
 #include "mcp_server.h"
 #include "dbg_info.h"
 #include "dbg_expr.h"
@@ -331,6 +332,79 @@ static sprite_trace_owner_t caller_sprite_owner(void) {
 // hook sends it a continued event.
 static void note_request_resumes(void) {
     if (current_caller == DBG_CALLER_DAP) dap_stop_announced = false;
+}
+
+// ─── Refresh events: recorded anywhere, sent from the poll ───────────
+//
+// Sending can drop the client, and these can be noted from inside the CPU loop,
+// so noting only sets state. dap_send_refresh() sends it. The spec gives
+// `invalidated` and `memory` a client capability each; `loadedSource` has none.
+#define REFRESH_CPU_SPACE  0x1000000u
+#define REFRESH_VRAM_SPACE 0x20000u
+
+enum {
+    REFRESH_AREA_ALL       = 1,
+    REFRESH_AREA_STACKS    = 2,
+    REFRESH_AREA_VARIABLES = 4,
+};
+
+static bool             dap_wants_invalidated = false;
+static bool             dap_wants_memory      = false;
+static uint8_t          refresh_areas         = 0;
+static refresh_ranges_t refresh_cpu;
+static refresh_ranges_t refresh_vram;
+static refresh_sources_t refresh_sources;
+static unsigned         refresh_sources_at    = 0;     // dbg_info_changes() last compared
+static bool             refresh_sources_more  = false;
+
+static bool refresh_session_open(void) {
+    return server_enabled && client_sock != SOCKET_INVALID && dap_initialize_answered &&
+           dap_session_active;
+}
+
+static void refresh_note_areas(uint8_t areas) {
+    if (dap_wants_invalidated && refresh_session_open()) refresh_areas |= areas;
+}
+
+static void refresh_note_memory(bool vram, uint32_t addr, uint32_t count) {
+    if (!dap_wants_memory || !refresh_session_open() || !count) return;
+    if (vram) {
+        refresh_ranges_add(&refresh_vram, addr, count, REFRESH_VRAM_SPACE);
+        return;
+    }
+    refresh_ranges_add(&refresh_cpu, addr, count, REFRESH_CPU_SPACE);
+    // $0000 and $0001 select what the banked windows show.
+    if (addr == 0) refresh_ranges_add(&refresh_cpu, 0xA000, 0x2000, REFRESH_CPU_SPACE);
+    if (addr <= 1 && addr + count > 1) refresh_ranges_add(&refresh_cpu, 0xC000, 0x4000, REFRESH_CPU_SPACE);
+}
+
+// A memory write made by the request being handled. The spec names setVariable
+// and setExpression as what this event is for, so the client that sent them
+// hears about it. Zero page, the stack and the virtual registers are scopes, and
+// the client that sent the request already knows what it wrote to them.
+static void refresh_request_wrote(bool vram, uint32_t addr, uint32_t count) {
+    refresh_note_memory(vram, addr, count);
+    if (!vram && current_caller != DBG_CALLER_DAP) refresh_note_areas(REFRESH_AREA_VARIABLES);
+}
+
+void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count) {
+    refresh_note_memory(vram, addr, count);
+    if (!vram) refresh_note_areas(REFRESH_AREA_VARIABLES);
+}
+
+void debug_server_note_registers_changed(void) {
+    refresh_note_areas(REFRESH_AREA_STACKS | REFRESH_AREA_VARIABLES);
+}
+
+void debug_server_note_program_load(uint16_t addr, uint32_t size) {
+    if (!size) return;
+    // A load crossing the end of the banked window carries on in the next bank,
+    // at the start of the same window.
+    if (addr >= 0xA000 && addr < 0xC000 && addr + size > 0xC000) {
+        refresh_note_memory(false, 0xA000, 0x2000);
+        return;
+    }
+    refresh_note_memory(false, addr, addr + size > 0x10000 ? 0x10000u - addr : size);
 }
 
 // Forward declarations
@@ -871,6 +945,8 @@ static void send_dap_error_response(int request_seq, const char *command, const 
     send_dap_error_response_with(request_seq, command, message, NULL, NULL);
 }
 
+static void dap_refresh_begin(void);
+
 static void send_dap_event(const char *event_name, cJSON *body) {
     if (!dap_initialize_answered) {
         cJSON_Delete(body);
@@ -1036,6 +1112,8 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     dap_line_base = (lb && cJSON_IsFalse(lb)) ? 0 : 1;
     dap_col_base  = (cb && cJSON_IsFalse(cb)) ? 0 : 1;
     dap_paths_are_uris = pf && cJSON_IsString(pf) && !strcmp(pf->valuestring, "uri");
+    dap_wants_invalidated = args && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "supportsInvalidatedEvent"));
+    dap_wants_memory      = args && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "supportsMemoryEvent"));
 
     cJSON *caps = cJSON_CreateObject();
     cJSON_AddBoolToObject(caps, "supportsConfigurationDoneRequest", true);
@@ -1086,6 +1164,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     if (dap_reply_lost()) return 0;
     dap_initialize_answered = true;
     dap_session_active = true;
+    dap_refresh_begin();
 
     // Per the DAP spec this follows the initialize response immediately: a
     // client is entitled to wait for it before sending configurationDone, so
@@ -2317,6 +2396,7 @@ static int handle_dap_goto(int seq, cJSON *args) {
 
     send_dap_response(seq, "goto", true, NULL);
     debug_server_notify_stopped("goto");
+    refresh_note_areas(REFRESH_AREA_STACKS | REFRESH_AREA_VARIABLES);
     return 0;
 }
 
@@ -2820,6 +2900,8 @@ static int handle_dap_write_memory(int seq, cJSON *args) {
     }
 
     free(raw);
+    // A client knows what its own writeMemory wrote.
+    if (current_caller != DBG_CALLER_DAP) refresh_request_wrote(is_vram, addr, (uint32_t)out);
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddNumberToObject(body, "bytesWritten", out);
@@ -3493,6 +3575,7 @@ void debug_server_state_load(ss_reader *r) {
     cycles_seen     = clockticks6502;
     frame_end_ticks = clockticks6502;
     frame_end_seen  = true;
+    refresh_note_areas(REFRESH_AREA_ALL);
 }
 
 // Standard base64, NUL-terminated. The caller frees it.
@@ -5408,6 +5491,13 @@ static bool dap_set_register(const char *name, uint32_t v, uint32_t *stored, int
     else if (!strcmp(name, "RAM Bank")) { memory_set_ram_bank((uint8_t)v); *stored = memory_get_ram_bank(); }
     else if (!strcmp(name, "ROM Bank")) { memory_set_rom_bank((uint8_t)v); *stored = memory_get_rom_bank(); }
     else return false;
+    if (!strcmp(name, "RAM Bank")) refresh_note_memory(false, 0xA000, 0x2000);
+    if (!strcmp(name, "ROM Bank")) refresh_note_memory(false, 0xC000, 0x4000);
+    if (current_caller != DBG_CALLER_DAP) {
+        const bool moves_frame = !strcmp(name, "PC") || !strcmp(name, "SP") || !strcmp(name, "PBR");
+        refresh_note_areas(moves_frame ? (REFRESH_AREA_STACKS | REFRESH_AREA_VARIABLES)
+                                       : REFRESH_AREA_VARIABLES);
+    }
     return true;
 }
 
@@ -5416,6 +5506,8 @@ static uint32_t dap_set_vreg(int n, uint32_t v) {
     const uint16_t a = dbg_machine_dp_add((uint16_t)(0x02 + 2 * n));
     debug_write6502(a, 0, (uint8_t)(v & 0xFF));
     debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
+    refresh_request_wrote(false, a, 1);
+    refresh_request_wrote(false, (uint16_t)(a + 1), 1);
     return (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
            ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
 }
@@ -5444,6 +5536,7 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
     } else if (ref == VARREF_STACK) {
         const uint16_t a = (uint16_t)dap_parse_num(name); // name is "$XXXX"
         debug_write6502(a, 0, (uint8_t)v);
+        refresh_request_wrote(false, a, 1);
         stored = debug_read6502(a, 0, USE_CURRENT_X16_BANK);
     } else if (ref == VARREF_VREGS) {
         // name is "Rn" (n = 0..15) → 16-bit little-endian at direct-page + $02 + 2*n.
@@ -5488,6 +5581,7 @@ static bool dap_expr_bank_mapped(uint32_t addr, int bank, char *err, size_t errn
 
 static void dap_expr_poke(uint32_t addr, uint8_t value) {
     debug_write6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), value);
+    refresh_request_wrote(false, addr, 1);
 }
 
 static uint8_t dap_expr_peek(uint32_t addr) {
@@ -5531,6 +5625,7 @@ static bool dap_expr_store(const dbg_expr_target_t *t, uint32_t v, uint32_t *sto
         }
         case DBG_EXPR_TARGET_VBYTE:
             video_space_write(t->addr, (uint8_t)v);
+            refresh_request_wrote(true, t->addr, 1);
             *stored = video_space_read(t->addr);
             return true;
     }
@@ -6536,6 +6631,18 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
 }
 
 // ─── loadedSources (files from the loaded .dbg) ──────────────────────
+
+// `shown` is `path` in the form the receiver wants.
+static cJSON *dap_loaded_source(const char *path, const char *shown, bool label) {
+    const char *base = path;
+    for (const char *p = path; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
+    cJSON *src = cJSON_CreateObject();
+    cJSON_AddStringToObject(src, "name", base);
+    cJSON_AddStringToObject(src, "path", shown);
+    if (label) cJSON_AddStringToObject(src, "origin", "label file");
+    return src;
+}
+
 static int handle_dap_loaded_sources(int seq, cJSON *args) {
     (void)args;
     cJSON *body = cJSON_CreateObject();
@@ -6547,13 +6654,17 @@ static int handle_dap_loaded_sources(int seq, cJSON *args) {
     for (int i = 0; i < n; i++) {
         const char *nm = NULL;
         if ((all ? dbg_info_all_file_at(i, &nm) : dbg_info_file_at(i, &nm)) && nm) {
-            const char *base = nm;
-            for (const char *p = nm; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
             char uri[1024];
-            cJSON *src = cJSON_CreateObject();
-            cJSON_AddStringToObject(src, "name", base);
-            cJSON_AddStringToObject(src, "path", caller_path_out(nm, uri, sizeof uri));
-            cJSON_AddItemToArray(arr, src);
+            cJSON_AddItemToArray(arr, dap_loaded_source(nm, caller_path_out(nm, uri, sizeof uri), false));
+        }
+    }
+    // The editor's list holds what loadedSource events announce.
+    if (current_caller == DBG_CALLER_DAP) {
+        for (int i = 0; i < dbg_info_label_file_count(); i++) {
+            const char *p = NULL;
+            char uri[1024];
+            if (dbg_info_label_file_at(i, &p, NULL, NULL) && p)
+                cJSON_AddItemToArray(arr, dap_loaded_source(p, dap_path_out(p, uri, sizeof uri), true));
         }
     }
     cJSON_AddItemToObject(body, "sources", arr);
@@ -9130,6 +9241,7 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
     }
     free(buf);
     const bool debug_info = dbg_load_poll();
+    debug_server_note_program_load((uint16_t)start, len);
 
     cJSON *body = cJSON_CreateObject();
     dap_add_range_fields(body, start, false, len);
@@ -9425,12 +9537,23 @@ static int dap_refuse_breakpoints(int seq, const char *command, cJSON *args) {
     return 0;
 }
 
+static void dap_refresh_end(void) {
+    dap_wants_invalidated = false;
+    dap_wants_memory = false;
+    refresh_areas = 0;
+    refresh_ranges_clear(&refresh_cpu);
+    refresh_ranges_clear(&refresh_vram);
+    refresh_sources_free(&refresh_sources);
+    refresh_sources_more = false;
+}
+
 static void dap_release_session_state(void) {
     dap_release_breakpoints();
     dap_line_base = 1;
     dap_col_base  = 1;
     dap_paths_are_uris = false;
     dap_no_debug = false;
+    dap_refresh_end();
 
     // A step-over or step-out THIS session started has a breakpoint of its own,
     // and nothing else can retract it. One the local debugger started belongs to
@@ -9735,6 +9858,125 @@ static void dap_send_logs(void) {
     log_frame_push();
 }
 
+// Everything the client could list right now. NULL with 0 for an empty set, -1
+// if there is no memory to build it.
+static int refresh_list_sources(refresh_source_t **out) {
+    const int files = dbg_info_all_file_count(), labels = dbg_info_label_file_count();
+    *out = NULL;
+    if (files + labels == 0) return 0;
+    refresh_source_t *v = (refresh_source_t *)malloc((size_t)(files + labels) * sizeof *v);
+    if (!v) return -1;
+    int n = 0;
+    for (int i = 0; i < files; i++) {
+        const char *name;
+        unsigned revision;
+        bool hidden;
+        if (dbg_info_source_at(i, &name, &revision, &hidden) && !hidden) {
+            v[n].path = name;
+            v[n].revision = revision;
+            v[n].label = false;
+            n++;
+        }
+    }
+    for (int i = 0; i < labels; i++) {
+        const char *p = NULL;
+        if (dbg_info_label_file_at(i, &p, NULL, NULL) && p) {
+            v[n].path = p;
+            v[n].revision = dbg_info_label_file_revision(i);
+            v[n].label = true;
+            n++;
+        }
+    }
+    *out = v;
+    return n;
+}
+
+// What is loaded now is what the client is about to list, so it is not news.
+static void dap_refresh_begin(void) {
+    refresh_areas = 0;
+    refresh_ranges_clear(&refresh_cpu);
+    refresh_ranges_clear(&refresh_vram);
+    refresh_sources_more = false;
+    refresh_sources_at = dbg_info_changes();
+    refresh_source_t *cur;
+    const int n = refresh_list_sources(&cur);
+    refresh_sources_baseline(&refresh_sources, cur, n > 0 ? n : 0);
+    free(cur);
+}
+
+#define DAP_REFRESH_INTERVAL_MS 16
+#define DAP_REFRESH_SOURCES     64
+
+static void dap_send_loaded_source_events(void) {
+    refresh_source_t *cur;
+    const unsigned at = dbg_info_changes();
+    const int n = refresh_list_sources(&cur);
+    if (n < 0) return;   // compared again at the next poll
+    refresh_sources_at = at;
+    refresh_source_change_t changes[DAP_REFRESH_SOURCES];
+    const int count = refresh_sources_diff(&refresh_sources, cur, n, changes, DAP_REFRESH_SOURCES,
+                                           &refresh_sources_more);
+    free(cur);
+    for (int i = 0; i < count && refresh_session_open(); i++) {
+        static const char *const reasons[] = { "new", "changed", "removed" };
+        char uri[1024];
+        cJSON *body = cJSON_CreateObject();
+        cJSON_AddStringToObject(body, "reason", reasons[changes[i].reason]);
+        cJSON_AddItemToObject(body, "source",
+                              dap_loaded_source(changes[i].path,
+                                                dap_path_out(changes[i].path, uri, sizeof uri),
+                                                changes[i].label));
+        send_dap_event("loadedSource", body);
+    }
+    refresh_source_changes_free(changes, count);
+}
+
+static void dap_send_memory_events(bool vram) {
+    refresh_ranges_t *set = vram ? &refresh_vram : &refresh_cpu;
+    refresh_range_t r;
+    // A send that drops the client empties the set.
+    while (refresh_ranges_take(set, &r)) {
+        char ref[16];
+        if (vram)                         snprintf(ref, sizeof ref, "vram:%05X", (unsigned)r.start);
+        else if (is_gen2 || r.start > 0xFFFF) snprintf(ref, sizeof ref, "0x%06X", (unsigned)r.start);
+        else                              snprintf(ref, sizeof ref, "0x%04X", (unsigned)r.start);
+        cJSON *body = cJSON_CreateObject();
+        cJSON_AddStringToObject(body, "memoryReference", ref);
+        cJSON_AddNumberToObject(body, "offset", 0);
+        cJSON_AddNumberToObject(body, "count", (double)r.count);
+        send_dap_event("memory", body);
+    }
+}
+
+// Sources first and invalidated last, so a client that refetches on invalidated
+// reads with the rest already in hand.
+static void dap_send_refresh(void) {
+    static Uint32 last = 0;
+    if (!refresh_session_open()) return;
+    const bool sources = refresh_sources_more || dbg_info_changes() != refresh_sources_at;
+    if (!sources && !refresh_areas && !refresh_cpu.n && !refresh_vram.n) return;
+    const Uint32 now = SDL_GetTicks();
+    if (now - last < DAP_REFRESH_INTERVAL_MS) return;
+    last = now;
+
+    if (sources) dap_send_loaded_source_events();
+    dap_send_memory_events(false);
+    dap_send_memory_events(true);
+    if (refresh_areas && refresh_session_open()) {
+        const uint8_t areas = refresh_areas;
+        refresh_areas = 0;
+        cJSON *body = cJSON_CreateObject();
+        cJSON *list = cJSON_AddArrayToObject(body, "areas");
+        if (areas & REFRESH_AREA_ALL) {
+            cJSON_AddItemToArray(list, cJSON_CreateString("all"));
+        } else {
+            if (areas & REFRESH_AREA_STACKS) cJSON_AddItemToArray(list, cJSON_CreateString("stacks"));
+            if (areas & REFRESH_AREA_VARIABLES) cJSON_AddItemToArray(list, cJSON_CreateString("variables"));
+        }
+        send_dap_event("invalidated", body);
+    }
+}
+
 int debug_server_poll(void) {
     if (!server_enabled && !mcp_server_is_enabled()) return 0;
 
@@ -9822,6 +10064,8 @@ int debug_server_poll(void) {
         step_poll();
     }
 
+    // After the requests, so an event follows the response to what caused it.
+    dap_send_refresh();
     return mode_changed;
 }
 

@@ -36,19 +36,25 @@
 extern "C" void
 debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x16Bank)
 {
+    // A bank that is not mapped is not at this address for anyone reading it.
+    bool mapped = true;
     if (x16Bank >= 0 && address >= 0xA000 && address < 0xC000) { // banked RAM
         uint8_t saved = memory_get_ram_bank();
+        mapped = saved == (uint8_t)x16Bank;
         memory_set_ram_bank((uint8_t)x16Bank);
         debug_write6502(address, bank, value);
         memory_set_ram_bank(saved);
     } else if (x16Bank >= 0 && address >= 0xC000) { // banked ROM / cartridge
         uint8_t saved = memory_get_rom_bank();
+        mapped = saved == (uint8_t)x16Bank;
         memory_set_rom_bank((uint8_t)x16Bank);
         debug_write6502(address, bank, value);
         memory_set_rom_bank(saved);
     } else {
         debug_write6502(address, bank, value);
     }
+    if (mapped)
+        debug_server_note_memory_changed(false, ((uint32_t)bank << 16) | address, 1);
 }
 
 namespace {
@@ -262,6 +268,7 @@ void
 vram_write_fn(ImU8 *, size_t off, ImU8 d, void *)
 {
     video_space_write((uint32_t)off, d);
+    debug_server_note_memory_changed(true, (uint32_t)off, 1);
 }
 
 

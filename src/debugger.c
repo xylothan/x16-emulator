@@ -1409,6 +1409,12 @@ static void DEBUGExecCmd() {
 			size = 1;
 			incr = 1;
 			if (sscanf(line, "%x %x %d %d", &addr, &number, &size, &incr) >= 2) {
+				// A negative stride runs backwards through the space, so
+				// only the whole of it is sure to cover what was filled.
+				const uint64_t span = size > 1 ? (uint64_t)(size - 1) * (uint64_t)(incr > 0 ? incr : 1) + 1 : 1;
+				const uint32_t filled = incr < 0 || span > 0x1000000u ? 0x1000000u : (uint32_t)span;
+				debug_server_note_memory_changed(dumpmode != DDUMP_RAM,
+				                                 addr & (dumpmode == DDUMP_RAM ? 0xFFFFFF : 0x1FFFF), filled);
 				if (dumpmode == DDUMP_RAM) {
 					addr &= 0xFFFFFF;
 					do {
@@ -1540,6 +1546,7 @@ static void DEBUGExecCmd() {
 					regs.sp= number & 0xFFFF;
 				}
 			}
+			debug_server_note_registers_changed();
 			break;
 
 		default:

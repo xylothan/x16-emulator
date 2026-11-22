@@ -201,6 +201,15 @@ enum { BP_CMP_EQ = BPCMP_EQ, BP_CMP_NE = BPCMP_NE, BP_CMP_LT = BPCMP_LT,
 // may relocate it into the core.
 void debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x16Bank);
 
+// Tell an attached DAP client what an edit here changed. Only records it.
+#ifdef HAS_DAP
+void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count);
+void debug_server_note_registers_changed(void);
+#else
+static inline void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count) { (void)vram; (void)addr; (void)count; }
+static inline void debug_server_note_registers_changed(void) { }
+#endif
+
 // ─── Memory write watchpoints ──────────────────────────────────────────────
 // struct watchpoint, MAX_WATCHPOINTS and the debug_wp_* API come from
 // debug_core.h. This header used to carry its own copy of the struct, and that

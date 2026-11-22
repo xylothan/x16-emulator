@@ -453,7 +453,7 @@ if(WIN32)
 endif()
 
 if(USE_DAP)
-    list(APPEND X16_SOURCES src/debug_server.c src/mcp_server.c src/mcp_http.c src/screen_text.c)
+    list(APPEND X16_SOURCES src/debug_server.c src/dap_refresh.c src/mcp_server.c src/mcp_http.c src/screen_text.c)
 endif()
 
 # --- Main Executable Target ---
@@ -790,6 +790,10 @@ x16_add_test(vera_pcm
 # test links it alone, with no CPU, no memory and no SDL.
 x16_add_test(io_trace
     SOURCES tests/test_io_trace.c tests/support/harness.c src/io_trace.c)
+
+# What an attached editor has yet to be told; no socket or core dependency.
+x16_add_test(dap_refresh
+    SOURCES tests/test_dap_refresh.c tests/support/harness.c src/dap_refresh.c)
 
 # vera_decode.c reads VRAM through a callback, so the test links it alone.
 x16_add_test(vera_decode

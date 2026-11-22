@@ -4768,6 +4768,129 @@ def check_readonly_surface(m):
     case("nothing was armed", not data(m.call("list_breakpoints")).get("breakpoints"))
 
 
+def test_refresh_events():
+    print("refresh events reach the editor")
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "prog.s").replace("\\", "/")
+        with open(source, "w") as f:
+            f.write("  nop\n")
+        body = bytes(0x40 + i for i in range(16))
+        path = os.path.join(tmp, "prog.prg")
+        with open(path, "wb") as f:
+            f.write(struct.pack("<H", 0x0A00) + body)
+        with open(os.path.join(tmp, "prog.dbg"), "w") as f:
+            f.write(K_PRG_DBG.replace('name="prog.s"', f'name="{source}"'))
+        labels = os.path.join(tmp, "extra.lbl").replace("\\", "/")
+        with open(labels, "w") as f:
+            f.write("al 000A00 .thing\n")
+
+        def uri(p):
+            return "file:///" + p.lstrip("/")
+
+        def settle(dap):
+            time.sleep(0.15)
+            dap.request("x16/status")
+            dap.events.clear()
+
+        def read_back(dap, ev):
+            b = ev["body"]
+            r = dap.request("readMemory", {"memoryReference": b["memoryReference"], "offset": b["offset"],
+                                           "count": b["count"]})
+            return base64.b64decode(r["body"]["data"])
+
+        with Mcp(["-debugport", str(free_port()), "-fsroot", tmp]) as m:
+            port = int(m.p.args[m.p.args.index("-debugport") + 1])
+            m.init()
+            time.sleep(0.5)
+
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "pathFormat": "uri",
+                                       "supportsInvalidatedEvent": True, "supportsMemoryEvent": True})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            plant_loop(m)
+            settle(dap)
+
+            m.call("write_memory", address=0x0900, hex="AABBCC")
+            e = dap.event("memory", timeout=3)
+            b = (e or {}).get("body", {})
+            case("an MCP write reaches the editor",
+                 b.get("memoryReference") == "0x0900" and b.get("offset") == 0 and b.get("count") == 3, str(e))
+            case("and its range reads back", bool(e) and read_back(dap, e) == b"\xAA\xBB\xCC")
+            e = dap.event("invalidated", timeout=3)
+            case("its scopes are refreshed", "variables" in (e or {}).get("body", {}).get("areas", []), str(e))
+            settle(dap)
+
+            m.call("write_memory", address="1B000", hex="1234", space="vram")
+            e = dap.event("memory", timeout=3)
+            case("VRAM carries the vram: reference",
+                 (e or {}).get("body", {}).get("memoryReference") == "vram:1B000" and read_back(dap, e) == b"\x12\x34",
+                 str(e))
+            settle(dap)
+
+            m.call("set_registers", a=0x12, x=0x34)
+            e = dap.event("invalidated", timeout=3)
+            case("an MCP register write invalidates variables",
+                 "variables" in (e or {}).get("body", {}).get("areas", []), str(e))
+            settle(dap)
+            m.call("set_registers", pc=LOOP)
+            e = dap.event("invalidated", timeout=3)
+            case("moving the PC invalidates the stack too",
+                 sorted((e or {}).get("body", {}).get("areas", [])) == ["stacks", "variables"], str(e))
+            settle(dap)
+
+            m.call("load_symbols", path=labels)
+            e = dap.event("loadedSource", timeout=3)
+            b = (e or {}).get("body", {})
+            case("load_symbols announces a new source in the editor's format",
+                 b.get("reason") == "new" and
+                 b.get("source", {}).get("path") == uri(os.path.realpath(labels).replace("\\", "/")), str(e))
+            settle(dap)
+            m.call("load_symbols", path=labels)
+            e = dap.event("loadedSource", timeout=3)
+            case("reloading it is changed", (e or {}).get("body", {}).get("reason") == "changed", str(e))
+            settle(dap)
+
+            d = data(m.call("load_prg", path=path))
+            e = dap.event("memory", timeout=3)
+            b = (e or {}).get("body", {})
+            case("load_prg reports the range",
+                 d.get("debugInfo") is True and b.get("memoryReference") == "0x0A00" and b.get("count") == 16, str(e))
+            case("which holds the program", bool(e) and read_back(dap, e) == body)
+            e = dap.event("loadedSource", timeout=3)
+            b = (e or {}).get("body", {})
+            case("and announces its source",
+                 b.get("reason") == "new" and b.get("source", {}).get("path") == uri(source), str(e))
+            sources = data(m.call("list_sources"))
+            names = json.dumps(sources)
+            case("MCP's source list is not given label files", "extra.lbl" not in names, names[:200])
+            settle(dap)
+
+            m.call("run_frames", frames=1)
+            m.call("save_state", slot="r")
+            settle(dap)
+            m.call("load_state", slot="r")
+            e = dap.event("invalidated", timeout=3)
+            case("an MCP state load invalidates everything", (e or {}).get("body", {}).get("areas") == ["all"], str(e))
+            dap.close()
+            time.sleep(0.3)
+
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test"})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            settle(dap)
+            m.call("write_memory", address=0x0900, hex="01")
+            m.call("set_registers", a=1)
+            m.call("load_symbols", path=labels)
+            e = dap.event("loadedSource", timeout=3)
+            case("loadedSource needs no capability", (e or {}).get("body", {}).get("reason") == "changed", str(e))
+            dap.request("x16/status")
+            got = [x.get("event") for x in dap.events if x.get("event") in ("memory", "invalidated")]
+            case("an editor that did not opt in gets neither of the others", not got, str(got))
+            dap.close()
+
+
 def test_readonly():
     print("-mcp-readonly")
     port = free_port()
@@ -4825,7 +4948,7 @@ def main():
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
                  test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,
-                 test_readonly):
+                 test_refresh_events, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

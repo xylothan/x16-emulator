@@ -1353,6 +1353,269 @@ def top_frame(d):
     return d.req("stackTrace", {"threadId": 1})["body"]["stackFrames"][0]
 
 
+OPT_IN = {"supportsInvalidatedEvent": True, "supportsMemoryEvent": True}
+
+
+def events_of(d, start, *names):
+    return [m for m in d.msgs[start:] if m.get("type") == "event" and m.get("event") in names]
+
+
+def write_program(folder, at, body):
+    path = os.path.join(folder, "fixture.prg")
+    with open(path, "wb") as f:
+        f.write(bytes((at & 0xFF, at >> 8)) + bytes(body))
+    return path
+
+
+def event_bytes(d, ev):
+    b = ev["body"]
+    r = d.req("readMemory", {"memoryReference": b["memoryReference"], "offset": b["offset"], "count": b["count"]})
+    return base64.b64decode(r["body"]["data"])
+
+
+def test_refresh_not_opted_in():
+    print("refresh events: no capability")
+    with tempfile.TemporaryDirectory() as t:
+        src, _ = write_debug_info(t)
+        prg = write_program(t, 0x0A00, [0xEA] * 16)
+        with session({}, {}) as e:
+            d = e.d
+            plant(d)
+            d.req("x16/step", {"frames": 1})
+            d.req("x16/saveState", {"slot": "r"})
+            d.drain(0.2)
+            start = len(d.msgs)
+            d.req("setVariable", {"variablesReference": 3, "name": "$01F0", "value": "$5A"})
+            d.req("setExpression", {"expression": "byte[$0400]", "value": "$12"})
+            d.req("setExpression", {"expression": "vbyte[$1000]", "value": "$34"})
+            d.req("goto", {"threadId": 1, "targetId": 0x0800})
+            d.req("x16/loadState", {"slot": "r"})
+            r = d.req("x16/loadPrg", {"path": prg})
+            d.drain(0.3)
+            case("the triggers ran", bool(r and r["success"]), str(r)[:120])
+            got = events_of(d, start, "memory", "invalidated")
+            case("no memory or invalidated event", not got, str(got)[:200])
+            names = [m["body"]["source"]["path"] for m in events_of(d, start, "loadedSource")]
+            case("loadedSource has no capability to wait for", src in names, str(names))
+
+
+def test_refresh_memory():
+    print("refresh events: memory")
+    with tempfile.TemporaryDirectory() as t:
+        write_debug_info(t)
+        body = bytes(0x40 + i for i in range(16))
+        prg = write_program(t, 0x0A00, body)
+        with session(OPT_IN, {}) as e:
+            d = e.d
+            plant(d, pc="$0810")
+            d.drain(0.2)
+
+            start = len(d.msgs)
+            put_mem(d, 0x0900, [1, 2, 3])
+            d.drain(0.2)
+            case("a client's own writeMemory is not echoed", not events_of(d, start, "memory"))
+
+            start = len(d.msgs)
+            d.req("continue", {"threadId": 1})
+            d.drain(0.5)
+            d.pause()
+            d.drain(0.2)
+            case("the loop stored to memory", get_byte(d, 0x1000) != 0)
+            got = events_of(d, start, "memory")
+            case("CPU stores send nothing", not got, str(got)[:200])
+
+            start = len(d.msgs)
+            d.req("setVariable", {"variablesReference": 3, "name": "$01F0", "value": "$5A"})
+            ev = d.wait_event("memory", start, 2)
+            case("setVariable on the stack reports the byte",
+                 bool(ev) and ev["body"]["memoryReference"] == "0x01F0" and ev["body"]["offset"] == 0 and
+                 ev["body"]["count"] == 1, str(ev))
+            case("the reference reads it back", bool(ev) and event_bytes(d, ev) == b"\x5A")
+
+            start = len(d.msgs)
+            d.req("setVariable", {"variablesReference": 4, "name": "R3", "value": "$1234"})
+            ev = d.wait_event("memory", start, 2)
+            case("a virtual register reports both bytes",
+                 bool(ev) and ev["body"]["memoryReference"] == "0x0008" and ev["body"]["count"] == 2, str(ev))
+            case("in order", bool(ev) and event_bytes(d, ev) == b"\x34\x12")
+
+            start = len(d.msgs)
+            d.req("setExpression", {"expression": "word[$0420]", "value": "$BEEF"})
+            ev = d.wait_event("memory", start, 2)
+            case("setExpression on a word", bool(ev) and ev["body"]["count"] == 2 and event_bytes(d, ev) == b"\xEF\xBE",
+                 str(ev))
+
+            start = len(d.msgs)
+            d.req("setExpression", {"expression": "vbyte[$1B000]", "value": "$77"})
+            ev = d.wait_event("memory", start, 2)
+            case("VRAM uses the vram: reference", bool(ev) and ev["body"]["memoryReference"] == "vram:1B000", str(ev))
+            case("and reads back from VRAM", bool(ev) and event_bytes(d, ev) == b"\x77")
+
+            start = len(d.msgs)
+            set_reg(d, "RAM Bank", "$02")
+            ev = d.wait_event("memory", start, 2)
+            case("a RAM bank change reports the window",
+                 bool(ev) and ev["body"]["memoryReference"] == "0xA000" and ev["body"]["count"] == 0x2000, str(ev))
+            set_reg(d, "RAM Bank", "$00")
+            d.drain(0.1)
+
+            start = len(d.msgs)
+            r = d.req("x16/loadPrg", {"path": prg})
+            d.drain(0.25)
+            got = events_of(d, start, "memory")
+            case("a program load reports its range once",
+                 bool(r and r["success"]) and len(got) == 1 and got[0]["body"]["memoryReference"] == "0x0A00" and
+                 got[0]["body"]["count"] == len(body), str(got))
+            case("the range holds the program", len(got) == 1 and event_bytes(d, got[0]) == body)
+
+            d.drain(0.1)
+            start = len(d.msgs)
+            last = None
+            for i in range(200):
+                last = d.send("setVariable", {"variablesReference": 3,
+                                              "name": "$%04X" % (0x0180 + (i % 0x60)), "value": "$11"})
+            d.response_to(last, 15)
+            d.drain(0.25)
+            got = events_of(d, start, "memory")
+            covered = sum(m["body"]["count"] for m in got)
+            case("many writes coalesce", 1 <= len(got) <= 20 and covered >= 0x60, f"{len(got)} events, {covered} bytes")
+
+            d.close()
+            time.sleep(0.2)
+            e.d = d = Dap(e.port)
+            d.req("initialize", {"adapterID": "conformance"})
+            d.req("attach", {})
+            d.req("configurationDone")
+            d.pause()
+            d.drain(0.2)
+            start = len(d.msgs)
+            d.req("setVariable", {"variablesReference": 3, "name": "$01F0", "value": "$22"})
+            d.drain(0.2)
+            case("the capability ends with its session", not events_of(d, start, "memory"))
+
+
+def test_refresh_invalidated():
+    print("refresh events: invalidated")
+    with session(OPT_IN, {}) as e:
+        d = e.d
+        plant(d)
+        d.req("x16/step", {"frames": 1})
+        d.req("x16/saveState", {"slot": "r"})
+        d.drain(0.2)
+
+        start = len(d.msgs)
+        set_reg(d, "A", "$12")
+        d.drain(0.2)
+        case("a client's own register write is not echoed", not events_of(d, start, "invalidated"))
+
+        start = len(d.msgs)
+        d.req("goto", {"threadId": 1, "targetId": 0x0803})
+        ev = d.wait_event("invalidated", start, 2)
+        case("goto invalidates the stack and variables",
+             bool(ev) and sorted(ev["body"]["areas"]) == ["stacks", "variables"], str(ev))
+        seen = [m.get("event") or m.get("command") for m in d.msgs[start:]]
+        case("after its response and stop",
+             "invalidated" in seen and seen.index("goto") < seen.index("stopped") < seen.index("invalidated"),
+             str(seen))
+
+        start = len(d.msgs)
+        r = d.req("x16/loadState", {"slot": "r"})
+        ev = d.wait_event("invalidated", start, 2)
+        case("a state load invalidates everything",
+             bool(r and r["success"]) and bool(ev) and ev["body"]["areas"] == ["all"], str(ev))
+        d.drain(0.2)
+        case("once", len(events_of(d, start, "invalidated")) == 1)
+
+
+def test_refresh_loaded_source():
+    print("refresh events: loadedSource")
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        prg = write_program(t, 0x0A00, [0xEA] * 16)
+        labels = os.path.join(t, "extra.lbl").replace("\\", "/")
+        with open(labels, "w") as f:
+            f.write("al 000A00 .thing\n")
+        with session({}, {}) as e:
+            d = e.d
+            d.pause()
+            d.drain(0.2)
+            case("a new session is not told what is already there", not events_of(d, 0, "loadedSource"))
+
+            start = len(d.msgs)
+            d.req("x16/loadPrg", {"path": prg})
+            ev = d.wait_event("loadedSource", start, 2)
+            case("a .dbg brings its source as new",
+                 bool(ev) and ev["body"]["reason"] == "new" and ev["body"]["source"]["path"] == src and
+                 ev["body"]["source"]["name"] == "fixture.c", str(ev))
+            d.drain(0.2)
+            start = len(d.msgs)
+            d.req("x16/loadPrg", {"path": prg})
+            d.drain(0.25)
+            case("loading the same program again says nothing", not events_of(d, start, "loadedSource"))
+
+            start = len(d.msgs)
+            r = d.req("x16/loadSymbols", {"path": labels})
+            ev = d.wait_event("loadedSource", start, 2)
+            case("a label file is new",
+                 bool(r and r["success"]) and bool(ev) and ev["body"]["reason"] == "new" and
+                 ev["body"]["source"]["path"] == labels and ev["body"]["source"].get("origin") == "label file",
+                 str(ev))
+            listed = [s["path"] for s in d.req("loadedSources")["body"]["sources"]]
+            case("and is in loadedSources", labels in listed and src in listed, str(listed))
+
+            d.drain(0.2)
+            start = len(d.msgs)
+            with open(labels, "w") as f:
+                f.write("al 000A01 .thing\n")
+            d.req("x16/loadSymbols", {"path": labels})
+            ev = d.wait_event("loadedSource", start, 2)
+            case("reading it again is changed",
+                 bool(ev) and ev["body"]["reason"] == "changed" and ev["body"]["source"]["path"] == labels, str(ev))
+
+            d.close()
+            time.sleep(0.2)
+            e.d = d = Dap(e.port)
+            d.req("initialize", {"adapterID": "conformance"})
+            d.req("attach", {})
+            d.req("configurationDone")
+            d.drain(0.3)
+            case("the next session starts from what is loaded", not events_of(d, 0, "loadedSource"))
+
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        with session({"pathFormat": "uri"}, {"dbgFile": dbg}) as e:
+            ev = e.d.wait_event("loadedSource", 0, 2)
+            case("the path uses the client's format",
+                 bool(ev) and ev["body"]["source"]["path"] == Path(src).as_uri(), str(ev))
+
+
+def test_refresh_kernal_load():
+    print("refresh events: KERNAL LOAD")
+    with session(OPT_IN, {}) as e:
+        d = e.d
+        wait_booted(d)
+        time.sleep(1)
+        src, dbg = write_debug_info(e.dir.name)
+        body = bytes(0x40 + i for i in range(16))
+        prg = write_program(e.dir.name, 0x0A00, body)
+        for have, name in ((prg, "FIXTURE.PRG"), (dbg, "FIXTURE.dbg")):
+            other = os.path.join(e.dir.name, name)
+            if not os.path.exists(other):
+                with open(have, "rb") as f, open(other, "wb") as g:
+                    g.write(f.read())
+        d.drain(0.2)
+        start = len(d.msgs)
+        r = d.req("x16/type", {"text": 'LOAD"FIXTURE.PRG",8,1\r'})
+        ev = d.wait_event("loadedSource", start, 10)
+        case("the load was typed", bool(r and r["success"]), str(r)[:120])
+        case("its .dbg source is announced",
+             bool(ev) and ev["body"]["reason"] == "new" and ev["body"]["source"]["name"] == "fixture.c", str(ev))
+        ev = d.wait_event("memory", start, 3)
+        case("its range is reported",
+             bool(ev) and ev["body"]["memoryReference"] == "0x0A00" and ev["body"]["count"] == len(body), str(ev))
+        case("and holds the program", bool(ev) and event_bytes(d, ev) == body)
+
+
 def test_stack_frames():
     print("stack frames")
     with Emu() as e:
@@ -1554,7 +1817,8 @@ def main():
                  test_exception_stops, test_saved_interrupt_setting,
                  test_data_breakpoints, test_data_breakpoint_bytes, test_stack_frames, test_line_base, test_uri_paths,
                  test_no_debug, test_disassemble, test_read_memory, test_wire_format,
-                 test_step_granularity):
+                 test_step_granularity, test_refresh_not_opted_in, test_refresh_memory, test_refresh_invalidated,
+                 test_refresh_loaded_source, test_refresh_kernal_load):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
