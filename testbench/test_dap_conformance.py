@@ -763,6 +763,99 @@ def test_source_breakpoints():
             case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [bp_id], str(ev))
 
 
+def output_lines(d, start):
+    return [m["body"]["output"] for m in d.msgs[start:]
+            if m.get("type") == "event" and m.get("event") == "output"]
+
+
+def wait_output(d, start, want, secs=3):
+    end = time.time() + secs
+    while time.time() < end:
+        lines = output_lines(d, start)
+        if any(want in l for l in lines):
+            return lines
+        d.pump(0.05)
+    return output_lines(d, start)
+
+
+def test_logpoints():
+    print("logpoints")
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            d = e.d
+            init = next(m for m in d.msgs if m.get("command") == "initialize")
+            case("logpoints are advertised", init["body"].get("supportsLogPoints") is True)
+            plant(d, a="$2A")
+            source = {"path": src}
+
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": [{"line": 1, "logMessage": "{"}]})
+            case("a malformed message is refused", refused(r), str(r and r.get("body")))
+            case("and nothing is armed", nothing_armed(d))
+
+            start = len(d.msgs)
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": [
+                {"line": 1, "logMessage": "A={A} {{ok}} {nosuchsymbol}"}]})
+            case("a logpoint is verified", r["body"]["breakpoints"][0].get("verified") is True, str(r))
+            listing = d.breakpoints()["breakpoints"]
+            case("the listing shows its message",
+                 listing and listing[0].get("logs", [{}])[0].get("message") == "A={A} {{ok}} {nosuchsymbol}",
+                 str(listing))
+            ev = go(d, 0.5)
+            case("it does not stop the machine", ev is None, str(ev))
+            lines = wait_output(d, start, "A=$2A")
+            hit = [l for l in lines if "A=$2A" in l]
+            case("it prints through output events", bool(hit), str(lines[:3]))
+            case("with escapes resolved", bool(hit) and "{ok}" in hit[0], str(hit[:1]))
+            case("a bad expression shows in the line",
+                 bool(hit) and "{nosuchsymbol:" in hit[0], str(hit[:1]))
+            case("each line ends in a newline", bool(hit) and hit[0].endswith("\n"), str(hit[:1]))
+            d.pause()
+
+            # A plain breakpoint in the same request stops; the logpoint beside it does not.
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": [
+                {"line": 1, "logMessage": "log"}, {"line": 2}]})
+            set_reg(d, "PC", "$0800")
+            ev = go(d)
+            plain = r["body"]["breakpoints"][1]["id"]
+            case("the plain breakpoint beside it stops", bool(ev) and ev["body"].get("hitBreakpointIds") == [plain], str(ev))
+
+            # Another owner's plain breakpoint at the logpoint's address stops it.
+            d.req("setBreakpoints", {"source": source, "breakpoints": [{"line": 1, "logMessage": "log"}]})
+            d.req("setInstructionBreakpoints", {"breakpoints": [{"instructionReference": "0x0800"}]})
+            set_reg(d, "PC", "$0806")
+            ev = go(d)
+            case("another owner's plain breakpoint still stops",
+                 bool(ev) and ev["body"].get("reason") in ("breakpoint", "instruction breakpoint"), str(ev))
+            case("a stop names only what asked to stop",
+                 bool(ev) and all(i != r["body"]["breakpoints"][0]["id"]
+                                  for i in ev["body"].get("hitBreakpointIds", [])), str(ev))
+            d.req("setInstructionBreakpoints", {"breakpoints": []})
+
+            # A logMessage dropped by the next request is a plain breakpoint again.
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": [{"line": 1}]})
+            set_reg(d, "PC", "$0806")
+            ev = go(d)
+            case("without logMessage it stops again", bool(ev) and ev["body"]["reason"] == "breakpoint", str(ev))
+            d.req("setBreakpoints", {"source": source, "breakpoints": []})
+            case("clearing leaves nothing armed", nothing_armed(d))
+
+            # A client that stops reading is neither stalled on nor dropped.
+            d.req("setBreakpoints", {"source": source, "breakpoints": [
+                {"line": 1, "logMessage": "x" * 200 + "{A}"}]})
+            set_reg(d, "PC", "$0800")
+            start = len(d.msgs)
+            d.req("continue", {"threadId": 1})
+            time.sleep(1.5)
+            s = d.status()
+            case("a client that stopped reading is still connected", bool(s), str(s)[:120])
+            lines = wait_output(d, start, "lines lost")
+            case("and hears how many lines it lost", any("lines lost" in l for l in lines),
+                 str([l[:40] for l in lines[:2]]))
+            d.pause()
+            d.req("setBreakpoints", {"source": source, "breakpoints": []})
+
+
 def test_function_breakpoints():
     print("function breakpoints")
     with tempfile.TemporaryDirectory() as t:
@@ -1102,7 +1195,7 @@ def main():
 
     for test in (test_evaluate_contexts, test_expressions, test_disconnect, test_terminate, test_dropped_socket,
                  test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
-                 test_source_breakpoints, test_function_breakpoints, test_instruction_stop,
+                 test_source_breakpoints, test_logpoints, test_function_breakpoints, test_instruction_stop,
                  test_data_breakpoints, test_stack_frames, test_line_base, test_uri_paths,
                  test_no_debug, test_disassemble, test_read_memory, test_wire_format,
                  test_step_granularity):

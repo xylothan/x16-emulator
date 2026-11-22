@@ -9,6 +9,9 @@
 #include "mcp_server.h"
 #include "dbg_info.h"
 #include "dbg_expr.h"
+#include "dbg_log.h"
+#include "dbg_machine.h"
+#include "logpoint.h"
 #include "call_stack.h"
 #include "debugger.h"
 #include "disasm.h"
@@ -202,6 +205,7 @@ static struct {
     // unconditional one that fires in every bank.
     char cond[192];
     char hit_cond[64];
+    char log[DBG_LOG_MAX_MESSAGE + 1];   // empty for a breakpoint that stops
 } dap_bps[MAX_DAP_BREAKPOINTS];
 static int num_dap_bps = 0;
 static int next_dap_bp_id = 1;
@@ -321,6 +325,33 @@ static void dap_add_bank_message(cJSON *bp, int x16Bank) {
     cJSON_AddStringToObject(bp, "message", msg);
 }
 
+// Source files match addresses by basename, so several entries can share one
+// core entry and this owner's single claim on it. It is a logpoint only if all of
+// them are: any plain breakpoint among them asked for a stop. Run after anything
+// that changes the claims.
+static void dap_sync_source_logs(void) {
+    for (int i = 0; i < num_dap_bps; i++) {
+        if (!dap_bps[i].verified || !dap_bps[i].file[0]) continue;
+        const int     pc = dap_bps[i].addr, x16 = dap_bps[i].x16Bank;
+        const uint8_t bank = dap_bps[i].bank;
+        if (!debug_bp_has_owner(pc, bank, x16, DEBUG_OWNER_DAP_SOURCE)) continue;
+        bool first = true, plain = false;
+        const char *msg = NULL;
+        for (int j = 0; j < num_dap_bps; j++) {
+            if (!dap_bps[j].verified || !dap_bps[j].file[0] || dap_bps[j].addr != pc ||
+                dap_bps[j].bank != bank || dap_bps[j].x16Bank != x16)
+                continue;
+            if (j < i) first = false;
+            if (!dap_bps[j].log[0]) plain = true;
+            else if (!msg) msg = dap_bps[j].log;
+        }
+        if (!first) continue;
+        char why[120];
+        if (plain || !msg || !logpoint_set(pc, bank, x16, DEBUG_OWNER_DAP_SOURCE, msg, why, sizeof why))
+            logpoint_clear(pc, bank, x16, DEBUG_OWNER_DAP_SOURCE);
+    }
+}
+
 // Re-resolve unverified breakpoints after new .dbg file loads
 static void retry_unverified_breakpoints(void) {
     for (int i = 0; i < num_dap_bps; i++) {
@@ -383,6 +414,7 @@ static void retry_unverified_breakpoints(void) {
             }
         }
     }
+    dap_sync_source_logs();
 }
 
 // Invalidate breakpoints whose addresses fall within a range being unloaded
@@ -479,6 +511,7 @@ static void rebank_breakpoints(void) {
         func_bp_x16[i] = pin;
         send_bp_changed(func_bp_ids[i], 0, pin);
     }
+    dap_sync_source_logs();
 }
 
 void debug_server_rebank_breakpoints(void) {
@@ -613,66 +646,116 @@ char *debug_server_utf8_repaired(const char *text, size_t len, size_t *out_len) 
     return dap_utf8_repaired(text, len, out_len);
 }
 
+// A message as it goes on the wire, or NULL. `*total` is its length.
+static char *dap_frame(cJSON *json, int *total) {
+    char *printed = cJSON_PrintUnformatted(json);
+    if (!printed) return NULL;
+    size_t body_len = strlen(printed);
+    char *repaired = dap_utf8_repaired(printed, body_len, &body_len);
+    const char *body = repaired ? repaired : printed;
+    char header[40];
+    const int header_len = snprintf(header, sizeof header, "Content-Length: %zu\r\n\r\n", body_len);
+    // Allocated per message: a source file or a large memory read can be
+    // any size, and a fixed buffer meant dropping the client over one.
+    char *frame = (char *)malloc((size_t)header_len + body_len);
+    if (frame) {
+        memcpy(frame, header, (size_t)header_len);
+        memcpy(frame + header_len, body, body_len);
+        *total = header_len + (int)body_len;
+    } else {
+        fprintf(stderr, "[dap] no memory for a %zu byte message; dropping client\n", body_len);
+    }
+    free(repaired);
+    cJSON_free(printed);
+    return frame;
+}
+
+static void dap_send_all(const char *buf, int total) {
+    int offset = 0;
+    // A client that stops reading fills the socket buffer, and this is
+    // the emulator's only thread. Retrying forever parks the machine on
+    // a peer that may never come back, so give up after a bounded wait
+    // and drop the client instead: a dead session is recoverable, a
+    // frozen emulator is not.
+    int stalls = 0;
+    const int max_stalls = 500;          // ~500ms of a peer not reading
+    while (offset < total) {
+        int n = send(client_sock, buf + offset, total - offset, 0);
+        if (n > 0) {
+            offset += n;
+            stalls = 0;
+        } else if (n < 0 && WOULD_BLOCK) {
+            if (send_no_wait || ++stalls > max_stalls) {
+                fprintf(stderr, "[dap] client is not reading; dropping it\n");
+                disconnect_client();
+                break;
+            }
+            // SDL's, rather than Sleep/usleep behind a platform split:
+            // usleep needs a feature-test macro this file does not set,
+            // which only the -Werror Linux builds noticed.
+            SDL_Delay(1);
+        } else {
+            break; // real error
+        }
+    }
+}
+
+// A frame of logpoint output the socket has not taken all of yet. Log lines never
+// wait for a slow client and never cost it the connection: what does not get out
+// stays in the ring until it is overwritten and reported as lost. But a frame
+// begun has to be finished before anything else goes on the wire.
+static char *log_frame = NULL;
+static int   log_frame_len = 0;
+static int   log_frame_off = 0;
+
+static void log_frame_drop(void) {
+    free(log_frame);
+    log_frame = NULL;
+    log_frame_len = log_frame_off = 0;
+}
+
+// Before any other message: the rest of the frame, at that message's terms.
+static void log_frame_finish(void) {
+    if (!log_frame) return;
+    char *rest = log_frame;
+    const int off = log_frame_off, len = log_frame_len;
+    log_frame = NULL;                  // disconnect_client() must not free it under us
+    log_frame_len = log_frame_off = 0;
+    dap_send_all(rest + off, len - off);
+    free(rest);
+}
+
+// As much as the socket will take now, without waiting.
+static void log_frame_push(void) {
+    while (log_frame && log_frame_off < log_frame_len) {
+        const int n = send(client_sock, log_frame + log_frame_off, log_frame_len - log_frame_off, 0);
+        if (n > 0) {
+            log_frame_off += n;
+        } else if (n < 0 && WOULD_BLOCK) {
+            return;
+        } else {
+            disconnect_client();
+            return;
+        }
+    }
+    log_frame_drop();
+}
+
 static void send_dap_message(cJSON *json) {
+    if (client_sock != SOCKET_INVALID) log_frame_finish();
     if (client_sock == SOCKET_INVALID) {
         cJSON_Delete(json);
         return;
     }
-    char *printed = cJSON_PrintUnformatted(json);
-    if (printed) {
-        size_t body_len = strlen(printed);
-        char *repaired = dap_utf8_repaired(printed, body_len, &body_len);
-        const char *body = repaired ? repaired : printed;
-        char header[40];
-        const int header_len = snprintf(header, sizeof header, "Content-Length: %zu\r\n\r\n", body_len);
-        // Allocated per message: a source file or a large memory read can be
-        // any size, and a fixed buffer meant dropping the client over one.
-        char *send_buf = (char *)malloc((size_t)header_len + body_len);
-        if (!send_buf) {
-            fprintf(stderr, "[dap] no memory for a %zu byte message; dropping client\n", body_len);
-            free(repaired);
-            cJSON_free(printed);
-            cJSON_Delete(json);
-            disconnect_client();
-            return;
-        }
-        {
-            memcpy(send_buf, header, (size_t)header_len);
-            memcpy(send_buf + header_len, body, body_len);
-            int total = header_len + (int)body_len;
-            int offset = 0;
-            // A client that stops reading fills the socket buffer, and this is
-            // the emulator's only thread. Retrying forever parks the machine on
-            // a peer that may never come back, so give up after a bounded wait
-            // and drop the client instead: a dead session is recoverable, a
-            // frozen emulator is not.
-            int stalls = 0;
-            const int max_stalls = 500;          // ~500ms of a peer not reading
-            while (offset < total) {
-                int n = send(client_sock, send_buf + offset, total - offset, 0);
-                if (n > 0) {
-                    offset += n;
-                    stalls = 0;
-                } else if (n < 0 && WOULD_BLOCK) {
-                    if (send_no_wait || ++stalls > max_stalls) {
-                        fprintf(stderr, "[dap] client is not reading; dropping it\n");
-                        disconnect_client();
-                        break;
-                    }
-                    // SDL's, rather than Sleep/usleep behind a platform split:
-                    // usleep needs a feature-test macro this file does not set,
-                    // which only the -Werror Linux builds noticed.
-                    SDL_Delay(1);
-                } else {
-                    break; // real error
-                }
-            }
-        }
-        free(send_buf);
-        free(repaired);
-        cJSON_free(printed);
-    }
+    int total = 0;
+    char *frame = dap_frame(json, &total);
     cJSON_Delete(json);
+    if (!frame) {
+        disconnect_client();
+        return;
+    }
+    dap_send_all(frame, total);
+    free(frame);
 }
 
 static void sink_reply(bool success, cJSON *body, const char *message) {
@@ -900,6 +983,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsStepInTargetsRequest", true);
     cJSON_AddBoolToObject(caps, "supportsConditionalBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsHitConditionalBreakpoints", true);
+    cJSON_AddBoolToObject(caps, "supportsLogPoints", true);
     // Non-standard, so that a client can tell this emulator's performance
     // budget surface from one that would reject the requests.
     cJSON_AddBoolToObject(caps, "supportsX16PerfStats", true);
@@ -1329,15 +1413,6 @@ static uint8_t vera_read_dbg(uint8_t reg) {
     return video_read(reg, true);
 }
 
-// Direct-page base + offset, matching the CPU's direct_page_add() (support.h).
-// The X16 r0-r15 pseudo-registers live at D+$02..D+$21; D is 0 under the KERNAL
-// ABI but can be non-zero in 65C816 native (GS) code, so honor it.
-static uint16_t dap_dp_add(uint16_t offset) {
-    if (regs.e && (regs.dp & 0x00FF) == 0)
-        return (uint16_t)((regs.dp & 0xFF00) | (uint8_t)((uint8_t)(regs.dp & 0xFF) + (offset & 0xFF)));
-    return (uint16_t)(regs.dp + offset);
-}
-
 static int handle_dap_variables(int seq, cJSON *args) {
     int ref = 0;
     if (args) {
@@ -1454,7 +1529,7 @@ static int handle_dap_variables(int seq, cJSON *args) {
         // $02 + 2*n (D is 0 under the KERNAL ABI, non-zero possible in GS native).
         for (int n = 0; n < 16; n++) {
             char name[8], value[48];
-            uint16_t a  = dap_dp_add((uint16_t)(0x02 + 2 * n));
+            uint16_t a  = dbg_machine_dp_add((uint16_t)(0x02 + 2 * n));
             uint8_t  lo = debug_read6502(a, 0, USE_CURRENT_X16_BANK);
             uint8_t  hi = debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK);
             uint16_t v  = (uint16_t)(lo | (hi << 8));
@@ -1812,11 +1887,14 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         // if an overlay reload forces it to be resolved again.
         const char *cond_str = "";
         const char *hit_str  = "";
+        const char *log_str  = "";
         if (bps) {
             cJSON *c = cJSON_GetObjectItemCaseSensitive(bp_item, "condition");
             if (c && cJSON_IsString(c) && c->valuestring) cond_str = c->valuestring;
             cJSON *h = cJSON_GetObjectItemCaseSensitive(bp_item, "hitCondition");
             if (h && cJSON_IsString(h) && h->valuestring) hit_str = h->valuestring;
+            cJSON *m = cJSON_GetObjectItemCaseSensitive(bp_item, "logMessage");
+            if (m && cJSON_IsString(m) && m->valuestring) log_str = m->valuestring;
         }
 
         // Every entry gets a reply, in order, whether or not it could be armed.
@@ -1842,6 +1920,10 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         if (hit_str[0] && !dap_check_hit_condition(hit_str)) {
             snprintf(why, sizeof why,
                      "cannot parse hitCondition \"%.60s\" (expected N: stop from the Nth hit on)", hit_str);
+            dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
+            continue;
+        }
+        if (log_str[0] && !dbg_log_check(log_str, why, sizeof why)) {
             dap_add_refused_bp(result_bps, bp_id, line, client_path, why);
             continue;
         }
@@ -1889,6 +1971,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             dap_bps[num_dap_bps].cond[sizeof(dap_bps[num_dap_bps].cond) - 1] = '\0';
             strncpy(dap_bps[num_dap_bps].hit_cond, hit_str, sizeof(dap_bps[num_dap_bps].hit_cond) - 1);
             dap_bps[num_dap_bps].hit_cond[sizeof(dap_bps[num_dap_bps].hit_cond) - 1] = '\0';
+            snprintf(dap_bps[num_dap_bps].log, sizeof dap_bps[num_dap_bps].log, "%s", log_str);
             num_dap_bps++;
 
 
@@ -1929,10 +2012,12 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             dap_bps[num_dap_bps].cond[sizeof(dap_bps[num_dap_bps].cond) - 1] = '\0';
             strncpy(dap_bps[num_dap_bps].hit_cond, hit_str, sizeof(dap_bps[num_dap_bps].hit_cond) - 1);
             dap_bps[num_dap_bps].hit_cond[sizeof(dap_bps[num_dap_bps].hit_cond) - 1] = '\0';
+            snprintf(dap_bps[num_dap_bps].log, sizeof dap_bps[num_dap_bps].log, "%s", log_str);
             num_dap_bps++;
         }
         cJSON_AddItemToArray(result_bps, result_bp);
     }
+    dap_sync_source_logs();
 
     cJSON_AddItemToObject(result_body, "breakpoints", result_bps);
     send_dap_response(seq, "setBreakpoints", true, result_body);
@@ -2201,63 +2286,6 @@ static bool dap_eval_vera_line(const char *arg, char *out, size_t size) {
 
 // ─── Expressions ─────────────────────────────────────────────────────
 
-static uint8_t expr_read_cpu(void *user, uint32_t addr, int x16_bank) {
-    (void)user;
-    return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16),
-                          x16_bank >= 0 ? x16_bank : USE_CURRENT_X16_BANK);
-}
-
-static uint8_t expr_read_vram(void *user, uint32_t addr) {
-    (void)user;
-    return video_space_read(addr);
-}
-
-// Each register at the width the variables view and setVariable use for it.
-static uint32_t expr_read_reg(void *user, dbg_expr_reg_t reg) {
-    (void)user;
-    const bool native = regs.is65c816 && !regs.e;
-    if (reg >= DBG_EXPR_REG_R0 && reg <= DBG_EXPR_REG_R15) {
-        const uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * (reg - DBG_EXPR_REG_R0)));
-        return (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
-               ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
-    }
-    switch (reg) {
-        case DBG_EXPR_REG_A:
-            return native && !(regs.status & FLAG_MEMORY_WIDTH) ? regs.c : regs.a;
-        case DBG_EXPR_REG_X:
-            return native && !(regs.status & FLAG_INDEX_WIDTH) ? regs.x : (uint8_t)regs.x;
-        case DBG_EXPR_REG_Y:
-            return native && !(regs.status & FLAG_INDEX_WIDTH) ? regs.y : (uint8_t)regs.y;
-        case DBG_EXPR_REG_SP:
-            return native ? regs.sp : (uint8_t)regs.sp;
-        case DBG_EXPR_REG_P:
-            return regs.status;
-        case DBG_EXPR_REG_PC:
-            return (is_gen2 || regs.is65c816) ? ((uint32_t)regs.k << 16) | regs.pc : regs.pc;
-        case DBG_EXPR_REG_RAMBANK:
-            return memory_get_ram_bank();
-        case DBG_EXPR_REG_ROMBANK:
-            return memory_get_rom_bank();
-        default:
-            return 0;
-    }
-}
-
-static bool expr_symbol(void *user, const char *name, uint32_t *value, int *bank,
-                        char *err, size_t errn) {
-    (void)user;
-    dbg_resolved_t r;
-    if (!dbg_info_resolve(name, &r, err, errn)) return false;
-    *value = r.addr;
-    // A label file's bank applies from $A000 up. Below that, banks select nothing.
-    *bank  = r.addr >= 0xA000 && r.addr <= 0xFFFF ? r.bank : DBG_EXPR_NO_BANK;
-    return true;
-}
-
-static const dbg_expr_env_t expr_env = {
-    NULL, expr_read_cpu, expr_read_vram, expr_read_reg, expr_symbol
-};
-
 static void dap_fmt_expr_value(char *out, size_t n, const dbg_expr_value_t *v) {
     const unsigned u = v->value;
     if (v->bank >= 0)
@@ -2270,8 +2298,8 @@ static void dap_fmt_expr_value(char *out, size_t n, const dbg_expr_value_t *v) {
 static bool dap_eval_expression(const char *text, char *out, size_t n) {
     dbg_expr_t       expr;
     dbg_expr_value_t value;
-    if (!dbg_expr_compile(text, &expr_env, &expr, out, n) ||
-        !dbg_expr_eval(&expr, &expr_env, &value, out, n))
+    if (!dbg_expr_compile(text, dbg_machine_env(), &expr, out, n) ||
+        !dbg_expr_eval(&expr, dbg_machine_env(), &value, out, n))
         return false;
     dap_fmt_expr_value(out, n, &value);
     return true;
@@ -2336,6 +2364,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
                 dap_bps[num_dap_bps].file[0] = '\0';
                 dap_bps[num_dap_bps].cond[0] = '\0';
                 dap_bps[num_dap_bps].hit_cond[0] = '\0';
+                dap_bps[num_dap_bps].log[0] = '\0';
                 dap_bps[num_dap_bps].verified = true;
                 num_dap_bps++;
             }
@@ -4585,20 +4614,21 @@ static const char *bp_cmp_name(int op) {
 // thing in both tables. debug_core.h says the owner list "can be extended
 // freely", so an unrecognised bit still gets an entry rather than being
 // silently dropped.
-static cJSON *owners_bitmask_to_json(uint16_t owners) {
+static const char *owner_name(int owner, char *buf, size_t n) {
     static const char *names[] = {
         "cli", "ui", "dapSource", "dapFunction", "dapInstruction", "dapConsole", "step", "mcp"
     };
+    if (owner >= 0 && owner < (int)(sizeof names / sizeof names[0])) return names[owner];
+    snprintf(buf, n, "owner%d", owner);
+    return buf;
+}
+
+static cJSON *owners_bitmask_to_json(uint16_t owners) {
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < DEBUG_OWNER_COUNT; i++) {
         if (!(owners & (1u << i))) continue;
-        if (i < (int)(sizeof names / sizeof names[0])) {
-            cJSON_AddItemToArray(arr, cJSON_CreateString(names[i]));
-        } else {
-            char buf[16];
-            snprintf(buf, sizeof buf, "owner%d", i);
-            cJSON_AddItemToArray(arr, cJSON_CreateString(buf));
-        }
+        char buf[16];
+        cJSON_AddItemToArray(arr, cJSON_CreateString(owner_name(i, buf, sizeof buf)));
     }
     return arr;
 }
@@ -4646,6 +4676,18 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
             cJSON_AddItemToObject(d, "owner", owners_bitmask_to_json((uint16_t)(1u << dump_owner)));
             cJSON_AddNumberToObject(d, "writes", dump_writes);
             cJSON_AddBoolToObject(d, "full", dump_full);
+        }
+
+        cJSON *logs = NULL;
+        for (int k = 0; k < DEBUG_OWNER_COUNT; k++) {
+            const char *message = logpoint_message(bp->pc, bp->bank, bp->x16Bank, (debug_owner_t)k);
+            if (!message) continue;
+            if (!logs) logs = cJSON_AddArrayToObject(o, "logs");
+            char   name[16];
+            cJSON *l = cJSON_CreateObject();
+            cJSON_AddStringToObject(l, "owner", owner_name(k, name, sizeof name));
+            cJSON_AddStringToObject(l, "message", message);
+            cJSON_AddItemToArray(logs, l);
         }
 
         // DAP-visible identity, when this address was set through
@@ -4697,6 +4739,65 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
     cJSON_AddItemToObject(body, "watchpoints", wps);
 
     send_dap_response(seq, "x16/listBreakpoints", true, body);
+    return 0;
+}
+
+// ─── x16/readLog: what logpoints have printed ───────────────────────────────
+//
+// Changes nothing: the position is the caller's, so any number of clients can
+// read the same lines. Pass the returned `cursor` back to get what came after.
+// `lost` counts the lines between the given cursor and the oldest still held.
+//   cursor: where to read from (default: the oldest line held)
+//   limit:  most lines to return, 1-256 (default 100)
+static int handle_x16_read_log(int seq, cJSON *args) {
+    static const char cmd[] = "x16/readLog";
+    const dbg_log_ring_t *ring = logpoint_ring();
+    const uint64_t oldest = dbg_log_ring_oldest(ring);
+    uint64_t cursor = oldest;
+    int limit = 100;
+
+    cJSON *c = args ? cJSON_GetObjectItemCaseSensitive(args, "cursor") : NULL;
+    if (c) {
+        if (!cJSON_IsNumber(c) || c->valuedouble < 0 || c->valuedouble > 9007199254740992.0 ||
+            c->valuedouble != (double)(uint64_t)c->valuedouble) {
+            send_dap_error_response(seq, cmd, "'cursor' must be a whole number from an earlier result");
+            return 0;
+        }
+        cursor = (uint64_t)c->valuedouble;
+        if (cursor > ring->next) {
+            send_dap_error_response(seq, cmd, "'cursor' is past the newest line");
+            return 0;
+        }
+    }
+    cJSON *l = args ? cJSON_GetObjectItemCaseSensitive(args, "limit") : NULL;
+    if (l) {
+        if (!cJSON_IsNumber(l) || l->valuedouble < 1 || l->valuedouble > 256 ||
+            l->valuedouble != (int)l->valuedouble) {
+            send_dap_error_response(seq, cmd, "'limit' must be a whole number from 1 to 256");
+            return 0;
+        }
+        limit = (int)l->valuedouble;
+    }
+
+    const uint64_t lost = cursor < oldest ? oldest - cursor : 0;
+    uint64_t at = cursor < oldest ? oldest : cursor;
+    cJSON *body = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(body, "entries");
+    for (int n = 0; n < limit && at < ring->next; n++, at++) {
+        const dbg_log_entry_t *e = dbg_log_ring_at(ring, at);
+        char where[24], name[16];
+        dap_fmt_bp(where, sizeof where, (int)e->pc, e->bank, e->x16_bank);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "seq", (double)e->seq);
+        cJSON_AddStringToObject(o, "address", where);
+        cJSON_AddStringToObject(o, "owner", owner_name(e->owner, name, sizeof name));
+        cJSON_AddStringToObject(o, "text", e->text);
+        cJSON_AddItemToArray(list, o);
+    }
+    cJSON_AddNumberToObject(body, "cursor", (double)at);
+    cJSON_AddNumberToObject(body, "lost", (double)lost);
+    cJSON_AddBoolToObject(body, "more", at < ring->next);
+    send_dap_response(seq, cmd, true, body);
     return 0;
 }
 
@@ -5159,7 +5260,7 @@ static bool dap_set_register(const char *name, uint32_t v, uint32_t *stored, int
 
 // Stores virtual register Rn and returns what it now holds.
 static uint32_t dap_set_vreg(int n, uint32_t v) {
-    const uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * n));
+    const uint16_t a = dbg_machine_dp_add((uint16_t)(0x02 + 2 * n));
     debug_write6502(a, 0, (uint8_t)(v & 0xFF));
     debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
     return (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
@@ -5296,8 +5397,8 @@ static int handle_dap_set_expression(int seq, cJSON *args) {
     char err[220];
     dbg_expr_t        target_expr, value_expr;
     dbg_expr_target_t target;
-    if (!dbg_expr_compile(ex->valuestring, &expr_env, &target_expr, err, sizeof err) ||
-        !dbg_expr_target(&target_expr, &expr_env, &target, err, sizeof err)) {
+    if (!dbg_expr_compile(ex->valuestring, dbg_machine_env(), &target_expr, err, sizeof err) ||
+        !dbg_expr_target(&target_expr, dbg_machine_env(), &target, err, sizeof err)) {
         send_dap_error_response(seq, cmd, err);
         return 0;
     }
@@ -5306,8 +5407,8 @@ static int handle_dap_set_expression(int seq, cJSON *args) {
     // editor offers for editing: "$12 (18)" or "$35 [nv-BdIzC]".
     uint32_t v = 0;
     dbg_expr_value_t value;
-    if (dbg_expr_compile(vi->valuestring, &expr_env, &value_expr, err, sizeof err) &&
-        dbg_expr_eval(&value_expr, &expr_env, &value, err, sizeof err)) {
+    if (dbg_expr_compile(vi->valuestring, dbg_machine_env(), &value_expr, err, sizeof err) &&
+        dbg_expr_eval(&value_expr, dbg_machine_env(), &value, err, sizeof err)) {
         v = value.value;
     } else if (!strpbrk(vi->valuestring, "([") || !dap_parse_value(vi->valuestring, &v)) {
         send_dap_error_response(seq, cmd, err);
@@ -5458,8 +5559,8 @@ static int handle_mcp_evaluate(int seq, cJSON *args) {
     char err[220], text[40];
     dbg_expr_t       expr;
     dbg_expr_value_t value;
-    if (!dbg_expr_compile(ex->valuestring, &expr_env, &expr, err, sizeof err) ||
-        !dbg_expr_eval(&expr, &expr_env, &value, err, sizeof err)) {
+    if (!dbg_expr_compile(ex->valuestring, dbg_machine_env(), &expr, err, sizeof err) ||
+        !dbg_expr_eval(&expr, dbg_machine_env(), &value, err, sizeof err)) {
         send_dap_error_response(seq, cmd, err);
         return 0;
     }
@@ -5956,7 +6057,7 @@ static bool dap_data_target(const char *name, int ref, uint16_t *addr, uint16_t 
     switch (ref) {
     case VARREF_VREGS:
         if (!dap_vreg_number(name, &vreg)) return false;
-        *addr = dap_dp_add((uint16_t)(0x02 + 2 * vreg));
+        *addr = dbg_machine_dp_add((uint16_t)(0x02 + 2 * vreg));
         *len  = 2;
         return *addr < 0xFFFF;   // a watch is one contiguous range
     case VARREF_STACK:
@@ -6615,6 +6716,12 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         send_dap_error_response(seq, cmd, "cannot parse hitCondition (expected N: stop from the Nth hit on)");
         return 0;
     }
+    cJSON *log_item = cJSON_GetObjectItemCaseSensitive(args, "log");
+    const char *log_text = log_item && cJSON_IsString(log_item) ? log_item->valuestring : "";
+    if (log_text[0] && !dbg_log_check(log_text, why, sizeof why)) {
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
     const dbg_addr_t a24 = ((dbg_addr_t)bp.bank << 16) | (dbg_addr_t)bp.pc;
     const uint16_t mine = (uint16_t)(1u << DEBUG_OWNER_MCP);
     const int at = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
@@ -6670,14 +6777,31 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         debug_bp_clear_dump_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
     }
     dap_apply_bp_condition(a24, cond, hit, bp.x16Bank);
+    if (!log_text[0]) {
+        logpoint_clear(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+    } else if (!logpoint_set(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP, log_text, why, sizeof why)) {
+        // Only out of memory: checked above. It stays a plain breakpoint if this
+        // client already held one, and goes if this call created it.
+        if (!had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+        if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
+            debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
+        else if (!was_enabled)
+            debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, false);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
 
     dap_fmt_bp(where, sizeof where, bp.pc, bp.bank, bp.x16Bank);
     body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "kind", "exec");
     cJSON_AddStringToObject(body, "address", where);
-    if (dump) {
-        cJSON_AddStringToObject(body, "dumpFile", target);
-        cJSON_AddBoolToObject(body, "alsoStops", others);
+    if (dump) cJSON_AddStringToObject(body, "dumpFile", target);
+    if (log_text[0]) cJSON_AddStringToObject(body, "log", log_text);
+    if (dump || log_text[0]) {
+        const int now = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
+        const uint16_t held = now >= 0 ? debug_bp_at(now)->owners : 0;
+        const uint16_t quiet = debug_bp_quiet_owners(bp.pc, bp.bank, bp.x16Bank);
+        cJSON_AddBoolToObject(body, "alsoStops", (held & (uint16_t)~quiet) != 0);
     }
     send_dap_response(seq, cmd, true, body);
     return 0;
@@ -7511,6 +7635,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/hostPerf")) result = handle_x16_host_perf(seq, args);
     else if (!strcmp(cmd, "x16/capture")) result = handle_x16_capture(seq, args);
     else if (!strcmp(cmd, "x16/listBreakpoints")) result = handle_x16_list_breakpoints(seq, args);
+    else if (!strcmp(cmd, "x16/readLog")) result = handle_x16_read_log(seq, args);
     else if (!strcmp(cmd, "x16/loadSymbols")) result = handle_x16_load_symbols(seq, args);
     else if (!strcmp(cmd, "x16/lookupSymbol")) result = handle_x16_lookup_symbol(seq, args);
     else if (!strcmp(cmd, "x16/listSymbols")) result = handle_x16_list_symbols(seq, args);
@@ -7611,7 +7736,7 @@ static const char *const callable_commands[] = {
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
-    "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig",
+    "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -7752,6 +7877,7 @@ static void disconnect_client(void) {
     if (client_sock != SOCKET_INVALID) {
         CLOSE_SOCKET(client_sock);
         client_sock = SOCKET_INVALID;
+        log_frame_drop();
         // Clear the contents, not just the length. A dropped oversized frame
         // otherwise stayed in the buffer as a NUL-terminated string, and the
         // next client -- accepted before it has written anything -- had that
@@ -7808,6 +7934,10 @@ static void try_accept(void) {
     recv_buf_len = 0;
     dap_seq = 1;
     dap_initialize_answered = false;
+    // This client hears its own logpoints from now on, and nothing older.
+    dbg_log_ring_sink(logpoint_ring(),
+                      (uint16_t)((1u << DEBUG_OWNER_DAP_SOURCE) | (1u << DEBUG_OWNER_DAP_FUNCTION) |
+                                 (1u << DEBUG_OWNER_DAP_INSTRUCTION) | (1u << DEBUG_OWNER_DAP_CONSOLE)));
     printf("[dap] Client connected from %s:%d\n",
            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 }
@@ -7957,6 +8087,63 @@ static void send_dap_event_thread_started(void) {
     send_dap_event("thread", tb);
 }
 
+// Lines go out in batches, one output event each, so that a logpoint in a hot
+// loop costs the host a few sends a frame rather than one per hit. Done here and
+// not where a logpoint fires, because sending can drop the client.
+#define DAP_LOG_INTERVAL_MS 16
+#define DAP_LOG_BATCH_LINES 256
+
+static void dap_send_logs(void) {
+    static Uint32 last_batch = 0;
+    static char   batch[DAP_LOG_BATCH_LINES * DBG_LOG_TEXT + 64];
+
+    if (!dap_initialize_answered) return;
+    if (log_frame) {
+        log_frame_push();
+        if (log_frame || client_sock == SOCKET_INVALID) return;
+    }
+    dbg_log_ring_t *ring = logpoint_ring();
+    if (ring->sink_next >= ring->next && !ring->sink_lost) return;
+    const Uint32 now = SDL_GetTicks();
+    if (now - last_batch < DAP_LOG_INTERVAL_MS) return;
+    last_batch = now;
+
+    uint64_t lost = 0;
+    const dbg_log_entry_t *e = dbg_log_ring_take(ring, &lost);
+    if (!e && !lost) return;
+    size_t o = 0;
+    if (lost)
+        o = (size_t)snprintf(batch, sizeof batch, "[logpoints: %llu lines lost]\n",
+                             (unsigned long long)lost);
+    for (int n = 0; e; ) {
+        const size_t len = strlen(e->text);
+        memcpy(batch + o, e->text, len);
+        o += len;
+        batch[o++] = '\n';
+        if (++n >= DAP_LOG_BATCH_LINES) break;
+        e = dbg_log_ring_take(ring, &lost);
+    }
+    batch[o] = '\0';
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "category", "console");
+    cJSON_AddStringToObject(body, "output", batch);
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddNumberToObject(event, "seq", dap_seq++);
+    cJSON_AddStringToObject(event, "type", "event");
+    cJSON_AddStringToObject(event, "event", "output");
+    cJSON_AddItemToObject(event, "body", body);
+    log_frame = dap_frame(event, &log_frame_len);
+    log_frame_off = 0;
+    cJSON_Delete(event);
+    if (!log_frame) {
+        log_frame_len = 0;
+        disconnect_client();
+        return;
+    }
+    log_frame_push();
+}
+
 int debug_server_poll(void) {
     if (!server_enabled && !mcp_server_is_enabled()) return 0;
 
@@ -7982,6 +8169,8 @@ int debug_server_poll(void) {
     // Push any budget overruns before reading: a client that never polls still
     // learns that the guest is missing its frame.
     perf_poll_overruns();
+    dap_send_logs();
+    if (client_sock == SOCKET_INVALID) return mode_changed;
 
     // Receive data (non-blocking)
     int space = RECV_BUF_SIZE - recv_buf_len - 2; // -2 for null terminator space
@@ -8080,7 +8269,7 @@ void debug_server_notify_stopped(const char *reason) {
             // Both halves of the key, and only breakpoints that are actually
             // armed: pending ones hold addr 0 and were reported as hit every
             // time the machine stopped at $0000.
-            if (dap_bps[i].verified && dap_bps[i].addr == regs.pc &&
+            if (dap_bps[i].verified && !dap_bps[i].log[0] && dap_bps[i].addr == regs.pc &&
                 dap_bps[i].bank == regs.k &&
                 debug_bank_selector_matches(dap_bps[i].x16Bank, regs.pc, regs.k)) {
                 cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(dap_bps[i].dap_id));

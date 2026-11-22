@@ -187,6 +187,89 @@ cond_editor_popup(const TrackedBP &t)
 	ImGui::EndPopup();
 }
 
+// ---- Log message ------------------------------------------------------------
+// This window's own logpoint on the row. A message the core refused stays in the
+// field with its reason, rather than vanishing as it is typed.
+struct LogRefused {
+	bool active = false;
+	int  pc = 0, x16Bank = 0;
+	uint8_t bank = 0;
+	char text[DBG_LOG_MAX_MESSAGE + 1] = "";
+	char why[120] = "";
+};
+LogRefused s_log_refused;
+
+bool
+log_refused_here(const TrackedBP &t)
+{
+	return s_log_refused.active && s_log_refused.pc == t.pc && s_log_refused.bank == t.bank &&
+	       s_log_refused.x16Bank == t.x16Bank;
+}
+
+void
+apply_log(const TrackedBP &t, const char *text)
+{
+	s_log_refused.active = false;
+	if (!text[0]) {
+		logpoint_clear(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI);
+		return;
+	}
+	char why[sizeof s_log_refused.why];
+	if (!dbg_log_check(text, why, sizeof why)) {
+		s_log_refused.active  = true;
+		s_log_refused.pc      = t.pc;
+		s_log_refused.bank    = t.bank;
+		s_log_refused.x16Bank = t.x16Bank;
+		snprintf(s_log_refused.text, sizeof s_log_refused.text, "%s", text);
+		snprintf(s_log_refused.why, sizeof s_log_refused.why, "%s", why);
+		return;
+	}
+	// A claim re-enables the entry, so one added here must not change that.
+	if (!debug_bp_has_owner(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI)) {
+		struct breakpoint bp = {};
+		bp.pc      = t.pc;
+		bp.bank    = t.bank;
+		bp.x16Bank = t.x16Bank;
+		DEBUGAddBreakPoint(bp);
+		DEBUGSetBreakpointEnabled(t.pc, t.bank, t.x16Bank, t.enabled);
+	}
+	logpoint_set(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI, text, why, sizeof why);
+}
+
+void
+log_field(const TrackedBP &t)
+{
+	char buf[DBG_LOG_MAX_MESSAGE + 1];
+	const char *mine = logpoint_message(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI);
+	snprintf(buf, sizeof buf, "%s", log_refused_here(t) ? s_log_refused.text : (mine ? mine : ""));
+
+	// Another client's message shows as the hint, since this field is only ours.
+	const char *hint = nullptr;
+	for (int o = 0; o < DEBUG_OWNER_COUNT && !hint; o++) {
+		if (o != DEBUG_OWNER_UI)
+			hint = logpoint_message(t.pc, t.bank, t.x16Bank, (debug_owner_t)o);
+	}
+	if (!hint)
+		hint = "stops";
+
+	const bool refused = log_refused_here(t);
+	if (refused)
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	ImGui::InputTextWithHint("##log", hint, buf, sizeof buf);
+	const bool commit = ImGui::IsItemDeactivatedAfterEdit();
+	if (refused)
+		ImGui::PopStyleColor();
+	if (refused)
+		ImGui::SetItemTooltip("%s", s_log_refused.why);
+	else
+		ImGui::SetItemTooltip("Print this and keep running, instead of stopping.\n"
+		                      "{A} or {word[R0]} prints a value; {{ and }} are literal braces.\n"
+		                      "Lines appear in the Log panel. Empty means an ordinary breakpoint.");
+	if (commit)
+		apply_log(t, buf);
+}
+
 // ---------------------------------------------------------------------------
 // Breakpoints - break when execution reaches an address.
 // ---------------------------------------------------------------------------
@@ -324,7 +407,7 @@ draw_breakpoints()
 
 	int remove_idx = -1;  // deferred per-row delete
 
-	if (ImGui::BeginTable("bp_table", 6,
+	if (ImGui::BeginTable("bp_table", 7,
 	        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
 	            DBGUI_TABLE_FLAGS_RESIZABLE)) {
 		ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed,
@@ -336,6 +419,7 @@ draw_breakpoints()
 		ImGui::TableSetupColumn("Hits",    ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_width("Hits", "99999"));
 		ImGui::TableSetupColumn("Condition", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Log",     ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_fit("", dbgui_field_width("x")));
 		ImGui::TableHeadersRow();
@@ -378,6 +462,9 @@ draw_breakpoints()
 			cond_editor_popup(t);
 
 			ImGui::TableNextColumn();
+			log_field(t);
+
+			ImGui::TableNextColumn();
 			if (ImGui::SmallButton("x")) {
 				remove_idx = i;
 			}
@@ -400,9 +487,12 @@ draw_breakpoints()
 			DEBUGForgetBreakpoint(t.pc, t.bank, t.x16Bank);
 		}
 		s_tracked.clear();
+		s_log_refused.active = false;
 	} else if (remove_idx >= 0 && remove_idx < (int)s_tracked.size()) {
 		DEBUGRemoveBreakPoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
 		DEBUGForgetBreakpoint(s_tracked[remove_idx].pc, s_tracked[remove_idx].bank, s_tracked[remove_idx].x16Bank);
+		if (log_refused_here(s_tracked[remove_idx]))
+			s_log_refused.active = false;
 		s_tracked.erase(s_tracked.begin() + remove_idx);
 	}
 
