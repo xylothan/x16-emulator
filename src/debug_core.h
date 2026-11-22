@@ -293,6 +293,21 @@ bool     debug_bp_dump_info(int pc, uint8_t bank, int x16Bank, debug_owner_t *ow
                             uint32_t *writes, bool *full);
 uint32_t debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank);
 extern uint8_t (*debug_bp_dump_read)(uint32_t addr, int x16Bank);
+
+// Logpoints: a firing calls debug_bp_log_fire instead of stopping for that
+// owner. The machine still stops if any other owner on the entry wants a stop.
+// Each owner has at most one message per entry, opaque here and released through
+// debug_bp_log_free when that owner's claim goes. See logpoint.h.
+extern void (*debug_bp_log_fire)(void *log, debug_owner_t owner, int pc, uint8_t bank,
+                                 int x16Bank);
+extern void (*debug_bp_log_free)(void *log);
+// Takes `log` on success. False, with nothing changed, unless `owner` holds the entry.
+bool     debug_bp_set_log(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, void *log);
+void     debug_bp_clear_log_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+void    *debug_bp_log_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+// The owners here that dump or log rather than stop.
+uint16_t debug_bp_quiet_owners(int pc, uint8_t bank, int x16Bank);
+
 void     debug_bp_set_ignore(int pc, uint8_t bank, int x16Bank, uint32_t ignore);
 uint32_t debug_bp_get_hits(int pc, uint8_t bank, int x16Bank);
 void     debug_bp_reset_hits(int pc, uint8_t bank, int x16Bank);

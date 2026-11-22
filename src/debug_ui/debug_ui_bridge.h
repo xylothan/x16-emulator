@@ -56,6 +56,7 @@
 #include "debugger.h"     // execution control + run state (pulls SDL, which is
                           // fine: the ImGui backends are SDL2 already)
 #include "dbg_info.h"     // symbols and source lines; owns dbg_addr_t
+#include "logpoint.h"    // logpoint messages and the log they print to
 #include "memory.h"       // real_read6502, write6502, bank mapping
 #include "glue.h"         // is_gen2, num_banks, num_ram_banks, MHZ, warp_mode
 #include "smc.h"          // smc_requested_reset

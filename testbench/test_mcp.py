@@ -186,7 +186,7 @@ READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "l
                  "wait_for_stop", "get_screen", "screenshot",
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
                  "list_sources", "read_source", "source_location", "host_perf",
-                 "get_sdcard", "evaluate"}
+                 "get_sdcard", "evaluate", "read_log"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                 "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
                 "sprite_mux_config"}
@@ -3520,6 +3520,156 @@ def test_evaluate():
         case("still no commands", is_error(m.call("evaluate", expression="reset")))
 
 
+def log_lines(m, cursor=None):
+    args = {} if cursor is None else {"cursor": cursor}
+    return data(m.call("read_log", **args))
+
+
+def test_logpoints():
+    print("logpoints")
+    with Mcp() as m:
+        m.init()
+        plant_loop(m)
+        case("nothing logged yet", log_lines(m).get("entries") == [], str(log_lines(m)))
+
+        for bad, why in (("{", "unmatched"), ("}", "unmatched"), ("{}", "empty")):
+            r = m.call("set_breakpoint", address=LOOP, log=bad)
+            case(f"message {bad!r} is refused", is_error(r) and why in r["content"][0]["text"], str(r)[:160])
+        case("and nothing is armed", not data(m.call("list_breakpoints")).get("breakpoints"))
+        case("log needs a string", is_error(m.call("set_breakpoint", address=LOOP, log=5)))
+        case("a watch takes no log", is_error(m.call("set_breakpoint", address=0x0910, kind="write", log="x")))
+
+        d = data(m.call("set_breakpoint", address=LOOP, log="A={A} b={byte[$0910]} {{x}} {nosuchname}"))
+        case("set reports the log", d.get("log", "").startswith("A={A}"), str(d))
+        case("and nobody else stops it", d.get("alsoStops") is False, str(d))
+        listed = data(m.call("list_breakpoints"))["breakpoints"]
+        case("the listing has the message",
+             listed and listed[0].get("logs") == [{"owner": "mcp", "message": "A={A} b={byte[$0910]} {{x}} {nosuchname}"}],
+             str(listed))
+
+        m.call("write_memory", address=0x0910, hex="07")
+        r = data(m.call("run_frames", frames=2))
+        case("the machine does not stop for it", r.get("reason") not in ("breakpoint",), str(r))
+        got = log_lines(m)
+        lines = got.get("entries", [])
+        case("it logged", len(lines) > 0, str(got)[:200])
+        text = lines[-1]["text"] if lines else ""
+        case("A and memory print in hex", "A=$05 b=$05" in text, text)
+        case("escapes print as braces", "{x}" in text, text)
+        case("a bad expression prints its error", "{nosuchname:" in text, text)
+        case("a line names its address", bool(lines) and lines[-1]["address"] == "$0900", str(lines[-1:]))
+        case("a line names its owner", bool(lines) and lines[-1]["owner"] == "mcp", str(lines[-1:]))
+
+        # Reading consumes nothing, so two readers see the same lines.
+        again = log_lines(m)
+        case("reading twice gives the same lines", again.get("entries") == got.get("entries"))
+
+        # Past the size of the ring: reports loss, and the cursor carries on from it.
+        m.call("run_frames", frames=30)
+        late = log_lines(m, 0)
+        case("an old cursor reports what it lost", late.get("lost", 0) > 0, str({k: late.get(k) for k in ("lost", "cursor", "more")}))
+        case("and starts at the oldest line held",
+             bool(late.get("entries")) and late["entries"][0]["seq"] == late["lost"], str(late.get("entries", [{}])[0]))
+        case("a limit is honoured",
+             len(data(m.call("read_log", cursor=late["lost"], limit=3))["entries"]) == 3)
+        page = data(m.call("read_log", cursor=late["lost"], limit=3))
+        case("more says there is more", page.get("more") is True, str(page.get("more")))
+        follow = data(m.call("read_log", cursor=page["cursor"], limit=1))
+        case("the returned cursor continues",
+             follow["entries"][0]["seq"] == page["entries"][-1]["seq"] + 1, str(follow)[:200])
+        case("no loss from a live cursor", follow.get("lost") == 0, str(follow.get("lost")))
+        for bad in (-1, 1.5, "x", 2 ** 60):
+            case(f"cursor {bad!r} is refused", is_error(m.call("read_log", cursor=bad)))
+        for bad in (0, 257):
+            case(f"limit {bad} is refused", is_error(m.call("read_log", limit=bad)))
+
+        # Setting it without log makes it an ordinary breakpoint again.
+        m.call("pause")
+        m.call("set_breakpoint", address=LOOP)
+        r = data(m.call("continue"))
+        d = data(m.call("wait_for_stop", timeoutMs=3000))
+        case("without log it stops", d.get("completed") is True, str(d)[:160])
+        listed = data(m.call("list_breakpoints"))["breakpoints"]
+        case("and the message is gone", listed and "logs" not in listed[0], str(listed))
+        m.call("remove_breakpoint", address=LOOP)
+
+    # Per owner: a logpoint must not hide another client's plain breakpoint.
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.3)
+        plant_loop(m)
+        dap = Dap(port)
+        dap.session()
+        d = data(m.call("set_breakpoint", address=LOOP + 2, log="m"))
+        case("alone, nothing else stops it", d.get("alsoStops") is False, str(d))
+        r = dap.request("setInstructionBreakpoints",
+                        {"breakpoints": [{"instructionReference": hex(LOOP + 2)}]})
+        case("DAP arms the same address", r["body"]["breakpoints"][0]["verified"] is True, str(r))
+        d = data(m.call("set_breakpoint", address=LOOP + 2, log="m"))
+        case("alsoStops sees the other client", d.get("alsoStops") is True, str(d))
+        before = log_lines(m).get("cursor", 0)
+        m.call("set_registers", pc=LOOP)
+        r = data(m.call("run_frames", frames=2))
+        case("a DAP breakpoint at the same address still stops the machine",
+             r.get("reason") == "breakpoint", str(r)[:200])
+        case("the logpoint still printed", len(log_lines(m, before).get("entries", [])) >= 1)
+        dap.request("setInstructionBreakpoints", {"breakpoints": []})
+        dap.close()
+
+    # An HTTP client's lease ending releases its logpoints.
+    with HttpMcp(env={"X16_MCP_LEASE_MS": "500"}) as m:
+        m.init()
+        plant_loop(m)
+        m.call("set_breakpoint", address=LOOP, log="leased")
+        time.sleep(1.2)
+        case("a lease ending releases its logpoint",
+             not data(m.call("list_breakpoints")).get("breakpoints"))
+
+    # Read-only: reading the log is available and changes nothing.
+    with Mcp(["-mcp-readonly"]) as m:
+        m.init()
+        time.sleep(0.2)
+        d = data(m.call("read_log"))
+        case("read_log works under -mcp-readonly", d.get("entries") == [], str(d)[:160])
+        case("set_breakpoint does not", is_error(m.call("set_breakpoint", address=LOOP, log="x")))
+
+
+def logpoint_run(with_log):
+    """A deterministic machine, stepped to a fixed frame, then run under a loop."""
+    with Mcp(["-deterministic", "-seed", "1", "-sound", "none"]) as m:
+        m.init()
+        m.call("pause")
+        f0 = data(m.call("get_status")).get("frame", 0)
+        m.call("run_frames", frames=600 - f0, timeoutMs=30000)
+        frame = data(m.call("get_status")).get("frame")
+        # A counting loop, IRQs live, so interrupts and machine state keep moving.
+        m.call("write_memory", address=0x0900, hex="EE10094C0009")
+        m.call("set_registers", pc=0x0900)
+        if with_log:
+            m.call("set_breakpoint", address=0x0900, log="n={byte[$0910]} X={X} v={vbyte[0]} "
+                                                         "d={byte[$9F23]} t={byte[$9F04]} s={byte[$9F27]}")
+        hashes = []
+        for _ in range(10):
+            hashes.append(data(m.call("run_frames", frames=10, hash=True, timeoutMs=30000)).get("hash"))
+        last = data(m.call("get_status")).get("frame")
+        logged = data(m.call("read_log")).get("cursor", 0)
+        return frame, last, hashes, logged
+
+
+def test_logpoint_determinism():
+    print("logpoint determinism")
+    f_a, l_a, plain, n_a = logpoint_run(False)
+    f_b, l_b, logged, n_b = logpoint_run(True)
+    case("both reach the same frame first", f_a == 600 and f_b == 600, f"{f_a} {f_b}")
+    case("and end on the same frame", l_a == l_b and l_a == 700, f"{l_a} {l_b}")
+    case("the plain run logged nothing", n_a == 0, str(n_a))
+    case("the logpoint fired", n_b > 1000, str(n_b))
+    case("every hash was taken", all(plain) and len(plain) == 10, str(plain[:2]))
+    case("a logpoint leaves the machine state hash identical", plain == logged,
+         next((f"frame {600 + 10 * (i + 1)}" for i, (x, y) in enumerate(zip(plain, logged)) if x != y), ""))
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -3587,7 +3737,8 @@ def main():
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
-                 test_dump_breakpoint, test_evaluate, test_readonly):
+                 test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
+                 test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
