@@ -734,10 +734,13 @@ void draw_interrupts()
 // is the DAP server's job, out of scope here).
 // ----------------------------------------------------------------------------
 struct WatchEntry {
-    uint16_t addr = 0x0000;
-    int      len  = 1;   // bytes to show, 1..16
-    int      bank = -1;  // x16 RAM/ROM bank, -1 == current
+    uint32_t addr = 0x0000;
+    int      len  = 1;     // bytes to show, 1..16
+    int      bank = -1;    // x16 RAM/ROM bank, -1 == current
+    bool     vram = false; // VERA video RAM, which is not in the CPU map
 };
+
+uint32_t watch_addr_mask(bool vram) { return vram ? 0x1FFFFu : 0xFFFFu; }
 
 // The list outlives the collapsing header so a request that arrives while the
 // header is closed is still honoured (and pops the header open to show it).
@@ -748,22 +751,24 @@ void draw_watch()
     // "Add to watch" from the memory view's context menu, possibly a range.
     bool added = false;
     {
-        uint16_t waddr = 0;
+        uint32_t waddr = 0;
         int16_t  wbank = -1;
-        uint16_t wlen  = 1;
-        if (debug_ui_take_watch_request(&waddr, &wbank, &wlen)) {
+        uint32_t wlen  = 1;
+        bool     wvram = false;
+        if (debug_ui_take_watch_request(&waddr, &wbank, &wlen, &wvram)) {
             // A watch row shows at most 16 bytes, so a longer range becomes
             // several consecutive rows rather than being silently truncated.
-            uint16_t left = wlen ? wlen : 1;
-            uint16_t at   = waddr;
+            uint32_t left = wlen ? wlen : 1;
+            uint32_t at   = waddr;
             while (left > 0 && g_watch_entries.size() < 64) {
                 WatchEntry w;
                 w.addr = at;
                 w.len  = left > 16 ? 16 : (int)left;
                 w.bank = wbank;
+                w.vram = wvram;
                 g_watch_entries.push_back(w);
-                at   = (uint16_t)(at + w.len);
-                left = (uint16_t)(left - w.len);
+                at    = (at + (uint32_t)w.len) & watch_addr_mask(wvram);
+                left -= (uint32_t)w.len;
             }
             added = true;
         }
@@ -785,10 +790,11 @@ void draw_watch()
     ImGui::SameLine();
     ImGui::TextDisabled("address-based watches (bank -1 = current)");
 
-    if (ImGui::BeginTable("watch_tbl", 6,
+    if (ImGui::BeginTable("watch_tbl", 7,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
                               ImGuiTableFlags_SizingFixedFit | DBGUI_TABLE_FLAGS_RESIZABLE)) {
         ImGui::TableSetupColumn("");
+        ImGui::TableSetupColumn("Space");
         ImGui::TableSetupColumn("Addr");
         ImGui::TableSetupColumn("Len");
         ImGui::TableSetupColumn("Bank");
@@ -809,28 +815,45 @@ void draw_watch()
             }
 
             ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(hex_width(4));
-            ImGui::InputScalar("##addr", ImGuiDataType_U16, &w.addr, nullptr, nullptr,
-                               "%04X", kHexFlags);
+            ImGui::SetNextItemWidth(ImGui::CalcTextSize("VRAM").x + ImGui::GetFrameHeight() * 2.0f);
+            int space = w.vram ? 1 : 0;
+            if (ImGui::Combo("##space", &space, "CPU\0VRAM\0")) {
+                w.vram = space == 1;
+                w.addr &= watch_addr_mask(w.vram);
+            }
 
             ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(hex_width(w.vram ? 5 : 4));
+            uint32_t typed = w.addr;
+            if (ImGui::InputScalar("##addr", ImGuiDataType_U32, &typed, nullptr, nullptr,
+                                   w.vram ? "%05X" : "%04X", kHexFlags)) {
+                w.addr = typed & watch_addr_mask(w.vram);
+            }
+
+            ImGui::TableSetColumnIndex(3);
             ImGui::SetNextItemWidth(hex_width(3));
             ImGui::InputInt("##len", &w.len, 0);
             if (w.len < 1) w.len = 1;
             if (w.len > 16) w.len = 16;
 
-            ImGui::TableSetColumnIndex(3);
+            ImGui::TableSetColumnIndex(4);
             ImGui::SetNextItemWidth(hex_width(3));
+            ImGui::BeginDisabled(w.vram);
             ImGui::InputInt("##bank", &w.bank, 0);
+            ImGui::EndDisabled();
+            if (w.vram) {
+                ImGui::SetItemTooltip("VRAM has no banks.");
+            }
             if (w.bank < -1) w.bank = -1;
             if (w.bank > 255) w.bank = 255;
 
             uint8_t bytes[16];
             for (int j = 0; j < w.len; j++) {
-                bytes[j] = debug_ui_read6502((uint16_t)(w.addr + j), 0, (int16_t)w.bank);
+                bytes[j] = w.vram ? video_space_read((w.addr + (uint32_t)j) & 0x1FFFF)
+                                  : debug_ui_read6502((uint16_t)(w.addr + j), 0, (int16_t)w.bank);
             }
 
-            ImGui::TableSetColumnIndex(4);
+            ImGui::TableSetColumnIndex(5);
             // Editable: type new hex bytes and the whole span is written back
             // through the normal write path (I/O side effects, watchpoints),
             // honouring this row's bank. Only commit on Enter/focus-loss so
@@ -866,7 +889,13 @@ void draw_watch()
                         v = (uint8_t)((hi << 4) | lo);
                         p++;
                     }
-                    debug_ui_write6502((uint16_t)(w.addr + j), v, 0, (int16_t)w.bank);
+                    if (w.vram) {
+                        const uint32_t at = (w.addr + (uint32_t)j) & 0x1FFFF;
+                        video_space_write(at, v);
+                        debug_server_note_memory_changed(true, at, 1);
+                    } else {
+                        debug_ui_write6502((uint16_t)(w.addr + j), v, 0, (int16_t)w.bank);
+                    }
                 }
             }
             if (ImGui::IsItemHovered() && !ImGui::IsItemActive()) {
@@ -877,7 +906,7 @@ void draw_watch()
                 dbgui_hover_value_tooltip("Watch value (little-endian) - editable", hv, hb);
             }
 
-            ImGui::TableSetColumnIndex(5);
+            ImGui::TableSetColumnIndex(6);
             uint32_t val = 0;
             for (int j = 0; j < w.len && j < 4; j++) {
                 val |= (uint32_t)bytes[j] << (8 * j); // little-endian

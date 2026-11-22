@@ -1142,6 +1142,9 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsHitConditionalBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsLogPoints", true);
     cJSON_AddBoolToObject(caps, "supportsExceptionInfoRequest", true);
+    cJSON_AddBoolToObject(caps, "supportsCancelRequest", true);
+    cJSON_AddBoolToObject(caps, "supportsClipboardContext", true);
+    cJSON_AddBoolToObject(caps, "supportsValueFormattingOptions", true);
     cJSON *filters = cJSON_AddArrayToObject(caps, "exceptionBreakpointFilters");
     for (int i = 0; i < NUM_STOP_FILTERS; i++) {
         cJSON *f = cJSON_CreateObject();
@@ -1260,10 +1263,54 @@ static int handle_dap_threads(int seq) {
     return 0;
 }
 
+// ─── Value formatting ────────────────────────────────────────────────
+
+// What a request's `format` asks for. With no `hex`, a value shows both bases.
+typedef enum { DAP_VALUE_BOTH, DAP_VALUE_HEX, DAP_VALUE_DEC } dap_value_format_t;
+
+static dap_value_format_t dap_value_format(const cJSON *args) {
+    const cJSON *f = args ? cJSON_GetObjectItemCaseSensitive(args, "format") : NULL;
+    const cJSON *h = cJSON_IsObject(f) ? cJSON_GetObjectItemCaseSensitive(f, "hex") : NULL;
+    if (!cJSON_IsBool(h)) return DAP_VALUE_BOTH;
+    return cJSON_IsTrue(h) ? DAP_VALUE_HEX : DAP_VALUE_DEC;
+}
+
+// Reduces a leading "$hex (decimal)" to the base asked for, in place, keeping
+// whatever follows it. Text of any other shape has no second base to drop: flags,
+// a "(label)", a console listing. A bank:addr has no decimal form of its own, so
+// it stays as it is when decimal is asked for.
+static void dap_apply_value_format(char *s, dap_value_format_t fmt) {
+    if (fmt == DAP_VALUE_BOTH || *s != '$') return;
+    char *p = s + 1;
+    bool banked = false;
+    while (isxdigit((unsigned char)*p) || *p == ':') {
+        if (*p == ':') banked = true;
+        p++;
+    }
+    if (p == s + 1 || p[0] != ' ' || p[1] != '(' || !isdigit((unsigned char)p[2])) return;
+    char *d = p + 2;
+    while (isdigit((unsigned char)*d)) d++;
+    const bool equate = !strncmp(d, ", equate)", 9);
+    if (*d != ')' && !equate) return;
+
+    if (fmt == DAP_VALUE_HEX) {
+        if (equate) memmove(p + 2, d + 2, strlen(d + 2) + 1);
+        else        memmove(p, d + 1, strlen(d + 1) + 1);
+    } else if (!banked) {
+        const size_t digits = (size_t)(d - (p + 2));
+        const char *rest = d + (equate ? 9 : 1);
+        char *tail = s + digits + (equate ? 9 : 0);
+        memmove(s, p + 2, digits);
+        memmove(tail, rest, strlen(rest) + 1);
+        if (equate) memcpy(s + digits, " (equate)", 9);
+    }
+}
+
 // Build a DAP stack frame object for a code address. `bank` is the 65C816
 // program bank (0 on the 65C02); it makes the instructionPointerReference a
 // full 24-bit address so disassembly opens in the right bank on GS.
-static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_current) {
+static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_current,
+                                dap_value_format_t fmt) {
     cJSON *frame = cJSON_CreateObject();
     cJSON_AddNumberToObject(frame, "id", id);
 
@@ -1285,8 +1332,12 @@ static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_cur
     char        name_buf[80];
     if (dbg_info_frame_label(site, ram_bank, &label, &label_at)) {
         const unsigned offset = (uint16_t)(addr - label_at);
-        if (offset) snprintf(name_buf, sizeof(name_buf), "%s+%u (%s)", label, offset, addr_text);
-        else        snprintf(name_buf, sizeof(name_buf), "%s (%s)", label, addr_text);
+        if (offset && fmt == DAP_VALUE_HEX)
+            snprintf(name_buf, sizeof(name_buf), "%s+$%X (%s)", label, offset, addr_text);
+        else if (offset)
+            snprintf(name_buf, sizeof(name_buf), "%s+%u (%s)", label, offset, addr_text);
+        else
+            snprintf(name_buf, sizeof(name_buf), "%s (%s)", label, addr_text);
     } else {
         snprintf(name_buf, sizeof(name_buf), "%s", addr_text);
     }
@@ -1349,8 +1400,9 @@ static int handle_dap_stack_trace(int seq, cJSON *args) {
     cJSON *frames = cJSON_CreateArray();
     int    first, last;
     stack_window(startFrame, levels, nf, &first, &last);
+    const dap_value_format_t fmt = dap_value_format(args);
     for (int i = first; i < last; i++) {
-        cJSON_AddItemToArray(frames, build_stack_frame(i + 1, addrs[i], regs.k, i == 0));
+        cJSON_AddItemToArray(frames, build_stack_frame(i + 1, addrs[i], regs.k, i == 0, fmt));
     }
     cJSON_AddItemToObject(body, "stackFrames", frames);
     cJSON_AddNumberToObject(body, "totalFrames", nf);
@@ -1710,6 +1762,13 @@ static int handle_dap_variables(int seq, cJSON *args) {
         }
     }
 
+    const dap_value_format_t fmt = dap_value_format(args);
+    if (fmt != DAP_VALUE_BOTH) {
+        cJSON *var;
+        cJSON_ArrayForEach(var, vars) {
+            dap_apply_value_format(cJSON_GetObjectItemCaseSensitive(var, "value")->valuestring, fmt);
+        }
+    }
     cJSON_AddItemToObject(body, "variables", vars);
     send_dap_response(seq, "variables", true, body);
     return 0;
@@ -2478,6 +2537,69 @@ static bool dap_eval_expression(const char *text, char *out, size_t n) {
     return true;
 }
 
+// The console's listings, as much of each as fits in `size`.
+static void dap_text_bp_list(char *out, size_t size) {
+    int len = 0;
+    const int n = debug_bp_count();
+    len += snprintf(out + len, size - len, "%d breakpoints:", n);
+    for (int i = 0; i < n && len < (int)size - 16; i++) {
+        const struct breakpoint *b = debug_bp_at(i);
+        char at[16];
+        dap_fmt_bp(at, sizeof at, b->pc, b->bank, b->x16Bank);
+        len += snprintf(out + len, size - len, " %s%s", at, b->enabled ? "" : "(off)");
+    }
+}
+
+static void dap_text_watch_list(char *out, size_t size) {
+    int len = 0;
+    int n   = debug_wp_count();
+    len += snprintf(out + len, size - len, "%d watchpoints:", n);
+    for (int i = 0; i < n && len < (int)size - 20; i++) {
+        const struct watchpoint *wp = debug_wp_at(i);
+        if (!wp) break;
+        len += snprintf(out + len, size - len,
+                        wp->space == DEBUG_WP_SPACE_VRAM ? " vram:%05X(%u)" : " $%04X(%u)",
+                        (unsigned)wp->addr, (unsigned)wp->len);
+    }
+}
+
+// vram ADDR [COUNT]: VERA VRAM bytes (17-bit address), at most `max` of them.
+static void dap_text_vram(const char *arg, int max, char *out, size_t size) {
+    char *endp;
+    uint32_t addr = (uint32_t)strtoul(arg, &endp, 16);
+    int count = 1;
+    if (*endp == ' ') count = (int)strtoul(endp + 1, NULL, 10);
+    if (count < 1) count = 1;
+    if (count > max) count = max;
+    int len = 0;
+    len += snprintf(out + len, size - len, "$%05X:", addr);
+    for (int i = 0; i < count && len < (int)size - 5; i++) {
+        uint8_t val = video_space_read((addr + i) & 0x1FFFF);
+        len += snprintf(out + len, size - len, " %02X", val);
+    }
+}
+
+#define DAP_EVAL_VRAM_CONSOLE 128
+#define DAP_EVAL_VRAM_WHOLE   0x20000
+
+// The listings a console reply cuts short, in full. NULL for anything else, whose
+// reply is already whole. The caller frees it.
+static char *dap_eval_clipboard(const char *expr) {
+    const bool bps = !strcmp(expr, "bp_list");
+    const bool wps = !strcmp(expr, "watch_list");
+    const bool vram = !strncmp(expr, "vram ", 5);
+    if (!bps && !wps && !vram) return NULL;
+    const size_t size = bps ? (size_t)debug_bp_count() * 16 + 32
+                      : wps ? (size_t)debug_wp_count() * 32 + 32
+                            : (size_t)DAP_EVAL_VRAM_WHOLE * 3 + 32;
+    char *out = (char *)malloc(size);
+    if (!out) return NULL;
+    if (bps)      dap_text_bp_list(out, size);
+    else if (wps) dap_text_watch_list(out, size);
+    else          dap_text_vram(expr + 5, DAP_EVAL_VRAM_WHOLE, out, size);
+    return out;
+}
+
 static int handle_dap_evaluate(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "evaluate", "missing arguments");
@@ -2497,6 +2619,17 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     if (!from_console && dap_eval_changes_state(expr)) {
         send_dap_error_response(seq, "evaluate", "this command only runs from the debug console");
         return 0;
+    }
+    if (ctx_item && cJSON_IsString(ctx_item) && !strcmp(ctx_item->valuestring, "clipboard")) {
+        char *whole = dap_eval_clipboard(expr);
+        if (whole) {
+            cJSON *full = cJSON_CreateObject();
+            cJSON_AddStringToObject(full, "result", whole);
+            cJSON_AddNumberToObject(full, "variablesReference", 0);
+            free(whole);
+            send_dap_response(seq, "evaluate", true, full);
+            return 0;
+        }
     }
 
     // Parse expression: $XXXX = memory peek, register names, bp_* commands
@@ -2573,16 +2706,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     } else if (strcmp(expr, "bp_list") == 0) {
         // Each address in the form bp_add takes, so a bank pin is visible: it
         // used to print $A000 for a breakpoint pinned to bank 3.
-        int len = 0;
-        const int n = debug_bp_count();
-        len += snprintf(result + len, sizeof(result) - len, "%d breakpoints:", n);
-        for (int i = 0; i < n && len < (int)sizeof(result) - 16; i++) {
-            const struct breakpoint *b = debug_bp_at(i);
-            char at[16];
-            dap_fmt_bp(at, sizeof at, b->pc, b->bank, b->x16Bank);
-            len += snprintf(result + len, sizeof(result) - len, " %s%s",
-                            at, b->enabled ? "" : "(off)");
-        }
+        dap_text_bp_list(result, sizeof result);
     } else if (strcmp(expr, "bp_clear") == 0) {
         // Typed by a person, and "clear all breakpoints" means all of them --
         // including any set with -bp or F9. The core's own clear takes the
@@ -2656,33 +2780,12 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         else
             snprintf(result, sizeof(result), "no watchpoint at $%04X", addr);
     } else if (!strcmp(expr, "watch_list")) {
-        int len = 0;
-        int n   = debug_wp_count();
-        len += snprintf(result + len, sizeof(result) - len, "%d watchpoints:", n);
-        for (int i = 0; i < n && len < (int)sizeof(result) - 20; i++) {
-            const struct watchpoint *wp = debug_wp_at(i);
-            if (!wp) break;
-            len += snprintf(result + len, sizeof(result) - len,
-                            wp->space == DEBUG_WP_SPACE_VRAM ? " vram:%05X(%u)" : " $%04X(%u)",
-                            (unsigned)wp->addr, (unsigned)wp->len);
-        }
+        dap_text_watch_list(result, sizeof result);
     } else if (!strcmp(expr, "watch_clear")) {
         debug_wp_clear_all();   // the console command clears everyone's, ours included
         snprintf(result, sizeof(result), "all watchpoints cleared");
     } else if (strncmp(expr, "vram ", 5) == 0) {
-        // vram ADDR [COUNT] — read VERA VRAM bytes (17-bit address)
-        char *endp;
-        uint32_t addr = (uint32_t)strtoul(expr + 5, &endp, 16);
-        int count = 1;
-        if (*endp == ' ') count = (int)strtoul(endp + 1, NULL, 10);
-        if (count < 1) count = 1;
-        if (count > 128) count = 128;
-        int len = 0;
-        len += snprintf(result + len, sizeof(result) - len, "$%05X:", addr);
-        for (int i = 0; i < count && len < (int)sizeof(result) - 5; i++) {
-            uint8_t val = video_space_read((addr + i) & 0x1FFFF);
-            len += snprintf(result + len, sizeof(result) - len, " %02X", val);
-        }
+        dap_text_vram(expr + 5, DAP_EVAL_VRAM_CONSOLE, result, sizeof result);
     } else if (!strncmp(expr, "vera_line", 9) && (expr[9] == ' ' || !expr[9])) {
         if (!dap_eval_vera_line(expr[9] ? expr + 10 : "", result, sizeof(result))) {
             send_dap_error_response(seq, "evaluate", result);
@@ -2709,6 +2812,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         send_dap_error_response(seq, "evaluate", result);
         return 0;
     }
+    dap_apply_value_format(result, dap_value_format(args));
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "result", result);
@@ -5554,6 +5658,7 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
     if (!ok) { send_dap_error_response(seq, "setVariable", "cannot set this variable"); return 0; }
     char result[40];
     snprintf(result, sizeof result, "$%0*X (%u)", digits, stored, stored);
+    dap_apply_value_format(result, dap_value_format(args));
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "value", result);
     cJSON_AddNumberToObject(body, "variablesReference", 0);
@@ -5671,6 +5776,7 @@ static int handle_dap_set_expression(int seq, cJSON *args) {
     }
     char result[40];
     snprintf(result, sizeof result, "$%0*X (%u)", digits, stored, stored);
+    dap_apply_value_format(result, dap_value_format(args));
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "value", result);
     cJSON_AddNumberToObject(body, "variablesReference", 0);
@@ -9251,6 +9357,48 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── cancel ──────────────────────────────────────────────────────────
+//
+// Only an x16/step or x16/runTo can still be unanswered. Cancelling one answers
+// it with `cancelled` and leaves the machine stopped where it got to, as a pause
+// would. Anything else, already answered or never seen, is left alone.
+static int handle_dap_cancel(int seq, cJSON *args) {
+    const cJSON *id = args ? cJSON_GetObjectItemCaseSensitive(args, "requestId") : NULL;
+    int request = 0;
+    if (cJSON_IsNumber(id) && id->valuedouble >= 1 && id->valuedouble <= 0x7FFFFFFF &&
+        id->valuedouble == (int)id->valuedouble)
+        request = (int)id->valuedouble;
+
+    // A step that has already stopped reports what happened instead.
+    step_poll();
+    const bool is_step   = request && step.pending && step.caller == DBG_CALLER_DAP &&
+                           step.seq == request;
+    const bool is_run_to = request && run_to.pending && run_to.seq == request;
+
+    if (is_step)
+        send_dap_error_response_full(request, "x16/step", "cancelled", "the step was cancelled",
+                                     NULL, NULL);
+    if (is_run_to)
+        send_dap_error_response_full(request, "x16/runTo", "cancelled", "the run-to was cancelled",
+                                     NULL, NULL);
+    send_dap_response(seq, "cancel", true, NULL);
+
+    // Sending can drop the client, and dropping it has already released both.
+    if ((!is_step && !is_run_to) || dap_reply_lost()) return 0;
+
+    if (is_step) {
+        // Still pending here, so that a step that asked for no events gets none.
+        DEBUGBreakToDebugger();
+        step.pending = false;
+        audio_events_end();
+    } else {
+        run_to.pending = false;
+        DEBUGCancelStepFor(DEBUG_OWNER_DAP_SOURCE);
+        DEBUGBreakToDebugger();
+    }
+    return 1;
+}
+
 // Run one request, whoever it came from. Returns 1 if execution mode was changed.
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
@@ -9290,6 +9438,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "stepIn"))        result = handle_dap_step_in(seq, args);
     else if (!strcmp(cmd, "stepOut"))       result = handle_dap_step_out(seq, args);
     else if (!strcmp(cmd, "pause"))         result = handle_dap_pause(seq, args);
+    else if (!strcmp(cmd, "cancel"))        result = handle_dap_cancel(seq, args);
     else if (!strcmp(cmd, "disconnect"))    result = handle_dap_disconnect(seq, args);
     else if (!strcmp(cmd, "restart"))       result = handle_dap_restart(seq, args);
     else if (!strcmp(cmd, "gotoTargets"))   result = handle_dap_goto_targets(seq, args);

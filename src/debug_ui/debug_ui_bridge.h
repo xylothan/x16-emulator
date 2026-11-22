@@ -279,9 +279,11 @@ bool debug_ui_peek_goto(uint16_t *addr, uint8_t *bank);
 // to ask for a watch is wherever you found the address (the memory view's
 // context menu, including over a drag-selected range). The CPU panel drains
 // this once per frame and splits anything longer than one watch row. bank is an
-// x16 RAM/ROM bank, or -1 for "whatever is currently mapped".
+// x16 RAM/ROM bank, or -1 for "whatever is currently mapped". A VRAM watch has a
+// 17-bit address and no bank.
 void debug_ui_request_watch(uint16_t addr, int16_t bank, uint16_t len);
-bool debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len);
+void debug_ui_request_vram_watch(uint32_t addr, uint32_t len);
+bool debug_ui_take_watch_request(uint32_t *addr, int16_t *bank, uint32_t *len, bool *vram);
 
 // ─── System control (main.c / smc.c / cpu) ─────────────────────────────────
 // Reset is deferred to the emulator-loop boundary via the SMC reset flag (the

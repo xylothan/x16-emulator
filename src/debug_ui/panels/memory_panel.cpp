@@ -688,6 +688,19 @@ vram_context_menu(const MemoryEditor &ed, MemSelection &sel)
     }
     ImGui::Separator();
 
+    if (ImGui::MenuItem(n > 1 ? "Add range to watch" : "Add to watch")) {
+        debug_ui_request_vram_watch(start, len);
+    }
+    if (ImGui::IsItemHovered()) {
+        if (n > 1) {
+            ImGui::SetTooltip("Add %d bytes from VRAM $%05X to the CPU panel's watch list.\n"
+                              "Ranges over 16 bytes become several rows.",
+                              (int)n, (unsigned)start);
+        } else {
+            ImGui::SetTooltip("Add VRAM $%05X to the CPU panel's watch list.", (unsigned)start);
+        }
+    }
+
     if (ImGui::MenuItem("Copy address")) {
         char buf[24];
         if (n > 1)
