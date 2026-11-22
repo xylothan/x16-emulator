@@ -14,7 +14,6 @@ static unsigned fifo_cnt;
 
 static uint8_t ctrl;
 static uint8_t rate;
-static uint8_t loop;
 
 static uint8_t volume_lut[16] = {0, 1, 2, 3, 4, 5, 6, 8, 11, 14, 18, 23, 30, 38, 49, 64};
 
@@ -38,13 +37,6 @@ fifo_reset(void)
 	fifo_cnt   = 0;
 }
 
-static void
-fifo_restart(void)
-{
-	fifo_rdidx = 0;
-	fifo_cnt = fifo_wridx;
-}
-
 void
 pcm_reset(void)
 {
@@ -61,16 +53,8 @@ pcm_reset(void)
 void
 pcm_write_ctrl(uint8_t val)
 {
-	if ((val & 0xc0) == 0xc0) {
-		loop = true;
-	} else {
-		loop = false;
-		if (val & 0x80) {
-			fifo_reset();
-		}
-	}
-	if (val & 0x40) {
-		fifo_restart();
+	if (val & 0x80) {
+		fifo_reset();
 	}
 	ctrl = val & 0x3F;
 }
@@ -91,7 +75,7 @@ pcm_read_ctrl(void)
 void
 pcm_write_rate(uint8_t val)
 {
-	rate = (val > 128) ? (256 - val) : val;
+	rate = val;
 }
 
 uint8_t
@@ -190,9 +174,6 @@ pcm_render(int16_t *buf, unsigned num_samples)
 						break;
 					}
 				}
-				if (loop && fifo_cnt == 0) {
-					fifo_restart();
-				}
 			}
 		}
 		*(buf++) = (int16_t)((int32_t)cur_l * volume_lut[ctrl & 0xF] / 64);
@@ -217,7 +198,6 @@ pcm_debug_get_state(struct pcm_debug_state *out)
 	}
 	out->ctrl         = ctrl;
 	out->rate         = rate;
-	out->loop         = loop != 0;
 	out->fifo_cnt     = fifo_cnt;
 	out->fifo_rdidx   = fifo_rdidx;
 	out->fifo_wridx   = fifo_wridx;
@@ -270,7 +250,7 @@ pcm_debug_scope_predict(int16_t *dest_l, int16_t *dest_r, unsigned num_samples)
 	unsigned n = (num_samples > PCM_SCOPE_SAMPLES) ? PCM_SCOPE_SAMPLES : num_samples;
 
 	// Everything pcm_render() mutates, saved so the projection leaves no trace.
-	// ctrl/rate/loop are only touched by register writes, so they stay put.
+	// ctrl and rate are only touched by register writes, so they stay put.
 	uint8_t  saved_fifo[PCM_FIFO_SIZE];
 	memcpy(saved_fifo, fifo, sizeof(fifo));
 	const unsigned saved_wridx = fifo_wridx;
@@ -282,8 +262,8 @@ pcm_debug_scope_predict(int16_t *dest_l, int16_t *dest_r, unsigned num_samples)
 	const unsigned saved_armed = scope_armed;
 	scope_armed = 0; // keep the projection out of the live capture ring
 
-	// Render through the real path in chunks, so the waveform, the FIFO drain
-	// order and the loop-restart behaviour all match live playback exactly.
+	// Render through the real path in chunks, so the waveform and the FIFO
+	// drain order match live playback exactly.
 	int16_t chunk[128 * 2];
 	unsigned done = 0;
 	while (done < n) {
@@ -312,8 +292,10 @@ pcm_debug_scope_predict(int16_t *dest_l, int16_t *dest_r, unsigned num_samples)
 
 // ─── Save states ─────────────────────────────────────────────────────────────
 //
-// The FIFO and its pointers, the control, rate and loop registers, the current
-// output sample and the rate accumulator. The scope capture is the debugger's.
+// The FIFO and its pointers, the control and rate registers, the current output
+// sample and the rate accumulator. The scope capture is the debugger's. The byte
+// after the rate is reserved: it held a loop flag, and keeping it lets existing
+// states load.
 
 void
 pcm_state_save(ss_writer *w)
@@ -325,7 +307,7 @@ pcm_state_save(ss_writer *w)
 	ss_put_u32(w, fifo_cnt);
 	ss_put_u8(w, ctrl);
 	ss_put_u8(w, rate);
-	ss_put_u8(w, loop);
+	ss_put_u8(w, 0); // reserved
 	ss_put_u16(w, (uint16_t)cur_l);
 	ss_put_u16(w, (uint16_t)cur_r);
 	ss_put_u8(w, phase);
@@ -342,7 +324,7 @@ pcm_state_load(ss_reader *r)
 	fifo_cnt   = ss_get_u32(r);
 	ctrl       = ss_get_u8(r);
 	rate       = ss_get_u8(r);
-	loop       = ss_get_u8(r);
+	(void)ss_get_u8(r); // reserved
 	cur_l      = (int16_t)ss_get_u16(r);
 	cur_r      = (int16_t)ss_get_u16(r);
 	phase      = ss_get_u8(r);
