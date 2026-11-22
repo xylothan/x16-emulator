@@ -1768,8 +1768,8 @@ def test_wire_format():
                  err["format"] == "{text}" and "{nope}" in err.get("variables", {}).get("text", ""), str(err))
 
             caps = d.req("initialize", {"adapterID": "x"})
-            case("no value formatting is claimed",
-                 "supportsValueFormattingOptions" not in ((caps or {}).get("body") or {}), str(caps)[:120])
+            case("value formatting is claimed",
+                 ((caps or {}).get("body") or {}).get("supportsValueFormattingOptions") is True, str(caps)[:120])
 
 
 def test_step_granularity():
@@ -1792,6 +1792,212 @@ def test_step_granularity():
                 case(f"{cmd} moves a source line", pc == 0x0803, hex(pc))
                 pc = step(cmd, granularity="instruction")
                 case(f"{cmd} by instruction moves one", pc == 0x0801, hex(pc))
+
+
+def responses_to(d, seq):
+    return [m for m in d.msgs if m.get("type") == "response" and m.get("request_seq") == seq]
+
+
+def is_cancelled(r):
+    return bool(r) and r.get("success") is False and r.get("message") == "cancelled"
+
+
+def test_cancel():
+    print("cancel")
+    with Emu() as e:
+        d = e.d
+        init = next(m for m in d.msgs if m.get("command") == "initialize")
+        case("advertised", init["body"].get("supportsCancelRequest") is True)
+        plant(d)
+
+        done = d.send("x16/step", {"frames": 1})
+        first = d.response_to(done)
+        case("a step runs to its answer", bool(first and first["success"]))
+        for name, args in (("no arguments", None), ("empty", {}), ("unknown id", {"requestId": 99999}),
+                           ("completed id", {"requestId": done}), ("progressId", {"progressId": "p"}),
+                           ("both", {"requestId": 99999, "progressId": "p"}), ("bad id", {"requestId": "x"}),
+                           ("zero id", {"requestId": 0}), ("negative id", {"requestId": -1}),
+                           ("fractional id", {"requestId": 1.5}), ("huge id", {"requestId": 1e30})):
+            r = d.req("cancel", args)
+            case(f"{name}: succeeds", bool(r and r["success"]), str(r)[:120])
+        d.drain(0.1)
+        case("a completed request is answered once", len(responses_to(d, done)) == 1)
+        case("harmless: still paused", d.status().get("paused") is True)
+
+        start = len(d.msgs)
+        step = d.send("x16/step", {"frames": 1000000})
+        time.sleep(0.1)
+        cancel = d.req("cancel", {"requestId": step})
+        s = d.response_to(step)
+        case("step: answered cancelled", is_cancelled(s), str(s)[:160])
+        case("step: cancel succeeds", bool(cancel and cancel["success"]))
+        case("step: machine stopped", d.status().get("paused") is True)
+        d.drain(0.2)
+        case("step: answered once", len(responses_to(d, step)) == 1)
+        case("step: no events unless asked",
+             not [m for m in d.msgs[start:] if m.get("event") in ("stopped", "continued")])
+        at = d.status().get("cycles")
+        d.drain(0.2)
+        case("step: stays stopped", d.status().get("cycles") == at)
+        r = d.req("x16/step", {"frames": 1})
+        case("step: the next step runs", bool(r and r["success"]) and r["body"]["framesRun"] == 1, str(r)[:120])
+        r = d.req("cancel", {"requestId": step})
+        case("step: cancelling again is harmless", bool(r and r["success"]) and len(responses_to(d, step)) == 1)
+
+        start = len(d.msgs)
+        step = d.send("x16/step", {"frames": 1000000, "events": True})
+        d.wait_event("continued", start)
+        d.req("cancel", {"requestId": step})
+        case("step with events: answered cancelled", is_cancelled(d.response_to(step)))
+        ev = d.wait_event("stopped", start)
+        case("step with events: stopped is sent", bool(ev))
+        kinds = [m.get("command") or m.get("event") for m in d.msgs[start:]
+                 if m.get("event") == "stopped" or m.get("command") in ("x16/step", "cancel")]
+        case("step with events: responses come first", kinds[:3] == ["x16/step", "cancel", "stopped"], str(kinds))
+
+        set_reg(d, "PC", "$0800")
+        start = len(d.msgs)
+        run = d.send("x16/runTo", {"address": "$0810", "timeoutMs": 30000})
+        time.sleep(0.1)
+        cancel = d.req("cancel", {"requestId": run})
+        r = d.response_to(run)
+        case("runTo: answered cancelled", is_cancelled(r), str(r)[:160])
+        case("runTo: cancel succeeds", bool(cancel and cancel["success"]))
+        case("runTo: stopped is sent", bool(d.wait_event("stopped", start)))
+        case("runTo: machine stopped", d.status().get("paused") is True)
+        d.drain(0.2)
+        case("runTo: answered once", len(responses_to(d, run)) == 1)
+
+        set_reg(d, "PC", "$0810")
+        start = len(d.msgs)
+        d.req("continue", {"threadId": 1})
+        d.drain(0.4)
+        case("runTo: the target is retracted",
+             d.status().get("paused") is False and not [m for m in d.msgs[start:] if m.get("event") == "stopped"])
+
+
+def test_clipboard():
+    print("clipboard context")
+    with Emu() as e:
+        d = e.d
+        init = next(m for m in d.msgs if m.get("command") == "initialize")
+        case("advertised", init["body"].get("supportsClipboardContext") is True)
+        d.pause()
+
+        def result(expr, ctx):
+            r = d.req("evaluate", {"expression": expr, "context": ctx})
+            return r["body"]["result"] if r and r["success"] else None
+
+        for expr in ("A", "PC", "$0000", "A+1", "regs_all", "vram 1B000 4"):
+            case(f"{expr}: as the console shows it", result(expr, "clipboard") == result(expr, "repl"))
+
+        for i in range(200):
+            d.req("evaluate", {"expression": f"bp_add {0x2000 + i:04X}", "context": "repl"})
+        short, whole = result("bp_list", "repl"), result("bp_list", "clipboard")
+        case("bp_list: the console is cut", len(short.split()) - 2 < 200, str(len(short.split())))
+        case("bp_list: the clipboard is whole", len(whole.split()) - 2 == 200, str(len((whole or "").split())))
+        case("bp_list: same start", whole.startswith(short))
+
+        d.req("evaluate", {"expression": "watch_add 0400 2", "context": "repl"})
+        case("watch_list: reads", "$0400(2)" in (result("watch_list", "clipboard") or ""))
+
+        short, whole = result("vram 1B000 300", "repl"), result("vram 1B000 300", "clipboard")
+        case("vram: the console is capped", len(short.split()) - 1 == 128, str(len(short.split())))
+        case("vram: the clipboard is whole", len(whole.split()) - 1 == 300, str(len(whole.split())))
+        case("vram: same start", whole.startswith(short))
+        whole = result("vram 0 999999", "clipboard")
+        case("vram: at most all of it", bool(whole) and len(whole.split()) - 1 == 0x20000)
+
+
+def test_value_format():
+    print("value format")
+    with tempfile.TemporaryDirectory() as t:
+        _, dbg = write_debug_info(t)
+        with open(dbg, newline="\n") as f:
+            text = f.read().replace("sym=1,", "sym=2,")
+        text += 'sym\tid=1,name="confequ",addrsize=zeropage,size=1,scope=0,def=0,type=equ,val=0x12\n'
+        with open(dbg, "w", newline="\n") as f:
+            f.write(text)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            d = e.d
+            init = next(m for m in d.msgs if m.get("command") == "initialize")
+            case("advertised", init["body"].get("supportsValueFormattingOptions") is True)
+            plant(d, a="$12")
+            set_reg(d, "PC", "$0813")
+            put_mem(d, 0x0002, [0x34, 0x12])
+
+            def var(ref, name, fmt=None):
+                args = {"variablesReference": ref}
+                if fmt is not None:
+                    args["format"] = fmt
+                r = d.req("variables", args)
+                return next((v["value"] for v in r["body"]["variables"] if v["name"] == name), None)
+
+            def ev(expr, fmt=None):
+                args = {"expression": expr, "context": "watch"}
+                if fmt is not None:
+                    args["format"] = fmt
+                r = d.req("evaluate", args)
+                return r["body"]["result"] if r and r["success"] else None
+
+            HEX, DEC = {"hex": True}, {"hex": False}
+            for fmt, want in ((None, "$12 (18)"), ({}, "$12 (18)"), ({"hex": "yes"}, "$12 (18)"),
+                              (HEX, "$12"), (DEC, "18")):
+                case(f"variables A {fmt}", var(1, "A", fmt) == want, str(var(1, "A", fmt)))
+                case(f"evaluate A {fmt}", ev("A", fmt) == want, str(ev("A", fmt)))
+
+            case("variables keep the address", var(4, "R0", HEX) == "$1234  @$0002", str(var(4, "R0", HEX)))
+            case("variables decimal keeps it", var(4, "R0", DEC) == "4660  @$0002", str(var(4, "R0", DEC)))
+            shown = var(1, "P (Status)")
+            case("flags: hex unchanged", var(1, "P (Status)", HEX) == shown)
+            case("flags: decimal unchanged", var(1, "P (Status)", DEC) == shown)
+            row = var(2, "$00-$0F")
+            case("zero page rows unchanged", var(2, "$00-$0F", HEX) == row and var(2, "$00-$0F", DEC) == row)
+
+            case("evaluate: peek", ev("$0002", HEX) == "$34", str(ev("$0002", HEX)))
+            case("evaluate: expression", ev("A+1", HEX) == "$13" and ev("A+1", DEC) == "19")
+            case("evaluate: label unchanged", ev("conflabel", HEX) == "$0803 (label)" == ev("conflabel"))
+            case("evaluate: equate hex", ev("confequ", HEX) == "$0012 (equate)", str(ev("confequ", HEX)))
+            case("evaluate: equate decimal", ev("confequ", DEC) == "18 (equate)", str(ev("confequ", DEC)))
+            case("evaluate: equate default", ev("confequ") == "$0012 (18, equate)", str(ev("confequ")))
+            labels = os.path.join(t, "banked.sym")
+            with open(labels, "w", newline="\n") as f:
+                f.write("al 00A000 .bankedsym\n")
+            d.req("x16/loadSymbols", {"path": labels, "bank": 3})
+            case("evaluate: bank:addr default", ev("bankedsym+1") == "$03:A001 (40961)", str(ev("bankedsym+1")))
+            case("evaluate: bank:addr hex", ev("bankedsym+1", HEX) == "$03:A001", str(ev("bankedsym+1", HEX)))
+            case("evaluate: bank:addr decimal unchanged", ev("bankedsym+1", DEC) == ev("bankedsym+1"))
+            for expr in ("bp_list", "watch_list", "vram 1B000 4", "regs_all"):
+                case(f"evaluate: {expr} unchanged", ev(expr, HEX) == ev(expr) == ev(expr, DEC))
+
+            r = d.req("setVariable", {"variablesReference": 1, "name": "A", "value": "$21", "format": HEX})
+            case("setVariable hex", bool(r and r["success"]) and r["body"]["value"] == "$21", str(r)[:120])
+            r = d.req("setVariable", {"variablesReference": 1, "name": "A", "value": "$21", "format": DEC})
+            case("setVariable decimal", bool(r and r["success"]) and r["body"]["value"] == "33", str(r)[:120])
+            r = d.req("setVariable", {"variablesReference": 1, "name": "A", "value": "$21"})
+            case("setVariable default", bool(r and r["success"]) and r["body"]["value"] == "$21 (33)", str(r)[:120])
+            r = d.req("setVariable", {"variablesReference": 1, "name": "A", "value": var(1, "A", HEX)})
+            case("a hex value reads back", bool(r and r["success"]) and r["body"]["value"] == "$21 (33)")
+            r = d.req("setVariable", {"variablesReference": 1, "name": "A", "value": var(1, "A", DEC)})
+            case("a decimal value reads back", bool(r and r["success"]) and r["body"]["value"] == "$21 (33)")
+
+            r = d.req("setExpression", {"expression": "byte[$0040]", "value": "$99", "format": HEX})
+            case("setExpression hex", bool(r and r["success"]) and r["body"]["value"] == "$99", str(r)[:120])
+            r = d.req("setExpression", {"expression": "byte[$0040]", "value": "$99", "format": DEC})
+            case("setExpression decimal", bool(r and r["success"]) and r["body"]["value"] == "153", str(r)[:120])
+            r = d.req("setExpression", {"expression": "byte[$0040]", "value": "$99"})
+            case("setExpression default", bool(r and r["success"]) and r["body"]["value"] == "$99 (153)", str(r)[:120])
+
+            def frame(fmt=None):
+                args = {"threadId": 1}
+                if fmt is not None:
+                    args["format"] = fmt
+                return d.req("stackTrace", args)["body"]["stackFrames"][0]["name"]
+
+            set_reg(d, "PC", "$0805")
+            case("stackTrace default", frame() == "conflabel+2 ($0805)", frame())
+            case("stackTrace hex", frame(HEX) == "conflabel+$2 ($0805)", frame(HEX))
+            case("stackTrace decimal", frame(DEC) == frame())
 
 
 # --- main -------------------------------------------------------------------
@@ -1817,7 +2023,8 @@ def main():
                  test_exception_stops, test_saved_interrupt_setting,
                  test_data_breakpoints, test_data_breakpoint_bytes, test_stack_frames, test_line_base, test_uri_paths,
                  test_no_debug, test_disassemble, test_read_memory, test_wire_format,
-                 test_step_granularity, test_refresh_not_opted_in, test_refresh_memory, test_refresh_invalidated,
+                 test_step_granularity, test_cancel, test_clipboard, test_value_format,
+                 test_refresh_not_opted_in, test_refresh_memory, test_refresh_invalidated,
                  test_refresh_loaded_source, test_refresh_kernal_load):
         try:
             test()

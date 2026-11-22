@@ -38,6 +38,8 @@ int                    s_runto_addr = 0; // hex address for the "Run to" box
 int  s_add_addr         = 0;
 int  s_add_bank         = 0;
 bool s_add_bank_touched = false; // has the user chosen a bank by hand?
+char s_add_symbol[128]  = "";    // see add_symbol_row()
+char s_add_symbol_err[200] = ""; // why the last one was refused
 
 // A breakpoint is identified by (pc, bank, x16Bank), because the same $A000 in
 // two RAM banks is two different breakpoints. Keying on (pc, bank) alone
@@ -371,11 +373,70 @@ add_breakpoint_row(void)
 	}
 }
 
+// Add a breakpoint by name, through the resolver the debug server uses for
+// "sym:". A bare token here is always a name, which is why this is a box of its
+// own: the address box above reads the same text as hex.
+bool
+add_symbol_breakpoint(const char *text, char *err, size_t errn)
+{
+	dbg_resolved_t r;
+	if (!dbg_info_resolve(text, &r, err, errn)) {
+		return false;
+	}
+	struct breakpoint bp = {};
+	if (!debug_bp_from_ref((long)r.addr, r.bank >= 0 ? r.bank : DEBUG_BANK_ANY, 0, &bp)) {
+		snprintf(err, errn, "\"%s\" is not an address a breakpoint can use", text);
+		return false;
+	}
+	// A symbol with no bank of its own means the bank mapped now, as the gutter does.
+	if (bp.x16Bank == DEBUG_BANK_ANY) {
+		bp.x16Bank = debug_current_x16_bank(bp.pc, bp.bank);
+	}
+	if (!DEBUGAddBreakPoint(bp)) {
+		snprintf(err, errn, "out of memory; no breakpoint added");
+		return false;
+	}
+	return true;
+}
+
+void
+add_symbol_row(void)
+{
+	ImGui::TextUnformatted("Break at symbol");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_field_width("some_long_label+$1000"));
+	const bool submit = ImGui::InputTextWithHint("##bpsymbol", "name, name+4, $C000, 04:C000",
+	                                             s_add_symbol, sizeof s_add_symbol,
+	                                             ImGuiInputTextFlags_EnterReturnsTrue);
+	if (ImGui::IsItemEdited()) {
+		s_add_symbol_err[0] = '\0';
+	}
+	ImGui::SetItemTooltip("A label or equate, with an optional offset, or an address.\n"
+	                      "Press Enter to add.");
+
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!s_add_symbol[0]);
+	const bool add = ImGui::Button("Add##bpsymbol");
+	ImGui::EndDisabled();
+
+	if ((add || submit) && s_add_symbol[0]) {
+		if (add_symbol_breakpoint(s_add_symbol, s_add_symbol_err, sizeof s_add_symbol_err)) {
+			s_add_symbol[0]     = '\0';
+			s_add_symbol_err[0] = '\0';
+			sync_tracked(); // show it in the table below this frame, not next
+		}
+	}
+	if (s_add_symbol_err[0]) {
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_add_symbol_err);
+	}
+}
+
 void
 draw_breakpoints()
 {
-	// --- Add by address ---------------------------------------------------
+	// --- Add by address or symbol -----------------------------------------
 	add_breakpoint_row();
+	add_symbol_row();
 
 	ImGui::Separator();
 

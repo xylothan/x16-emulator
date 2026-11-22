@@ -1041,10 +1041,23 @@ stop debugging.
 Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threads`, `stackTrace`,
 `scopes`, `variables`, `setVariable`, `setBreakpoints`, `setFunctionBreakpoints`,
 `setInstructionBreakpoints`, `setDataBreakpoints`, `setExceptionBreakpoints`, `exceptionInfo`, `breakpointLocations`,
-`continue`, `next`, `stepIn`, `stepOut`, `pause`, `goto`, `gotoTargets`, `stepInTargets`,
+`continue`, `next`, `stepIn`, `stepOut`, `pause`, `cancel`, `goto`, `gotoTargets`, `stepInTargets`,
 `evaluate`, `setExpression`, `completions`, `readMemory`, `writeMemory`, `disassemble`,
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
+
+`cancel` with a `requestId` ends a pending `x16/step` or `x16/runTo`: that request is answered with
+`success: false` and `message: "cancelled"`, and the machine stops where it got to. An id that has
+already been answered, or was never used, changes nothing, and the server sends no progress events
+for a `progressId` to name.
+
+`evaluate` takes the `clipboard` context, which runs nothing a hover could not and returns
+`bp_list`, `watch_list` and `vram ADDR COUNT` whole, where the console caps them.
+
+`format` is honoured on `variables`, `evaluate`, `setVariable`, `setExpression` and `stackTrace`.
+Values default to both bases, `$12 (18)`. `{"hex": true}` gives `$12` and `{"hex": false}` gives
+`18`. Flags, labels, console listings and `bank:addr` values have no second base and are unchanged,
+and in a stack frame's name `hex` applies to the offset from the label.
 
 Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sprites`, `x16/palette`, `x16/tilemap`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,

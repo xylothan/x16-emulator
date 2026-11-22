@@ -1608,9 +1608,10 @@ debug_ui_follow_stop_location(void)
 // The watch list lives in the CPU panel, but the natural place to ask for a
 // watch is wherever you found the address. Same one-frame latch as the goto
 // request above so panel render order doesn't matter.
-static uint16_t s_watch_req_addr    = 0;
+static uint32_t s_watch_req_addr    = 0;
 static int16_t  s_watch_req_bank    = -1;
-static uint16_t s_watch_req_len     = 1;
+static uint32_t s_watch_req_len     = 1;
+static bool     s_watch_req_vram    = false;
 static bool     s_watch_req_pending = false;
 
 extern "C" void
@@ -1619,11 +1620,22 @@ debug_ui_request_watch(uint16_t addr, int16_t bank, uint16_t len)
     s_watch_req_addr    = addr;
     s_watch_req_bank    = bank;
     s_watch_req_len     = len ? len : 1;
+    s_watch_req_vram    = false;
+    s_watch_req_pending = true;
+}
+
+extern "C" void
+debug_ui_request_vram_watch(uint32_t addr, uint32_t len)
+{
+    s_watch_req_addr    = addr & 0x1FFFF;
+    s_watch_req_bank    = -1;
+    s_watch_req_len     = len ? len : 1;
+    s_watch_req_vram    = true;
     s_watch_req_pending = true;
 }
 
 extern "C" bool
-debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len)
+debug_ui_take_watch_request(uint32_t *addr, int16_t *bank, uint32_t *len, bool *vram)
 {
     if (!s_watch_req_pending) {
         return false;
@@ -1631,6 +1643,7 @@ debug_ui_take_watch_request(uint16_t *addr, int16_t *bank, uint16_t *len)
     if (addr) *addr = s_watch_req_addr;
     if (bank) *bank = s_watch_req_bank;
     if (len)  *len  = s_watch_req_len;
+    if (vram) *vram = s_watch_req_vram;
     s_watch_req_pending = false;
     return true;
 }
