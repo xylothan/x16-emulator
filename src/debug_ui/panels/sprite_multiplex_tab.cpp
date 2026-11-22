@@ -567,6 +567,8 @@ draw_sprite_multiplex_tab(const uint32_t pal[256])
     // this flag: a DAP client can arm tracing on its own, and this checkbox
     // would otherwise sit unchecked while data was already being recorded.
     s_enabled = sprite_trace_owner_wants(SPRITE_TRACE_OWNER_UI);
+    // A debug client can set this too.
+    s_burst_gap = (int)sprite_trace_get_burst_gap();
 
     if (ImGui::Checkbox("Record sprite raster activity", &s_enabled)) {
         s_alloc_failed = !sprite_trace_arm(SPRITE_TRACE_OWNER_UI, s_enabled);
@@ -580,13 +582,13 @@ draw_sprite_multiplex_tab(const uint32_t pal[256])
     if (ImGui::SliderInt("Burst gap", &s_burst_gap, 8, 2048, "%d cyc"))
         sprite_trace_set_burst_gap((uint32_t)s_burst_gap);
 
-    // Live, not s_enabled: tracing can be running because a DAP client armed
+    // Live, not s_enabled: tracing can be running because a debug client armed
     // it even while this checkbox reads unchecked, and the memory really is
     // allocated either way.
     if (sprite_trace_active) {
         ImGui::SameLine();
-        if (sprite_trace_owner_wants(SPRITE_TRACE_OWNER_DAP) && !s_enabled) {
-            ImGui::TextDisabled("(active - armed by a DAP client, %zu KB)",
+        if (!s_enabled) {
+            ImGui::TextDisabled("(active - armed by a debug client, %zu KB)",
                                 sprite_trace_memory_usage() / 1024);
         } else {
             ImGui::TextDisabled("(%zu KB)", sprite_trace_memory_usage() / 1024);

@@ -284,6 +284,9 @@ static perf_owner_t caller_perf_owner(void) {
 static vera_bw_owner_t caller_bw_owner(void) {
     return current_caller == DBG_CALLER_MCP ? VERA_BW_OWNER_MCP : VERA_BW_OWNER_DAP;
 }
+static sprite_trace_owner_t caller_sprite_owner(void) {
+    return current_caller == DBG_CALLER_MCP ? SPRITE_TRACE_OWNER_MCP : SPRITE_TRACE_OWNER_DAP;
+}
 
 // A DAP request is answered by its own response. One from elsewhere leaves the
 // editor believing the machine is halted, so the flag stays set and the resume
@@ -4787,8 +4790,8 @@ static int handle_x16_sprite_mux_stats(int seq, cJSON *args) {
     (void)args;
     // Same rationale as handle_x16_perf_stats: asking for statistics is
     // asking for them to be collected, so attach-poll-read just works.
-    if (!sprite_trace_owner_wants(SPRITE_TRACE_OWNER_DAP) && !sprite_trace_active) {
-        sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, true);
+    if (!sprite_trace_owner_wants(caller_sprite_owner()) && !sprite_trace_active) {
+        sprite_trace_arm(caller_sprite_owner(), true);
     }
 
     cJSON *body = cJSON_CreateObject();
@@ -4816,7 +4819,7 @@ static int handle_x16_sprite_mux_config(int seq, cJSON *args) {
 
     cJSON *item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
     if (cJSON_IsBool(item)) {
-        if (!sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, cJSON_IsTrue(item))) {
+        if (!sprite_trace_arm(caller_sprite_owner(), cJSON_IsTrue(item))) {
             send_dap_error_response(seq, "x16/spriteMuxConfig",
                                     "could not allocate the trace buffers");
             return 0;
@@ -7082,6 +7085,7 @@ static const char *const callable_commands[] = {
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
+    "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -7133,6 +7137,7 @@ void debug_server_release_frontend(void) {
     }
     perf_budget_arm(PERF_OWNER_MCP, false);
     vera_bandwidth_arm(VERA_BW_OWNER_MCP, false);
+    sprite_trace_arm(SPRITE_TRACE_OWNER_MCP, false);
     if (capture_is_live() && cap_serial() == mcp_capture_serial) cap_stop();
 
     // A headless machine is never left halted with nobody able to restart it.

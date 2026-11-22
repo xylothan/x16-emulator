@@ -1045,7 +1045,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `disconnect` and `terminate`.
 
 Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
-`x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
+`x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
 
@@ -1468,6 +1468,7 @@ debugging it.
 | VERA | `get_vera_state` |
 | Files and speed | `hash_memory`, `dump_memory`, `load_prg`, `set_warp` |
 | Performance | `perf_stats`, `perf_config`, `perf_history`, `host_perf`, `profile_capture` |
+| Devices | `get_sdcard`, `sprite_mux_stats`, `sprite_mux_config` |
 | Other | `save_state`, `load_state` |
 
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
@@ -1483,6 +1484,11 @@ depends on are refused while one records.
 `perf_history` `dump` and `profile_capture` `export` write only inside `-fsroot`, or the dump folder
 when there is none, and replace a file only with `overwrite`. `profile_capture` `load` reads under
 the same rule as `load_symbols`. DAP clients are not restricted.
+
+`get_sdcard` reports `attached: false` when there is no card. It does not offer `x16/sdcard`'s
+`reindex`, which can discard per-file counts and would build an index the I/O panel has turned off.
+`sprite_mux_stats` and `sprite_mux_config` `enabled` are that client's own claim on recording, which
+ends with its session. `burstGap` is one global value, shared with the panel and not put back.
 
 `get_stack` guesses callers from the hardware stack, because the CPU keeps no frame pointer. It
 recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's
