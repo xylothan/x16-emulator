@@ -23,6 +23,15 @@
 extern "C" {
 #endif
 
+// Interrupts and traps a client can ask to stop on. Each interrupt's bit is
+// 1 << its vector, the mask cpu_irq_take_entered_kinds() reports. COP has no
+// filter. STP is not an interrupt, so it takes the one bit no vector uses.
+#define DEBUG_STOP_BRK (1u << 0x6)
+#define DEBUG_STOP_NMI (1u << 0xA)
+#define DEBUG_STOP_IRQ (1u << 0xE)
+#define DEBUG_STOP_STP (1u << 0xF)
+#define DEBUG_STOP_ALL (DEBUG_STOP_BRK | DEBUG_STOP_NMI | DEBUG_STOP_IRQ | DEBUG_STOP_STP)
+
 // A bank selector, stored on a breakpoint or watchpoint.
 //
 // Banks only mean anything at $A000-$FFFF: the RAM window follows the RAM bank,
@@ -293,6 +302,25 @@ bool     debug_bp_dump_info(int pc, uint8_t bank, int x16Bank, debug_owner_t *ow
                             uint32_t *writes, bool *full);
 uint32_t debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank);
 extern uint8_t (*debug_bp_dump_read)(uint32_t addr, int x16Bank);
+
+// Stop filters, one set per owner, replaced whole. The machine stops on the union
+// of them. The debugger window's saved "break on every interrupt" setting is a
+// separate input to debug_stop_on_entry(), so no filter can change it.
+void     debug_stop_filter_set(debug_owner_t owner, uint16_t mask);
+uint16_t debug_stop_filter_get(debug_owner_t owner);
+uint16_t debug_stop_filters(void);
+
+typedef enum {
+	DEBUG_ENTRY_NO_STOP,
+	DEBUG_ENTRY_INTERRUPT,   // the saved setting, or a step following an interrupt
+	DEBUG_ENTRY_EXCEPTION,   // a client's filter
+} debug_entry_stop_t;
+
+// What an interrupt entry means. `kinds` is the mask of entries, `halted` that
+// something else has already stopped the machine in the same instruction,
+// `break_on_interrupt` the saved setting, `follow_step` a step being followed.
+debug_entry_stop_t debug_stop_on_entry(uint16_t kinds, bool halted, bool break_on_interrupt,
+                                       bool follow_step);
 
 // Logpoints: a firing calls debug_bp_log_fire instead of stopping for that
 // owner. The machine still stops if any other owner on the entry wants a stop.

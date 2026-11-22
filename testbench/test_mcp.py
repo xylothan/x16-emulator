@@ -192,7 +192,7 @@ LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_st
                 "sprite_mux_config"}
 MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
                 "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
-                "set_warp", "perf_stats", "sprite_mux_stats"}
+                "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on"}
 
 
 def test_tools():
@@ -3670,6 +3670,103 @@ def test_logpoint_determinism():
          next((f"frame {600 + 10 * (i + 1)}" for i, (x, y) in enumerate(zip(plain, logged)) if x != y), ""))
 
 
+def stop_on_wait_booted(m):
+    end = time.time() + 20
+    while time.time() < end and data(m.call("get_status")).get("frame", 0) < 200:
+        time.sleep(0.05)
+
+
+def stop_on_run(m, hex_code, pc=0x0810):
+    m.call("pause")
+    m.call("write_memory", address=0x1000, hex="00")
+    m.call("write_memory", address=pc, hex=hex_code)
+    status = data(m.call("get_registers"))["cpu"]["status"]
+    m.call("set_registers", pc=pc, status=status | 0x04)
+    last = data(m.call("get_status")).get("stopId")
+    m.call("continue")
+    return data(m.call("wait_for_stop", sinceStopId=last, timeoutMs=3000))
+
+
+def stop_on_runs_on(m):
+    last = data(m.call("get_status")).get("stopId")
+    m.call("continue")
+    d = data(m.call("wait_for_stop", sinceStopId=last, timeoutMs=500))
+    running = d.get("completed") is not True
+    m.call("pause")
+    count = data(m.call("read_memory", address=0x1000, length=1)).get("hex", "00")
+    return running and count == "01"
+
+
+def test_stop_on():
+    print("set_stop_on")
+    with Mcp() as m:
+        m.init()
+        stop_on_wait_booted(m)
+        d = data(m.call("set_stop_on"))
+        case("nothing armed by default", d.get("filters") == [] and d.get("armed") == [], str(d))
+        r = m.call("set_stop_on", filters=["brk", "nope"])
+        case("an unknown filter is refused", is_error(r), str(r)[:160])
+        case("and changes nothing", data(m.call("set_stop_on")).get("filters") == [])
+        case("filters must be a list", is_error(m.call("set_stop_on", filters="brk")))
+        case("an unknown argument is refused", is_error(m.call("set_stop_on", on=["brk"])))
+
+        d = data(m.call("set_stop_on", filters=["stp"]))
+        case("arming reports it", d.get("filters") == ["stp"] and d.get("armed") == ["stp"], str(d))
+        case("the result has the run state", "paused" in d and "stopReason" in d, str(d))
+        d = stop_on_run(m, "DBA9018D00104C1108")
+        case("stp: stops", d.get("completed") is True and d.get("stopReason") == "exception", str(d))
+        s = d.get("stop", {})
+        case("stp: names it", s.get("kind") == "stp" and s.get("address") == 0x0810 and s.get("programBank") == 0, str(s))
+        case("stp: no vector", "vector" in s and s["vector"] is None, str(s))
+        case("stp: the reason is on every result",
+             data(m.call("get_status")).get("stopReason") == "exception")
+        case("stp: resuming runs on, no second stop", stop_on_runs_on(m))
+
+        m.call("set_stop_on", filters=["brk"])
+        m.call("pause")
+        m.call("write_memory", address=0x0316, hex="2008")
+        m.call("write_memory", address=0x0820, hex="A9018D00104C2008")
+        d = stop_on_run(m, "0000")
+        s = d.get("stop", {})
+        case("brk: stops", d.get("stopReason") == "exception" and s.get("kind") == "brk", str(d))
+        case("brk: vector and address", s.get("vector") == 0xFFFE and s.get("address") == 0x0810, str(s))
+        case("brk: resuming runs the handler, no second stop", stop_on_runs_on(m))
+
+        d = data(m.call("set_stop_on", filters=[]))
+        case("[] clears it", d.get("filters") == [] and d.get("armed") == [], str(d))
+
+        m.call("set_stop_on", filters=["irq"])
+        m.call("pause")
+        status = data(m.call("get_registers"))["cpu"]["status"]
+        m.call("set_registers", pc=0x0820, status=status & ~0x04)
+        d = data(m.call("run_frames", frames=5))
+        case("irq: ends a run of frames", d.get("stopReason") == "exception" and
+             d.get("stop", {}).get("kind") == "irq", str(d)[:200])
+        m.call("set_stop_on", filters=[])
+        m.call("continue")
+
+    port = free_port()
+    with HttpMcp(["-debugport", str(port)], env={"X16_MCP_LEASE_MS": "700"}) as m:
+        m.init()
+        m.call("get_status")
+        dap = Dap(port)
+        dap.session()
+        dap.request("setExceptionBreakpoints", {"filters": ["brk"]})
+        d = data(m.call("set_stop_on", filters=["irq"]))
+        case("armed is every client's", d.get("filters") == ["irq"] and sorted(d.get("armed", [])) == ["brk", "irq"],
+             str(d))
+        d = data(m.call("set_stop_on", filters=[]))
+        case("clearing leaves the other client's", d.get("armed") == ["brk"], str(d))
+        m.call("set_stop_on", filters=["nmi"])
+        time.sleep(1.3)
+        d = data(m.call("set_stop_on"))
+        case("a lease expiring releases them", d.get("filters") == [] and d.get("armed") == ["brk"], str(d))
+        dap.close()
+        time.sleep(0.3)
+        d = data(m.call("set_stop_on"))
+        case("a DAP session ending releases its own", d.get("armed") == [], str(d))
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -3738,7 +3835,7 @@ def main():
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
-                 test_readonly):
+                 test_stop_on, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

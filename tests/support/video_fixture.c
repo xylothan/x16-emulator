@@ -90,6 +90,12 @@ void video_win32_remove_move_hook(SDL_Window *window) { (void)window; }
 // ─── Debugger overlay ───────────────────────────────────────────────────────
 
 void DEBUGBreakToDebugger(void) { }
+bool DEBUGBreakOnStp(uint16_t address, uint8_t bank, bool attached)
+{
+	(void)address;
+	(void)bank;
+	return attached;
+}
 void DEBUGPause(void) { }
 bool DEBUGIsRunning(void) { return true; }
 void DEBUGFreeUI(void) { }

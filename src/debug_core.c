@@ -171,6 +171,46 @@ owner_bit(debug_owner_t owner)
 }
 
 // ---------------------------------------------------------------------------
+//  Stop filters
+// ---------------------------------------------------------------------------
+
+static uint16_t stop_filter[DEBUG_OWNER_COUNT];
+static uint16_t stop_filter_union;
+
+void
+debug_stop_filter_set(debug_owner_t owner, uint16_t mask)
+{
+	if (!owner_bit(owner))
+		return;
+	stop_filter[owner] = mask & DEBUG_STOP_ALL;
+	stop_filter_union = 0;
+	for (int i = 0; i < DEBUG_OWNER_COUNT; i++)
+		stop_filter_union |= stop_filter[i];
+}
+
+uint16_t
+debug_stop_filter_get(debug_owner_t owner)
+{
+	return owner_bit(owner) ? stop_filter[owner] : 0;
+}
+
+uint16_t
+debug_stop_filters(void)
+{
+	return stop_filter_union;
+}
+
+debug_entry_stop_t
+debug_stop_on_entry(uint16_t kinds, bool halted, bool break_on_interrupt, bool follow_step)
+{
+	if (!kinds)
+		return DEBUG_ENTRY_NO_STOP;
+	if (!halted && (kinds & stop_filter_union))
+		return DEBUG_ENTRY_EXCEPTION;
+	return (break_on_interrupt || follow_step) ? DEBUG_ENTRY_INTERRUPT : DEBUG_ENTRY_NO_STOP;
+}
+
+// ---------------------------------------------------------------------------
 //  Table management
 // ---------------------------------------------------------------------------
 
