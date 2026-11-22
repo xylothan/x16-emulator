@@ -32,6 +32,7 @@
 #include "debugger.h"
 #include "debug_core.h"
 #include "dbg_info.h"
+#include "perf_budget.h"
 #include "version.h"
 
 #ifdef _WIN32
@@ -1517,6 +1518,132 @@ static cJSON *tool_perf_stats(cJSON *args) {
     return tool_forward("x16/perfStats", args);
 }
 
+// The requests below skip a value of the wrong type, which would turn a mistake
+// into a call that quietly did less than it was asked to.
+static bool arg_bool(cJSON *args, const char *name, char *err, size_t errn) {
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, name) : NULL;
+    if (v && !cJSON_IsBool(v)) {
+        snprintf(err, errn, "'%s' must be true or false", name);
+        return false;
+    }
+    return true;
+}
+
+static bool arg_text(cJSON *args, const char *name, char *err, size_t errn) {
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, name) : NULL;
+    if (v && (!cJSON_IsString(v) || !v->valuestring[0])) {
+        snprintf(err, errn, "'%s' must be a non-empty string", name);
+        return false;
+    }
+    return true;
+}
+
+// `start` to `end`, end exclusive, in the CPU map.
+static bool arg_span(cJSON *obj, char *err, size_t errn) {
+    int start, end;
+    if (!arg_int(obj, "start", -1, 0, 0xFFFF, &start, err, errn) ||
+        !arg_int(obj, "end", -1, 0, 0xFFFF, &end, err, errn))
+        return false;
+    if (start < 0 || end <= start) {
+        snprintf(err, errn, "'start' and 'end' are required, with end above start");
+        return false;
+    }
+    return true;
+}
+
+static cJSON *tool_perf_history(cJSON *args) {
+    static const char *const span_keys[] = {"start", "end", NULL};
+    char err[200];
+    if (!arg_bool(args, "enabled", err, sizeof err) || !arg_bool(args, "reset", err, sizeof err) ||
+        !arg_bool(args, "overwrite", err, sizeof err) || !arg_text(args, "dump", err, sizeof err))
+        return tool_fail(err);
+    cJSON *caller = args ? cJSON_GetObjectItemCaseSensitive(args, "caller") : NULL;
+    if (caller) {
+        cJSON *s = cJSON_IsObject(caller) ? cJSON_GetObjectItemCaseSensitive(caller, "start") : NULL;
+        cJSON *e = cJSON_IsObject(caller) ? cJSON_GetObjectItemCaseSensitive(caller, "end") : NULL;
+        const bool off = cJSON_IsNumber(s) && cJSON_IsNumber(e) && s->valuedouble == 0 && e->valuedouble == 0;
+        if (!only_keys(caller, span_keys, "caller", err, sizeof err) ||
+            (!off && !arg_span(caller, err, sizeof err)))
+            return tool_fail(err);
+    }
+    return tool_forward("x16/perfHist", args);
+}
+
+static cJSON *tool_perf_config(cJSON *args) {
+    static const char *const zone_keys[] = {"name", "start", "end", "bank", "idle", NULL};
+    char err[200];
+    int n;
+    if (!arg_bool(args, "enabled", err, sizeof err) || !arg_bool(args, "reset", err, sizeof err) ||
+        !arg_int(args, "historyFrames", 2, 2, 65536, &n, err, sizeof err))
+        return tool_fail(err);
+    cJSON *fps = args ? cJSON_GetObjectItemCaseSensitive(args, "targetFps") : NULL;
+    if (fps && (!cJSON_IsNumber(fps) || fps->valuedouble < 1 || fps->valuedouble > 1000))
+        return tool_fail("'targetFps' must be a number from 1 to 1000");
+    cJSON *idle = args ? cJSON_GetObjectItemCaseSensitive(args, "idleMode") : NULL;
+    if (idle && (!cJSON_IsString(idle) || (strcmp(idle->valuestring, "auto") &&
+                                           strcmp(idle->valuestring, "markers") &&
+                                           strcmp(idle->valuestring, "none"))))
+        return tool_fail("'idleMode' must be \"auto\", \"markers\" or \"none\"");
+    cJSON *zones = args ? cJSON_GetObjectItemCaseSensitive(args, "zones") : NULL;
+    if (zones) {
+        if (!cJSON_IsArray(zones) || cJSON_GetArraySize(zones) > PERF_MAX_ZONES) {
+            snprintf(err, sizeof err, "'zones' must be an array of at most %d", PERF_MAX_ZONES);
+            return tool_fail(err);
+        }
+        cJSON *z;
+        cJSON_ArrayForEach(z, zones) {
+            if (!only_keys(z, zone_keys, "zone", err, sizeof err) || !arg_span(z, err, sizeof err) ||
+                !arg_int(z, "bank", -1, 0, 255, &n, err, sizeof err) ||
+                !arg_text(z, "name", err, sizeof err) || !arg_bool(z, "idle", err, sizeof err))
+                return tool_fail(err);
+        }
+    }
+    cJSON *none = args ? NULL : cJSON_CreateObject();  // no arguments is a plain read
+    cJSON *result = tool_forward("x16/perfConfig", args ? args : none);
+    cJSON_Delete(none);
+    return result;
+}
+
+static cJSON *tool_host_perf(cJSON *args) {
+    (void)args;
+    return tool_passthrough("x16/hostPerf");
+}
+
+// Answers at once with the state. A capture spans frames, so a client polls.
+static cJSON *tool_profile_capture(cJSON *args) {
+    static const char *const start_keys[] = {"frames", "seconds", "onMarker", "recorders", NULL};
+    static const char *const export_keys[] = {"folded", "json", "trace", "run", NULL};
+    char err[200];
+    int n;
+    if (!arg_bool(args, "stop", err, sizeof err) || !arg_bool(args, "overwrite", err, sizeof err) ||
+        !arg_text(args, "load", err, sizeof err) ||
+        !arg_int(args, "top", 50, 0, 100000, &n, err, sizeof err))
+        return tool_fail(err);
+    cJSON *ex = args ? cJSON_GetObjectItemCaseSensitive(args, "export") : NULL;
+    if (ex) {
+        if (!only_keys(ex, export_keys, "export", err, sizeof err)) return tool_fail(err);
+        for (const char *const *k = export_keys; *k; k++) {
+            if (!arg_text(ex, *k, err, sizeof err)) return tool_fail(err);
+        }
+    }
+    cJSON *start = args ? cJSON_GetObjectItemCaseSensitive(args, "start") : NULL;
+    if (start) {
+        if (!only_keys(start, start_keys, "start", err, sizeof err) ||
+            !arg_int(start, "frames", 1, 1, 0x7FFFFFFF, &n, err, sizeof err) ||
+            !arg_bool(start, "onMarker", err, sizeof err))
+            return tool_fail(err);
+        cJSON *secs = cJSON_GetObjectItemCaseSensitive(start, "seconds");
+        if (secs && (!cJSON_IsNumber(secs) || secs->valuedouble <= 0))
+            return tool_fail("'seconds' must be a number above 0");
+        cJSON *recs = cJSON_GetObjectItemCaseSensitive(start, "recorders");
+        if (recs && !cJSON_IsArray(recs))
+            return tool_fail("'recorders' must be an array");
+        if (ex || cJSON_HasObjectItem(args, "stop") || cJSON_HasObjectItem(args, "load"))
+            return tool_fail("'start' goes alone: poll until the state is done, then export");
+    }
+    return tool_forward("x16/capture", args);
+}
+
 static cJSON *tool_get_vera_state(cJSON *args) {
     (void)args;
     return tool_passthrough("x16/vera");
@@ -1883,6 +2010,82 @@ static const mcp_tool_t tools[] = {
       "\"description\":\"window lengths in seconds; 0 means since start\"}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_perf_stats },
+    { "perf_config",
+      "Configure the CPU budget and VERA bandwidth statistics. With no arguments, reports the "
+      "settings. 'enabled' is this client's own claim: statistics keep running while any other "
+      "client or panel wants them, and the claim ends with the session. targetFps, idleMode, "
+      "historyFrames and zones are shared with every client and the Performance panel and are "
+      "not put back afterwards. 'zones' replaces the whole list, historyFrames and 'reset' "
+      "discard history. Those are refused while a capture is recording.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"enabled\":{\"type\":\"boolean\"},"
+      "\"targetFps\":{\"type\":\"number\",\"minimum\":1,\"maximum\":1000},"
+      "\"idleMode\":{\"type\":\"string\",\"enum\":[\"auto\",\"markers\",\"none\"]},"
+      "\"historyFrames\":{\"type\":\"integer\",\"minimum\":2,\"maximum\":65536},"
+      "\"zones\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"object\",\"properties\":{"
+      "\"name\":{\"type\":\"string\"},"
+      "\"start\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},"
+      "\"end\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65535,\"description\":\"exclusive\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"idle\":{\"type\":\"boolean\"}"
+      "},\"required\":[\"start\",\"end\"],\"additionalProperties\":false}},"
+      "\"reset\":{\"type\":\"boolean\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_perf_config },
+    { "perf_history",
+      "The whole-program cycle histogram: totals, and a table of tasks called from a main loop "
+      "named by 'caller' (start, end exclusive; 0 and 0 turn it off). Applied in order: enabled "
+      "(allocates about 32 MB), caller, reset, dump. The histogram is one shared set of counters "
+      "with no owner, so these affect every client and stay as set after the session. They are "
+      "refused while a capture is recording. 'dump' writes the counts to a host file inside "
+      "-fsroot, or the dump folder when there is no -fsroot. An existing file is replaced only "
+      "with 'overwrite'. 'dumped' is the records written, or -1 if it could not be written.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"enabled\":{\"type\":\"boolean\"},"
+      "\"caller\":{\"type\":\"object\",\"properties\":{"
+      "\"start\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},"
+      "\"end\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535}"
+      "},\"required\":[\"start\",\"end\"],\"additionalProperties\":false},"
+      "\"reset\":{\"type\":\"boolean\"},"
+      "\"dump\":{\"type\":\"string\"},"
+      "\"overwrite\":{\"type\":\"boolean\",\"default\":false}"
+      "},\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_perf_history },
+    { "host_perf",
+      "Where the host's time goes per emulated frame: emulation, input, present, the debugger "
+      "UI, sleep and the debug servers, with each panel, spikes and the worst frames. Guest "
+      "cycles are in perf_stats. Totals run from the last reset, which starting a capture or loading a state does.",
+      NO_ARGS, TOOL_READ, tool_host_perf },
+    { "profile_capture",
+      "Record a stretch of running, then read where the guest's time went by routine. Always "
+      "answers at once with 'state' (idle, armed, running or done): a capture spans frames, so "
+      "call again with no arguments to poll, and keep the machine running or it never ends. "
+      "'start' takes frames, seconds, onMarker (wait for the guest to write $F8 to $9FBC) and "
+      "recorders (hist, tree, budget, vram, waterfall; default hist and tree), and goes alone. "
+      "It discards the last report and the shared histogram. 'stop' ends this client's capture; "
+      "another client's is refused, and this client's also ends with its session. 'load' shows "
+      "a saved run, from inside -fsroot (the working folder without one), the dump folder or "
+      "the -prg folder. 'export' writes the report to host files inside -fsroot, or the dump "
+      "folder when there is no -fsroot: folded stacks, json, a Chrome trace (needs waterfall) "
+      "or a run to load later. An existing file is replaced only with 'overwrite'. Each count "
+      "in 'exported' is -1 if that file could not be written. 'top' limits the report's rows.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"start\":{\"type\":\"object\",\"properties\":{"
+      "\"frames\":{\"type\":\"integer\",\"minimum\":1},"
+      "\"seconds\":{\"type\":\"number\",\"exclusiveMinimum\":0},"
+      "\"onMarker\":{\"type\":\"boolean\"},"
+      "\"recorders\":{\"type\":\"array\",\"items\":{\"enum\":[\"hist\",\"tree\",\"budget\",\"vram\",\"waterfall\"]}}"
+      "},\"additionalProperties\":false},"
+      "\"stop\":{\"type\":\"boolean\"},"
+      "\"load\":{\"type\":\"string\"},"
+      "\"export\":{\"type\":\"object\",\"properties\":{"
+      "\"folded\":{\"type\":\"string\"},\"json\":{\"type\":\"string\"},"
+      "\"trace\":{\"type\":\"string\"},\"run\":{\"type\":\"string\"}"
+      "},\"additionalProperties\":false},"
+      "\"overwrite\":{\"type\":\"boolean\",\"default\":false},"
+      "\"top\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000,\"default\":50}"
+      "},\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_profile_capture },
     { "get_vera_state",
       "VERA's internal state, which its registers do not all read back: both data ports "
       "(address, increment, prefetch, nibble) whatever ADDRSEL is, interrupts, the scanline, "

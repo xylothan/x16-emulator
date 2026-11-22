@@ -11,6 +11,7 @@ static cap_config_t config;
 static cap_end_t    end_reason;
 static uint32_t     frames;
 static double       started_at, ended_after;
+static uint32_t     serial;
 
 static double
 now_s(void)
@@ -68,6 +69,7 @@ cap_start(const cap_config_t *cfg)
 {
 	if (!cfg || cap_state_now == CAP_ARMED || cap_state_now == CAP_RUNNING)
 		return false;
+	serial++;
 	config      = *cfg;
 	frames      = 0;
 	ended_after = 0.0;
@@ -162,4 +164,10 @@ const cap_config_t *
 cap_config(void)
 {
 	return &config;
+}
+
+uint32_t
+cap_serial(void)
+{
+	return serial;
 }

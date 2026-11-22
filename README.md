@@ -1341,6 +1341,9 @@ classification works, what the bandwidth model is derived from, and where each c
 | --- | --- | --- |
 | `x16/perfStats` | optional `windows` (array of seconds, or names like `"30s"`/`"session"`), `includeZones` (default true), `includeFrames` (raw per-frame samples, oldest first) | Returns the budget, the last completed frame, rolling statistics — min/mean/p50/p95/p99/max, budget overruns and the worst one — per window, and a `bandwidth` object with VERA's VRAM traffic. Asking arms both if they were off. |
 | `x16/perfConfig` | `enabled`, `targetFps`, `idleMode` (`"auto"`/`"markers"`/`"none"`), `historyFrames`, `overrunEvents`, `zones` (array of `{name, start, end, bank, idle}`), `reset` | Configures the above. `zones` replaces the address zones wholesale. |
+| `x16/perfHist` | `enabled`, `caller` (`{start, end}`), `reset`, `dump` (path) | The whole-program cycle histogram: totals and a task table. `dump` writes the counts to a file. |
+| `x16/hostPerf` | `reset` | Where the host's time goes per emulated frame: by section and panel, with spikes and the worst frames. |
+| `x16/capture` | `start` (`{frames, seconds, onMarker, recorders}`), `stop`, `load` (path), `export` (`{folded, json, trace, run}` paths), `top` | Records a stretch of running and reports where the guest's time went by routine. Answers at once with the state; poll until it is `done`. |
 
 The **`bandwidth`** object answers the other half of "what is eating my frame?": what VERA's VRAM
 bus did, rather than what the CPU did. It reports per-layer fetches and bytes, the CPU's own
@@ -1464,11 +1467,22 @@ debugging it.
 | Screen | `get_screen`, `screenshot` |
 | VERA | `get_vera_state` |
 | Files and speed | `hash_memory`, `dump_memory`, `load_prg`, `set_warp` |
-| Other | `save_state`, `load_state`, `perf_stats` |
+| Performance | `perf_stats`, `perf_config`, `perf_history`, `host_perf`, `profile_capture` |
+| Other | `save_state`, `load_state` |
 
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
 refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
 program or update BASIC's pointers.
+
+`profile_capture` answers at once with the capture's state, so a client polls until it is `done`.
+A capture a client starts is its own to stop, and ends with its session. `perf_config`'s `enabled`
+is likewise that client's own claim. Its other settings, and everything in `perf_history`, are
+shared by all clients and the panels and are not put back when a session ends; those that a capture
+depends on are refused while one records.
+
+`perf_history` `dump` and `profile_capture` `export` write only inside `-fsroot`, or the dump folder
+when there is none, and replace a file only with `overwrite`. `profile_capture` `load` reads under
+the same rule as `load_symbols`. DAP clients are not restricted.
 
 `get_stack` guesses callers from the hardware stack, because the CPU keeps no frame pointer. It
 recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's
