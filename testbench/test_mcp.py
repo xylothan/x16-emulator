@@ -2105,6 +2105,88 @@ def test_load_prg():
             case("a missing file is refused", is_error(m.call("load_prg", path=os.path.join(tmp, "no.prg"))))
 
 
+def test_client_format():
+    print("a DAP client's line and path format")
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "prog.s").replace("\\", "/")
+        with open(source, "w") as f:
+            f.write("; one\n; two\n  nop\n")
+        path = os.path.join(tmp, "prog.prg")
+        with open(path, "wb") as f:
+            f.write(struct.pack("<H", 0x0A00) + b"\xEA" * 16)
+        with open(os.path.join(tmp, "prog.dbg"), "w") as f:
+            f.write(K_PRG_DBG.replace('name="prog.s"', f'name="{source}"')
+                    .replace("line=1,span=0", "line=3,span=0"))
+        uri = "file:///" + source.lstrip("/")
+
+        def begin(dap, editor):
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": not editor,
+                                       "columnsStartAt1": not editor,
+                                       "pathFormat": "uri" if editor else "path"})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            r = dap.request("setBreakpoints", {"source": {"path": uri if editor else source},
+                                               "breakpoints": [{"line": 2 if editor else 3}]})
+            return r["body"]["breakpoints"][0]
+
+        def views(m):
+            listed = [b for b in data(m.call("list_breakpoints")).get("breakpoints", [])
+                      if "dapId" in b]
+            row = data(m.call("disassemble", address=0x0A00, count=1)).get("instructions", [{}])[0]
+            return ([b.get("line") for b in listed], [b.get("file") for b in listed],
+                    row.get("line"), (row.get("location") or {}).get("path"))
+
+        port = free_port()
+        with Mcp(["-debugport", str(port)]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            m.call("load_prg", path=path)
+
+            dap = Dap(port)
+            case("a default client's breakpoint is verified", begin(dap, False).get("verified") is True)
+            plain = views(m)
+            case("MCP reports the source line and path",
+                 plain == ([3], [source], 3, source), str(plain))
+            dap.close()
+            time.sleep(0.3)
+
+            dap = Dap(port)
+            bp = begin(dap, True)
+            case("a 0-based, URI client's breakpoint is verified", bp.get("verified") is True, str(bp))
+            case("and is answered in its format", bp.get("line") == 2, str(bp))
+            seen = views(m)
+            case("MCP results do not take that format", seen == plain, f"{seen} != {plain}")
+
+            own = dap.request("x16/listBreakpoints")["body"]["breakpoints"]
+            own = [b for b in own if "dapId" in b]
+            case("the client's own listing keeps its format",
+                 [b.get("line") for b in own] == [2], str(own))
+            row = dap.request("disassemble", {"memoryReference": "0x0A00",
+                                              "instructionCount": 1})["body"]["instructions"][0]
+            case("and so does its own disassembly",
+                 row.get("line") == 2 and row.get("location", {}).get("path", "").startswith("file://"),
+                 str(row))
+            dap.close()
+
+        # A load made through MCP can verify the editor's breakpoint. That event is the
+        # editor's, even though an MCP request is what caused it.
+        port = free_port()
+        with Mcp(["-debugport", str(port)]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            dap = Dap(port)
+            bp = begin(dap, True)
+            case("before the load it is pending", bp.get("verified") is False, str(bp))
+            m.call("load_prg", path=path)
+            ev = dap.event("breakpoint")
+            got = ((ev or {}).get("body") or {}).get("breakpoint", {})
+            case("an event caused by MCP is in the editor's format",
+                 got.get("verified") is True and got.get("line") == 2, str(ev))
+            dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -2115,7 +2197,8 @@ def main():
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
-                 test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg):
+                 test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
+                 test_client_format):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
