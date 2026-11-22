@@ -8,6 +8,7 @@
 #include "debug_server_call.h"
 #include "mcp_server.h"
 #include "dbg_info.h"
+#include "call_stack.h"
 #include "debugger.h"
 #include "disasm.h"
 #include "code_map.h"
@@ -858,6 +859,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
 
     cJSON *caps = cJSON_CreateObject();
     cJSON_AddBoolToObject(caps, "supportsConfigurationDoneRequest", true);
+    cJSON_AddBoolToObject(caps, "supportsDelayedStackTraceLoading", true);
     cJSON_AddBoolToObject(caps, "supportsSetVariable", true);
     cJSON_AddBoolToObject(caps, "supportsRestartRequest", true);
     cJSON_AddBoolToObject(caps, "supportsTerminateRequest", true);
@@ -990,21 +992,28 @@ static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_cur
     cJSON *frame = cJSON_CreateObject();
     cJSON_AddNumberToObject(frame, "id", id);
 
+    // `addr` stays the frame's instruction pointer. Its name and line come from
+    // the instruction it is at, which for a caller is the JSR.
+    const uint16_t site = call_stack_site(is_current, addr);
+    const int      ram_bank = (int)memory_get_ram_bank();
+
     const char *src_file = NULL;
     int         src_line = 0;
-    bool        has_source = dbg_info_addr_to_source_banked(addr, (int)memory_get_ram_bank(),
-                                                            &src_file, &src_line);
+    bool        has_source = dbg_info_addr_to_source_banked(site, ram_bank, &src_file, &src_line);
+
+    char addr_text[16];
+    if (bank != 0 || is_gen2) snprintf(addr_text, sizeof(addr_text), "$%02X:%04X", bank, addr);
+    else                      snprintf(addr_text, sizeof(addr_text), "$%04X", addr);
 
     const char *label = NULL;
+    dbg_addr_t  label_at = 0;
     char        name_buf[80];
-    const char *afmt = (bank != 0 || is_gen2) ? "%s ($%02X:%04X)" : "%s ($%04X)";
-    const char *nfmt = (bank != 0 || is_gen2) ? "$%02X:%04X" : "$%04X";
-    if (dbg_info_addr_to_label(addr, &label) && label) {
-        if (bank != 0 || is_gen2) snprintf(name_buf, sizeof(name_buf), afmt, label, bank, addr);
-        else                      snprintf(name_buf, sizeof(name_buf), afmt, label, addr);
+    if (dbg_info_frame_label(site, ram_bank, &label, &label_at)) {
+        const unsigned offset = (uint16_t)(addr - label_at);
+        if (offset) snprintf(name_buf, sizeof(name_buf), "%s+%u (%s)", label, offset, addr_text);
+        else        snprintf(name_buf, sizeof(name_buf), "%s (%s)", label, addr_text);
     } else {
-        if (bank != 0 || is_gen2) snprintf(name_buf, sizeof(name_buf), nfmt, bank, addr);
-        else                      snprintf(name_buf, sizeof(name_buf), nfmt, addr);
+        snprintf(name_buf, sizeof(name_buf), "%s", addr_text);
     }
     cJSON_AddStringToObject(frame, "name", name_buf);
     // Without a source the protocol wants both at 0, whatever the client's base.
@@ -1033,47 +1042,109 @@ static cJSON *build_stack_frame(int id, uint16_t addr, uint8_t bank, bool is_cur
     return frame;
 }
 
+static uint8_t call_stack_read(uint16_t address, uint8_t bank) {
+    return debug_read6502(address, bank, USE_CURRENT_X16_BANK);
+}
+
+static int unwind_cpu_stack(uint16_t *frames) {
+    return call_stack_unwind(regs.pc, regs.sp, regs.k, regs.is65c816 && !regs.e,
+                             call_stack_read, frames);
+}
+
+// The frames a request asked for. No levels, or 0, means all that remain.
+static void stack_window(double start, double levels, int total, int *first, int *last) {
+    *first = start <= 0 ? 0 : start >= total ? total : (int)start;
+    const int left = total - *first;
+    *last = *first + (levels >= 1 && levels < left ? (int)levels : left);
+}
+
 static int handle_dap_stack_trace(int seq, cJSON *args) {
-    int startFrame = 0, levels = 0;
+    double startFrame = 0, levels = 0;
     if (args) {
         cJSON *sf = cJSON_GetObjectItemCaseSensitive(args, "startFrame");
-        if (sf && cJSON_IsNumber(sf)) startFrame = (int)sf->valuedouble;
+        if (sf && cJSON_IsNumber(sf)) startFrame = sf->valuedouble;
         cJSON *lv = cJSON_GetObjectItemCaseSensitive(args, "levels");
-        if (lv && cJSON_IsNumber(lv)) levels = (int)lv->valuedouble;
+        if (lv && cJSON_IsNumber(lv)) levels = lv->valuedouble;
     }
 
-    // Heuristically unwind the hardware stack (no frame pointer on 6502): frame 0
-    // is the current PC, then scan for return-address pairs preceded by a JSR.
-    uint16_t addrs[64];
-    int      nf = 0;
-    addrs[nf++] = regs.pc;
-
-    bool     native = regs.is65c816 && !regs.e;
-    uint32_t sp     = regs.sp;
-    uint32_t start  = native ? (sp + 1) : (0x100 + (sp & 0xFF) + 1);
-    uint32_t end    = native ? (sp + 1 + 256) : 0x200;
-    for (uint32_t a = start; a + 1 < end && nf < 64;) {
-        uint8_t  lo     = debug_read6502((uint16_t)a, 0, USE_CURRENT_X16_BANK);
-        uint8_t  hi     = debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK);
-        uint16_t pushed = (uint16_t)(lo | (hi << 8));
-        uint8_t  opc    = debug_read6502((uint16_t)(pushed - 2), regs.k, USE_CURRENT_X16_BANK);
-        if (opc == 0x20) { addrs[nf++] = (uint16_t)(pushed + 1); a += 2; }
-        else             { a += 1; }
-    }
+    uint16_t addrs[CALL_STACK_MAX];
+    const int nf = unwind_cpu_stack(addrs);
 
     cJSON *body   = cJSON_CreateObject();
     cJSON *frames = cJSON_CreateArray();
-    int    total  = nf;
-    if (startFrame < 0) startFrame = 0;
-    if (startFrame > nf) startFrame = nf;
-    int    last   = (levels > 0) ? (startFrame + levels) : nf;
-    if (last > nf) last = nf;
-    for (int i = startFrame; i < last; i++) {
+    int    first, last;
+    stack_window(startFrame, levels, nf, &first, &last);
+    for (int i = first; i < last; i++) {
         cJSON_AddItemToArray(frames, build_stack_frame(i + 1, addrs[i], regs.k, i == 0));
     }
     cJSON_AddItemToObject(body, "stackFrames", frames);
-    cJSON_AddNumberToObject(body, "totalFrames", total);
+    cJSON_AddNumberToObject(body, "totalFrames", nf);
     send_dap_response(seq, "stackTrace", true, body);
+    return 0;
+}
+
+static bool stack_arg_ok(const cJSON *v) {
+    return !v || (cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= CALL_STACK_MAX &&
+                  v->valuedouble == (int)v->valuedouble);
+}
+
+// The same unwind as stackTrace, as flat fields rather than a display name.
+static int handle_x16_call_stack(int seq, cJSON *args) {
+    static const char cmd[] = "x16/callStack";
+    cJSON *sf = args ? cJSON_GetObjectItemCaseSensitive(args, "startFrame") : NULL;
+    cJSON *lv = args ? cJSON_GetObjectItemCaseSensitive(args, "levels") : NULL;
+    if (!stack_arg_ok(sf) || !stack_arg_ok(lv)) {
+        char msg[80];
+        snprintf(msg, sizeof msg, "'startFrame' and 'levels' are whole numbers from 0 to %d",
+                 CALL_STACK_MAX);
+        send_dap_error_response(seq, cmd, msg);
+        return 0;
+    }
+
+    uint16_t addrs[CALL_STACK_MAX];
+    const int nf = unwind_cpu_stack(addrs);
+    const int ram_bank = (int)memory_get_ram_bank();
+    int first, last;
+    stack_window(sf ? sf->valuedouble : 0, lv ? lv->valuedouble : 0, nf, &first, &last);
+
+    cJSON *body   = cJSON_CreateObject();
+    cJSON *frames = cJSON_CreateArray();
+    for (int i = first; i < last; i++) {
+        const uint16_t addr = addrs[i];
+        const uint16_t site = call_stack_site(i == 0, addr);
+        cJSON *f = cJSON_CreateObject();
+        cJSON_AddNumberToObject(f, "index", i);
+        cJSON_AddStringToObject(f, "kind", i == 0 ? "current" : "return");
+        cJSON_AddNumberToObject(f, "address", addr);
+        if (i > 0) {
+            cJSON_AddNumberToObject(f, "callSite", site);
+        }
+        if (regs.k != 0 || is_gen2) {
+            cJSON_AddNumberToObject(f, "programBank", regs.k);
+        }
+        if (regs.k == 0 && addr >= 0xA000) {
+            cJSON_AddNumberToObject(f, "bank", addr < 0xC000 ? ram_bank : memory_get_rom_bank());
+        }
+
+        const char *name = NULL;
+        dbg_addr_t  at   = 0;
+        if (dbg_info_frame_label(site, ram_bank, &name, &at)) {
+            cJSON_AddStringToObject(f, "symbol", name);
+            cJSON_AddNumberToObject(f, "symbolOffset", (uint16_t)(addr - at));
+        }
+        const char *file = NULL;
+        int         line = 0;
+        if (dbg_info_addr_to_source_banked(site, ram_bank, &file, &line) && file) {
+            char uri[1024];
+            cJSON_AddStringToObject(f, "file", caller_path_out(file, uri, sizeof uri));
+            cJSON_AddNumberToObject(f, "line", caller_line_out(line));
+        }
+        cJSON_AddItemToArray(frames, f);
+    }
+    cJSON_AddBoolToObject(body, "heuristic", true);
+    cJSON_AddItemToObject(body, "stackFrames", frames);
+    cJSON_AddNumberToObject(body, "totalFrames", nf);
+    send_dap_response(seq, cmd, true, body);
     return 0;
 }
 
@@ -6523,6 +6594,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "configurationDone")) result = handle_dap_configuration_done(seq);
     else if (!strcmp(cmd, "threads"))       result = handle_dap_threads(seq);
     else if (!strcmp(cmd, "stackTrace"))    result = handle_dap_stack_trace(seq, args);
+    else if (!strcmp(cmd, "x16/callStack")) result = handle_x16_call_stack(seq, args);
     else if (!strcmp(cmd, "scopes"))        result = handle_dap_scopes(seq, args);
     else if (!strcmp(cmd, "variables"))     result = handle_dap_variables(seq, args);
     else if (!strcmp(cmd, "setBreakpoints"))result = handle_dap_set_breakpoints(seq, args);
@@ -6642,7 +6714,7 @@ static const char *const callable_commands[] = {
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
-    "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols",
+    "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
 };
 
