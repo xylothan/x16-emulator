@@ -301,6 +301,7 @@ the display backend.
 | `-imgui` | Opens the graphical debugger in its own window, with dockable panels for the CPU, memory, disassembly, source, breakpoints, symbols, the call stack, VERA graphics, the three audio sources, I/O ports and file access, and the performance budget. Additive: independent of, and combinable with, `-debug`. |
 | `-debugport [<port>]` | Starts the Debug Adapter Protocol server so an IDE can attach. Default port 9009. |
 | `-mcp [<port>]` | Starts the Model Context Protocol server so an agent can drive the debugger: over stdin and stdout with no port, or at `http://127.0.0.1:<port>/mcp` with one. Works alongside `-debugport`. See [Driving the machine with MCP](#driving-the-machine-with-mcp). |
+| `-mcp-readonly` | With `-mcp`, offers and accepts only the tools that change nothing in the machine, write no host file and arm nothing. |
 | `-bp <address>` | Arms a breakpoint before the first instruction runs, for catching start-up code you could never attach to in time. Can be repeated. Needs a debugger to resume from, so it opens `-debug` unless `-imgui` or `-debugport` is already giving you one. See [Catching early boot with `-bp`](#catching-early-boot-with--bp). |
 | `-dbgfile <path>` | Loads a cc65 `.dbg` file, so addresses map back to source files and line numbers. |
 | `-dbgauto` / `-no-dbgauto` | Whether to merge the `.dbg` beside each program the machine loads. Follows the debugger unless forced either way. |
@@ -1448,6 +1449,7 @@ the same request does over DAP, and the two can be used at once.
 x16emu -mcp -hidden ...      # stdio: the agent launches the emulator
 x16emu -mcp 9100 ...         # HTTP: the agent attaches at http://127.0.0.1:9100/mcp
 x16emu -mcp 9100 -debugport  # an agent and an editor on the same machine
+x16emu -mcp -mcp-readonly    # an agent that can look but not touch
 ```
 
 Under stdio the protocol owns stdout, so the emulator's own output moves to stderr, and it exits
@@ -1460,7 +1462,7 @@ debugging it.
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack` |
-| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
+| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
@@ -1514,7 +1516,20 @@ A stop caused by a watch also carries a `stop` object: the `address`, `bank`, `v
 moved past. DAP clients get the same object on the `stopped` event and in `x16/status`.
 
 Breakpoints belong to whoever set them: removing one leaves it armed if an editor or the command
-line also holds it.
+line also holds it. `enable_breakpoint` turns one on or off and keeps its condition and hit count.
+The flag is shared per address, so it is refused where anyone else holds that address.
+
+`set_breakpoint` `dump` makes an exec breakpoint write to a host file on each hit instead of
+stopping: a 4-byte hit index, then each region. The file must be new and inside `-fsroot`, or the
+dump folder when there is none, and it stops growing at 256 MiB. It closes when the breakpoint goes.
+A plain breakpoint another client holds at the same address still stops the machine, for a DAP
+`x16Dump` as well.
+
+Under `-mcp-readonly`, over stdio or HTTP, `tools/list` offers only the tools that change nothing
+in the machine, write no host file and arm nothing, and any other tool is refused. That leaves out
+`perf_stats` and `sprite_mux_stats`, whose first call turns collection on. A read-only client is
+not counted as able to resume the machine, so a DAP session ending still resumes it, and the client
+going away changes nothing. A DAP client on the same emulator is not restricted.
 
 `get_vera_state` (`x16/vera`) reports what VERA's registers do not all read back: both data ports
 whatever ADDRSEL is, and the FX state whatever DCSEL is. Fields ending `16_16` are the emulator's

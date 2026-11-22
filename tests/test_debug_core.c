@@ -1422,6 +1422,82 @@ main(void)
 		reset_all();
 	}
 
+	// ── Dump breakpoints and other owners ───────────────────────────────────
+	{
+		const uint32_t addr = 0x10, len = 2;
+		const int      rb   = -1;
+		debug_owner_t  who  = DEBUG_OWNER_UI;
+		uint32_t       writes = 0;
+		bool           full = true, stopped;
+
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_MCP);
+		FILE *f = tmpfile();
+		check(f && debug_bp_set_dump_file(0x2000, 0, -1, DEBUG_OWNER_MCP, f, 0, 1, &addr, &len, &rb),
+		      "a dump can be set");
+		stopped = debug_bp_on_arrival(0x2000, 0);
+		check(!stopped, "a dump alone runs on");
+		check(debug_bp_dump_writes(0x2000, 0, -1) == 1, "and records the hit");
+		check(debug_bp_dump_info(0x2000, 0, -1, &who, &writes, &full) && who == DEBUG_OWNER_MCP &&
+		          writes == 1 && !full,
+		      "and reports its owner and count");
+
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		stopped = debug_bp_on_arrival(0x2000, 0);
+		check(stopped, "another owner's plain breakpoint still stops");
+		check(debug_bp_dump_writes(0x2000, 0, -1) == 2, "and the dump still records that hit");
+
+		FILE *g = tmpfile();
+		check(g && !debug_bp_set_dump_file(0x2000, 0, -1, DEBUG_OWNER_CLI, g, 0, 1, &addr, &len, &rb),
+		      "a second owner's dump is refused");
+		if (g)
+			fclose(g);
+		debug_bp_clear_dump_for(0x2000, 0, -1, DEBUG_OWNER_CLI);
+		check(debug_bp_dump_info(0x2000, 0, -1, NULL, NULL, NULL), "only its owner clears a dump");
+
+		debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_MCP);
+		check(!debug_bp_dump_info(0x2000, 0, -1, NULL, NULL, NULL), "a dump goes with its owner");
+		check(debug_bp_on_arrival(0x2000, 0), "and the other owner's breakpoint stops as plain");
+
+		// A later entry's dump records the arrival an earlier entry stops on.
+		reset_all();
+		g_ram_bank = 5;
+		debug_bp_add_for(bp_at(0xA000, 0, DEBUG_BANK_ANY), DEBUG_OWNER_CLI);
+		debug_bp_add_for(bp_at(0xA000, 0, 5), DEBUG_OWNER_MCP);
+		f = tmpfile();
+		debug_bp_set_dump_file(0xA000, 0, 5, DEBUG_OWNER_MCP, f, 0, 1, &addr, &len, &rb);
+		stopped = debug_bp_on_arrival(0xA000, 0);
+		check(stopped, "an overlapping plain entry stops");
+		check(debug_bp_dump_writes(0xA000, 0, 5) == 1, "and the dump in the later entry records");
+		g_ram_bank = 0;
+
+		// A record is 4 bytes of index plus the regions: two of 6 fit in 15.
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_MCP);
+		f = tmpfile();
+		debug_bp_set_dump_file(0x2000, 0, -1, DEBUG_OWNER_MCP, f, 15, 1, &addr, &len, &rb);
+		for (int i = 0; i < 3; i++)
+			debug_bp_on_arrival(0x2000, 0);
+		debug_bp_dump_info(0x2000, 0, -1, NULL, &writes, &full);
+		check(writes == 2 && full, "a dump stops at its size limit and says so");
+
+		// A delete, and a whole-owner clear, close it too.
+		debug_bp_delete(0x2000, 0, -1);
+		check(!debug_bp_dump_info(0x2000, 0, -1, NULL, NULL, NULL), "deleting the entry closes it");
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_UI);
+		check(debug_bp_on_arrival(0x2000, 0), "and a new breakpoint there is plain");
+
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_INSTRUCTION);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
+		f = tmpfile();
+		debug_bp_set_dump_file(0x2000, 0, -1, DEBUG_OWNER_DAP_INSTRUCTION, f, 0, 1, &addr, &len, &rb);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_INSTRUCTION);
+		check(!debug_bp_dump_info(0x2000, 0, -1, NULL, NULL, NULL), "clearing an owner closes its dump");
+
+		reset_all();
+	}
+
 	// ── Watchpoint ownership ────────────────────────────────────────────────
 	// -wp, the debugger and a DAP client can all want one address.
 	{
