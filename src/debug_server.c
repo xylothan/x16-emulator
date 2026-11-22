@@ -191,10 +191,21 @@ static uint8_t  func_bp_banks[128];
 static int      func_bp_x16[128];       // bank selector it was armed with
 static int      func_bp_ids[128];
 static char     func_bp_names[128][64]; // kept to re-pin once the bank is known
+static char     func_bp_cond[128][192]; // re-applied when a re-pin moves the entry
+static char     func_bp_hit[128][64];
 static int      num_func_bps = 0;
 static uint16_t instr_bp_addrs[128];
 static uint8_t  instr_bp_banks[128];
+static int      instr_bp_x16[128];
+static int      instr_bp_ids[128];      // 0 for a dump breakpoint, which never stops
 static int      num_instr_bps = 0;
+
+// Data breakpoints, so a stop can name the one that fired.
+static struct {
+    int      id;
+    uint16_t addr;
+} data_bps[MAX_WATCHPOINTS];
+static int      num_data_bps = 0;
 
 static bool     dap_session_active = false;
 // The session began with launch, so the machine's lifetime is the client's. One
@@ -231,6 +242,10 @@ static void send_dap_message(cJSON *json);
 static int dap_apply_bp_condition(dbg_addr_t addr, const char *cond_str, const char *hit_str,
                                   int default_bank);
 static int dap_cond_bank_pin(dbg_addr_t addr, const char *cond_str, int default_bank);
+static bool dap_bp_can_arm(dbg_addr_t addr, int default_bank, const char *cond, const char *hit,
+                           char *why, size_t whyn);
+static bool dap_check_condition(const char *cond, int *bank_out, char *err, size_t errn);
+static bool dap_check_hit_condition(const char *h);
 static bool dap_parse_instruction_ref(const char *s, long offset, struct breakpoint *out);
 static void dap_fmt_bp(char *out, size_t n, int pc, uint8_t bank, int x16Bank);
 
@@ -249,6 +264,24 @@ static void retry_unverified_breakpoints(void) {
             dbg_addr_t addr = 0;
             int seg_bank = -1;
             if (dbg_info_source_to_addr_bank(dap_bps[i].file, dap_bps[i].line, &addr, &seg_bank)) {
+                // The line has an address now, which is the first time its
+                // condition can be checked against what is already there.
+                char why[200];
+                if (!dap_bp_can_arm(addr, seg_bank, dap_bps[i].cond, dap_bps[i].hit_cond,
+                                    why, sizeof why)) {
+                    if (client_sock != SOCKET_INVALID) {
+                        cJSON *body = cJSON_CreateObject();
+                        cJSON *bp = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(bp, "id", dap_bps[i].dap_id);
+                        cJSON_AddBoolToObject(bp, "verified", false);
+                        cJSON_AddStringToObject(bp, "message", why);
+                        cJSON_AddNumberToObject(bp, "line", dap_bps[i].line);
+                        cJSON_AddItemToObject(body, "breakpoint", bp);
+                        cJSON_AddStringToObject(body, "reason", "changed");
+                        send_dap_event("breakpoint", body);
+                    }
+                    continue;
+                }
                 // Re-arm it exactly as the client asked for it. Re-applying the
                 // condition also recovers the bank pin, which decides the
                 // selector the core entry is keyed on -- arming with ANY here
@@ -374,9 +407,11 @@ static void rebank_breakpoints(void) {
         const int     pc = (int)(addr & 0xFFFF);
         const uint8_t pb = (uint8_t)(addr >> 16);
         if (pc != func_bp_addrs[i] || pb != func_bp_banks[i]) continue;
-        const int pin = debug_normalise_bank(seg_bank, pc, pb);
+        const int pin = dap_cond_bank_pin(addr, func_bp_cond[i], seg_bank);
         if (pin == func_bp_x16[i]) continue;
         move_bp_bank(pc, pb, func_bp_x16[i], pin, DEBUG_OWNER_DAP_FUNCTION);
+        // The move left the condition behind on the old key.
+        dap_apply_bp_condition(addr, func_bp_cond[i], func_bp_hit[i], seg_bank);
         func_bp_x16[i] = pin;
         send_bp_changed(func_bp_ids[i], 0, pin);
     }
@@ -690,7 +725,9 @@ static int handle_dap_configuration_done(int seq) {
         // the client was still configuring emits its own stopped event, and
         // announcing the same halt again under a different reason confuses a
         // client into thinking it stopped twice.
-        if (!dap_stop_announced) debug_server_notify_stopped("breakpoint");
+        if (!dap_stop_announced)
+            debug_server_notify_stopped(!strcmp(DEBUGGetStopReason(), "data breakpoint")
+                                            ? "data breakpoint" : "breakpoint");
         return 1;
     }
 
@@ -878,6 +915,35 @@ static uint32_t dap_parse_num(const char *s) {
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
         return (uint32_t)strtoul(s + 2, NULL, 16);
     return (uint32_t)strtoul(s, NULL, 0);
+}
+
+// One number filling [s, end), with spaces allowed around it: $hex, 0xhex or
+// decimal. Fails on anything else, where dap_parse_num() would quietly read a
+// prefix of it, or read a leading zero as octal.
+static bool dap_strict_num(const char *s, const char *end, uint32_t *out) {
+    while (s < end && *s == ' ') s++;
+    while (end > s && end[-1] == ' ') end--;
+    unsigned base = 10;
+    if (s < end && *s == '$') {
+        s++;
+        base = 16;
+    } else if (end - s >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+        base = 16;
+    }
+    if (s == end) return false;
+    uint64_t v = 0;
+    for (; s < end; s++) {
+        const unsigned char c = (unsigned char)*s;
+        unsigned d;
+        if (isdigit(c)) d = (unsigned)(c - '0');
+        else if (base == 16 && isxdigit(c)) d = (unsigned)(tolower(c) - 'a' + 10);
+        else return false;
+        v = v * base + d;
+        if (v > 0xFFFFFFFFu) return false;
+    }
+    *out = (uint32_t)v;
+    return true;
 }
 
 static bool dap_has_prefix_i(const char *s, const char *prefix) {
@@ -1097,9 +1163,21 @@ static bool dap_parse_value_term(const char *s, int *out_operand, uint16_t *out_
     int      operand = -1;
     uint16_t oaddr   = 0;
     #define ISALNUM(c) (((c) >= '0' && (c) <= '9') || ((c) >= 'a' && (c) <= 'z') || ((c) >= 'A' && (c) <= 'Z'))
-    if (!strncmp(s, "byte[", 5)) { operand = 5; oaddr = (uint16_t)dap_parse_num(s + 5); const char *b = strchr(s, ']'); s = b ? b + 1 : s + strlen(s); }
-    else if (!strncmp(s, "word[", 5)) { operand = 6; oaddr = (uint16_t)dap_parse_num(s + 5); const char *b = strchr(s, ']'); s = b ? b + 1 : s + strlen(s); }
-    else if (*s == '$' || (*s == '0' && (s[1] == 'x' || s[1] == 'X'))) { operand = 5; oaddr = (uint16_t)dap_parse_num(s); while (*s && *s != ' ' && *s != '=' && *s != '!' && *s != '<' && *s != '>') s++; }
+    if (!strncmp(s, "byte[", 5) || !strncmp(s, "word[", 5)) {
+        const char *b = strchr(s, ']');
+        uint32_t a;
+        if (!b || !dap_strict_num(s + 5, b, &a) || a > 0xFFFF) return false;
+        operand = (s[0] == 'b') ? 5 : 6;
+        oaddr = (uint16_t)a;
+        s = b + 1;
+    } else if (*s == '$' || (*s == '0' && (s[1] == 'x' || s[1] == 'X'))) {
+        const char *e = s + strcspn(s, " =!<>");
+        uint32_t a;
+        if (!dap_strict_num(s, e, &a) || a > 0xFFFF) return false;
+        operand = 5;
+        oaddr = (uint16_t)a;
+        s = e;
+    }
     else if ((s[0] == 'A' || s[0] == 'a') && !ISALNUM(s[1])) { operand = 0; s++; }
     else if ((s[0] == 'X' || s[0] == 'x') && !ISALNUM(s[1])) { operand = 1; s++; }
     else if ((s[0] == 'Y' || s[0] == 'y') && !ISALNUM(s[1])) { operand = 2; s++; }
@@ -1117,18 +1195,21 @@ static bool dap_parse_value_term(const char *s, int *out_operand, uint16_t *out_
     else if (*s == '<') { op = 2; s++; }
     else if (*s == '>') { op = 4; s++; }
     if (op < 0) return false;
-    while (*s == ' ') s++;
+    uint32_t value;
+    if (!dap_strict_num(s, s + strlen(s), &value)) return false;
     *out_operand = operand;
     *out_oaddr   = oaddr;
     *out_op      = op;
-    *out_value   = dap_parse_num(s);
+    *out_value   = value;
     return true;
 }
 
 // If a term is "bank[==]N" or "rombank[==]N" (case-insensitive), return the bank
-// number; "bank==any" returns DAP_BANK_TERM_ANY; anything else -1. Used to pin a
-// breakpoint to a specific RAM/ROM bank, or to keep it in every bank.
+// number; "bank==any" returns DAP_BANK_TERM_ANY; a bank term whose value cannot
+// be read returns DAP_BANK_TERM_BAD; anything else -1. Used to pin a breakpoint
+// to a specific RAM/ROM bank, or to keep it in every bank.
 #define DAP_BANK_TERM_ANY (-2)
+#define DAP_BANK_TERM_BAD (-3)
 static int dap_parse_bank_term(const char *s) {
     while (*s == ' ') s++;
     if (dap_ci_prefix(s, "rombank")) s += 7;
@@ -1139,8 +1220,14 @@ static int dap_parse_bank_term(const char *s) {
     if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z')) return -1;
     while (*s == ' ' || *s == '=' || *s == '#') s++;
     if (!*s) return -1;
-    if (dap_ci_prefix(s, "any") || *s == '*') return DAP_BANK_TERM_ANY;
-    return (int)(dap_parse_num(s) & 0xFF);
+    if (dap_ci_prefix(s, "any") || *s == '*') {
+        const char *r = s + (*s == '*' ? 1 : 3);
+        while (*r == ' ') r++;
+        return *r ? DAP_BANK_TERM_BAD : DAP_BANK_TERM_ANY;
+    }
+    uint32_t v;
+    if (!dap_strict_num(s, s + strlen(s), &v) || v > 0xFF) return DAP_BANK_TERM_BAD;
+    return (int)v;
 }
 
 // Parse an optional leading comparison then a number ("== $05", "!=0", "$05",
@@ -1155,10 +1242,10 @@ static bool dap_parse_simple_cmp(const char *s, int *out_op, uint32_t *out_val) 
     else if (*s == '=') { op = 0; s++; }
     else if (*s == '<') { op = 2; s++; }
     else if (*s == '>') { op = 4; s++; }
-    while (*s == ' ') s++;
-    if (!*s) return false;
+    uint32_t v;
+    if (!dap_strict_num(s, s + strlen(s), &v)) return false;
     *out_op  = op;
-    *out_val = dap_parse_num(s);
+    *out_val = v;
     return true;
 }
 
@@ -1183,6 +1270,43 @@ static int dap_cond_bank_pin(dbg_addr_t addr, const char *cond_str, int default_
         }
     }
     return debug_normalise_bank(bank_pin, (int)(addr & 0xFFFF), (uint8_t)(addr >> 16));
+}
+
+// What a condition and hit count ask the core for.
+typedef struct {
+    bool     has;
+    int      operand;
+    uint16_t oaddr;
+    int      op;
+    uint32_t value;
+    uint32_t ignore;
+} dap_cond_t;
+
+// The value of a hitCondition: "N" or ">= N". Plain decimal only.
+static bool dap_parse_hit(const char *h, uint32_t *n) {
+    while (*h == ' ') h++;
+    if (h[0] == '>' && h[1] == '=') h += 2;
+    if (strspn(h, "0123456789 ") != strlen(h)) return false;
+    return dap_strict_num(h, h + strlen(h), n);
+}
+
+static void dap_read_condition(const char *cond, const char *hit, dap_cond_t *out) {
+    memset(out, 0, sizeof *out);
+    if (cond && cond[0]) {
+        char buf[192];
+        strncpy(buf, cond, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        for (char *p = buf; p && *p && !out->has; ) {
+            char *amp = strstr(p, "&&");
+            if (amp) *amp = '\0';
+            if (dap_parse_bank_term(p) == -1
+                && dap_parse_value_term(p, &out->operand, &out->oaddr, &out->op, &out->value))
+                out->has = true;
+            p = amp ? amp + 2 : NULL;
+        }
+    }
+    uint32_t n;
+    if (hit && hit[0] && dap_parse_hit(hit, &n) && n > 0) out->ignore = n - 1;
 }
 
 // Parse a DAP source-breakpoint "condition"/"hitCondition" and apply it to the
@@ -1213,12 +1337,8 @@ static int dap_apply_bp_condition(dbg_addr_t addr, const char *cond_str, const c
     // unconditionally. Writing the same two terms the other way round worked,
     // which is not a distinction the user should be able to feel.
     const int bank_pin = dap_cond_bank_pin(addr, cond_str, default_bank);
-    char buf[192];
-    buf[0] = '\0';
-    if (cond_str && cond_str[0]) {
-        strncpy(buf, cond_str, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = '\0';
-    }
+    dap_cond_t want;
+    dap_read_condition(cond_str, hit_str, &want);
 
     debug_bp_clear_condition(pc, bank, bank_pin);
     debug_bp_set_ignore(pc, bank, bank_pin, 0);
@@ -1229,31 +1349,67 @@ static int dap_apply_bp_condition(dbg_addr_t addr, const char *cond_str, const c
     // itself is left alone: an editor re-sends a whole file's breakpoints on
     // every keystroke, and a count that restarted each time could not drive a
     // hit condition at all.
-
-    if (buf[0]) {
-        bool value_set = false;
-        char *p = buf;
-        while (p && *p) {
-            char *amp = strstr(p, "&&");
-            if (amp) *amp = '\0';                 // terminate this term
-            if (dap_parse_bank_term(p) == -1 && !value_set) {
-                int operand, op; uint16_t oaddr; uint32_t val;
-                if (dap_parse_value_term(p, &operand, &oaddr, &op, &val)) {
-                    debug_bp_set_condition(pc, bank, bank_pin, operand, oaddr, op, val);
-                    value_set = true;
-                }
-            }
-            p = amp ? amp + 2 : NULL;
-        }
-    }
-
-    if (hit_str && hit_str[0]) {
-        const char *h = hit_str;
-        while (*h && !(*h >= '0' && *h <= '9')) h++;
-        uint32_t n = (uint32_t)strtoul(h, NULL, 0);
-        if (n > 0) debug_bp_set_ignore(pc, bank, bank_pin, n - 1); // stop on the Nth hit
-    }
+    if (want.has)
+        debug_bp_set_condition(pc, bank, bank_pin, want.operand, want.oaddr, want.op, want.value);
+    if (want.ignore)
+        debug_bp_set_ignore(pc, bank, bank_pin, want.ignore);   // stop on the Nth hit
     return bank_pin;
+}
+
+// A condition and hit count belong to the core entry, so one owner's would
+// replace another's at a shared address. Called after the caller has dropped
+// its own previous claims, so any entry still here belongs to someone else or
+// to an earlier item in the same request.
+static bool dap_bp_cond_conflicts(dbg_addr_t addr, int pin, const char *cond, const char *hit) {
+    const int     pc   = (int)(addr & 0xFFFF);
+    const uint8_t bank = (uint8_t)(addr >> 16);
+    if (debug_bp_find(pc, bank, pin) < 0) return false;
+    dap_cond_t want;
+    dap_read_condition(cond, hit, &want);
+    int has = 0, operand = 0, op = 0;
+    uint16_t oaddr = 0;
+    uint32_t value = 0, ignore = 0;
+    debug_bp_get_condition(pc, bank, pin, &has, &operand, &oaddr, &op, &value, &ignore);
+    if (ignore != want.ignore || (has != 0) != want.has) return true;
+    return want.has && (operand != want.operand || oaddr != want.oaddr
+                        || op != want.op || value != want.value);
+}
+
+// Can this condition and hit count be applied to a breakpoint at `addr`? When
+// not, says why, and the caller must report it unverified and arm nothing.
+static bool dap_bp_can_arm(dbg_addr_t addr, int default_bank, const char *cond, const char *hit,
+                           char *why, size_t whyn) {
+    int cond_bank = -1;
+    if (!dap_check_condition(cond, &cond_bank, why, whyn)) return false;
+    if (hit && hit[0] && !dap_check_hit_condition(hit)) {
+        snprintf(why, whyn, "cannot parse hitCondition \"%.60s\" (expected N: stop from the Nth hit on)", hit);
+        return false;
+    }
+    const int     pc   = (int)(addr & 0xFFFF);
+    const uint8_t bank = (uint8_t)(addr >> 16);
+    if (cond_bank >= 0 && debug_normalise_bank(cond_bank, pc, bank) == DEBUG_BANK_ANY) {
+        snprintf(why, whyn, "$%04X is not in a banked window, so a bank cannot apply", (unsigned)pc);
+        return false;
+    }
+    if (dap_bp_cond_conflicts(addr, dap_cond_bank_pin(addr, cond, default_bank), cond, hit)) {
+        snprintf(why, whyn, "another breakpoint at $%04X has a different condition or hit count",
+                 (unsigned)pc);
+        return false;
+    }
+    return true;
+}
+
+// Report one requested source breakpoint as not armed.
+static void dap_add_refused_bp(cJSON *arr, int id, int line, const char *path, const char *why) {
+    cJSON *bp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(bp, "id", id);
+    cJSON_AddBoolToObject(bp, "verified", false);
+    cJSON_AddStringToObject(bp, "message", why);
+    cJSON_AddNumberToObject(bp, "line", line);
+    cJSON *src = cJSON_CreateObject();
+    cJSON_AddStringToObject(src, "path", path);
+    cJSON_AddItemToObject(bp, "source", src);
+    cJSON_AddItemToArray(arr, bp);
 }
 
 static int handle_dap_set_breakpoints(int seq, cJSON *args) {
@@ -1264,10 +1420,18 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
 
     cJSON *source = cJSON_GetObjectItemCaseSensitive(args, "source");
     cJSON *bps = cJSON_GetObjectItemCaseSensitive(args, "breakpoints");
-    if (!source || !bps) {
-        send_dap_error_response(seq, "setBreakpoints", "missing source or breakpoints");
+    cJSON *lines = cJSON_GetObjectItemCaseSensitive(args, "lines");
+    if (!source) {
+        send_dap_error_response(seq, "setBreakpoints", "missing source");
         return 0;
     }
+    if ((bps && !cJSON_IsArray(bps)) || (!bps && lines && !cJSON_IsArray(lines))) {
+        send_dap_error_response(seq, "setBreakpoints", "breakpoints and lines must be arrays");
+        return 0;
+    }
+    // Only `source` is required. `lines` is the deprecated form of the list, and
+    // neither being present means this file now has no breakpoints.
+    cJSON *list = bps ? bps : lines;
 
     cJSON *path_item = cJSON_GetObjectItemCaseSensitive(source, "path");
     const char *src_path = (path_item && cJSON_IsString(path_item)) ? path_item->valuestring : "";
@@ -1307,24 +1471,50 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
     cJSON *result_body = cJSON_CreateObject();
     cJSON *result_bps = cJSON_CreateArray();
 
-    int bp_count = cJSON_GetArraySize(bps);
-    for (int i = 0; i < bp_count && num_dap_bps < MAX_DAP_BREAKPOINTS; i++) {
-        cJSON *bp_item = cJSON_GetArrayItem(bps, i);
-        cJSON *line_item = cJSON_GetObjectItemCaseSensitive(bp_item, "line");
-        int line = (line_item && cJSON_IsNumber(line_item)) ? (int)line_item->valuedouble : 0;
-
-        cJSON *result_bp = cJSON_CreateObject();
+    int bp_count = list ? cJSON_GetArraySize(list) : 0;
+    for (int i = 0; i < bp_count; i++) {
+        cJSON *bp_item = cJSON_GetArrayItem(list, i);
+        cJSON *line_item = bps ? cJSON_GetObjectItemCaseSensitive(bp_item, "line") : bp_item;
+        const bool has_line = line_item && cJSON_IsNumber(line_item);
+        int line = has_line ? (int)line_item->valuedouble : 0;
         int bp_id = next_dap_bp_id++;
 
         // Kept verbatim so the breakpoint can be re-armed exactly as asked for
         // if an overlay reload forces it to be resolved again.
         const char *cond_str = "";
         const char *hit_str  = "";
-        {
+        if (bps) {
             cJSON *c = cJSON_GetObjectItemCaseSensitive(bp_item, "condition");
             if (c && cJSON_IsString(c) && c->valuestring) cond_str = c->valuestring;
             cJSON *h = cJSON_GetObjectItemCaseSensitive(bp_item, "hitCondition");
             if (h && cJSON_IsString(h) && h->valuestring) hit_str = h->valuestring;
+        }
+
+        // Every entry gets a reply, in order, whether or not it could be armed.
+        char why[200];
+        int  cond_bank = -1;
+        if (!has_line) {
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, "breakpoint has no line");
+            continue;
+        }
+        if (num_dap_bps >= MAX_DAP_BREAKPOINTS) {
+            snprintf(why, sizeof why, "too many breakpoints (limit %d)", MAX_DAP_BREAKPOINTS);
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            continue;
+        }
+        if (strlen(src_path) >= sizeof dap_bps[0].file) {
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, "source path is too long");
+            continue;
+        }
+        if (!dap_check_condition(cond_str, &cond_bank, why, sizeof why)) {
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            continue;
+        }
+        if (hit_str[0] && !dap_check_hit_condition(hit_str)) {
+            snprintf(why, sizeof why,
+                     "cannot parse hitCondition \"%.60s\" (expected N: stop from the Nth hit on)", hit_str);
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            continue;
         }
 
         // Try to resolve source:line to address
@@ -1332,6 +1522,12 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
         int seg_bank = -1;
         bool resolved = dbg_info_source_to_addr_bank(src_path, line, &addr, &seg_bank);
 
+        if (resolved && !dap_bp_can_arm(addr, seg_bank, cond_str, hit_str, why, sizeof why)) {
+            dap_add_refused_bp(result_bps, bp_id, line, src_path, why);
+            continue;
+        }
+
+        cJSON *result_bp = cJSON_CreateObject();
         if (resolved) {
             // The condition is parsed first so a "bank==N" term pins x16Bank at
             // add time; the value term and hit count go to the core as well.
@@ -1347,15 +1543,9 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             if (added == DEBUG_ADD_FULL) {
                 // Nothing was armed, so say so rather than reporting a verified
                 // breakpoint the machine will never stop on.
-                cJSON_AddNumberToObject(result_bp, "id", bp_id);
-                cJSON_AddBoolToObject(result_bp, "verified", false);
-                cJSON_AddStringToObject(result_bp, "message",
-                                        "Out of memory; breakpoint not armed");
-                cJSON_AddNumberToObject(result_bp, "line", line);
-                cJSON *bp_source = cJSON_CreateObject();
-                cJSON_AddStringToObject(bp_source, "path", src_path);
-                cJSON_AddItemToObject(result_bp, "source", bp_source);
-                cJSON_AddItemToArray(result_bps, result_bp);
+                cJSON_Delete(result_bp);
+                dap_add_refused_bp(result_bps, bp_id, line, src_path,
+                                   "Out of memory; breakpoint not armed");
                 continue;
             }
 
@@ -4223,7 +4413,16 @@ static int handle_dap_attach(int seq, cJSON *args) {
 static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
     // "Here is the complete list" -- so let go of everything this kind of
     // breakpoint asked for, and start again. Anything another owner also wants
-    // stays armed for them; nothing here has to know who they are.
+    // stays armed for them; nothing here has to know who they are. The keys are
+    // remembered so conditions nobody asks for again can be dropped below,
+    // rather than left for a later breakpoint at that address to inherit.
+    struct { int pc; uint8_t bank; int x16Bank; } old[128];
+    const int n_old = num_func_bps;
+    for (int i = 0; i < n_old; i++) {
+        old[i].pc = func_bp_addrs[i];
+        old[i].bank = func_bp_banks[i];
+        old[i].x16Bank = func_bp_x16[i];
+    }
     debug_bp_clear_owner(DEBUG_OWNER_DAP_FUNCTION);
     num_func_bps = 0;
 
@@ -4234,18 +4433,31 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
     for (int i = 0; i < n; i++) {
         cJSON *fb = cJSON_GetArrayItem(bps, i);
         cJSON *nm = cJSON_GetObjectItemCaseSensitive(fb, "name");
+        cJSON *ci = cJSON_GetObjectItemCaseSensitive(fb, "condition");
+        cJSON *hi = cJSON_GetObjectItemCaseSensitive(fb, "hitCondition");
+        const char *cond_str = (ci && cJSON_IsString(ci)) ? ci->valuestring : "";
+        const char *hit_str  = (hi && cJSON_IsString(hi)) ? hi->valuestring : "";
         cJSON *rb = cJSON_CreateObject();
-        dbg_addr_t addr;
+        dbg_addr_t addr = 0;
         bool verified = false;
         int seg_bank = -1;
-        if (nm && cJSON_IsString(nm) && dbg_info_label_to_addr_bank(nm->valuestring, &addr, &seg_bank)
-            && num_func_bps < 128) {
-            // Pinned to the bank the label's segment was loaded into. Armed for
-            // any bank, a label at $A000 also stopped in every other bank's code
-            // at $A000.
+        char why[200] = "out of memory; breakpoint not armed";
+        if (!nm || !cJSON_IsString(nm)) {
+            snprintf(why, sizeof why, "breakpoint has no name");
+        } else if (strlen(nm->valuestring) >= sizeof func_bp_names[0]) {
+            snprintf(why, sizeof why, "name is too long");
+        } else if (num_func_bps >= 128) {
+            snprintf(why, sizeof why, "too many function breakpoints (limit 128)");
+        } else if (!dbg_info_label_to_addr_bank(nm->valuestring, &addr, &seg_bank)) {
+            snprintf(why, sizeof why, "no label named \"%.60s\" in the loaded debug info", nm->valuestring);
+        } else if (dap_bp_can_arm(addr, seg_bank, cond_str, hit_str, why, sizeof why)) {
+            // Pinned to the bank the label's segment was loaded into, unless the
+            // condition names one. Armed for any bank, a label at $A000 also
+            // stopped in every other bank's code at $A000.
             const int pc  = (int)(addr & 0xFFFF);
             const uint8_t pb = (uint8_t)(addr >> 16);
-            const int x16 = debug_normalise_bank(seg_bank, pc, pb);
+            const bool existed = debug_bp_find(pc, pb, dap_cond_bank_pin(addr, cond_str, seg_bank)) >= 0;
+            const int x16 = dap_apply_bp_condition(addr, cond_str, hit_str, seg_bank);
             struct breakpoint bp = { pc, pb, x16, 0, false };
             if (debug_bp_add_for(bp, DEBUG_OWNER_DAP_FUNCTION) != DEBUG_ADD_FULL) {
                 const int id = next_dap_bp_id++;
@@ -4253,17 +4465,31 @@ static int handle_dap_set_function_breakpoints(int seq, cJSON *args) {
                 func_bp_addrs[num_func_bps] = (uint16_t)pc;
                 func_bp_x16[num_func_bps]   = x16;
                 func_bp_ids[num_func_bps]   = id;
-                strncpy(func_bp_names[num_func_bps], nm->valuestring, sizeof func_bp_names[0] - 1);
-                func_bp_names[num_func_bps][sizeof func_bp_names[0] - 1] = '\0';
+                snprintf(func_bp_names[num_func_bps], sizeof func_bp_names[0], "%s", nm->valuestring);
+                snprintf(func_bp_cond[num_func_bps], sizeof func_bp_cond[0], "%s", cond_str);
+                snprintf(func_bp_hit[num_func_bps], sizeof func_bp_hit[0], "%s", hit_str);
                 num_func_bps++;
+                char ref[16];
+                if (pb != 0 || is_gen2)
+                    snprintf(ref, sizeof ref, "0x%06X", ((uint32_t)pb << 16) | (uint32_t)pc);
+                else
+                    snprintf(ref, sizeof ref, "0x%04X", (unsigned)pc);
                 cJSON_AddNumberToObject(rb, "id", id);
-                cJSON_AddNumberToObject(rb, "instructionReference", addr);
+                cJSON_AddStringToObject(rb, "instructionReference", ref);
                 dap_add_bank_message(rb, x16);
                 verified = true;
+            } else if (!existed) {
+                debug_bp_forget(pc, pb, x16);
+                snprintf(why, sizeof why, "out of memory; breakpoint not armed");
             }
         }
         cJSON_AddBoolToObject(rb, "verified", verified);
+        if (!verified) cJSON_AddStringToObject(rb, "message", why);
         cJSON_AddItemToArray(arr, rb);
+    }
+    for (int i = 0; i < n_old; i++) {
+        if (debug_bp_find(old[i].pc, old[i].bank, old[i].x16Bank) < 0)
+            debug_bp_forget(old[i].pc, old[i].bank, old[i].x16Bank);
     }
     cJSON_AddItemToObject(body, "breakpoints", arr);
     send_dap_response(seq, "setFunctionBreakpoints", true, body);
@@ -4330,19 +4556,6 @@ static void dap_fmt_bp(char *out, size_t n, int pc, uint8_t bank, int x16Bank) {
         snprintf(out, n, "$%04X", (unsigned)pc);
 }
 
-// A number running to the end of the string: $hex, 0xhex or decimal.
-static bool dap_number_to_end(const char *s) {
-    while (*s == ' ') s++;
-    int base = 10;
-    if (*s == '$') { s++; base = 16; }
-    else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { s += 2; base = 16; }
-    const char *start = s;
-    while (base == 16 ? isxdigit((unsigned char)*s) : isdigit((unsigned char)*s)) s++;
-    if (s == start) return false;
-    while (*s == ' ') s++;
-    return *s == '\0';
-}
-
 // Check a breakpoint condition is one this server can apply: "&&"-joined
 // terms, each a bank pin ("bank == 70", "bank == any") or a single value test
 // ("A == $05", "byte[$1234] != 0"). *bank_out gets the bank term: -1 for none,
@@ -4362,16 +4575,11 @@ static bool dap_check_condition(const char *cond, int *bank_out, char *err, size
         if (amp) *amp = '\0';
         while (*t == ' ') t++;
         const int b = dap_parse_bank_term(t);
+        if (b == DAP_BANK_TERM_BAD) {
+            snprintf(err, errn, "cannot read the bank in \"%s\"", t);
+            return false;
+        }
         if (b != -1) {
-            // dap_parse_bank_term() reads any digits it finds; make sure that
-            // is all there was.
-            const char *v = t + (dap_ci_prefix(t, "rombank") ? 7 : 4);
-            while (*v == ' ' || *v == '=' || *v == '#') v++;
-            const bool any = dap_ci_prefix(v, "any") ? !v[3] || v[3] == ' ' : *v == '*';
-            if (!any && !dap_number_to_end(v)) {
-                snprintf(err, errn, "cannot read the bank in \"%s\"", t);
-                return false;
-            }
             if (*bank_out != -1 && *bank_out != b) {
                 snprintf(err, errn, "condition names two different banks");
                 return false;
@@ -4379,9 +4587,7 @@ static bool dap_check_condition(const char *cond, int *bank_out, char *err, size
             *bank_out = b;
         } else {
             int operand, op; uint16_t oaddr; uint32_t val;
-            const char *v = strpbrk(t, "=!<>");
-            if (v) v += strspn(v, "=!<>");
-            if (!dap_parse_value_term(t, &operand, &oaddr, &op, &val) || !v || !dap_number_to_end(v)) {
+            if (!dap_parse_value_term(t, &operand, &oaddr, &op, &val)) {
                 snprintf(err, errn,
                          "cannot parse condition term \"%s\" (expected e.g. A == $05, "
                          "byte[$1234] != 0, bank == 70)", t);
@@ -4400,11 +4606,8 @@ static bool dap_check_condition(const char *cond, int *bank_out, char *err, size
 // A hitCondition this server can apply: N, or >= N, meaning stop from the Nth
 // hit on.
 static bool dap_check_hit_condition(const char *h) {
-    while (*h == ' ') h++;
-    if (h[0] == '>' && h[1] == '=') h += 2;
-    while (*h == ' ') h++;
-    if (!isdigit((unsigned char)*h)) return false;
-    return dap_number_to_end(h) && strtoul(h, NULL, 10) > 0;
+    uint32_t n;
+    return strlen(h) < sizeof func_bp_hit[0] && dap_parse_hit(h, &n) && n > 0;
 }
 
 // x16Dump on an instruction breakpoint makes it a DUMP breakpoint: it does not
@@ -4542,14 +4745,30 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
 
         if (ok) {
             const dbg_addr_t a24 = ((dbg_addr_t)bp.bank << 16) | (dbg_addr_t)bp.pc;
+            if (dap_bp_cond_conflicts(a24, dap_cond_bank_pin(a24, cond_str, bp.x16Bank),
+                                      cond_str, hit_str)) {
+                snprintf(why, sizeof why,
+                         "another breakpoint at $%04X has a different condition or hit count",
+                         (unsigned)bp.pc);
+                ok = false;
+            }
+        }
+
+        if (ok) {
+            const dbg_addr_t a24 = ((dbg_addr_t)bp.bank << 16) | (dbg_addr_t)bp.pc;
             dap_apply_bp_condition(a24, cond_str, hit_str, bp.x16Bank);
             if (debug_bp_add_for(bp, DEBUG_OWNER_DAP_INSTRUCTION) != DEBUG_ADD_FULL) {
-                instr_bp_banks[num_instr_bps] = bp.bank;
-                instr_bp_addrs[num_instr_bps++] = (uint16_t)bp.pc;
-                cJSON_AddNumberToObject(rb, "id", next_dap_bp_id++);
+                const int id  = next_dap_bp_id++;
+                const int idx = num_instr_bps++;
+                instr_bp_banks[idx] = bp.bank;
+                instr_bp_addrs[idx] = (uint16_t)bp.pc;
+                instr_bp_x16[idx]   = debug_normalise_bank(bp.x16Bank, bp.pc, bp.bank);
+                instr_bp_ids[idx]   = id;
+                cJSON_AddNumberToObject(rb, "id", id);
                 verified = true;
                 cJSON *dump = cJSON_GetObjectItemCaseSensitive(ib, "x16Dump");
                 if (dump) {
+                    instr_bp_ids[idx] = 0;   // writes to a file and never stops
                     if (dap_apply_dump(&bp, dump))
                         cJSON_AddBoolToObject(rb, "x16Dump", true);
                     else {
@@ -4589,13 +4808,64 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
 }
 
 // ─── dataBreakpointInfo (memory write watchpoint on an address) ──────
+
+// "R0" to "R15", either case.
+static bool dap_vreg_number(const char *s, int *n) {
+    if (s[0] != 'R' && s[0] != 'r') return false;
+    if (!isdigit((unsigned char)s[1])) return false;
+    int v = s[1] - '0';
+    if (s[2]) {
+        if (s[1] == '0' || !isdigit((unsigned char)s[2]) || s[3]) return false;
+        v = v * 10 + (s[2] - '0');
+    }
+    if (v > 15) return false;
+    *n = v;
+    return true;
+}
+
+// What a variable or expression names in memory. A CPU register has no address,
+// and a zero-page row is sixteen unrelated bytes, so neither can be watched: the
+// old code read every such name as the number 0 and watched $0000.
+static bool dap_data_target(const char *name, int ref, uint16_t *addr, uint16_t *len) {
+    uint32_t a;
+    int vreg;
+    switch (ref) {
+    case VARREF_VREGS:
+        if (!dap_vreg_number(name, &vreg)) return false;
+        *addr = dap_dp_add((uint16_t)(0x02 + 2 * vreg));
+        *len  = 2;
+        return *addr < 0xFFFF;   // a watch is one contiguous range
+    case VARREF_STACK:
+        if (!dap_strict_num(name, name + strlen(name), &a) || a < 0x0100 || a > 0x01FF) return false;
+        *addr = (uint16_t)a;
+        *len  = 1;
+        return true;
+    case 0:   // an expression rather than a row of a scope
+        if (dap_vreg_number(name, &vreg)) return dap_data_target(name, VARREF_VREGS, addr, len);
+        if (!dap_strict_num(name, name + strlen(name), &a) || a > 0xFFFF) return false;
+        *addr = (uint16_t)a;
+        *len  = 1;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
     cJSON *name_i = args ? cJSON_GetObjectItemCaseSensitive(args, "name") : NULL;
+    cJSON *ref_i  = args ? cJSON_GetObjectItemCaseSensitive(args, "variablesReference") : NULL;
+    const int ref = (ref_i && cJSON_IsNumber(ref_i)) ? (int)ref_i->valuedouble : 0;
     cJSON *body = cJSON_CreateObject();
-    if (name_i && cJSON_IsString(name_i)) {
-        uint16_t addr = (uint16_t)dap_parse_num(name_i->valuestring);
-        char dataId[16]; snprintf(dataId, sizeof dataId, "%u", addr);
-        char desc[64];   snprintf(desc, sizeof desc, "write $%04X", addr);
+    uint16_t addr = 0, len = 1;
+    if (name_i && cJSON_IsString(name_i) && dap_data_target(name_i->valuestring, ref, &addr, &len)) {
+        char dataId[16], desc[64];
+        if (len > 1) {
+            snprintf(dataId, sizeof dataId, "%u:%u", addr, len);
+            snprintf(desc, sizeof desc, "write $%04X-$%04X", addr, (unsigned)(addr + len - 1));
+        } else {
+            snprintf(dataId, sizeof dataId, "%u", addr);
+            snprintf(desc, sizeof desc, "write $%04X", addr);
+        }
         cJSON_AddStringToObject(body, "dataId", dataId);
         cJSON_AddStringToObject(body, "description", desc);
         cJSON *at = cJSON_CreateArray();
@@ -4604,10 +4874,41 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
         cJSON_AddBoolToObject(body, "canPersist", false);
     } else {
         cJSON_AddNullToObject(body, "dataId");
-        cJSON_AddStringToObject(body, "description", "not available");
+        cJSON_AddStringToObject(body, "description", "no data breakpoint is available for this");
     }
     send_dap_response(seq, "dataBreakpointInfo", true, body);
     return 0;
+}
+
+// A dataId as dataBreakpointInfo issues it: "addr", or "addr:len".
+static bool dap_parse_data_id(const char *s, uint16_t *addr, uint16_t *len) {
+    const char *colon = strchr(s, ':');
+    uint32_t a, l = 1;
+    if (!dap_strict_num(s, colon ? colon : s + strlen(s), &a) || a > 0xFFFF) return false;
+    if (colon && (!dap_strict_num(colon + 1, colon + strlen(colon), &l) || l == 0 || a + l > 0x10000))
+        return false;
+    *addr = (uint16_t)a;
+    *len  = (uint16_t)l;
+    return true;
+}
+
+// Claim a watch, or say why not. A shared entry keeps its first owner's length
+// and filter, so one that differs from this request would be reported armed
+// while doing something else, and changing it would alter that owner's watch.
+static const char *dap_arm_watch(uint16_t addr, uint16_t len, bool has_value, int op, uint8_t value) {
+    const int key = debug_normalise_bank(DEBUG_BANK_ANY, addr, 0);
+    for (int i = 0; i < debug_wp_count(); i++) {
+        const struct watchpoint *w = debug_wp_at(i);
+        if (!w || w->addr != addr || w->x16Bank != key) continue;
+        if (w->len != len || !w->active || w->has_value != has_value
+            || (has_value && (w->op != op || w->value != value)))
+            return "another watch at this address has a different range, filter or state";
+        break;
+    }
+    const debug_add_result_t added = debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE);
+    if (added == DEBUG_ADD_FULL) return "the watchpoint table is full";
+    if (added == DEBUG_ADD_CREATED && has_value) debug_wp_set_value(addr, DEBUG_BANK_ANY, op, value);
+    return NULL;
 }
 
 // ─── setDataBreakpoints (maps to emulator write watchpoints) ─────────
@@ -4615,6 +4916,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
     // The client's complete list, so let go of the previous one. Watches the
     // console made are owned separately and are left alone, as are any from -wp.
     debug_wp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+    num_data_bps = 0;
 
     cJSON *body = cJSON_CreateObject();
     cJSON *arr  = cJSON_CreateArray();
@@ -4623,25 +4925,47 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
     for (int i = 0; i < n; i++) {
         cJSON *db = cJSON_GetArrayItem(bps, i);
         cJSON *id = cJSON_GetObjectItemCaseSensitive(db, "dataId");
+        cJSON *ac = cJSON_GetObjectItemCaseSensitive(db, "accessType");
+        cJSON *hc = cJSON_GetObjectItemCaseSensitive(db, "hitCondition");
+        cJSON *c  = cJSON_GetObjectItemCaseSensitive(db, "condition");
         cJSON *rb = cJSON_CreateObject();
-        bool verified = false;
-        if (id && cJSON_IsString(id)) {
-            uint16_t addr = (uint16_t)dap_parse_num(id->valuestring);
-            if (debug_wp_add_for(addr, 1, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE)
-                != DEBUG_ADD_FULL) {
-                verified = true;
-                // Optional written-value filter via the DAP dataBreakpoint's
-                // `condition` (e.g. "== $05", "!=0", "$FF"): only break when the
-                // byte written to addr compares true.
-                cJSON *c = cJSON_GetObjectItemCaseSensitive(db, "condition");
-                if (c && cJSON_IsString(c) && c->valuestring[0]) {
-                    int op; uint32_t val;
-                    if (dap_parse_simple_cmp(c->valuestring, &op, &val))
-                        debug_wp_set_value(addr, DEBUG_BANK_ANY, op, (uint8_t)val);
-                }
-            }
+        const char *why = NULL;
+        uint16_t addr = 0, len = 1;
+        bool has_value = false;
+        int op = 0;
+        uint32_t val = 0;
+
+        if (!id || !cJSON_IsString(id) || !dap_parse_data_id(id->valuestring, &addr, &len))
+            why = "not a dataId from dataBreakpointInfo";
+        else if (ac && (!cJSON_IsString(ac) || strcmp(ac->valuestring, "write")))
+            why = "only write access is supported";
+        else if (hc && (!cJSON_IsString(hc) || hc->valuestring[0]))
+            why = "hitCondition is not supported on data breakpoints";
+        else if (c && !cJSON_IsString(c))
+            why = "condition must be a string";
+        else if (c && c->valuestring[0]) {
+            // A written-value filter (e.g. "== $05", "!=0", "$FF"): only break
+            // when the byte written compares true.
+            has_value = true;
+            if (len > 1)
+                why = "a value condition applies to a single byte";
+            else if (!dap_parse_simple_cmp(c->valuestring, &op, &val) || val > 0xFF)
+                why = "cannot parse condition (expected a byte comparison, e.g. == $05)";
         }
-        cJSON_AddBoolToObject(rb, "verified", verified);
+        if (!why && num_data_bps >= MAX_WATCHPOINTS)
+            why = "too many data breakpoints";
+        if (!why)
+            why = dap_arm_watch(addr, len, has_value, op, (uint8_t)val);
+
+        if (!why) {
+            const int bp_id = next_dap_bp_id++;
+            data_bps[num_data_bps].id   = bp_id;
+            data_bps[num_data_bps].addr = addr;
+            num_data_bps++;
+            cJSON_AddNumberToObject(rb, "id", bp_id);
+        }
+        cJSON_AddBoolToObject(rb, "verified", why == NULL);
+        if (why) cJSON_AddStringToObject(rb, "message", why);
         cJSON_AddItemToArray(arr, rb);
     }
     cJSON_AddItemToObject(body, "breakpoints", arr);
@@ -4880,6 +5204,7 @@ static void dap_release_session_state(void) {
     num_dap_bps   = 0;
     num_func_bps  = 0;
     num_instr_bps = 0;
+    num_data_bps  = 0;
 
     // A step-over or step-out THIS session started has a breakpoint of its own,
     // and nothing else can retract it. One the local debugger started belongs to
@@ -5219,9 +5544,10 @@ void debug_server_notify_stopped(const char *reason) {
 
     // Map our reason strings to DAP reason strings
     if (!strcmp(reason, "breakpoint")) {
-        cJSON_AddStringToObject(body, "reason", "breakpoint");
-        // Find which DAP breakpoint was hit
+        // Find which DAP breakpoints were hit, and name the kind that asked. A
+        // stop from something else (-bp, F9) has no ids and stays "breakpoint".
         cJSON *hit_ids = cJSON_CreateArray();
+        const char *kind = NULL;
         for (int i = 0; i < num_dap_bps; i++) {
             // Both halves of the key, and only breakpoints that are actually
             // armed: pending ones hold addr 0 and were reported as hit every
@@ -5230,6 +5556,45 @@ void debug_server_notify_stopped(const char *reason) {
                 dap_bps[i].bank == regs.k &&
                 debug_bank_selector_matches(dap_bps[i].x16Bank, regs.pc, regs.k)) {
                 cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(dap_bps[i].dap_id));
+                kind = "breakpoint";
+            }
+        }
+        // Owner-gated: bp_remove in the console can delete an entry these
+        // tables still list.
+        for (int i = 0; i < num_func_bps; i++) {
+            if (func_bp_addrs[i] == regs.pc && func_bp_banks[i] == regs.k &&
+                debug_bank_selector_matches(func_bp_x16[i], regs.pc, regs.k) &&
+                debug_bp_has_owner(func_bp_addrs[i], func_bp_banks[i], func_bp_x16[i],
+                                   DEBUG_OWNER_DAP_FUNCTION)) {
+                cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(func_bp_ids[i]));
+                if (!kind) kind = "function breakpoint";
+            }
+        }
+        for (int i = 0; i < num_instr_bps; i++) {
+            if (instr_bp_ids[i] && instr_bp_addrs[i] == regs.pc && instr_bp_banks[i] == regs.k &&
+                debug_bank_selector_matches(instr_bp_x16[i], regs.pc, regs.k) &&
+                debug_bp_has_owner(instr_bp_addrs[i], instr_bp_banks[i], instr_bp_x16[i],
+                                   DEBUG_OWNER_DAP_INSTRUCTION)) {
+                cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(instr_bp_ids[i]));
+                if (!kind) kind = "instruction breakpoint";
+            }
+        }
+        cJSON_AddStringToObject(body, "reason", kind ? kind : "breakpoint");
+        if (cJSON_GetArraySize(hit_ids) > 0) {
+            cJSON_AddItemToObject(body, "hitBreakpointIds", hit_ids);
+        } else {
+            cJSON_Delete(hit_ids);
+        }
+    } else if (!strcmp(reason, "data breakpoint")) {
+        cJSON_AddStringToObject(body, "reason", "data breakpoint");
+        uint16_t wrote = 0;
+        uint8_t  value = 0;
+        cJSON *hit_ids = cJSON_CreateArray();
+        if (debug_wp_last_hit(&wrote, &value)) {
+            for (int i = 0; i < num_data_bps; i++) {
+                if (debug_wp_has_owner(data_bps[i].addr, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE) &&
+                    debug_wp_fires_on(data_bps[i].addr, DEBUG_BANK_ANY, wrote, value))
+                    cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(data_bps[i].id));
             }
         }
         if (cJSON_GetArraySize(hit_ids) > 0) {

@@ -1106,7 +1106,19 @@ word[$0002] >= $0100
 bank == 0 && byte[$1234] != 0
 ```
 
-A `hitCondition` of `"5"` stops on the fifth hit.
+A `hitCondition` of `"5"` or `">= 5"` stops from the fifth hit on. Source, function and instruction
+breakpoints all take these.
+
+A breakpoint that cannot be applied comes back `verified: false` with a `message`, and nothing is
+armed. That covers a condition that cannot be read, and one that differs from a breakpoint another
+owner already has at the same address, since a condition belongs to the address.
+
+#### Data breakpoints
+
+`dataBreakpointInfo` offers a watch for an address, an `R0`-`R15` virtual register (both bytes) or a
+stack entry. CPU registers and zero-page rows have no single address, so their `dataId` is null.
+`setDataBreakpoints` supports `write` access and a one-byte value `condition` such as `== $05`. Read
+access and hit counts are refused with `verified: false` rather than ignored.
 
 #### Expressions you can evaluate
 

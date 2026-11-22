@@ -951,24 +951,57 @@ debug_wp_covers(uint16_t addr)
 	return false;
 }
 
+static bool
+wp_value_passes(const struct watchpoint *w, uint8_t value)
+{
+	if (!w->has_value)
+		return true;
+	switch (w->op) {
+		case BPCMP_EQ: return value == w->value;
+		case BPCMP_NE: return value != w->value;
+		case BPCMP_LT: return value <  w->value;
+		case BPCMP_LE: return value <= w->value;
+		case BPCMP_GT: return value >  w->value;
+		case BPCMP_GE: return value >= w->value;
+		default:       return true;
+	}
+}
+
+static bool     wpLastHitValid = false;
+static uint16_t wpLastHitAddr  = 0;
+static uint8_t  wpLastHitValue = 0;
+
 bool
 debug_wp_check_write(uint16_t addr, uint8_t value)
 {
 	for (int i = 0; i < numWatchpoints; i++) {
 		const struct watchpoint *w = &watchPoints[i];
-		if (!wp_covers_addr(w, addr) || !wp_bank_ok(w))
-			continue;
-		if (!w->has_value)
+		if (wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value)) {
+			wpLastHitValid = true;
+			wpLastHitAddr  = addr;
+			wpLastHitValue = value;
 			return true;
-		switch (w->op) {
-			case BPCMP_EQ: if (value == w->value) return true; break;
-			case BPCMP_NE: if (value != w->value) return true; break;
-			case BPCMP_LT: if (value <  w->value) return true; break;
-			case BPCMP_LE: if (value <= w->value) return true; break;
-			case BPCMP_GT: if (value >  w->value) return true; break;
-			case BPCMP_GE: if (value >= w->value) return true; break;
-			default: return true;
 		}
 	}
 	return false;
+}
+
+bool
+debug_wp_last_hit(uint16_t *addr, uint8_t *value)
+{
+	if (!wpLastHitValid)
+		return false;
+	*addr  = wpLastHitAddr;
+	*value = wpLastHitValue;
+	return true;
+}
+
+bool
+debug_wp_fires_on(uint16_t wp_addr, int x16Bank, uint16_t addr, uint8_t value)
+{
+	const int idx = wp_find(wp_addr, x16Bank);
+	if (idx < 0)
+		return false;
+	const struct watchpoint *w = &watchPoints[idx];
+	return wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value);
 }

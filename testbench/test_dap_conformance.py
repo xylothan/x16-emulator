@@ -228,7 +228,7 @@ class Dap:
 class Emu:
     """kind is "launch", "attach", or None for a session that sent neither."""
 
-    def __init__(self, kind="attach", extra=(), handshake=True, warp=True):
+    def __init__(self, kind="attach", extra=(), handshake=True, warp=True, kind_args=None):
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         self.port = probe.getsockname()[1]
@@ -244,7 +244,7 @@ class Emu:
             self.d.req("initialize", {"adapterID": "conformance", "linesStartAt1": True,
                                       "columnsStartAt1": True, "pathFormat": "path"})
             if kind:
-                self.d.req(kind, {})
+                self.d.req(kind, kind_args or {})
             self.d.req("configurationDone")
 
     def exits(self, secs=8):
@@ -510,6 +510,245 @@ def test_set_variable():
         case("reports a 16-bit value", bool(r and r["success"]) and r["body"]["value"].startswith("$C123"))
 
 
+# --- breakpoints ------------------------------------------------------------
+
+def write_debug_info(folder):
+    """Two source lines at $0800 and $0803, and a label on the second."""
+    src = os.path.join(folder, "fixture.c").replace("\\", "/")
+    with open(src, "w") as f:
+        f.write("first();\nsecond();\nthird();\n")
+    dbg = os.path.join(folder, "fixture.dbg")
+    with open(dbg, "w", newline="\n") as f:
+        f.write('version\tmajor=2,minor=0\n')
+        f.write('info\tcsym=0,file=1,lib=0,line=2,mod=1,scope=1,seg=1,span=2,sym=1,type=0\n')
+        f.write(f'file\tid=0,name="{src}",size=30,mtime=0x00000000,mod=0\n')
+        f.write('mod\tid=0,name="fixture.o",file=0\n')
+        f.write('seg\tid=0,name="CODE",start=0x000800,size=0x0040,addrsize=absolute,type=rw,oname="f.prg",ooffs=0\n')
+        f.write('span\tid=0,seg=0,start=0,size=3\n')
+        f.write('span\tid=1,seg=0,start=3,size=3\n')
+        f.write('scope\tid=0,name="",mod=0,size=64,span=0+1\n')
+        f.write('line\tid=0,file=0,line=1,type=1,span=0\n')
+        f.write('line\tid=1,file=0,line=2,type=1,span=1\n')
+        f.write('sym\tid=0,name="conflabel",addrsize=absolute,size=1,scope=0,def=0,type=lab,val=0x0803,seg=0\n')
+    return src, dbg
+
+
+def put_mem(d, addr, data):
+    d.req("writeMemory", {"memoryReference": hex(addr), "data": base64.b64encode(bytes(data)).decode()})
+
+
+def get_byte(d, addr):
+    r = d.req("readMemory", {"memoryReference": hex(addr), "count": 1})
+    return base64.b64decode(r["body"]["data"])[0]
+
+
+def set_reg(d, name, value):
+    d.req("setVariable", {"variablesReference": 1, "name": name, "value": value})
+
+
+def plant(d, a="$00", pc="$0800"):
+    """NOPs looping at $0800, and INC $1000 looping at $0810, with IRQs masked."""
+    d.pause()
+    put_mem(d, 0x0800, [0xEA] * 6 + [0x4C, 0x00, 0x08])
+    put_mem(d, 0x0810, [0xEE, 0x00, 0x10, 0x4C, 0x10, 0x08])
+    put_mem(d, 0x1000, [0])
+    set_reg(d, "P (Status)", "$24")
+    set_reg(d, "A", a)
+    set_reg(d, "PC", pc)
+
+
+def go(d, secs=3):
+    start = len(d.msgs)
+    d.req("continue", {"threadId": 1})
+    return d.wait_event("stopped", start, secs)
+
+
+def nothing_armed(d):
+    listing = d.breakpoints()
+    return not listing.get("breakpoints") and not listing.get("watchpoints")
+
+
+def refused(r, n=0):
+    bps = (r or {}).get("body", {}).get("breakpoints", [])
+    return len(bps) > n and bps[n].get("verified") is False and bool(bps[n].get("message"))
+
+
+def test_source_breakpoints():
+    print("source breakpoints")
+    with tempfile.TemporaryDirectory() as t:
+        src, dbg = write_debug_info(t)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            d = e.d
+            plant(d)
+            source = {"path": src}
+
+            r = d.req("setBreakpoints", {"source": source})
+            case("breakpoints is optional", bool(r and r["success"]) and r["body"]["breakpoints"] == [])
+
+            r = d.req("setBreakpoints", {"source": source, "lines": [1]})
+            case("the deprecated lines form is read",
+                 bool(r and r["success"]) and r["body"]["breakpoints"][0].get("verified") is True, str(r))
+            d.req("setBreakpoints", {"source": source, "breakpoints": []})
+            case("an empty list clears it", nothing_armed(d))
+
+            for label, bp in (("an unreadable condition", {"line": 1, "condition": "A == banana"}),
+                              ("an unreadable address", {"line": 1, "condition": "byte[zz] != 0"}),
+                              ("trailing text", {"line": 1, "condition": "A == 5 junk"}),
+                              ("a bank out of range", {"line": 1, "condition": "bank == 300"}),
+                              ("a bank on unbanked memory", {"line": 1, "condition": "bank == 2"}),
+                              ("a modulo hitCondition", {"line": 1, "hitCondition": "% 3"}),
+                              ("a greater-than hitCondition", {"line": 1, "hitCondition": "> 5"}),
+                              ("a pending line with a bad condition", {"line": 99, "condition": "nope"})):
+                r = d.req("setBreakpoints", {"source": source, "breakpoints": [bp]})
+                case(f"refused: {label}", refused(r), str(r and r.get("body")))
+                case(f"nothing armed: {label}", nothing_armed(d))
+
+            bps = [{"line": 1000 + i} for i in range(300)]
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": bps})
+            got = (r or {}).get("body", {}).get("breakpoints", [])
+            case("one reply per entry past the table's size", len(got) == 300, str(len(got)))
+            case("entries that did not fit are refused", len(got) == 300 and refused(r, 299))
+            d.req("setBreakpoints", {"source": source, "breakpoints": []})
+
+            r = d.req("setBreakpoints", {"source": source, "breakpoints": [{"line": 1, "condition": "A == 1"}]})
+            bp_id = r["body"]["breakpoints"][0]["id"]
+            case("a condition that can apply is verified", r["body"]["breakpoints"][0]["verified"] is True)
+            case("it does not stop while false", go(d, 0.4) is None)
+            d.pause()
+            set_reg(d, "A", "$01")
+            set_reg(d, "PC", "$0800")
+            ev = go(d)
+            case("it stops once true", bool(ev) and ev["body"]["reason"] == "breakpoint", str(ev))
+            case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [bp_id], str(ev))
+
+
+def test_function_breakpoints():
+    print("function breakpoints")
+    with tempfile.TemporaryDirectory() as t:
+        _, dbg = write_debug_info(t)
+        with Emu(kind_args={"dbgFile": dbg}) as e:
+            d = e.d
+            plant(d)
+
+            def fn(**bp):
+                return d.req("setFunctionBreakpoints", {"breakpoints": [dict(name="conflabel", **bp)]})
+
+            r = fn()
+            b = r["body"]["breakpoints"][0]
+            case("verified", b.get("verified") is True, str(b))
+            case("instructionReference is a string", b.get("instructionReference") == "0x0803", str(b))
+            d.req("setFunctionBreakpoints", {"breakpoints": []})
+
+            r = d.req("setFunctionBreakpoints", {"breakpoints": [{"name": "nosuchlabel"}]})
+            case("refused: an unknown label", refused(r), str(r and r.get("body")))
+            for label, bp in (("an unreadable condition", {"condition": "A == banana"}),
+                              ("an unreadable hitCondition", {"hitCondition": "% 2"})):
+                r = fn(**bp)
+                case(f"refused: {label}", refused(r), str(r and r.get("body")))
+                case(f"nothing armed: {label}", nothing_armed(d))
+
+            r = fn(condition="A == 1")
+            bp_id = r["body"]["breakpoints"][0]["id"]
+            case("the condition applies: no stop while false", go(d, 0.4) is None)
+            d.pause()
+            set_reg(d, "A", "$01")
+            set_reg(d, "PC", "$0800")
+            ev = go(d)
+            case("stops once true", bool(ev) and ev["body"]["reason"] == "function breakpoint", str(ev))
+            case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [bp_id], str(ev))
+
+            fn(hitCondition="3")
+            entry = d.breakpoints()["breakpoints"][0]
+            case("hitCondition reaches the core", entry.get("ignoreCount") == 2, str(entry))
+
+            fn(condition="A == 7")
+            d.req("setFunctionBreakpoints", {"breakpoints": []})
+            d.req("evaluate", {"expression": "bp_add 0803"})
+            entry = d.breakpoints()["breakpoints"][0]
+            case("a removed condition is not inherited", entry.get("condition") is None, str(entry))
+            d.req("evaluate", {"expression": "bp_clear"})
+
+            d.req("setInstructionBreakpoints",
+                  {"breakpoints": [{"instructionReference": "0x0803", "condition": "A == 1"}]})
+            before = d.breakpoints()
+            r = fn()
+            case("refused: would change another breakpoint's condition", refused(r), str(r and r.get("body")))
+            case("the other breakpoint is unchanged", d.breakpoints() == before)
+
+
+def test_instruction_stop():
+    print("instruction breakpoint stops")
+    with Emu() as e:
+        d = e.d
+        plant(d)
+        r = d.req("setInstructionBreakpoints", {"breakpoints": [{"instructionReference": "0x0803"}]})
+        bp_id = r["body"]["breakpoints"][0]["id"]
+        ev = go(d)
+        case("reason", bool(ev) and ev["body"]["reason"] == "instruction breakpoint", str(ev))
+        case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [bp_id], str(ev))
+
+
+def test_data_breakpoints():
+    print("data breakpoints")
+    with Emu() as e:
+        d = e.d
+        plant(d, pc="$0810")
+
+        def info(name, ref=None):
+            args = {"name": name}
+            if ref is not None:
+                args["variablesReference"] = ref
+            r = d.req("dataBreakpointInfo", args)
+            return r["body"].get("dataId") if r and r["success"] else "failed"
+
+        for name, ref in (("A", 1), ("PC", 1), ("R0", 1), ("$00-$0F", 2), ("A", None), ("banana", None),
+                          ("$12345", None), ("R16", 4), ("$0000", 3)):
+            case(f"no data breakpoint for {name} in scope {ref}", info(name, ref) is None, str(info(name, ref)))
+        case("R0 watches both of its bytes", info("R0", 4) == "2:2", str(info("R0", 4)))
+        case("R15 watches both of its bytes", info("R15", 4) == "32:2", str(info("R15", 4)))
+        case("a stack entry is its address", info("$01FF", 3) == "511", str(info("$01FF", 3)))
+        case("an address expression", info("$1000") == "4096", str(info("$1000")))
+
+        def data(**bp):
+            return d.req("setDataBreakpoints", {"breakpoints": [bp]})
+
+        for label, bp in (("read access", {"dataId": "4096", "accessType": "read"}),
+                          ("readWrite access", {"dataId": "4096", "accessType": "readWrite"}),
+                          ("a hitCondition", {"dataId": "4096", "hitCondition": "3"}),
+                          ("an unreadable condition", {"dataId": "4096", "condition": "== banana"}),
+                          ("a condition past a byte", {"dataId": "4096", "condition": "== 300"}),
+                          ("a value test on two bytes", {"dataId": "2:2", "condition": "== 1"}),
+                          ("an invalid dataId", {"dataId": "banana"}),
+                          ("an address past 16 bits", {"dataId": "65536"})):
+            r = data(**bp)
+            case(f"refused: {label}", refused(r), str(r and r.get("body")))
+            case(f"nothing armed: {label}", nothing_armed(d))
+
+        r = data(dataId="2:2", accessType="write")
+        wps = d.breakpoints().get("watchpoints", [])
+        case("a two-byte watch is armed as two bytes", len(wps) == 1 and wps[0]["len"] == 2, str(wps))
+
+        r = data(dataId="4096", accessType="write")
+        b = r["body"]["breakpoints"][0]
+        case("a write watch is verified and has an id", b.get("verified") is True and "id" in b, str(b))
+        ev = go(d)
+        case("reason", bool(ev) and ev["body"]["reason"] == "data breakpoint", str(ev))
+        case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [b.get("id")], str(ev))
+
+        r = data(dataId="4096", condition="== 5")
+        b = r["body"]["breakpoints"][0]
+        ev = go(d)
+        case("a value condition applies", bool(ev) and get_byte(d, 0x1000) == 5, str(get_byte(d, 0x1000)))
+        case("a filtered stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [b.get("id")], str(ev))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        d.req("evaluate", {"expression": "watch_add 1000"})
+        before = d.breakpoints()
+        r = data(dataId="4096", condition="== 9")
+        case("refused: would change another owner's watch", refused(r), str(r and r.get("body")))
+        case("the other watch is unchanged", d.breakpoints() == before)
+
+
 # --- main -------------------------------------------------------------------
 
 def main():
@@ -528,7 +767,9 @@ def main():
         print("SKIP schema validation: run python tests/fetch_dap_schema.py to enable it")
 
     for test in (test_evaluate_contexts, test_disconnect, test_terminate, test_dropped_socket,
-                 test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable):
+                 test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
+                 test_source_breakpoints, test_function_breakpoints, test_instruction_stop,
+                 test_data_breakpoints):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
