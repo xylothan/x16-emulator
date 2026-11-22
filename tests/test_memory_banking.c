@@ -1,32 +1,15 @@
 // RAM and ROM banking: the registers at $0000 and $0001, and the two windows
 // they steer.
 //
-// This one needs its oracle stated carefully, because it is weaker than
-// anywhere else in the suite and the file is deliberately split along that
-// line.
-//
-// VERA is an FPGA, so its Verilog is the hardware and the VERA tests cite it.
-// The X16's banking has no equivalent: it is discrete logic on the board, and
-// no schematic, CPLD, GAL or PLD source is published in any X16Community
-// repository. The strongest source that exists is the project's own
-// documentation, which is a step removed from the hardware.
-//
-// So:
-//
+// X16 banking is discrete logic with no published source.
 //   ORACLE: C -- X16Community/x16-docs, "X16 Reference - 08 - Memory Map.md",
 //   pinned at 79a8303bc33cda4ec3e85f3239f9b3d4c8c76260, for the bank
 //   registers, the window sizes and the bank counts. Quoted inline. Fetch it
 //   with `python tests/refs/fetch_refs.py`.
 //
-//   ORACLE: none, for what happens on a bank that is not installed. The
-//   documentation says only that such banks are "unavailable" and never says
-//   what accessing one does. Those assertions are characterization: they pin
-//   what this emulator does today so a change is deliberate, and they are not
-//   a claim about hardware. They are grouped separately below and say so.
+// ORACLE: none for an uninstalled bank: those assertions characterize this emulator.
 //
-// The fixture is a 512 KB machine -- fake_devices.c sets num_ram_banks to 64 --
-// which is one of the two configurations the documentation names, and puts the
-// boundary at exactly the bank number it calls out.
+// The fixture is a 512 KB machine (num_ram_banks is 64).
 
 #include "support/fake_devices.h"
 #include "support/harness.h"
@@ -42,9 +25,7 @@
 #define BANKED_RAM_END   0xBFFF
 #define BANKED_ROM_START 0xC000
 
-// fake_devices.c declares this as the installed RAM bank count. Stated here as
-// a number so a change to the fixture shows up as a failure rather than
-// quietly moving what "out of range" means.
+// Matches num_ram_banks in fake_devices.c.
 #define INSTALLED_RAM_BANKS 64
 
 static void
@@ -102,11 +83,7 @@ test_the_bank_registers_hold_and_report_a_bank(void)
 }
 
 // The other half of the same sentence: "Both settings default to 0 on RESET."
-//
-// On the machine $0000 and $0001 are the bank latches themselves, so a reset
-// that clears the latches is a reset of what those addresses report. The
-// emulator keeps the two apart -- memory.c:325 writes the byte into RAM as
-// well as into the latch, and memory.c:220 reads it back out of RAM.
+// memory.c:325 writes the byte to RAM and the latch; memory.c:220 reads it back.
 static void
 test_a_reset_returns_both_banks_to_zero(void)
 {
@@ -154,9 +131,7 @@ test_the_ram_window_shows_one_bank_at_a_time(void)
 	check_eq(read(BANKED_RAM_START), 0x11, "and bank 0 still holds what it was given");
 	check_eq(read(BANKED_RAM_END), 0x22, "at both ends of the window");
 
-	// 8 KB: the byte below the window is fixed RAM and does not move with the
-	// bank, which is what makes the window a window. $9EFF rather than $9FFF
-	// because the Memory Map puts fixed RAM at "$0000-$9EFF" and I/O above it.
+	// 8 KB: the byte below is fixed RAM (Memory Map: "$0000-$9EFF").
 	write(0x9EFF, 0x55);
 	write(RAM_BANK_REG, 1);
 	check_eq(read(0x9EFF), 0x55, "the last byte of fixed RAM is not banked");
@@ -179,16 +154,9 @@ test_the_rom_window_is_sixteen_kilobytes(void)
 }
 
 // ─── Characterization: undocumented, pinned so a change is deliberate ───────
-//
-// ORACLE: none. The Memory Map chapter says of a 512 KB machine only that
-// "(On systems with only 512 KB RAM, banks 64-255 are unavailable.)" and
-// nowhere says what reading or writing one does. There is no schematic to
-// consult. Everything below records this emulator's answer; none of it is a
-// claim about what the hardware does.
-//
-// memory.c:262 calls it an open bus read and returns the high byte of the
-// address, which is a plausible model of a floating 6502 data bus rather than
-// a measured value.
+// ORACLE: none. The Memory Map says only:
+//   "(On systems with only 512 KB RAM, banks 64-255 are unavailable.)"
+// memory.c:262 returns the high byte of the address as an open bus read.
 
 static void
 test_an_uninstalled_ram_bank_reads_as_the_address_high_byte(void)
@@ -223,10 +191,7 @@ test_a_write_to_an_uninstalled_ram_bank_is_dropped(void)
 	check_eq(read(BANKED_RAM_START), 0x5A, "a write to an uninstalled bank reaches no memory");
 }
 
-// memory.c:359-362 forwards writes to banks 32 and up to the cartridge and
-// ignores the rest, so the system ROM is unwritable. The Hardware chapter
-// describes a J1 jumper that makes the ROM flashable, which the emulator does
-// not model in either direction.
+// memory.c:359-362 forwards writes to banks 32+ to the cartridge, ignores the rest.
 static void
 test_writes_to_system_rom_are_ignored(void)
 {

@@ -6,11 +6,7 @@
 //   tag:    v47.0.2   (commit 45cc1f05)
 //   file:   fpga/source/top.v
 //
-// VERA has 32 register addresses and far more than 32 registers, so $9F29-$9F2C
-// mean different things depending on DCSEL. Get the banking wrong and a write
-// lands in an unrelated register -- a scroll position becomes a border colour
-// -- which is the kind of fault that shows up as a corrupted display three
-// subsystems away from the cause.
+// $9F29-$9F2C mean different things depending on DCSEL.
 //
 // See tests/support/video_fixture.c for the link seam.
 
@@ -46,8 +42,7 @@ select_dcsel(unsigned dcsel)
 // top.v:86    reg [5:0] dc_select_r, dc_select_next;
 // top.v:336   dc_select_next = write_data[6:1];
 //
-// Six bits, so 64 banks -- not the four or eight a reader might assume from the
-// registers actually in use.
+// Six bits: 64 banks.
 static void
 test_dcsel_is_six_bits(void)
 {
@@ -66,9 +61,7 @@ test_dcsel_is_six_bits(void)
 
 // top.v:173   5'h05: rddata = {1'b0, dc_select_r, vram_addr_select_r};
 //
-// Bit 7 reads back as zero regardless of what was written. On a write it is
-// fpga_reconfigure (top.v:335), a command rather than stored state, so there is
-// nothing to read back.
+// Bit 7 reads zero: on a write it is fpga_reconfigure (top.v:335), a command, not stored state.
 static void
 test_ctrl_bit7_reads_as_zero(void)
 {
@@ -86,8 +79,7 @@ test_ctrl_bit7_reads_as_zero(void)
 
 // top.v:337   vram_addr_select_next = write_data[0];
 //
-// ADDRSEL shares the register with DCSEL, so changing one must not disturb the
-// other. Both are written by the same byte, and software sets them separately.
+// ADDRSEL shares the register with DCSEL; changing one must not disturb the other.
 static void
 test_addrsel_and_dcsel_are_independent(void)
 {
@@ -106,10 +98,7 @@ test_addrsel_and_dcsel_are_independent(void)
 
 // top.v:179-208   5'h09..5'h0C each switch on dc_select_r
 //
-// The same four addresses carry different registers per bank. This writes a
-// value in one bank and checks it is still there after a round trip through
-// another, which is what a program does when it touches scroll and scale in the
-// same frame.
+// The four addresses differ per bank; a value survives a trip through another.
 static void
 test_banked_registers_do_not_alias(void)
 {
@@ -139,22 +128,16 @@ test_banked_registers_do_not_alias(void)
 // top.v:199   default: rddata = 8'd0;
 // top.v:207   default: rddata = 8'd0;
 //
-// Banks with nothing mapped do not read as zero or as open bus: they return the
-// version string, which is how software identifies the chip. DCSEL 3 has
-// nothing mapped at any of the four addresses.
-//
-// The major and patch bytes diverge. The emulator claims 49.0.6 (VERA_VERSION_*
-// in video.c), the R49.0.6 bitstream, which has no public RTL; the oracle stays
-// v47.0.2, whose registers report 47.0.0 -- they were never bumped to match the
-// tag name. See tests/check_vera_version.py.
+// Unmapped banks return the version string; DCSEL 3 maps none of the four.
+// Claims 49.0.6 (VERA_VERSION_* in video.c); the v47.0.2 registers report 47.0.0.
+// See tests/check_vera_version.py.
 static void
 test_unmapped_banks_return_the_version(void)
 {
 	video_reset();
 	select_dcsel(3);
 
-	// Real reads, not debug reads: video.c:2690 diverts a debug read to the
-	// stored composer array before the version path is reached.
+	// Real reads, not debug reads: video.c:2690 diverts a debug read to the stored composer array.
 	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V',
 	         "an unmapped bank reports 'V' at the first address");
 	check_divergent(video_read(VERA_DC_1, false) == 47,
@@ -171,15 +154,7 @@ test_unmapped_banks_return_the_version(void)
 
 // video.c:2690   if (debugOn) return video_get_dc_value(i);
 //
-// The debugger reads these registers by a different route than the machine
-// does, and for an unmapped bank the two disagree: the CPU sees the version
-// string, the debugger sees the stored composer bytes. Nothing in the RTL
-// corresponds to a debug read, so this is not a hardware divergence -- it is
-// the debugger showing something the running machine would never see, which is
-// worth knowing before trusting a register panel.
-//
-// The debugOn contract elsewhere is about side effects. This is about the value
-// itself, which that contract does not cover.
+// Unmapped bank: CPU sees the version string, the debugger the composer bytes.
 static void
 test_debug_and_real_reads_disagree_on_unmapped_banks(void)
 {
@@ -192,8 +167,7 @@ test_debug_and_real_reads_disagree_on_unmapped_banks(void)
 	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V', "while the CPU sees the version");
 }
 
-// Reading the version does not depend on having selected a bank first, and does
-// not disturb the selection: a program probes the chip and carries on.
+// Reading the version needs no bank selected and leaves the selection alone.
 static void
 test_reading_the_version_leaves_the_bank_alone(void)
 {

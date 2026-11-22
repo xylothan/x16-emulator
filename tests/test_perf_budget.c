@@ -1,14 +1,5 @@
 // Checks for guest performance budget accounting (src/perf_budget.c).
-//
-// The module's whole job is to decide which cycles were WORK and which were
-// WAITING, so most of what is worth testing is the classification: that a spin
-// loop is recognised, that something which merely looks like one is not, and
-// that the three layers override each other in the documented order. The
-// statistics on top of that are ordinary arithmetic, but they are the numbers a
-// developer would act on, so the percentile and overrun maths is pinned too.
-//
-// perf_budget.c reaches for no emulator state, so this drives it directly: no
-// CPU, no memory, no video, no SDL.
+// Classifies WORK versus WAITING cycles, then pins the percentile and overrun maths.
 
 #include "perf_budget.h"
 #include "support/harness.h"
@@ -16,8 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-// The machine this file assumes throughout: 8 MHz, VGA. Stated once here so a
-// change of default in the module cannot quietly rewrite what the checks mean.
+// The machine assumed throughout: 8 MHz, VGA.
 #define KHZ              8000
 #define CYCLES_PER_FRAME 134400
 #define SCANLINES        525
@@ -100,9 +90,7 @@ main(void)
 	}
 
 	// ── The same rule, for work recorded elsewhere ──────────────────────────
-	//
-	// perf_budget_period() is what a saved profile run is judged with, so it
-	// must agree with what the live machine does for the same target.
+	// perf_budget_period() must agree with the live machine for the same target.
 	{
 		configure();
 		const float targets[] = {60.0f, 59.0f, 30.0f, 20.0f, 120.0f, 45.0f};
@@ -158,9 +146,7 @@ main(void)
 
 		perf_frame_t f;
 		perf_budget_last_frame(&f);
-		// Each pass is 9 cycles. The detector re-anchors on the loop head and
-		// only credits confirmed passes, so a couple go to work; the point is
-		// that the great majority is recognised.
+		// Each pass is 9 cycles; only confirmed passes are credited, so a couple go to work.
 		check(f.idle >= 9 * 16, "a store-free spin loop is mostly idle");
 		check(perf_frame_work(&f) < 40 + 9 * 4,
 		      "and only the run-up is charged as work");
@@ -325,8 +311,7 @@ main(void)
 		perf_budget_last_frame(&f);
 		check_eq(f.zone[0], 0, "a region left open is closed by the frame boundary");
 
-		// Leaving a region that was never entered is ignored rather than
-		// corrupting the stack.
+		// Leaving a region that was never entered is ignored.
 		perf_budget_marker_write(0x93);
 		run_work(4, 5);
 		perf_budget_frame_end(0);
@@ -336,9 +321,7 @@ main(void)
 
 	// ── Marker mode does not outlive a reset ────────────────────────────────
 	{
-		// Marker mode suppresses the heuristic. If a reset did not clear it, a
-		// program that wrote one marker would disable automatic detection for
-		// the rest of the session, with no way back.
+		// Marker mode suppresses the heuristic; a reset must clear it.
 		configure();
 		perf_budget_marker_write(0xF0);
 		run_work(4, 5);
@@ -513,11 +496,7 @@ main(void)
 
 	// ── A tight poll nested inside a compact routine that stores ────────────
 	{
-		// The case a real ROM found: a whole routine small enough to fit inside
-		// PERF_SPIN_SPAN, containing a storing loop AND a store-free one. A
-		// detector that anchors on PC drift rather than on the backward jump
-		// treats the entire routine as one storing "loop" and reports no idle
-		// at all.
+		// Storing and store-free loops: the detector anchors on the backward jump.
 		configure();
 		for (int outer = 0; outer < 20; outer++) {
 			// work loop at $C004: STA / DEX / BNE, 80 passes
@@ -556,10 +535,7 @@ main(void)
 		check(half > CYCLES_PER_FRAME * 45 / 100 && half < CYCLES_PER_FRAME * 55 / 100,
 		      "and gets about half a frame's cycles");
 
-		// A routine using three quarters of a frame genuinely misses a
-		// half-frame budget, and this is the case where an overrun means
-		// something: work cannot exceed a whole frame, so without sub-frame
-		// budgets there would be nothing to overrun.
+		// A routine using three quarters of a frame misses a half-frame budget.
 		for (int i = 0; i < 5; i++) {
 			perf_budget_step(CYCLES_PER_FRAME * 3 / 4, 0x2000, 0, false, 0);
 			perf_budget_frame_end(0);
@@ -573,8 +549,7 @@ main(void)
 	// ── "60" means every frame, not 0.8% faster than the hardware ───────────
 	{
 		configure();
-		// The machine scans at 59.52 Hz. Asking for 60 must not shave the
-		// budget to 133,333 and put every saturated program over it.
+		// The machine scans at 59.52 Hz; asking for 60 must not shave the budget to 133,333.
 		perf_budget_set_target_fps(60.0f);
 		check_eq(perf_budget_budget_cycles(), CYCLES_PER_FRAME,
 		         "a 60 fps target snaps onto the 59.52 Hz frame");
@@ -586,9 +561,7 @@ main(void)
 	// ── A late frame boundary is not an overrun ─────────────────────────────
 	{
 		configure();
-		// A frame boundary is detected after the instruction that crossed it,
-		// so a saturated program overshoots the nominal period by a few cycles.
-		// That is where the boundary landed, not a budget failure.
+		// Boundaries are detected after the crossing instruction, so overshoot is small.
 		for (int i = 0; i < 10; i++) {
 			perf_budget_step(CYCLES_PER_FRAME + 3, 0x2000, 0, false, 0);
 			perf_budget_frame_end(0);
@@ -640,10 +613,7 @@ main(void)
 	}
 
 	// ── A value the marker hook consumes never reaches the protocol ─────────
-	// Capture mode takes $F8/$F9 through perf_budget_marker_hook. Any marker
-	// that does reach the protocol switches this module into marker mode for
-	// the session, which turns the spin detector off -- so a guest starting a
-	// capture must not silently change how work and waiting are classified.
+	// $F8/$F9 via perf_budget_marker_hook must not switch on marker mode.
 	{
 		configure();
 		perf_budget_marker_hook = hook_takes_f8;

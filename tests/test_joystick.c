@@ -1,17 +1,6 @@
 // The SNES controller ports: the latch/clock shift register, and the virtual
 // joystick that lets automation drive a port with no gamepad attached.
-//
-// The properties worth pinning are the ones a script driving the machine over
-// DAP depends on: that a button it holds actually reaches the data line, on the
-// right bit for the right port; that the shift register clocks out LSB-first
-// with the upper nibble forced high the way the hardware does; and -- the one
-// that is easy to break -- that a port nothing is driving still reads as
-// released, forever, rather than draining a shift register to zero and
-// reporting every button pressed.
-//
-// joystick.c reaches SDL's headers and its controller-enumeration functions, so
-// this links SDL, but never calls joystick_init(): the virtual path deliberately
-// needs no SDL controller, and the test is here to prove that.
+// Bits, LSB-first shift-out, and an undriven port. joystick_init() is never called.
 
 #include "support/harness.h"
 
@@ -102,12 +91,7 @@ test_a_port_with_no_source_reads_released(void)
 {
 	reset_joysticks();
 
-	// The compatibility guard, and the reason presence detection works at all.
-	// A port nothing drives must keep reporting 1s past the sixteenth clock,
-	// because that is how the KERNAL tells an empty port from an occupied one:
-	// a real controller's shift register runs out and reads 0, while a floating
-	// port stays high. Let this fall through to the shift register and every
-	// port would report a controller plugged into it.
+	// An undriven port reads 1s past clock 16: how the KERNAL detects an empty port.
 	check_eq(read_slot(0, 16), 0xFFFF, "an undriven port reads as nothing pressed");
 
 	Joystick_data = 0;
@@ -129,11 +113,7 @@ test_a_driven_port_runs_out(void)
 {
 	reset_joysticks();
 
-	// The other half of that contract: a port something *is* driving has a
-	// sixteen-bit shift register and nothing behind it, so the seventeenth
-	// clock onwards reads 0. That difference is the presence signal, so a
-	// virtual joystick has to reproduce it or nothing that checks whether a
-	// controller is plugged in would see one.
+	// Driven port: 16-bit shift register, then 0 from clock 17, the presence signal.
 	joystick_set_virtual(0, 0xFFFF);
 
 	Joystick_data = 0;
@@ -167,8 +147,7 @@ test_holding_persists_across_reads(void)
 {
 	reset_joysticks();
 
-	// A held direction has to survive being read every frame, or nothing that
-	// polls the port more than once could be driven at all.
+	// A held direction survives being read every frame.
 	joystick_set_virtual(0, (uint16_t)~JOY_BIT_DPAD_RIGHT);
 	for (int frame = 0; frame < 3; ++frame) {
 		check_eq(read_slot(0, 16), (uint16_t)(~JOY_BIT_DPAD_RIGHT | 0xF000),
@@ -185,8 +164,7 @@ test_driving_a_port_enables_it(void)
 	joystick_set_virtual(3, (uint16_t)~JOY_BIT_SELECT);
 	check(Joystick_slots_enabled[3], "driving a port enables it, so no -joy4 flag is needed");
 
-	// Releasing leaves the port enabled: that bit is the user's configuration,
-	// and a physical pad may bind to it now the virtual one has let go.
+	// Releasing leaves the port enabled: that bit is the user's configuration.
 	joystick_clear_virtual(3);
 	check(Joystick_slots_enabled[3], "releasing leaves the port enabled");
 }

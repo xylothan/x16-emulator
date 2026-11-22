@@ -1,25 +1,10 @@
 // VERA's layer registers, and the addresses derived from them.
 //
-// $9F2D-$9F33 (layer 0) and $9F34-$9F3A (layer 1) carry the map and tile base
-// addresses, the map and tile geometry, and the scroll offsets. Every one of
-// them is a shift or a bit field, which is the kind of arithmetic that goes
-// wrong quietly: a wrong shift puts the tilemap somewhere plausible.
-//
-// Two things are checked. The registers themselves -- what a write stores and
-// what a read reports -- and the two base addresses the emulator derives from
-// them, observed through video_is_tilemap_address() and
-// video_is_tiledata_address(). Those two are what the debugger uses to label
-// VRAM, so a wrong base mislabels a memory view as well as rendering wrongly.
-//
-// Not covered: the horizontal tile-column arithmetic and the per-row strides
-// within a tile. Both are only visible in rendered pixels, and video.c's
-// framebuffer has no accessor -- that seam belongs to the backend work, not
-// here. Nothing below claims to reach them.
+// Not covered: horizontal tile-column arithmetic and per-row strides (rendered pixels only).
 //
 // ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
 // (45cc1f053376dae12173ea63612820e4d289c0da), quoted inline.
-// layer_renderer.v is identical at v48.0.1 and at the tip: its last change was
-// a37697832a (2024-01-17), which v48.0.1 already contains.
+// layer_renderer.v is identical at v48.0.1; its last change is a37697832a.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -76,8 +61,7 @@ test_the_full_width_layer_registers_round_trip(void)
 
 	for (unsigned layer = 0; layer < 2; layer++) {
 		for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++) {
-			// A pattern with both nibbles populated and no byte repeated, so a
-			// register wired to its neighbour shows up.
+			// Both nibbles populated, no byte repeated.
 			const uint8_t v = (uint8_t)(0x9C + layer * 0x10 + i);
 
 			write_layer(layer, regs[i], v);
@@ -123,8 +107,7 @@ test_the_scroll_high_bytes_are_four_bits_wide(void)
 	}
 }
 
-// Each layer has its own copy of all seven. Written separately so a shared
-// index or a wrong stride between the two banks shows up as a bleed.
+// Each layer has its own copy of all seven; written separately to catch bleed.
 static void
 test_the_two_layers_are_independent(void)
 {
@@ -141,9 +124,7 @@ test_the_two_layers_are_independent(void)
 	check_eq(read_layer(1, L0_MAPBASE), 0x22, "separately from the other");
 }
 
-// Put both layers on the same geometry and base, so the two ranges coincide
-// and a boundary is unambiguous. video_is_tilemap_address() answers for either
-// layer, so overlapping them deliberately is what makes the edges testable.
+// Both layers on the same geometry and base, so the ranges coincide.
 static void
 set_both_layers(uint8_t config, uint8_t mapbase, uint8_t tilebase)
 {
@@ -170,8 +151,7 @@ test_mapbase_places_the_tilemap_at_512_byte_units(void)
 	check(video_is_tilemap_address(0x47FF), "and so is the last byte of a 32x32 map");
 	check(!video_is_tilemap_address(0x4800), "one past the end is not");
 
-	// A different register value must move it by the same unit, or the shift is
-	// right only at zero.
+	// A different register value must move it by the same unit.
 	set_both_layers(0x00, 0x21, 0xFC);
 	check(video_is_tilemap_address(0x4200), "the next register value is 512 bytes further on");
 	check(!video_is_tilemap_address(0x41FF), "and the byte below it is outside");
@@ -201,8 +181,7 @@ test_the_map_extent_follows_width_and_height(void)
 			check(video_is_tilemap_address((int)(bytes - 1)),
 			      "the last byte of the map is inside it");
 
-			// 256x256 fills the whole 128K, so there is no byte past the end to
-			// look at and the check would be measuring the address space.
+			// 256x256 fills the whole 128K; there is no byte past the end.
 			if (bytes < 0x20000u) {
 				check(!video_is_tilemap_address((int)bytes),
 				      "and the byte after it is outside");
@@ -236,8 +215,7 @@ test_tilebase_ignores_the_two_size_bits(void)
 	set_both_layers(0x00, 0xF0, 0x03);
 	check(video_is_tiledata_address(0x0000), "the tile size bits do not move the base");
 
-	// The first value that does move it, and by 2K rather than 512 bytes,
-	// because the two bits below it are not part of the field.
+	// First value that moves it, by 2K: the two low bits are not part of the field.
 	set_both_layers(0x00, 0xF0, 0x04);
 	check(!video_is_tiledata_address(0x07FF), "the first base step clears the 2K below it");
 	check(video_is_tiledata_address(0x0800), "and lands 2K up");

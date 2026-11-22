@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 """Fetch the reference documents the conformance tests are written against.
 
-The tests assert hardware behaviour, so every non-obvious expectation should be
-traceable to a document rather than to somebody's memory. This pulls those
-documents down and turns them into greppable text with page markers, so a test
-comment can cite a page and the next person can check it.
+Turns the documents into greppable text with page markers, so a test comment
+can cite a page.
 
     python tests/refs/fetch_refs.py
 
-Nothing fetched here is committed. The datasheets are copyrighted by Western
-Design Center and the tutorials are Bruce Clark's work; this only automates
-downloading them to a local, ignored directory. Run it once, and again whenever
-you want a fresh copy.
+Nothing fetched here is committed; the datasheets are Western Design Center's
+and the tutorials Bruce Clark's.
 
-Text extraction needs pypdf (pip install pypdf). Without it the PDFs are still
-downloaded and the HTML references still work; only the .txt files are skipped,
-and a test that cites a page can still be checked against the PDF by hand.
-
-The CPU tests already cite pages of the two WDC CPU datasheets. Until this
-script was committed those citations named a document nobody could fetch,
-which is the failure mode the whole "quote your oracle" rule exists to stop.
+Text extraction needs pypdf (pip install pypdf); without it only the .txt files
+of the PDFs are skipped.
 """
 
 import re
@@ -46,15 +37,8 @@ PAGES = {
     "6502org-65c02-opcodes.txt": "http://6502.org/tutorials/65c02opcodes.html",
 }
 
-# The X16's own documentation. Unlike VERA there is no hardware definition to
-# consult: the banking is discrete logic on the board, with no schematic or
-# programmable-logic source published anywhere, so this is the strongest source
-# there is for the memory map -- and it is documentation, a step removed.
-#
-# Pinned to a commit rather than a branch, for the same reason the VERA RTL is:
-# a citation of a line in a moving file is not checkable. The Memory Map
-# chapter carries its own warning that "the layout of the banks may still
-# change", so this pin will need moving one day.
+# The X16's own documentation: no hardware definition is published for the
+# banking, so this is the source for the memory map. Pinned to a commit.
 DOCS_COMMIT = "79a8303bc33cda4ec3e85f3239f9b3d4c8c76260"
 
 DOCS = {
@@ -98,8 +82,7 @@ def pdf_to_text(pdf, out):
     reader = pypdf.PdfReader(str(pdf))
     with out.open("w", encoding="utf-8") as fh:
         for i, page in enumerate(reader.pages, 1):
-            # The page marker is the point of this: a citation is only useful if
-            # the next person can find the line again.
+            # The page marker lets a citation be found again.
             fh.write(f"\n===== page {i} =====\n")
             fh.write(page.extract_text() or "")
     print(f"  made {out.name} ({len(reader.pages)} pages)")

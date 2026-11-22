@@ -1,34 +1,17 @@
 #!/usr/bin/env python3
 """Check the emulator's default palette against the one in VERA's bitstream.
 
-VERA's palette RAM is initialised at configuration time from a Lattice memory
-file, fpga/source/palette_ram.mem, baked into the FPGA bitstream. That makes
-the default palette a property of the hardware rather than a convention the
-ROM establishes, so src/video.c's default_palette[] is checkable against it
-entry for entry.
+VERA's palette RAM is initialised from fpga/source/palette_ram.mem; src/video.c's
+default_palette[] is checked against it entry for entry.
 
     python tests/check_vera_palette.py
 
-Skips when the RTL has not been fetched. Nothing in the suite requires the
-reference to be present -- run tests/fetch_vera_rtl.py to get it. CI does
-fetch it, and sets X16_VERA_RTL_REQUIRED so that a broken fetch is a failure
-rather than a silent skip, the same way X16_KLAUS_REQUIRED works.
+Skips when the RTL has not been fetched (tests/fetch_vera_rtl.py). CI sets
+X16_VERA_RTL_REQUIRED so that a broken fetch fails rather than skips.
 
-WHY THIS IS A SCRIPT AND NOT A C TEST
--------------------------------------
-The palette the renderer uses lives in a static array with no accessor, and
-the only path to it is rendered pixels, which need the framebuffer. Comparing
-the two declarations needs neither. It also catches an entry being edited by
-hand, which is the way a 256-entry table actually goes wrong.
-
-WHAT THIS DOES NOT CHECK
-------------------------
-How a 4-bit channel becomes an 8-bit one. video.c:792-794 replicates the
-nibble, so 0xF becomes 0xFF. The RTL cannot settle that: video_vga.v declares
-vga_r, vga_g and vga_b as [3:0] and assigns palette_rgb_data[11:8] etc.
-straight to them, so the hardware terminates at four bits per channel and the
-expansion is the emulator's own presentation choice. Asserting it against the
-Verilog would be inventing an oracle.
+Not checked: how a 4-bit channel becomes 8 bits (video.c:792-794 replicates the
+nibble); video_vga.v declares vga_r, vga_g and vga_b as [3:0], so the RTL does
+not settle it.
 """
 
 import os
@@ -88,9 +71,7 @@ def main():
 
     ok = True
 
-    # Counted separately from the comparison. Two tables of different lengths
-    # would otherwise compare equal over the shorter one and say nothing about
-    # the rest.
+    # Counted separately: tables of different lengths would compare equal over the shorter.
     for name, got in (("video.c", len(emu)), (MEM.name, len(rtl))):
         if got != ENTRIES:
             print(f"FAIL: {name} holds {got} entries, expected {ENTRIES}")

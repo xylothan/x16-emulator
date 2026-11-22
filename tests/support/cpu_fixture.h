@@ -1,16 +1,8 @@
 // Test fixture for the CPU core: a flat 64K memory and the handful of symbols
 // fake6502.c expects the rest of the emulator to provide.
+// fake6502.c needs six outside symbols, all supplied here: no SDL, ROM or devices.
 //
-// The CPU is the cheapest part of the machine to test. fake6502.c defines its
-// own registers, cycle counter and run state, includes no memory.h, and reaches
-// outside itself for only six symbols -- all supplied here. So a CPU test links
-// the real instruction tables against this flat memory and nothing else: no
-// SDL, no ROM, no banking, no devices.
-//
-// One fixture covers all three instruction sets. There is no separate 65C816
-// core: fake6502.c holds both optable_c02[] and optable_c816[] and swaps a
-// single pointer inside reset6502(), so which CPU a scenario runs on is a
-// parameter here rather than a different harness.
+// One fixture for all three instruction sets; reset6502() swaps one pointer.
 
 #ifndef X16_TEST_CPU_FIXTURE_H
 #define X16_TEST_CPU_FIXTURE_H
@@ -21,9 +13,7 @@
 #include "cpu/fake6502.h"
 #include "cpu/registers.h"
 
-// registers.h defines the type but not the object, and the only declaration of
-// it lives in glue.h, which reaches SDL. code_map.c and debug_core.c each
-// declare it locally for the same reason; this does the same.
+// registers.h has the type, glue.h the object (and SDL); declared locally.
 extern struct regs regs;
 
 // The four CPU configurations the emulator can be in. Three of them change how
@@ -53,9 +43,7 @@ extern uint8_t cpu_mem[CPU_MEM_SIZE];
 // always cleared; outside it, use this or the byte survives into the next test.
 void cpu_seed(uint32_t addr, uint8_t value);
 
-// Zero memory and counters, point the reset vector at `start`, and reset the
-// CPU into `mode`. Every scenario begins here, so one test cannot inherit
-// state from the one before it.
+// Zero memory and counters, point the reset vector at `start`, and reset the CPU into `mode`.
 void cpu_reset_to(cpu_mode_t mode, uint16_t start);
 
 // Copy a block into memory, returning the address just past it so successive
@@ -65,20 +53,13 @@ uint16_t cpu_load(uint16_t addr, const uint8_t *bytes, uint16_t len);
 // Execute exactly `count` instructions.
 void cpu_steps(int count);
 
-// Execute one instruction and return what it cost. Timing assertions want this
-// rather than cpu_last_cycles(), which covers a whole run: reading a per-
-// instruction cost off a run that also included its setup is an easy mistake to
-// make and a confusing one to debug.
+// Execute one instruction and return what it cost; cpu_last_cycles() covers a whole run.
 uint32_t cpu_step(void);
 
-// Run for `ticks` cycles through exec6502(), the loop the emulator itself uses.
-// step6502() is the loop the debugger drives, and the two are separate pieces
-// of code that are supposed to agree; this exists so a test can compare them.
+// Run for `ticks` cycles through exec6502(), the emulator's loop.
 void cpu_exec(uint32_t ticks);
 
-// Cycles consumed by the most recent cpu_steps() call. Cycle counts are worth
-// asserting on: they are what a debugger hook can perturb without changing any
-// visible register.
+// Cycles consumed by the most recent cpu_steps() call.
 uint32_t cpu_last_cycles(void);
 
 // How often the CPU has signalled a halt (STP) or pulled a vector, since the
@@ -87,21 +68,13 @@ extern uint32_t cpu_stop_count;
 extern uint32_t cpu_vector_pulls;
 
 // Read a register at the width the CPU is currently using.
-//
-// The register names are less symmetric than they look: regs.a is the LOW BYTE
-// of the accumulator, while regs.x and regs.y are the whole 16-bit registers
-// (regs.xl and regs.yl are their low bytes). Checking regs.a in a 16-bit
-// scenario would quietly drop the high byte and report a false pass, in exactly
-// the mode this fixture exists to cover, so prefer these throughout.
+// regs.a is the accumulator's low byte; regs.xl and regs.yl are X's and Y's.
 uint16_t cpu_a(void);
 uint16_t cpu_x(void);
 uint16_t cpu_y(void);
 
-// Set these to watch every bus access the CPU makes, so a test can compare the
-// order and addresses against a reference trace. NULL by default, which costs
-// one branch per access and keeps the other tests unaffected.
-//
-// The address is the full 24-bit one; on a 65C02 the bank is always zero.
+// Set these to watch every bus access, for comparison with a reference trace. NULL by default.
+// The address is the full 24-bit one; on a 65C02 the bank is zero.
 extern void (*cpu_bus_read_hook)(uint32_t addr, uint8_t value);
 extern void (*cpu_bus_write_hook)(uint32_t addr, uint8_t value);
 

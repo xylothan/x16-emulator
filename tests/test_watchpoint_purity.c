@@ -1,15 +1,6 @@
 // Regression: watching memory must not change what the machine does.
 //
-// The watchpoint hook sits in write6502(), on the path every store takes. It
-// runs before the write and does not return early, which is what lets a store
-// still land while the debugger is told about it -- but nothing pinned that,
-// and "the debugger swallowed my write" is a bug that would look like the
-// emulated program being wrong.
-//
-// The wider claim is the one that matters: setting a watchpoint changes nothing
-// except that a break is reported. These compare a whole machine signature
-// either side of it rather than a list of fields, because the failures worth
-// catching are the ones nobody thought to name.
+// A watchpoint changes nothing but the reported break, compared by whole-machine signature.
 //
 // memory.c, debug_core.c and the CPU core are real here; only the devices
 // behind the I/O page are fakes.
@@ -23,8 +14,7 @@
 
 #include <stdint.h>
 
-// Declared locally for the same reason the other tests do it: the only
-// declarations live in headers that reach SDL.
+// Declared locally: the only declarations live in headers that reach SDL.
 extern uint8_t *RAM;
 extern uint32_t clockticks6502;
 
@@ -115,8 +105,7 @@ test_unrelated_watch_is_inert(void)
 }
 
 // ---- Watching costs no cycles ----------------------------------------------
-// The scan runs on every store, so if it charged anything the whole machine
-// would run slower whenever a watchpoint was set.
+// The scan runs on every store and charges nothing.
 
 static void
 test_watching_costs_no_cycles(void)

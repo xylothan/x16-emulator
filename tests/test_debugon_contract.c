@@ -1,17 +1,10 @@
 // Regression: the debugOn contract.
 //
-// real_read6502() carries a debugOn flag down to every device behind the I/O
-// page. The rule it encodes, nowhere written down and nowhere enforced, has two
-// halves:
+// real_read6502() carries a debugOn flag to every device behind the I/O page:
 //
 //   * a debug read reports what is there and disturbs nothing -- no device
 //     state moved, no cycles spent;
 //   * a real read does both, because that is what the hardware does.
-//
-// It matters because the debugger reads memory constantly: a memory view
-// refreshing over the I/O page would otherwise step every device it touches.
-// That is not hypothetical -- a debug read of VIA port A was advancing the I2C
-// bus until recently, which on this machine talks to the SMC and the RTC.
 //
 // Devices here are recording fakes (tests/support/fake_devices.c), so these
 // assertions are about how memory.c routes and guards, not about how any real
@@ -110,8 +103,7 @@ test_debug_read_moves_no_state(void)
 }
 
 // ---- A debug read costs no cycles ------------------------------------------
-// The slow I/O ranges charge three cycles on a real access. A debugger that
-// spent those would change program timing just by being open.
+// The slow I/O ranges charge three cycles on a real access.
 
 static void
 test_debug_read_costs_nothing(void)
@@ -156,9 +148,7 @@ test_io_page_sweep_is_pure(void)
 	check(fake_devices_total_reads() > 0, "the sweep reached at least one device");
 	check_eq(clockticks6502, 0, "sweeping the I/O page costs no cycles");
 
-	// The YM is the one exception, and it is a signature problem rather than a
-	// routing one: YM_read_status() takes no debug flag, so memory.c has no way
-	// to tell it this read is for the debugger.
+	// The YM is the one exception: YM_read_status() takes no debug flag.
 	uint32_t moved = fake_devices_state_sum() - fake_dev[FAKE_YM].state;
 	check_eq(moved, 0, "sweeping the I/O page moves no device state");
 	check(fake_dev[FAKE_YM].state > 0,

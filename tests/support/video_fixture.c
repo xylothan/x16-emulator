@@ -1,23 +1,10 @@
 // Link seam for testing the real video.c.
 //
-// video.c is the VERA implementation and the emulator's SDL host rolled into
-// one file. The emulation half -- register decode, the data ports, address
-// increment, the layer and sprite arithmetic, video_step() and the framebuffer
-// -- touches no SDL at all. The host half owns the window, the event pump and
-// the debugger overlay.
+// The SDL host half of video.c, inert: a test reaching one has left emulation.
 //
-// The tests want the first half and nothing else, so this supplies everything
-// the second half refers to. Every function here is inert: a test that reaches
-// one has left emulation and gone into presentation, and wants rewriting rather
-// than accommodating. Nothing records, because nothing here should be called.
+// video_reset() is called and is deterministic; video_init/update/end are not.
 //
-// video_init(), video_update() and video_end() are therefore never called by a
-// test. video_reset() is, and is deterministic.
-//
-// The audio modules are linked for real rather than faked. video.c routes
-// $9F3B-$9F3D straight into them, they have no dependencies of their own, and
-// they already have their own tests -- so a fake would add a second thing to
-// keep true for no benefit.
+// The audio modules are linked for real: video.c routes $9F3B-$9F3D into them.
 
 #include "video_fixture.h"
 
@@ -112,9 +99,6 @@ void DEBUGSetStopReason(const char *reason) { (void)reason; }
 
 // ─── Audio mixing ───────────────────────────────────────────────────────────
 //
-// video.c calls this before every audio register access so the mixer catches up
-// to the current cycle. The PSG and PCM modules themselves are linked for real;
-// only the pull from the audio backend is stubbed, since there is no device to
-// render into.
+// video.c calls this before each audio register access; only the pull is stubbed.
 
 void audio_render(void) { }

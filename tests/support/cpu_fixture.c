@@ -2,9 +2,7 @@
 
 #include <string.h>
 
-// exec6502() accumulates into clockgoal6502, and neither reset6502() nor the
-// header exposes it. Left alone it would carry over between scenarios, so a
-// run following another run would stop at the wrong point.
+// exec6502() accumulates into clockgoal6502; cleared so runs do not carry over.
 extern uint32_t clockgoal6502;
 
 uint8_t  cpu_mem[CPU_MEM_SIZE];
@@ -13,14 +11,8 @@ uint32_t cpu_vector_pulls;
 
 static uint32_t cycles_before_run;
 
-// Clearing 16 MB per reset would dominate everything: the ProcessorTests runner
-// resets once per case and there are tens of thousands of them. Bank 0 is
-// cleared outright, because it is small and every 65C02 test lives there. Above
-// bank 0 only the pages actually touched are cleared, tracked here.
-//
-// A test that scribbles over more than DIRTY_MAX pages sets dirty_all instead
-// and pays for a full clear, which is the right trade for the few that load
-// whole images.
+// Bank 0 is cleared outright; above it only touched pages, per reset.
+// More than DIRTY_MAX touched pages sets dirty_all and pays for a full clear.
 #define DIRTY_PAGE_SHIFT 8
 #define DIRTY_MAX        256
 
@@ -72,17 +64,12 @@ cpu_seed(uint32_t addr, uint8_t value)
 }
 
 // ---- What fake6502.c expects the rest of the emulator to provide ------------
-// Flat 24-bit memory: no I/O, and no banking beyond the 65C816's own, which is
-// just the top eight address lines. A test that cares about the emulator's
-// banking scheme belongs with memory.c, not here.
+// Flat 24-bit memory: no I/O, no banking beyond the 65C816's own.
 
 void (*cpu_bus_read_hook)(uint32_t addr, uint8_t value);
 void (*cpu_bus_write_hook)(uint32_t addr, uint8_t value);
 
-// A 65C02 has sixteen address lines and no bank pins, so its addresses wrap
-// inside 64K. The core computes effective addresses in 24 bits for the 65C816's
-// benefit and indexing can carry past $FFFF, which on a 65C02 must come back to
-// $0000 rather than reaching bank 1.
+// A 65C02 has no bank pins, so indexing past $FFFF wraps to $0000 rather than reaching bank 1.
 static uint32_t
 cpu_bus_address(uint16_t address, uint8_t bank)
 {
@@ -178,10 +165,7 @@ cpu_reset_to(cpu_mode_t mode, uint16_t start)
 	cpu_stop_count   = 0;
 	cpu_vector_pulls = 0;
 
-	// reset6502() only ever sets bits in the status register -- it ORs in the
-	// constant and width bits and calls setinterrupt()/cleardecimal() -- so
-	// N, V, Z and C would otherwise survive from the previous scenario and
-	// make a test's result depend on what ran before it.
+	// reset6502() only ORs status bits, so N, V, Z and C would survive a scenario.
 	regs.status = 0;
 
 	// reset6502() reads the vector from $FFFC/$FFFD, so the entry point has to
@@ -249,10 +233,7 @@ cpu_last_cycles(void)
 	return clockticks6502 - cycles_before_run;
 }
 
-// The register names are not as symmetric as they look: regs.a is the low byte
-// of the accumulator while regs.x and regs.y are the whole 16-bit registers,
-// so reading regs.a in a 16-bit scenario would silently discard the high byte
-// and report a false pass. These read the width the CPU is actually using.
+// regs.a is the accumulator's low byte; regs.x and regs.y are whole 16-bit.
 
 uint16_t
 cpu_a(void)

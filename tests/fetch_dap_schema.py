@@ -4,9 +4,7 @@ validates against.
 
     python tests/fetch_dap_schema.py
 
-Nothing here is committed: it is someone else's repository under its own licence.
-Pinned to a commit rather than a branch, so a change to the specification cannot
-change what the test means without someone moving the pin.
+Not committed: someone else's repository under its own licence. Pinned to a commit.
 """
 
 import sys

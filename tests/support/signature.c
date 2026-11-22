@@ -10,9 +10,7 @@ extern struct regs regs;
 extern uint32_t clockticks6502;
 extern uint8_t *RAM;
 
-// FNV-1a. Chosen because it is short enough to read and verify at a glance,
-// which matters more here than distribution: this is change detection, not
-// cryptography.
+// FNV-1a: short enough to verify at a glance; change detection, not cryptography.
 static void
 mix(uint64_t *h, const void *data, size_t len)
 {

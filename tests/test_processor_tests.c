@@ -9,13 +9,9 @@
 //   3. the bus trace -- which addresses were touched, in what order, including
 //      the dummy accesses real hardware makes.
 //
-// The core cannot pass (3) as written: it adds an instruction's cycles in one
-// go rather than one bus access per cycle, and skips dummy accesses. All three
-// are therefore measured against a recorded baseline rather than asserted
-// against hardware.
+// The core cannot pass (3): it skips dummy accesses. All three are baselined.
 //
-// Fixtures come from tests/fetch_pt.py and are not committed. Without them
-// this reports skipped.
+// Fixtures come from tests/fetch_pt.py; without them this reports skipped.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
@@ -110,8 +106,7 @@ read_addr24(FILE *f, uint32_t *out)
 	return true;
 }
 
-// Why read_case() last returned false. A truncated fixture and a case too large
-// for these buffers look identical otherwise, and the loop just stops early.
+// Why read_case() last returned false: a truncated fixture or a case too large for the buffers.
 static const char *read_error = NULL;
 
 static bool
@@ -163,9 +158,7 @@ typedef struct {
 
 static pt_opcode by_opcode[256];
 
-// Native mode picks the accumulator and index widths independently, so a fault
-// in one width looks like scattered opcode failures until the results are split
-// this way.
+// Native mode picks accumulator and index widths independently; results are split by width.
 enum { MODE_EMU, MODE_M8X8, MODE_M8X16, MODE_M16X8, MODE_M16X16, MODE_COUNT };
 
 static const char *mode_name[MODE_COUNT] = {
@@ -191,10 +184,7 @@ mode_of(const pt_case *c)
 	return x8 ? MODE_M16X8 : MODE_M16X16;
 }
 
-// Opcodes the suite records in a way that cannot be compared against a single
-// step of this emulator. Counted separately rather than left to read as
-// failure, since none of them is a fault in the core.
-//
+// Opcodes recorded in a form one step cannot compare; counted separately.
 //   $44 MVP, $54 MVN   Move one byte per execution and rewind PC so the
 //                      instruction runs again, which is what makes a block move
 //                      interruptible. The suite records a fixed 100-cycle
@@ -227,9 +217,7 @@ run_case(const pt_case *c, pt_result *r)
 {
 	const bool is816 = (c->cpu == PT_CPU_65816);
 
-	// The suite chooses the mode per case, through the E bit and the width
-	// flags in P, so reset into the plainest configuration for the core and
-	// let the case's own registers select the rest.
+	// Reset into the plainest mode; the case's registers select the rest.
 	cpu_reset_to(is816 ? CPU_816_EMU : CPU_65C02, 0x0000);
 	for (int i = 0; i < c->init_ram_n; i++) {
 		cpu_seed(c->init_ram[i].addr, c->init_ram[i].value);
@@ -301,9 +289,7 @@ run_case(const pt_case *c, pt_result *r)
 	}
 
 	bool state = regs_but_p && ram_ok && regs.status == c->final_.p;
-	// Bit 4 has no physical existence: it only means anything in a copy of P
-	// pushed to the stack. Counting matches that ignore it separates one
-	// systematic disagreement from genuinely wrong results.
+	// Bit 4 exists only in a pushed P; matches ignoring it are counted separately.
 	bool state_but_b = regs_but_p && ram_ok &&
 	                   (regs.status & ~0x10) == (c->final_.p & ~0x10);
 
@@ -358,8 +344,7 @@ run_case(const pt_case *c, pt_result *r)
 	}
 }
 
-// ctest may run this from the source root or the build directory. Resolve once
-// rather than giving every file its own candidate list.
+// ctest may run this from the source root or the build directory.
 static const char *
 tests_prefix(void)
 {
@@ -389,8 +374,7 @@ tests_path(char *buf, size_t buflen, const char *rel)
 	return buf;
 }
 
-// Which suite to run. One binary rather than three: the fixtures differ only in
-// which cases they hold, and the runner already reads the CPU from each case.
+// One binary for all suites; the runner reads the CPU from each case.
 static const char *variant = "wdc65c02";
 
 static const char *
@@ -407,14 +391,7 @@ find_fixture(char *buf, size_t buflen)
 	return NULL;
 }
 
-// Baseline: cases passing each check, per opcode. Committed; the fixtures are
-// not. A diff to this file is the record of the core's conformance changing.
-//
-// Compared in both directions. A drop is a regression; a rise fails too, since
-// a baseline is only useful while it stays true. Both are resolved by
-// regenerating it and reading the diff.
-//
-// Fixes belong in src/cpu and touch nothing here, so they can go upstream.
+// Baseline: passing cases per check and opcode (committed), compared both ways.
 static const char *
 find_baseline(char *buf, size_t buflen)
 {
@@ -647,8 +624,7 @@ main(int argc, char **argv)
 	}
 	write_report(per_opcode);
 
-	// A run matching its baseline is still wrong; say so, or green reads as
-	// correct.
+	// A run matching its baseline is still wrong; say so.
 	int diverging = 0;
 	int not_comparable = 0;
 	for (int i = 0; i < 256; i++) {

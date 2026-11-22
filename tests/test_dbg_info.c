@@ -1,8 +1,5 @@
 // Parser checks for the cc65 debug-info reader.
-//
-// Standalone: dbg_info.c has no dependency on the emulator core, so this links
-// it on its own. No SDL, ROM or emulator required. Returns 0 when every check
-// passes.
+// Standalone: no SDL, ROM or emulator; returns 0 when every check passes.
 //
 // Build: configure with -DBUILD_DBG_INFO_TEST=ON, then build target
 // dbg_info_test.
@@ -24,9 +21,7 @@ check(int cond, const char *msg)
 	}
 }
 
-// A minimal but realistic cc65 .dbg file. Two source files so file/line lookup
-// has something to disambiguate, two spans so mid-span resolution is
-// meaningful, and two labels so symbol lookup and ordering are exercised.
+// Minimal cc65 .dbg: two source files, two spans, two labels.
 static const char *k_dbg =
 	"version\tmajor=2,minor=0\n"
 	"info\tcsym=0,file=2,lib=0,line=3,mod=1,scope=1,seg=1,span=2,sym=2,type=0\n"
@@ -42,9 +37,7 @@ static const char *k_dbg =
 	"sym\tid=1,name=\"_helper\",addrsize=absolute,size=3,scope=0,def=0,val=0x000811,type=lab\n"
 	"mod\tid=0,name=\"main.o\",file=0\n";
 
-// Two loads of the same module where an equate's value changed. Nothing prunes
-// equates, and the lookup returns the first match, so appending rather than
-// replacing lets the old value win for the rest of the session.
+// Two loads of the same module where an equate's value changed.
 static const char *k_dbg_equ_v1 =
 	"version\tmajor=2,minor=0\n"
 	"file\tid=0,name=\"equ.s\",size=10,mtime=0x00000000,mod=0\n"
@@ -65,11 +58,6 @@ static const char *k_dbg_equ_v2 =
 	"sym\tid=1,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000007,type=equ\n"
 	"mod\tid=0,name=\"equ.o\",file=0\n";
 // Returns a path valid until this is called WRITE_TEMP_SLOTS more times.
-// It used to hand back one static buffer, so a caller that wrote a second
-// fixture before removing the first removed the wrong file -- and a caller that
-// wrote three before loading any would have loaded the last one three times.
-// Rotating the buffers makes holding a few paths at once safe, which is what
-// every multi-module fixture here needs.
 #define WRITE_TEMP_SLOTS 8
 static char *
 write_temp(const char *contents, const char *leaf)
@@ -104,9 +92,7 @@ write_temp_dbg(void)
 	return write_temp(k_dbg, "x16_dbg_info_test.dbg");
 }
 
-// Two segments sharing the banked window at $A000, one per RAM bank, each
-// attributed to its own source file. Different sizes are what lets a LOAD tell
-// them apart.
+// Two segments sharing the banked window at $A000, one per RAM bank, each with its own source file.
 static const char *k_dbg_banked =
 	"version\tmajor=2,minor=0\n"
 	"file\tid=0,name=\"a_bank5.s\",size=100,mtime=0x00000000,mod=0\n"
@@ -129,8 +115,7 @@ write_temp_banked_dbg(void)
 int
 main(void)
 {
-	// Nothing loaded yet: every lookup should decline rather than invent an
-	// answer, and none of them should trip over the empty tables.
+	// Nothing loaded: every lookup declines.
 	check(!dbg_info_is_loaded(), "reports not loaded before any load");
 	{
 		const char *file = NULL;
@@ -162,8 +147,7 @@ main(void)
 		check(line == 10, "  ...to the right line");
 	}
 
-	// Landing mid-instruction must still resolve; this is what keeps the
-	// current-line highlight steady while stepping.
+	// Landing mid-instruction still resolves.
 	{
 		const char *file = NULL;
 		int         line = 0;
@@ -200,7 +184,7 @@ main(void)
 		      "finds a label by address");
 		check(dbg_info_symbol_count() == 2, "enumerates both labels");
 
-		// Enumeration is sorted by address, which the symbol list relies on.
+		// Enumeration is sorted by address.
 		dbg_addr_t prev   = 0;
 		int      sorted = 1;
 		for (int i = 0; i < dbg_info_symbol_count(); i++) {
@@ -220,8 +204,7 @@ main(void)
 		check(!dbg_info_symbol_at(-1, &n, &a), "declines a negative index");
 	}
 
-	// Source files referenced by the .dbg, so a UI can offer them before the
-	// PC has ever been there.
+	// Source files referenced by the .dbg.
 	check(dbg_info_file_count() == 2, "enumerates both source files");
 
 	// Span starts are what the anchored disassembler falls back to.
@@ -239,12 +222,11 @@ main(void)
 
 	dbg_info_free();
 	check(!dbg_info_is_loaded(), "reports not loaded after free");
-	// Freeing twice must be harmless; shutdown paths are not always ordered.
+	// Freeing twice is harmless.
 	dbg_info_free();
 	check(1, "double free is harmless");
 
-	// A load that fails must not disturb what is already loaded. The obvious
-	// ordering bug here is clearing the address map before opening the file.
+	// A failed load leaves what is already loaded undisturbed.
 	check(dbg_info_load(path) == 0, "reloads after free");
 	check(dbg_info_load("this/does/not/exist.dbg") != 0, "second load of a missing file fails");
 	{
@@ -254,9 +236,7 @@ main(void)
 		      "a failed load leaves the existing mapping intact");
 	}
 
-	// Reloading a module, which is what an overlay swap does, must replace it
-	// rather than accumulate a second copy of its segments -- duplicates make
-	// bank disambiguation ambiguous and it gives up.
+	// Reloading a module replaces it rather than duplicating its segments.
 	{
 		const int files_before = dbg_info_file_count();
 		dbg_info_unload_range(0x0801, 0x0840);
@@ -267,11 +247,7 @@ main(void)
 		      "the reloaded module still resolves");
 		check(line == 10, "  ...to the original line");
 
-		// The point of the block, which it used to measure and then discard.
-		// Unloading a range deliberately leaves file records alone, so nothing
-		// stops a reload appending a second copy of every one of them; the same
-		// is true of equates, where the lookup returns the FIRST match and a
-		// stale value would therefore win for the rest of the session.
+		// Unloading keeps file records; a reload must not append a second copy.
 		check(dbg_info_file_count() == files_before,
 		      "  ...without accumulating a second copy of its files");
 	}
@@ -305,12 +281,7 @@ main(void)
 	remove(path);
 
 	// ── Bank-aware mapping across a module swap ─────────────────────────────
-	// Two segments share the banked window at $A000, one per RAM bank, which is
-	// the normal shape of a banked X16 program. The .dbg format records no
-	// bank, so they are told apart by the size of the blob each LOAD placed
-	// there. A swap must replace a module rather than accumulate a second copy
-	// of its segments: with duplicates present nothing can be told apart any
-	// more, and every banked address resolves to whichever module matched first.
+	// Two segments share $A000, one per bank; a swap replaces a module.
 	{
 		char *bpath = write_temp_banked_dbg();
 		if (!bpath) {
@@ -318,10 +289,7 @@ main(void)
 		}
 		check(dbg_info_load(bpath) == 0, "loads a banked .dbg");
 
-		// Before any LOAD is observed, neither segment's bank is known. The
-		// lookup must still answer -- a mapping is never lost -- but it has to
-		// say the answer is a guess, because either segment could be the one
-		// actually mapped in at $A000.
+		// Before any LOAD neither bank is known: the lookup answers but flags a guess.
 		const char *fu = NULL;
 		int         lu = 0;
 		check(dbg_info_addr_to_source_banked_ex(0xA000, 5, &fu, &lu) == DBG_BANK_UNKNOWN,
@@ -340,8 +308,7 @@ main(void)
 			      "label in an unknown-bank segment reports no bank");
 		}
 
-		// Learning one segment's bank must not make the other one confident:
-		// $A018 lies only inside the larger segment, whose bank is still unknown.
+		// Learning one segment's bank does not make the other confident.
 		dbg_info_note_bank_load(0xA000, 0x10, 5);
 		check(dbg_info_addr_to_source_banked_ex(0xA000, 5, &fu, &lu) == DBG_BANK_RESOLVED,
 		      "reports the newly learned segment as resolved");
@@ -386,8 +353,7 @@ main(void)
 		check(dbg_info_addr_to_source_banked_ex(0xA000, 5, &f5, &l5) == DBG_BANK_RESOLVED,
 		      "reports a known bank as resolved");
 
-		// A bank nothing was ever observed for must NOT be passed off as
-		// resolved: the answer comes from another bank's segment.
+		// A bank never observed is not reported as resolved.
 		check(dbg_info_addr_to_source_banked_ex(0xA000, 9, &f5, &l5) == DBG_BANK_UNKNOWN,
 		      "reports an unlearned bank as unknown rather than guessing");
 
@@ -400,8 +366,7 @@ main(void)
 	}
 
 	// ── 24-bit addresses ────────────────────────────────────────────────────
-	// Code on a GS/Gen2 machine lives above $FFFF. A 16-bit address type simply
-	// could not describe it, so those mappings used to be dropped at load.
+	// Code above $FFFF on a GS/Gen2 machine keeps its mappings at load.
 	{
 		static const char *k_dbg_far =
 			"version\tmajor=2,minor=0\n"
@@ -428,10 +393,7 @@ main(void)
 	}
 
 	// ── Long records ────────────────────────────────────────────────────────
-	// cc65 lists every reference to a symbol on its `sym` line, so for a
-	// heavily used label that line runs to many kilobytes -- and val/type come
-	// after the list. A fixed read buffer would truncate it and silently lose
-	// the symbol.
+	// A `sym` line with a long reference list must not be truncated or lose the symbol.
 	{
 		char *big = malloc(70000);
 		if (!big) {
@@ -464,14 +426,7 @@ main(void)
 	}
 
 	// ── A confirmed bank outranks a narrower guess ──────────────────────────
-	// Two segments share $A000, one per bank. Only the OUTER one has been
-	// loaded, so only its bank is known. Preferring the innermost span
-	// regardless answers with the inner segment's file and line and downgrades
-	// a confirmed match to a guess -- the wrong source, reported confidently
-	// enough to send someone debugging code that is fine.
-	//
-	// The block above learns the inner segment's bank first, which is the case
-	// that already worked, so this needs its own load to reach the other order.
+	// Only the outer segment's bank is known; a confirmed bank outranks a narrower guess.
 	{
 		dbg_info_free();
 		char *bpath = write_temp_banked_dbg();   // static buffer; do not free
@@ -496,10 +451,7 @@ main(void)
 		}
 	}
 	// ── A reloaded equate replaces the old value ────────────────────────────
-	// Nothing prunes equates, and the lookup returns the FIRST match, so
-	// appending on reload would let a value from a module swapped out long ago
-	// win for the rest of the session -- and the bank equates seed which RAM
-	// bank a segment lives in, so a stale one mislabels code.
+	// A reloaded equate replaces the old value, bank equates included.
 	{
 		dbg_info_free();
 		char *p1 = write_temp(k_dbg_equ_v1, "x16_dbg_info_equ.dbg");
@@ -520,11 +472,7 @@ main(void)
 				check(dbg_info_equate_to_value("SCORE", &v) && v == 0xBEEF,
 				      "and the new value replaces the old one");
 
-				// Bank equates have no accessor of their own; what they do is
-				// seed which RAM bank a segment is taken to live in, so a stale
-				// one mislabels code rather than merely reporting a wrong
-				// number. The segment is in the banked window and named to match
-				// the equate, so the reload's bank 7 must be the one in force.
+				// Bank equates seed a segment's RAM bank; the reload's bank 7 must be in force.
 				const char *bf = NULL;
 				int         bl = 0;
 				check(dbg_info_addr_to_source_banked_ex(0xA000, 7, &bf, &bl)
@@ -535,11 +483,7 @@ main(void)
 			dbg_info_free();
 		}
 	}
-	// Deduplication is only correct within one module. Two linked modules may
-	// each define the same equate name with different values, and may each
-	// compile a file of the same name. Pooling those would not merely report a
-	// stale number -- it destroys one module's definition outright, since
-	// nothing puts it back when the other module unloads.
+	// Equates and files dedupe within one module; two may define a name differently.
 	{
 		dbg_info_free();
 		char *pa = write_temp(k_dbg_equ_v1, "x16_dbg_info_modA.dbg");
@@ -561,9 +505,7 @@ main(void)
 		}
 	}
 
-	// A `line` that precedes the `file` it names. cc65 emits them the other way
-	// round today, but nothing in the format promises that, and resolving the
-	// reference before the record exists silently loses the source mapping.
+	// A `line` that precedes the `file` it names.
 	{
 		dbg_info_free();
 		static const char *k_dbg_line_first =
@@ -583,9 +525,7 @@ main(void)
 			check(dbg_info_addr_to_source(0x0801, &f, &n) && n == 7,
 			      "and the line still resolves to its file");
 
-			// The reload is what actually exercises the ordering: only then has
-			// the ID base moved on, so the reused file record's ID and the one
-			// a `line` would assume for itself are different numbers.
+			// The reload moves the ID base, so the reused file record's ID differs.
 			dbg_info_unload_range(0x0801, 0x0810);
 			check(dbg_info_load(lp) == 0, "reloads it");
 			f = NULL;
@@ -597,11 +537,7 @@ main(void)
 		}
 	}
 
-	// A segment whose name is a prefix of another's. Matching an equate to a
-	// segment by prefix in either direction means RAM_BANK_CODE matches CODE2
-	// as readily as CODE, so whichever equate happened to be parsed first used
-	// to claim both -- and the exact match for the second was then discarded,
-	// putting its code confidently in the wrong bank.
+	// Prefix names: RAM_BANK_CODE must not claim both CODE and CODE2.
 	{
 		dbg_info_free();
 		static const char *k_dbg_two_banks =
@@ -636,11 +572,7 @@ main(void)
 		}
 	}
 
-	// Two equates that both prefix-match one segment, with no exact match and
-	// different banks. There is no basis for choosing between them, so the
-	// segment must be left unknown: unknown is recoverable -- a runtime bank
-	// observation can still resolve it -- whereas a confident wrong answer is
-	// not, and it silently attributes code to the wrong bank.
+	// Two equates prefix-match one segment with different banks: the segment stays unknown.
 	{
 		dbg_info_free();
 		static const char *k_dbg_ambig =
@@ -671,11 +603,7 @@ main(void)
 		}
 	}
 
-	// Bank equates are owned too. Two overlays commonly each define
-	// RAM_BANK_CODE for their own CODE segment, with different values. Each
-	// module's own equate has to win for its own segment: pooling them lets the
-	// second module's bank decide where the first module's code lives, and
-	// merely refusing to choose would leave both unknown.
+	// Two overlays each define RAM_BANK_CODE differently; each wins for its own segment.
 	{
 		dbg_info_free();
 		static const char *k_bank_a =
@@ -719,9 +647,7 @@ main(void)
 		}
 	}
 
-	// Files are owned as well. Two modules that each compile a file of the same
-	// name must keep two records; consumers resolve by name today, so the count
-	// is what makes the pooling visible.
+	// Two modules compiling a same-named file keep two records.
 	{
 		dbg_info_free();
 		char *fa = write_temp(k_dbg_equ_v1, "x16_dbg_info_fileA.dbg");
@@ -742,10 +668,7 @@ main(void)
 		}
 	}
 
-	// A segment can be given its bank by another module's equate, through the
-	// fallback pass. Those segments are not unloaded when that other module
-	// reloads, so unless equate-derived banks are recomputed they keep a value
-	// nobody declares any more.
+	// A segment given its bank by another module's equate is recomputed when that module reloads.
 	{
 		dbg_info_free();
 		static const char *k_donor_v1 =
@@ -809,8 +732,7 @@ main(void)
 		}
 	}
 
-	// Re-deriving equate banks must not discard what was actually observed at
-	// runtime. An observation is evidence; an equate is only an inference.
+	// Re-deriving equate banks keeps what was observed at runtime.
 	{
 		dbg_info_free();
 		char *op = write_temp(k_dbg_equ_v1, "x16_dbg_info_obs.dbg");
@@ -842,10 +764,7 @@ main(void)
 		}
 	}
 
-	// A module's own equate must not outrank a better match from elsewhere.
-	// An own-module prefix match used to end the search before another
-	// module's exact match was considered, which is the same "claimed by a name
-	// it resembles" failure the ranking exists to prevent.
+	// A module's own equate does not outrank another module's better match.
 	{
 		dbg_info_free();
 		static const char *k_rank_main =
@@ -891,9 +810,7 @@ main(void)
 		}
 	}
 
-	// Two equates in ONE module that both reduce to the segment's name, with
-	// different banks. The module contradicts itself, so there is nothing to
-	// choose between them.
+	// Two equates in one module reduce to the segment's name with different banks: no choice.
 	{
 		dbg_info_free();
 		static const char *k_self_contradict =
@@ -949,9 +866,7 @@ main(void)
 		}
 	}
 
-	// A rebuilt module that no longer declares an equate must not go on
-	// declaring it. Replacing equates one by one as they are parsed cannot see
-	// this: the record that needs removing is never visited.
+	// A rebuilt module that no longer declares an equate stops declaring it.
 	{
 		dbg_info_free();
 		static const char *k_gone_v1 =
@@ -964,9 +879,7 @@ main(void)
 			"sym\tid=0,name=\"RAM_BANK_CODE\",addrsize=absolute,size=1,scope=0,def=0,val=0x000003,type=equ\n"
 			"sym\tid=1,name=\"SCORE\",addrsize=absolute,size=2,scope=0,def=0,val=0x001234,type=equ\n"
 			"mod\tid=0,name=\"gone.o\",file=0\n";
-		// Same module, rebuilt with both equates removed. It still has a label,
-		// as any real linked module does -- that is what distinguishes it from
-		// a write that was cut off before the symbols.
+		// Same module rebuilt with both equates removed; it still has a label.
 		static const char *k_gone_v2 =
 			"version\tmajor=2,minor=0\n"
 			"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=1,type=0\n"
@@ -1017,15 +930,10 @@ main(void)
 		}
 	}
 
-	// Names too long to reduce are refused rather than truncated: a truncated
-	// name compares equal to anything sharing its head, inventing exact matches
-	// the full names do not support.
+	// Names too long to reduce are refused, not truncated.
 	{
 		dbg_info_free();
-		// The equate's target is exactly as long as the squash buffer allows,
-		// so it is accepted. The segment name shares that whole head but runs
-		// past the buffer, so truncating it would make the two compare equal
-		// even though the full names differ.
+		// The equate target fits the squash buffer; the longer segment name must not match.
 		char longseg[256], longequ[256];
 		memset(longseg, 'A', 130);
 		memcpy(longseg + 130, "LEFT", 5);
@@ -1056,9 +964,7 @@ main(void)
 		}
 	}
 
-	// An ambiguous winning rank does not fall through to a weaker one. The
-	// better evidence has just said the question is undecidable; answering it
-	// from worse evidence would be inventing certainty.
+	// An ambiguous winning rank does not fall through to a weaker one.
 	{
 		dbg_info_free();
 		// Owns CODE2, and its own equate only resembles it (own-prefix).
@@ -1163,10 +1069,7 @@ main(void)
 		}
 	}
 
-	// A file that opens but parses to nothing must not take the previous
-	// generation with it. Sweeping the old equates before reading meant an
-	// empty or corrupt rebuild silently deleted them and still reported
-	// success -- the emulator writes these files while a program is running,
+	// A file that opens but parses to nothing keeps the previous generation.
 	// so a half-written one is a real state, not a hypothetical.
 	{
 		dbg_info_free();
@@ -1235,14 +1138,7 @@ main(void)
 		}
 	}
 
-	// An equate name too long for the reduction buffer must be refused, not
-	// copied into it. The name comes straight out of a file sitting next to a
-	// loaded program, so its length is not ours to assume.
-	//
-	// This is a smoke test, not a guard: squash_name() refuses the name either
-	// way, so the resolution outcome is the same with or without the length
-	// check, and only a sanitizer can see the difference. Removing the check
-	// turns this input into a 300-byte write into a 128-byte stack buffer.
+	// An equate name too long for the reduction buffer is refused, not copied.
 	{
 		dbg_info_free();
 		char huge[400];
@@ -1275,9 +1171,7 @@ main(void)
 		}
 	}
 
-	// ld65 states how many symbols it wrote. That is what separates a file cut
-	// off partway through its symbol block from one that genuinely declares
-	// fewer -- the two have the same shape and differ only in the promise.
+	// ld65 states its symbol count, separating a cut-off file from a smaller one.
 	{
 		dbg_info_free();
 		static const char *k_cnt_full =
@@ -1330,11 +1224,7 @@ main(void)
 				      "a file that promised three and gave one keeps them");
 			}
 
-			// Cut inside the symbol block rather than before it. For a real
-			// program the symbols are the bulk of the file, so this is where a
-			// partial write is most likely to land -- and the shape the
-			// previous guard, which only asked whether any symbol was seen,
-			// could not tell from a finished file.
+			// Cut inside the symbol block rather than before it.
 			static const char *k_cnt_mid =
 				"version\tmajor=2,minor=0\n"
 				"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=3,type=0\n"
@@ -1360,8 +1250,7 @@ main(void)
 				      "so the bank it seeded is still known");
 			}
 
-			// A symbol line cut off mid-record is not a symbol. Counting it
-			// would let a file that stopped halfway look complete.
+			// A symbol line cut off mid-record is not counted.
 			static const char *k_cnt_torn =
 				"version\tmajor=2,minor=0\n"
 				"info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=2,type=0\n"
@@ -1396,9 +1285,7 @@ main(void)
 		}
 	}
 
-	// The same name can be filed as a bank constant or an ordinary one
-	// depending on its value, so a redefinition can cross between the two
-	// tables. The later definition has to be the only one left.
+	// One name as a bank constant or an ordinary one: the later definition remains.
 	{
 		dbg_info_free();
 		static const char *k_cross =
@@ -1461,9 +1348,7 @@ main(void)
 		}
 	}
 
-	// A .dbg with no `info` line gives no record counts to check against, so a
-	// short read cannot be detected and the file is merged. It must still not
-	// be treated as a statement that the module declares nothing.
+	// A .dbg with no `info` line is merged and does not mean the module declares nothing.
 	{
 		dbg_info_free();
 		static const char *k_ni_full =
@@ -1502,13 +1387,7 @@ main(void)
 	}
 
 	// ── Complete records that are simply not ours to keep ───────────────────
-	// ld65 counts every `sym` record in its `info` line, so the check for a
-	// half-written file has to count the records it SAW, not the ones it chose
-	// to store. Two shapes broke that, and either one refused the whole file:
-	// an import, which names a symbol another module defines and so carries no
-	// `val`; and a constant outside the 24-bit space the tables describe --
-	// C's EOF is -1, written as 0xFFFFFFFF, so every program that includes
-	// <stdio.h> has one.
+	// ld65 counts every `sym` record, including imports and out-of-range constants.
 	{
 		dbg_info_free();
 		static const char *k_dbg_imp =
@@ -1544,13 +1423,7 @@ main(void)
 	}
 
 	// ── cc65 C: high-level lines outrank the generated assembly ─────────────
-	// Compiling C goes hello.c -> hello.s -> ca65, and with -g ca65 records BOTH
-	// line infos over the same bytes: a type=1 record naming the C statement and
-	// a type=0 record per instruction naming the generated .s. The per-
-	// instruction assembly spans are always the smaller, so the "innermost span
-	// wins" rule that is right for assembly inverts here and would step through
-	// a generated file that cl65 deletes on the way out.
-	//
+	// ca65 -g: the type=1 C line outranks the smaller type=0 assembly spans.
 	// Layout, all in CODE at $0801:
 	//   $0801-$080C  x16hello.c:5   over four assembly spans
 	//   $080D-$0814  x16hello.c:6   over two
@@ -1607,8 +1480,7 @@ main(void)
 			"sym\tid=1,name=\"_printf\",addrsize=absolute,scope=0,def=0,ref=9,type=imp,exp=6\n"
 			"mod\tid=0,name=\"x16hello.o\",file=0\n";
 
-		// A hand-written .s that IS on disk must survive the picker filter, so
-		// it has to exist next to the .dbg before the load looks for it.
+		// A hand-written .s on disk must survive the picker filter.
 		char *mixed_asm = write_temp("; hand-written\n", "x16mixed.s");
 		char *cpath     = write_temp(k_dbg_cc65, "x16_dbg_info_cc65.dbg");
 		if (!cpath) {
@@ -1625,10 +1497,7 @@ main(void)
 			check(f && strstr(f, "x16hello.c") != NULL, "  ...to the C source");
 			check(n == 5, "  ...to the C line");
 
-			// The case an equal-start-only preference cannot reach: an interior
-			// instruction boundary. The C statement's span opened at $0801, so
-			// nothing that starts at $0804 knows about it -- and $0804 is where
-			// stepping actually lands.
+			// An interior instruction boundary ($0804), where stepping lands.
 			f = NULL; n = 0;
 			check(dbg_info_addr_to_source_nearest(0x0804, &f, &n)
 			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
@@ -1652,15 +1521,13 @@ main(void)
 			          && f && strstr(f, "x16hello.c") != NULL && n == 6,
 			      "the next C statement is reported at its own address");
 
-			// The exact-match form feeds the DAP disassembly view, which must
-			// not name a file the picker hides.
+			// The exact-match form feeds DAP disassembly and must not name a hidden file.
 			f = NULL; n = 0;
 			check(dbg_info_addr_to_source(0x0804, &f, &n)
 			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
 			      "the exact-address lookup also prefers the C line");
 
-			// A C statement and an assembly span with identical bounds: the
-			// type has to decide, since the span size cannot.
+			// Identical bounds: the type decides, not the span size.
 			f = NULL; n = 0;
 			check(dbg_info_addr_to_source_nearest(0x0815, &f, &n)
 			          && f && strstr(f, "x16hello.c") != NULL && n == 5,
@@ -1684,17 +1551,12 @@ main(void)
 				      "and each statement resolves to its own start");
 			}
 
-			// The per-instruction assembly spans are the anchored
-			// disassembler's alignment anchors and must stay in the map, however
-			// little the source view wants to display them.
+			// Assembly spans are the anchored disassembler's alignment anchors and stay in the map.
 			check(dbg_info_is_span_start(0x0804), "keeps an assembly span start as an anchor");
 			check(dbg_info_is_span_start(0x0809), "keeps the later ones too");
 			check(!dbg_info_is_span_start(0x0807), "and still rejects a mid-span address");
 
-			// The picker offers what the user wrote. x16hello.s is generated and
-			// gone; x16util.s has no C source it could have been generated from;
-			// x16mixed.s is paired with a C file but is on disk, so somebody
-			// wanted it.
+			// Picker: x16hello.s is generated, x16util.s has no C, x16mixed.s is on disk.
 			{
 				int  fc      = dbg_info_file_count();
 				bool has_c   = false, has_gen = false, has_util = false;
@@ -1718,22 +1580,17 @@ main(void)
 				check(has_util, "  ...keeps a .s with no C source behind it");
 				check(has_mixed_c && has_mixed_s,
 				      "  ...keeps a hand-written .s that is on disk");
-				// cl65 doing compile-and-assemble in one step names the
-				// intermediate after the whole C file plus a temporary suffix,
-				// which shares no stem with it. This is what a real
-				// `cl65 -t cx16 -g` build produces.
+				// cl65 one-step names the intermediate after the C file plus a temporary suffix.
 				check(has_gen_c, "  ...keeps the C source of a one-step build");
 				check(!has_gen_tmp, "  ...hides cl65's temporary intermediate");
 
-				// Indices stay dense: a caller walking 0..count-1 must not hit
-				// a gap where the hidden file used to be.
+				// Indices stay dense.
 				const char *nm = NULL;
 				check(dbg_info_file_at(fc - 1, &nm) && nm, "the last visible index resolves");
 				check(!dbg_info_file_at(fc, &nm), "and one past the end does not");
 			}
 
-			// Unloading the C module takes the high-level info with it, so
-			// nothing stays hidden on account of a module that has gone.
+			// Unloading the C module takes its high-level info with it.
 			dbg_info_unload_range(0x0801, 0x0840);
 			check(dbg_info_file_count() == 7,
 			      "unloading the C module puts every file back on offer");
@@ -1745,11 +1602,7 @@ main(void)
 		}
 	}
 
-	// An assembly-only .dbg must be untouched by all of the above: no high-level
-	// records, so nothing is preferred and nothing is hidden. cc65's own runtime
-	// files (cbm/loadaddr.s and friends) are exactly the ".s referenced only by
-	// assembly records and not on disk" shape the filter looks for, and they
-	// must keep showing up for an assembly project.
+	// Assembly-only .dbg: nothing preferred, nothing hidden, cc65 runtime .s files included.
 	{
 		dbg_info_free();
 		char *apath = write_temp(k_dbg, "x16_dbg_info_asmonly.dbg");
@@ -1769,13 +1622,7 @@ main(void)
 	}
 
 	// ── A refused load must not speak for the ones that succeeded ───────────
-	// A .dbg caught mid-write is refused, but its records are already in the
-	// tables and the address map is rebuilt on the way out. If deciding
-	// "this program is written in C" happened there, a half-written C .dbg --
-	// which is exactly what the auto-load path finds while cl65 is still
-	// writing -- would switch every already-loaded assembly module over to the
-	// C lookup, for good: the refused records stay behind, so every later
-	// rebuild would keep agreeing with it.
+	// A refused half-written C .dbg must not switch loaded assembly modules to the C lookup.
 	{
 		dbg_info_free();
 		// An assembly module with two overlapping spans opening at different
@@ -1828,10 +1675,7 @@ main(void)
 		}
 	}
 
-	// ld65's bank= on a segment record: the bank is known from the debug info
-	// itself, with no LOAD observed -- a launcher that loads the banks before
-	// the .dbg is in play never shows us one. Outside the banked window it
-	// means nothing and is ignored.
+	// ld65's segment bank= gives the bank with no LOAD; ignored outside the window.
 	{
 		dbg_info_free();
 		static const char *k_dbg_seg_bank =
@@ -1885,9 +1729,7 @@ main(void)
 		dbg_info_free();
 	}
 
-	// Scope heads: the label that a type=scope record names opens a routine;
-	// the others are locals. The scope records come AFTER the symbols here,
-	// which nothing forbids, so marking has to wait for the end of the file.
+	// Scope heads: a type=scope record's label opens a routine; marked at end of file.
 	{
 		dbg_info_free();
 		static const char *k_dbg_scopes =

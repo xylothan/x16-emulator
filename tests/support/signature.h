@@ -1,11 +1,6 @@
 // A hash of everything a scenario can observe, so a test can say "do this, and
 // nothing changed" without listing what "nothing" covers.
 //
-// The point is to catch the accidental. Asserting on named fields only finds
-// what the author thought to name, and the failures worth catching here are the
-// ones nobody predicted -- a debugger feature that quietly advances a device,
-// spends a cycle, or perturbs memory it only meant to read.
-//
 // Everything the fixtures can reach is folded in: CPU registers, the cycle
 // counter, RAM, the bank registers, and each fake device's access counts and
 // state. If a test wants to allow one specific change, it compares the fields

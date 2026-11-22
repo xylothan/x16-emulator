@@ -1,11 +1,8 @@
 // Sprite multiplexing trace: generation lifetimes, the effective/phantom/late
 // classification, VERA budget accounting and burst costing.
 //
-// sprite_trace has no dependency on video.c -- it is fed scalars -- so these
-// drive it directly rather than standing a VERA up around it. Each test builds
-// a frame the way render_sprite_line() would: advance to open the frame, then
-// line_begin / note_slot / line_end per scanline, then advance again to close
-// and publish it.
+// sprite_trace takes scalars, so these drive it directly: advance to open a frame,
+// line_begin / note_slot / line_end per scanline, advance to close and publish it.
 
 #include "../src/sprite_trace.h"
 #include "support/harness.h"
@@ -55,9 +52,7 @@ write_slot(int slot, uint16_t line, uint32_t cycle, uint32_t addr, int x, int y,
 	}
 }
 
-// One scanline of rendering. `drawing_slot` is the slot that put pixels down on
-// this line, or -1 for none. Every slot is reported as evaluated, which is what
-// the real renderer does until its line timer runs out.
+// One scanline: `drawing_slot` put pixels down, or -1. Every slot is evaluated.
 static void
 end_line(uint16_t line, uint32_t demand, uint16_t drawn, uint16_t dropped)
 {
@@ -172,8 +167,7 @@ test_one_slot_reused_counts_as_two_sprites(void)
 	check_eq(f->summary.phantom_writes, 0u, "both values were displayed");
 	check_eq(f->summary.late_writes, 0u, "neither write was late");
 
-	// The residency map must show the handover, not one sprite over the whole
-	// frame: that separation is the entire point of the trace.
+	// The residency map must show the handover, not one sprite over the whole frame.
 	uint16_t top    = f->line_gen[(size_t)32 * SPRITE_TRACE_SLOTS + 0];
 	uint16_t bottom = f->line_gen[(size_t)96 * SPRITE_TRACE_SLOTS + 0];
 	check(top != bottom, "the slot maps to different values above and below the split");
@@ -181,9 +175,7 @@ test_one_slot_reused_counts_as_two_sprites(void)
 		check_eq(f->gens[top].address, 0x4000u, "the top band is sprite A");
 		check_eq(f->gens[bottom].address, 0x8000u, "the bottom band is sprite B");
 		check_eq(f->gens[bottom].index_in_slot, 1u, "sprite B is the slot's second value");
-		// The handler stored all eight bytes, but only the address high bits,
-		// the X low byte and the Y low byte differ between the two sprites.
-		// Separating the two is what makes redundant stores visible.
+		// Only address high, X low and Y low differ, so redundant stores are visible.
 		check_eq(f->gens[bottom].writes, 3u, "three of the eight stores changed anything");
 		check_eq(f->summary.mutations, 8u, "all eight were still paid for");
 		check_eq(f->gens[bottom].write_line, 64u, "it was stamped with the line it completed on");
@@ -230,8 +222,7 @@ test_a_write_after_its_own_y_span_is_late(void)
 	for (uint16_t y = 0; y < 300; y++) {
 		render_line_with(y, y * 100u, -1, 20);
 	}
-	// The sprite is meant to appear at y=10..25, but the handler only gets
-	// round to storing it at line 300 -- the classic multiplexer bug.
+	// Sprite meant at y=10..25, but stored only at line 300.
 	write_slot(5, 300, 30000, 0x6000, 40, 10, W16, W16, 1, 0);
 	for (uint16_t y = 300; y < 320; y++) {
 		render_line_with(y, y * 100u, -1, 20);

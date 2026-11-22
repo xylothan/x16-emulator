@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """Check the generated opcode tables against the published 65C02 spec.
 
-ProcessorTests measures what the hardware does, across tens of thousands of
-randomised cases. This checks something different and much smaller: that the
-sizes and cycle counts in src/cpu/tables.h still agree with the documentation.
-
-The two have disagreed once already, over $5C, where both WDC datasheets and
-the 6502.org list say eight cycles and the test suite says four. Divergences
-like that are listed below rather than hidden, so changing one is a deliberate
-act.
+Sizes and cycle counts in src/cpu/tables.h against the documentation.
+Known divergences are listed below.
 """
 
 import pathlib
@@ -26,15 +20,13 @@ MODE_BYTES = {
     "abso": 3, "absx": 3, "absy": 3, "ind": 3, "ainx": 3, "zprel": 3,
 }
 
-# Where this emulator knowingly differs from the published 65C02 spec. The
-# value is what the emulator is expected to be, so a drift away from the
-# recorded difference fails rather than being waved through.
+# Where this emulator knowingly differs from the published 65C02 spec; the value
+# is what the emulator is expected to be.
 KNOWN = {
     0xDB: ((1, 1), "the X16 maps $DB to a debugger trap rather than STP"),
 }
 
-# The spec file is data, and data can be quietly emptied. A truncated file would
-# otherwise report zero failures out of zero opcodes and pass.
+# A truncated spec file would report zero failures out of zero opcodes.
 MIN_ROWS = 120
 
 

@@ -1,14 +1,5 @@
 // The I/O trace ring buffer: retention, ordering, gating and the CPU stamp.
-//
-// The ring is what the I/O panel shows, so the properties worth pinning are the
-// ones a reader of that panel relies on without thinking about it: that the
-// events are the most recent ones, in the order they happened; that a device
-// whose capture bit is clear contributes nothing; and that sequence numbers
-// keep increasing so "later in the list" always means "later in time", even
-// across a resize or a clear.
-//
-// io_trace.c deliberately has no emulator dependencies, so this test links it
-// alone -- no CPU, no memory, no SDL.
+// Keeps the latest events in order; sequence numbers survive resize and clear.
 
 #include "support/harness.h"
 
@@ -80,9 +71,7 @@ test_sequence_numbers_only_increase(void)
 	const io_event_t *first = io_trace_at(0);
 	const uint32_t    seq   = (first != NULL) ? first->seq : 0;
 
-	// A resize throws the contents away, because ordering against a new ring is
-	// not meaningful -- but the sequence must not restart, or two unrelated
-	// events would claim the same moment.
+	// A resize discards the contents, but the sequence must not restart.
 	check(io_trace_init(256), "the ring can be resized");
 	check_eq((uint32_t)io_trace_count(), 0, "which discards what it held");
 	check_eq((uint32_t)io_trace_capacity(), 256, "and adopts the new capacity");
@@ -106,11 +95,7 @@ test_sequence_numbers_only_increase(void)
 static void
 test_capacity_is_clamped(void)
 {
-	// A capacity the caller asks for is a request, not an instruction: a ring
-	// of four events is useless for reading a trace, and an enormous one is a
-	// way to exhaust memory from a settings field. Both ends are clamped, and
-	// the accessor reports what was actually allocated so the UI can show the
-	// real number rather than the one it asked for.
+	// A requested capacity is clamped at both ends; the accessor reports what was allocated.
 	check(io_trace_init(1), "an absurdly small ring is accepted");
 	check(io_trace_capacity() >= 64, "but clamped up to something usable");
 
@@ -136,9 +121,7 @@ test_capture_gating(void)
 	check(io_trace_wants(IO_DEV_SDCARD), "an unmasked device is wanted");
 	check(!io_trace_wants(IO_DEV_VERA), "a masked-out device is not");
 
-	// The default mask is the one the panel starts with: everything except
-	// VERA's registers, which would otherwise be the only thing in the ring,
-	// and open-bus reads, which say nothing.
+	// Default mask: everything except VERA's registers and open-bus reads.
 	io_trace_device_mask = IO_TRACE_MASK_DEFAULT;
 	check(!io_trace_wants(IO_DEV_VERA), "VERA is excluded by default");
 	check(!io_trace_wants(IO_DEV_OPENBUS), "and so is open bus");
@@ -237,9 +220,7 @@ test_clear_keeps_the_ring_usable(void)
 static void
 test_survives_use_before_init(void)
 {
-	// A call site that fires before anything allocated the ring must not crash.
-	// The module allocates on demand instead, so that merely enabling capture
-	// works rather than silently recording nothing.
+	// A call before the ring is allocated must not crash; it allocates on demand.
 	io_trace_shutdown();
 	check_eq((uint32_t)io_trace_capacity(), 0, "the ring starts unallocated");
 	capture_everything();
@@ -260,8 +241,7 @@ test_survives_use_before_init(void)
 static void
 test_device_names(void)
 {
-	// The panel prints these, so an unnamed device would show as a blank column
-	// rather than anything a reader could act on.
+	// An unnamed device would show as a blank column.
 	for (int d = 0; d < IO_DEV_COUNT; d++) {
 		const char *name = io_trace_device_name((io_device_t)d);
 		check(name != NULL && name[0] != '\0' && strcmp(name, "?") != 0,

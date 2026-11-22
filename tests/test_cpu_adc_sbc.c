@@ -1,14 +1,7 @@
 // CPU conformance: ADC and SBC in binary mode, and the flags they produce.
 //
 // Oracle: WDC W65C02S datasheet.
-//
-// The overflow flag is the interesting part and the one most often got wrong.
-// V is about signed arithmetic: it is set when two operands of the same sign
-// produce a result of the other sign, which is the only case where the signed
-// answer cannot fit in eight bits. Carry, by contrast, is the unsigned answer
-// not fitting. The two are independent, so each combination is checked.
-//
-// Decimal mode is deliberately absent; it has its own scenarios.
+// V is signed overflow, independent of carry. Decimal mode is not covered.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"

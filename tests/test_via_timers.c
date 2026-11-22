@@ -1,30 +1,12 @@
 // The 65C22's interval timers: T1 ($04-$07) and T2 ($08-$09).
-//
-// Both count down at the PHI2 rate and raise an interrupt flag at zero. What
-// differs between them, and between T1's two modes, is what happens next:
-// whether the flag can be raised again, and where the next count comes from.
-// That is the part programs get wrong, and it is entirely internal to the
-// chip.
-//
-// As in tests/test_via_irq.c the subject is VIA 2, whose accessors pass
-// straight through to the generic implementation both VIAs share.
-//
-// The counter is observed with debug reads. A real read of T1C-L or T2C-L
-// clears the timer's interrupt flag (Table 2-11), which would make every
-// observation change what the next assertion is measuring; the debug path is
-// pinned side-effect-free in tests/test_via_irq.c.
+// Both count down at the PHI2 rate and raise an interrupt flag at zero.
+// Subject is VIA 2, as in tests/test_via_irq.c. The counter is observed with
+// debug reads, since a real read of T1C-L or T2C-L clears the flag (Table 2-11).
 //
 // ORACLE: C -- WDC W65C22S datasheet, pages 17-19, quoted inline. Fetch it
 // with `python tests/refs/fetch_refs.py`.
 //
-// NOT COVERED, because via.c computes them and nothing reads them back:
-//   * PB7 output (ACR bit 7). via.c:171 toggles a pb7_output field on every
-//     T1 timeout and via.c:121 clears it on a load, but no read path consults
-//     it, so the square wave and the single negative pulse the datasheet
-//     describes are invisible from outside.
-//   * PB6 pulse counting. via.c:194 counts pb6_pulse_counts in T2's pulse
-//     mode, and nothing anywhere increments that field.
-// Both are recorded rather than asserted around.
+// NOT COVERED: PB7 output (ACR bit 7), PB6 pulse counting: nothing reads them.
 
 #include "support/harness.h"
 
@@ -76,9 +58,7 @@ test_writing_t1_high_loads_the_counter_from_the_latch(void)
 	via2_init();
 	via2_write(VIA_ACR, ACR_ONE_SHOT);
 
-	// Put a known value in the counter first. via_init() deliberately leaves
-	// the timer counters alone, so starting from whatever the last test left
-	// would make this assert against leftover state.
+	// via_init() leaves the counters alone; put a known value in first.
 	via2_write(VIA_T1L_L, 0xFF);
 	via2_write(VIA_T1C_H, 0xFF);
 	check_eq(t1_count(), 0xFFFFu, "the counter holds a known value");
@@ -200,9 +180,7 @@ test_t2_loads_counts_and_fires_once(void)
 }
 
 // p19: "A single control bit within ACR5 is used to select between these two
-//       modes." In pulse mode T2 counts negative pulses on PB6 rather than the
-//       PHI2 clock, so with nothing driving PB6 -- VIA 2 is the user port, and
-//       nothing is connected to it -- it does not count at all.
+//       modes." Nothing drives PB6 on VIA 2, so T2 does not count in pulse mode.
 static void
 test_acr_bit_5_takes_t2_off_the_clock(void)
 {
@@ -215,8 +193,7 @@ test_acr_bit_5_takes_t2_off_the_clock(void)
 	check_eq(t2_count(), 0x1000u, "T2 in pulse mode ignores the clock");
 	check_eq(ifr() & IFR_T2, 0, "and never times out on it");
 
-	// The same count with the mode bit clear, to show the step was doing
-	// something and the assertion above is not measuring a stopped test.
+	// The same count with the mode bit clear.
 	via2_init();
 	via2_write(VIA_ACR, ACR_ONE_SHOT);
 	via2_write(VIA_T2C_L, 0x00);

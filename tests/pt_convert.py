@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Convert SingleStepTests JSON into a binary fixture. Format 2.
 
-Avoids a JSON parser in C. Run once; the C runner walks the output with fread().
-
 One format covers both suites. The 65C02 has no bank registers and no emulation
 bit, so those fields carry the values a 65C816 in emulation mode would hold, and
 the cpu field says which core to reset into.
@@ -86,9 +84,8 @@ def pack_cycles(cycles):
     out = struct.pack("<H", len(cycles))
     for entry in cycles:
         addr, val, word = entry[0], entry[1], entry[2]
-        # Both can be null: an internal cycle drives nothing meaningful onto
-        # the bus. VDA and VPA in the flags are what says the address is real,
-        # so a placeholder zero here is not mistaken for address zero.
+        # Both can be null on an internal cycle; VDA and VPA in the flags say
+        # whether the address is real.
         out += struct.pack("<IBB", (addr or 0) & 0xFFFFFF, (val or 0) & 0xFF,
                            pack_cycle_flags(word))
     return out

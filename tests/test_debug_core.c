@@ -1,10 +1,5 @@
 // Checks for the debugger breakpoint core (src/debug_core.c).
 //
-// Upstream tracked one breakpoint in one global, so there was very little to
-// get wrong. A table with bank matching, conditions and ignore counts has real
-// decision logic in it, and that logic decides whether a debugging session
-// stops where you asked -- which is exactly the sort of thing that should not
-// be verified by clicking around a UI.
 //
 // debug_core.c reaches for only the register file, the two bank registers and a
 // debug memory read, so this supplies its own and links no emulator core.
@@ -26,8 +21,7 @@ static uint8_t g_mem[0x10000];
 static uint8_t g_ram_bank = 0;
 static uint8_t g_rom_bank = 0;
 
-// The four CPU configurations the emulator can be in, since three of them
-// change how wide a register comparison is.
+// The four CPU configurations; three change register comparison width.
 typedef enum { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8, CPU_816_NATIVE_16 } cpu_mode_t;
 
 static const char *
@@ -131,19 +125,12 @@ bp_at(int pc, uint8_t bank, int x16Bank)
 }
 
 // ---- Owner-defaulting shim -------------------------------------------------
-//
-// Ownership is exercised on its own further down. Everything above it is about
-// bank matching, conditions and counts, which are the same whoever asked, so
-// those cases name a single owner through these rather than restating it on
-// every line. Deliberately thin: each is the ownership call the emulator itself
-// makes, with DEBUG_OWNER_CLI standing in for "somebody".
+// Names a single owner through DEBUG_OWNER_CLI so cases need not restate it.
 
 static int
 debug_bp_add(struct breakpoint bp)
 {
-	// The old entry point answered with the new entry's index, and several
-	// cases below check that a second breakpoint got its own slot rather than
-	// displacing the first. A created entry always lands at the end.
+	// A created entry always lands at the end.
 	return debug_bp_add_for(bp, DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED ? numBreakpoints - 1 : -1;
 }
 
@@ -177,8 +164,7 @@ int
 main(void)
 {
 	// ── The table ───────────────────────────────────────────────────────────
-	// Upstream had exactly one breakpoint, so setting a second silently threw
-	// the first away. Holding several at once is the whole point of the table.
+	// Several breakpoints held at once.
 	{
 		reset_all();
 		check(numBreakpoints == 0, "starts with no breakpoints");
@@ -237,10 +223,7 @@ main(void)
 		debug_bp_toggle(0x8000, 0, -1);
 		check(!debug_bp_is_set(0x8000, 0), "toggle removes when present");
 
-		// Toggling a banked address must act on the bank being displayed, not
-		// on whatever entry happens to share the address. Keying the table on
-		// (pc, bank) alone made F9 in bank 6 delete the bank-5 breakpoint and
-		// arm nothing -- so the user lost a breakpoint and gained none.
+		// Toggling a banked address acts on the displayed bank.
 		reset_all();
 		g_ram_bank = 5;
 		debug_bp_toggle(0xA100, 0, 5);
@@ -262,8 +245,7 @@ main(void)
 	}
 
 	// ── Same address in two banks ───────────────────────────────────────────
-	// Banked RAM means $A000 holds a different program in each bank, so wanting
-	// a breakpoint at the same address in two of them is ordinary, not exotic.
+	// The same address in two banks is ordinary.
 	{
 		reset_all();
 		check(debug_bp_add(bp_at(0xA000, 0, 5)) == 0, "adds a breakpoint in bank 5");
@@ -293,10 +275,7 @@ main(void)
 	}
 
 	// ── Bank matching ───────────────────────────────────────────────────────
-	// Banked RAM means the same address holds unrelated code depending on which
-	// bank is mapped. A breakpoint set while looking at bank 5 must not fire on
-	// bank 6's code, which upstream's single unbanked breakpoint could not
-	// express at all.
+	// A breakpoint set in bank 5 does not fire in bank 6.
 	{
 		reset_all();
 		debug_bp_add(bp_at(0xA000, 0, 5));
@@ -306,8 +285,7 @@ main(void)
 		g_ram_bank = 6;
 		check(!debug_bp_is_set(0xA000, 0), "does not fire in a different RAM bank");
 
-		// Below $A000 nothing is banked, so the bank must be ignored entirely
-		// rather than accidentally filtering the breakpoint out.
+		// Below $A000 the bank is ignored.
 		reset_all();
 		debug_bp_add(bp_at(0x0801, 0, -1));
 		g_ram_bank = 3;
@@ -339,9 +317,7 @@ main(void)
 		debug_bp_reset_hits(0x8000, 0, -1);
 		check(debug_bp_get_hits(0x8000, 0, -1) == 0, "the count can be reset");
 
-		// A count is kept for an address even without a condition, and survives
-		// the remove/re-add a UI performs when a breakpoint is disabled and
-		// re-enabled -- silently resetting it there would be surprising.
+		// A count is kept without a condition and survives remove/re-add.
 		debug_bp_on_arrival(0x8000, 0);
 		debug_bp_remove(0x8000, 0, -1);
 		debug_bp_add(bp_at(0x8000, 0, -1));
@@ -355,9 +331,7 @@ main(void)
 	}
 
 	// ── Ignore counts ───────────────────────────────────────────────────────
-	// "Stop the 100th time round this loop" is the reason to have these: the
-	// hit is counted every time, but execution only stops once the budget is
-	// spent.
+	// Hits are counted every time; execution stops once the ignore budget is spent.
 	{
 		reset_all();
 		debug_bp_add(bp_at(0x8000, 0, -1));
@@ -444,8 +418,7 @@ main(void)
 		debug_bp_set_condition(0x8000, 0, -1, BPOPERAND_SP, 0, BPCMP_EQ, 0x00F0);
 		check(!debug_bp_on_arrival(0x8000, 0), "does not truncate the stack pointer to 8 bits");
 
-		// Memory operands: "stop when this variable becomes N" is the most
-		// useful conditional breakpoint there is.
+		// Memory operands: stop when a variable becomes N.
 		g_mem[0x1234] = 0x99;
 		g_mem[0x1235] = 0xAB;
 		debug_bp_set_condition(0x8000, 0, -1, BPOPERAND_BYTE, 0x1234, BPCMP_EQ, 0x99);
@@ -457,9 +430,7 @@ main(void)
 	}
 
 	// ── Conditions and ignore counts together ───────────────────────────────
-	// The ignore count counts *satisfying* arrivals, so "the 3rd time we pass
-	// here with A == 7" means what it says, rather than counting arrivals that
-	// failed the test.
+	// The ignore count counts satisfying arrivals.
 	{
 		reset_all();
 		debug_bp_add(bp_at(0x8000, 0, -1));
@@ -504,9 +475,7 @@ main(void)
 	}
 
 	// ── Register widths follow the CPU ──────────────────────────────────────
-	// On a 65C816 in native mode A/X/Y can be 16-bit. Comparing only the low
-	// byte would make "A == $1234" silently mean "A == $34" and stop in the
-	// wrong place, so the comparison uses the width the CPU is using.
+	// On a 65C816 in native mode A/X/Y can be 16-bit; the comparison uses the CPU's width.
 	{
 		reset_all();
 		debug_bp_add(bp_at(0x8000, 0, -1));
@@ -559,10 +528,7 @@ main(void)
 	}
 
 	// ── Clearing everything really clears everything ────────────────────────
-	// A full clear is a delete, not a disable. A front end that replaces its
-	// whole breakpoint set -- which is how the Debug Adapter Protocol works --
-	// must not silently inherit an old condition or ignore count on what the
-	// user thinks is a brand new breakpoint.
+	// A full clear is a delete: no condition or ignore count carries over.
 	{
 		reset_all();
 		debug_bp_add(bp_at(0x8000, 0, -1));
@@ -596,9 +562,7 @@ main(void)
 	}
 
 	// ── Memory write watchpoints ────────────────────────────────────────────
-	// The counterpart to a breakpoint, for data rather than code: stop when
-	// something writes here. The tool for finding what is corrupting a variable
-	// when you have no idea which code is responsible.
+	// Stop when something writes here.
 	{
 		reset_all();
 		check(debug_wp_count() == 0, "starts with no watchpoints");
@@ -610,9 +574,7 @@ main(void)
 		check(!debug_wp_check_write(0x1235, 0x55), "does not fire on the next byte");
 		check(!debug_wp_check_write(0x1233, 0x55), "does not fire on the previous byte");
 
-		// A second watchpoint on the same address in the same bank is a
-		// duplicate and is refused, rather than quietly reporting success while
-		// discarding whatever the caller asked for.
+		// A duplicate watchpoint on the same address and bank is refused.
 		check(debug_wp_add(0x1234, 8, DEBUG_BANK_ANY) == -1 && debug_wp_count() == 1,
 		      "refuses a duplicate address in the same bank");
 
@@ -636,9 +598,7 @@ main(void)
 		debug_wp_add(0x3000, 0, -1);
 		check(debug_wp_check_write(0x3000, 0), "a zero length watches one byte");
 
-		// A range running off the top of memory catches nothing beyond it: the
-		// coverage test is a half-open comparison in 32 bits, so the end cannot
-		// wrap round to the bottom of memory.
+		// A range running off the top of memory catches nothing beyond it; the end cannot wrap.
 		reset_all();
 		debug_wp_add(0xFFFE, 8, DEBUG_BANK_ANY);
 		check(debug_wp_check_write(0xFFFF, 0), "watches up to the last byte");
@@ -647,8 +607,7 @@ main(void)
 	}
 
 	// ── Value filters ───────────────────────────────────────────────────────
-	// "Stop when this becomes zero" is far more useful than stopping on every
-	// write to a variable that is written constantly.
+	// Stop on a value rather than on every write.
 	{
 		reset_all();
 		debug_wp_add(0x1234, 1, -1);
@@ -686,8 +645,7 @@ main(void)
 	}
 
 	// ── Watchpoints follow the RAM bank ─────────────────────────────────────
-	// $A100 holds a different variable in every bank. A watchpoint that fired
-	// on all of them would bury the write it was set to find.
+	// $A100 holds a different variable per bank.
 	{
 		reset_all();
 		debug_wp_add(0xA100, 1, 5);
@@ -878,11 +836,7 @@ main(void)
 	}
 
 	// ── One bank-selector rule, for breakpoints and watchpoints alike ───────
-	// A bank selector says one of two things: "whichever bank is mapped"
-	// (DEBUG_BANK_ANY) or "this specific bank". For an address outside a banked
-	// window it says nothing at all, so it is normalised away on the way in --
-	// otherwise it would be a hidden field distinguishing two entries that are
-	// really the same.
+	// A bank selector means ANY or one bank; it is normalised away outside a banked window.
 	{
 		reset_all();
 
@@ -913,9 +867,7 @@ main(void)
 		g_ram_bank = 6;
 		check(!debug_bp_is_set(0xA000, 0), "and not in another");
 
-		// Below the banked window the selector is meaningless, so a stored bank
-		// must not stop the breakpoint firing, and must not create a second
-		// distinct breakpoint either.
+		// Below the banked window a stored bank neither blocks firing nor adds an entry.
 		reset_all();
 		debug_bp_add(bp_at(0x0801, 0, 7));
 		g_ram_bank = 3;
@@ -950,9 +902,7 @@ main(void)
 		g_rom_bank = 4;
 		check(!debug_wp_check_write(0xC100, 0), "and not a different ROM bank");
 
-		// The same address can be watched in two banks at once -- the whole
-		// reason the selector is part of a watchpoint's identity. Keying on the
-		// address alone silently kept only the first.
+		// The same address in two banks: the bank is part of a watchpoint's identity.
 		reset_all();
 		check(debug_wp_add(0xA100, 1, 5) == 0, "watches an address in bank 5");
 		check(debug_wp_add(0xA100, 1, 6) == 1, "watches the same address in bank 6");
@@ -983,10 +933,7 @@ main(void)
 	}
 
 	// ── Every condition operand, in every CPU mode ──────────────────────────
-	// A/X/Y are 8 or 16 bits depending on the CPU and the M/X status bits;
-	// SP and a memory word are always 16; P and a memory byte always 8. The
-	// comparison has to agree with whatever the CPU is actually doing, in all
-	// four configurations the emulator can be in.
+	// A/X/Y are 8 or 16 bits by CPU mode; SP and a memory word are 16, P and a memory byte 8.
 	{
 		const cpu_mode_t modes[] = { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8,
 			                         CPU_816_NATIVE_16 };
@@ -1085,17 +1032,11 @@ main(void)
 
 
 	// ── PC matching across banks and machine types ──────────────────────────
-	// A breakpoint's address is (pc, program bank, bank selector). Which of
-	// those actually select memory depends on the machine, so the same
-	// breakpoint has to behave correctly on a stock X16, on one with a 65C816,
-	// and on a Gen2 where a non-zero program bank maps its own flat 64K.
+	// A breakpoint's address is (pc, program bank, bank selector).
 	{
 		// -- Unbanked low memory: neither bank means anything.
 		reset_all();
-		// Named with a specific bank, which is the only way this proves
-		// anything: an ANY selector matches before the bank rule is consulted,
-		// so it would pass even under a rule that wrongly called low memory
-		// banked. A bank named here has to be normalised away on insert.
+		// Named with a specific bank: an ANY selector matches before the bank rule is consulted.
 		debug_bp_add(bp_at(0x0801, 0, 7));
 		bool unbanked_ok = true;
 		for (int b = 0; b < 3; b++) {
@@ -1180,10 +1121,7 @@ main(void)
 		// registers select nothing and must not filter the breakpoint out.
 		reset_all();
 		is_gen2 = true;
-		// Added with a SPECIFIC bank, not ANY. An ANY selector short-circuits
-		// before the bank rule is ever consulted, so it passes whatever that
-		// rule does -- which is how the only direct check of this case used to
-		// pass with the very bug it was written for.
+		// Added with a specific bank, not ANY, which short-circuits before the bank rule.
 		debug_bp_add(bp_at(0xA000, 1, 5));
 		bool gs_ok = true;
 		for (int b = 0; b < 8; b++) {
@@ -1193,8 +1131,7 @@ main(void)
 		}
 		check(gs_ok, "in a Gen2 program bank the RAM bank does not apply");
 
-		// The shared entry point, called directly. hitBreakpoint() in the
-		// debugger reaches the rule through this and nothing else did.
+		// The shared entry point, called directly.
 		check(debug_bank_selector_matches(5, 0xA000, 1),
 		      "a named bank does not filter inside a Gen2 program bank");
 		g_ram_bank = 5;
@@ -1268,9 +1205,7 @@ main(void)
 		}
 		check(wp_rom_ok, "a ROM-window watchpoint fires in exactly one of all 32 banks");
 
-		// A watchpoint address is only ever bank 0, so a Gen2 program bank
-		// cannot change what it means -- but the lookup still has to normalise
-		// consistently, or removal by a named bank would miss.
+		// Watchpoint addresses are bank 0; lookup normalises so named-bank removal hits.
 		reset_all();
 		debug_wp_add(0x0400, 1, 7);       // bank named for an unbanked address
 		check(debug_wp_remove(0x0400, DEBUG_BANK_ANY),
@@ -1280,10 +1215,7 @@ main(void)
 		check(debug_wp_remove(0x0400, 7),
 		      "and can be removed while naming one, since it means nothing there");
 
-		// A watchpoint's bank means one thing for the whole range, judged on
-		// where the range starts. The selector's meaning changes at $C000 (RAM
-		// bank below, ROM bank above), so a range spanning that line would
-		// otherwise have its halves tested against unrelated registers.
+		// A watchpoint's bank is judged at the range start; the selector moves at $C000.
 		reset_all();
 		debug_wp_add(0xBFFF, 2, 5);
 		g_ram_bank = 5;
@@ -1299,15 +1231,9 @@ main(void)
 	}
 
 	// ── Ownership ───────────────────────────────────────────────────────────
-	// The table used to record only that an address was wanted, never by whom,
-	// so the first remove disarmed it for everyone. Five independent things can
-	// want one address -- -bp, the debugger's F9, and the three kinds of DAP
-	// breakpoint -- and the DAP server spent eight review rounds trying to
-	// reconstruct from outside what only the table can know. Every case here is
-	// a defect that was actually found during those rounds.
+	// Five things can want one address: -bp, F9 and three kinds of DAP breakpoint.
 	{
-		// -- Two owners, one address. The first to let go must not disarm the
-		// other. (Round 4: teardown deleted -bp and F9 breakpoints outright.)
+		// -- Two owners, one address. The first to let go must not disarm the other.
 		reset_all();
 		check(debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED,
 		      "the first owner creates the entry");
@@ -1321,9 +1247,7 @@ main(void)
 		      "and the breakpoint stays armed for the owner that still wants it");
 		check(debug_bp_on_arrival(0x2000, 0), "and still actually fires");
 
-		// -- ...and when the last owner goes, so does the entry. (Round 5: the
-		// orphan -- armed, with no table naming it, unreachable by any request.
-		// On a headless -debugport run that is a machine that cannot resume.)
+		// -- ...and when the last owner goes, so does the entry.
 		check(debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE),
 		      "the last owner can let go too");
 		check(numBreakpoints == 0 && !debug_bp_is_set(0x2000, 0),
@@ -1336,10 +1260,7 @@ main(void)
 		      "an owner that never asked cannot remove");
 		check(numBreakpoints == 1, "and the entry is untouched");
 
-		// -- Asking twice as the same owner is idempotent, and one clear
-		// retires it. Two source paths with the same basename resolved to one
-		// address and the two records vetoed each other's removal, leaving it
-		// armed. (Round 8: the mutual veto.)
+		// -- Asking twice as the same owner is idempotent; one clear retires it.
 		reset_all();
 		debug_bp_add_for(bp_at(0x3000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
 		check(debug_bp_add_for(bp_at(0x3000, 0, -1), DEBUG_OWNER_DAP_SOURCE) == DEBUG_ADD_EXISTED,
@@ -1355,9 +1276,7 @@ main(void)
 		      "clearing an owner that holds nothing disarms nothing");
 		check(numBreakpoints == 1, "and leaves the table alone");
 
-		// -- A -bp breakpoint survives a DAP session, with its condition and
-		// hit count intact. (Rounds 5 and 6: the flag that was meant to protect
-		// it either orphaned it or handed it to the wrong table.)
+		// -- A -bp breakpoint survives a DAP session with its condition and hit count.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
 		debug_bp_set_condition(0x2000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 5);
@@ -1380,9 +1299,7 @@ main(void)
 		      "with its condition intact");
 		check(debug_bp_get_hits(0x2000, 0, -1) == 2, "and its hit count intact");
 
-		// -- A client re-sending its list keeps the count. VS Code re-sends a
-		// whole file's breakpoints on every edit, so this path runs constantly;
-		// a count that reset each time could not drive a hit condition.
+		// -- A client re-sending its list keeps the count.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
 		debug_bp_on_arrival(0x2000, 0);
@@ -1394,11 +1311,7 @@ main(void)
 		check(debug_bp_get_hits(0x2000, 0, -1) == 3,
 		      "but re-sending the same breakpoint keeps its hit count");
 
-		// -- The stale-registry pair. The server cached a per-address verdict
-		// and nothing invalidated it, so it went wrong in both directions.
-		//
-		// Direction 1: a client set and cleared an address, the user then set
-		// their own there, and teardown deleted the user's. (Round 7.)
+		// -- Stale registry, direction 1: teardown must not delete the user's own entry.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
 		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
@@ -1411,8 +1324,7 @@ main(void)
 		          && !debug_bp_has_owner(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE),
 		      "and owned by the user alone");
 
-		// Direction 2: a cached "someone else owns this" survived the user
-		// deleting their own, leaving a server-created entry armed and orphaned.
+		// Direction 2: a cached foreign owner must not survive the user's delete.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
@@ -1424,10 +1336,7 @@ main(void)
 		check(numBreakpoints == 0,
 		      "and a later client breakpoint there is not mistaken for the user's");
 
-		// -- The human's delete is authoritative. Under a strict refcount F9 on
-		// a client's breakpoint would only drop the UI's own reference and
-		// leave it armed, so the user would press the key and watch nothing
-		// happen. Whoever asked for it, the keyboard wins.
+		// -- The human's delete is authoritative: F9 on a client's breakpoint removes it.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_FUNCTION);
@@ -1444,10 +1353,7 @@ main(void)
 		debug_bp_toggle_for(0x2000, 0, -1, DEBUG_OWNER_UI);
 		check(!debug_bp_is_set(0x2000, 0), "and F9 again takes it away");
 
-		// -- Ownership keys are normalised like every other key. A bank named
-		// for an address that is not banked must not produce an entry that the
-		// owner can never name again. (This was its own defect, on gen2 with a
-		// non-zero program bank.)
+		// -- Ownership keys are normalised: a bank on an unbanked address makes no entry.
 		reset_all();
 		debug_bp_add_for(bp_at(0x0801, 0, 7), DEBUG_OWNER_DAP_SOURCE);
 		check(debug_bp_has_owner(0x0801, 0, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE),
@@ -1456,11 +1362,7 @@ main(void)
 		      "and can let go without naming it");
 		check(numBreakpoints == 0, "leaving nothing behind");
 
-		// -- The "restate what I still want" pattern the DAP source handler
-		// uses. Source files are matched to addresses by basename, so two paths
-		// can resolve to one entry and one owner's two claims are a single bit;
-		// removing per entry would disarm an address the owner still wants.
-		// Clearing the owner and re-asserting the survivors is safe instead.
+		// -- Restate pattern: clear the owner and re-assert the survivors.
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_CLI);        // the user's
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE); // two paths,
@@ -1489,9 +1391,7 @@ main(void)
 	}
 
 	// ── Enable and disable ──────────────────────────────────────────────────
-	// Front ends used to implement this by deleting the entry and remembering
-	// it themselves, which loses the condition, the count, and every other
-	// view's marker. A disabled breakpoint keeps its place.
+	// A disabled breakpoint keeps its place, condition and count.
 	{
 		reset_all();
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_UI);
@@ -1511,8 +1411,7 @@ main(void)
 		check(debug_bp_on_arrival(0x2000, 0), "whereupon it fires again");
 		check(debug_bp_get_hits(0x2000, 0, -1) == 3, "carrying its count with it");
 
-		// Asking for a breakpoint is asking for it to be armed, so a client
-		// re-sending one that is disabled gets an armed breakpoint back.
+		// Re-sending a disabled breakpoint arms it.
 		debug_bp_set_enabled(0x2000, 0, -1, false);
 		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
 		check(debug_bp_is_enabled(0x2000, 0, -1), "re-adding a disabled breakpoint re-arms it");
@@ -1524,8 +1423,7 @@ main(void)
 	}
 
 	// ── Watchpoint ownership ────────────────────────────────────────────────
-	// The same shape, and it had the same defect: -wp, the debugger and a DAP
-	// client can all want one address.
+	// -wp, the debugger and a DAP client can all want one address.
 	{
 		reset_all();
 		check(debug_wp_add_for(0xA100, 1, DEBUG_BANK_ANY, DEBUG_OWNER_CLI) == DEBUG_ADD_CREATED,
@@ -1554,9 +1452,7 @@ main(void)
 		check(debug_wp_delete(0xA100, DEBUG_BANK_ANY), "a delete takes the whole watch");
 		check(debug_wp_count() == 0, "whoever asked for it");
 
-		// A full table has to be distinguishable from a duplicate. The server
-		// read one -1 as "already there" and would have armed nothing while
-		// believing it had.
+		// A full table is distinguishable from a duplicate.
 		reset_all();
 		bool filled = true;
 		for (int i = 0; i < MAX_WATCHPOINTS; i++) {
@@ -1575,13 +1471,7 @@ main(void)
 	}
 
 	// ── Address references: which field a bank byte lands in ────────────────
-	//
-	// The DAP instruction-breakpoint path had no X16 bank dimension. It read a
-	// reference as `pc | bank << 16` into the program-bank field and left the
-	// window selector at ANY, so a breakpoint in banked RAM was recorded against
-	// a program bank a gen1 never runs in: accepted, reported verified, and
-	// silently dead. These pin the interpretation, which is the part a caller
-	// cannot be trusted to re-derive.
+	// A reference `pc | bank << 16` selects the window bank, not the program bank, off a Gen2.
 	{
 		reset_all();
 		is_gen2 = false;
@@ -1591,8 +1481,7 @@ main(void)
 		          && bp.pc == 0xA555 && bp.bank == 0 && bp.x16Bank == DEBUG_BANK_ANY,
 		      "a bare address names no bank and matches whichever is mapped");
 
-		// The regression: off a Gen2 the program bank is always zero, so the
-		// only bank a top byte can be talking about is the window's.
+		// Off a Gen2 the program bank is zero, so a top byte names the window bank.
 		check(debug_bp_from_ref(0x33A555, DEBUG_BANK_ANY, 0, &bp)
 		          && bp.pc == 0xA555 && bp.bank == 0 && bp.x16Bank == 0x33,
 		      "a packed bank byte is the window bank on a gen1, not the program bank");
@@ -1604,8 +1493,7 @@ main(void)
 		          && colon.x16Bank == bp.x16Bank,
 		      "the bb:aaaa form and the packed form describe one breakpoint");
 
-		// ...and it has to actually fire, which is what the old entry never did.
-		// Added through the real table and matched through the real rule.
+		// It fires: added through the real table, matched through the real rule.
 		check(debug_bp_add(bp) == 0, "the resolved breakpoint goes into the table");
 		g_ram_bank = 0x33;
 		bool armed = debug_bp_is_set(0xA555, 0);
@@ -1613,8 +1501,7 @@ main(void)
 		check(armed && !debug_bp_is_set(0xA555, 0),
 		      "and fires in the bank it named, and only there");
 
-		// What the old code built, stated directly: the window bank left in the
-		// program-bank field. A gen1 runs in program bank 0, so nothing matches.
+		// Window bank in the program-bank field: gen1 is in bank 0, so nothing matches.
 		reset_all();
 		is_gen2 = false;
 		debug_bp_add(bp_at(0xA555, 0x33, DEBUG_BANK_ANY));
@@ -1629,8 +1516,7 @@ main(void)
 		reset_all();
 		is_gen2 = false;
 
-		// A bank selects nothing below $A000, so naming one there is a request
-		// that cannot be honoured rather than one to quietly widen to ANY.
+		// A bank selects nothing below $A000, so naming one is refused rather than widened to ANY.
 		check(!debug_bp_from_ref(0x330555, DEBUG_BANK_ANY, 0, &bp),
 		      "a bank packed onto an unbanked address is refused");
 		check(!debug_bp_from_ref(0x0555, 0x33, 0, &bp),
@@ -1643,8 +1529,7 @@ main(void)
 		          && !debug_bp_from_ref(0x1000000, DEBUG_BANK_ANY, 0, &bp),
 		      "a reference outside 24 bits is refused");
 
-		// The offset is a displacement within the bank; letting it carry would
-		// move the breakpoint to an address nobody named.
+		// The offset is a displacement within the bank and must not carry.
 		check(debug_bp_from_ref(0x33A555, DEBUG_BANK_ANY, 0x10, &bp)
 		          && bp.pc == 0xA565 && bp.x16Bank == 0x33,
 		      "an offset moves the address and leaves the bank alone");
@@ -1666,9 +1551,7 @@ main(void)
 	}
 
 	// ── The PC map the per-instruction fast path trusts ─────────────────────
-	// A clear bit lets the emulator skip the breakpoint test entirely, so a bit
-	// that is clear while an entry exists at that PC is a breakpoint that never
-	// fires. Every way the table changes is checked against it.
+	// A clear bit skips the breakpoint test; every table change is checked against it.
 	{
 		reset_all();
 		check(!debug_bp_maybe_at(0x8000), "map: empty table, empty map");

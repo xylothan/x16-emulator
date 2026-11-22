@@ -1,19 +1,9 @@
 // VERA's interrupt latch and mask: IEN ($9F26) and ISR ($9F27).
 //
-// Four sources reach ISR -- VSYNC, LINE, sprite collision and PCM AFLOW -- but
-// only three of them are latches, and only three of ISR's eight bits can be
-// cleared by writing to it. Which bits a write can store and which it can
-// clear is the whole of what this file checks.
-//
-// Raster IRQ position is not covered. The plan rules it out as needing
-// co-simulation, so events are used as events: nothing here asserts which
-// scanline one arrives on.
-//
 // ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
-// (45cc1f053376dae12173ea63612820e4d289c0da). The cited lines are quoted
-// inline; `python tests/fetch_vera_rtl.py` retrieves the sources to check them
-// against. The IRQ logic is identical at v48.0.1, three lines further down
-// top.v.
+// (45cc1f053376dae12173ea63612820e4d289c0da). `python tests/fetch_vera_rtl.py`
+// retrieves the sources. IRQ logic is identical at v48.0.1, three lines further
+// down top.v.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -37,17 +27,14 @@
 #define SPRITE_ATTR 0x1FC00
 #define SPRITE_GFX  0x01000
 
-// video_step() advances the scan position by PIXEL_FREQ * steps / mhz and
-// subtracts one scan width per call, so any step wider than VGA_SCAN_WIDTH
-// (800) advances exactly one line.
+// A step wider than VGA_SCAN_WIDTH (800) advances exactly one line.
 static void
 step_line(void)
 {
 	video_step(25.0f, 801.0f, false);
 }
 
-// SCAN_HEIGHT lines: every scanline value is passed exactly once and the
-// position ends where it began.
+// SCAN_HEIGHT lines pass every scanline value once and return to the start.
 static void
 step_frame(void)
 {
@@ -98,8 +85,7 @@ test_reset_clears_the_enables_the_latches_and_irqline(void)
 // top.v:334-335
 //     if (do_write && access_addr == 5'h05) begin
 //         fpga_reconfigure_next = write_data[7];
-// Reconfiguring reloads the bitstream, so CTRL bit 7 reaches the reset block
-// above rather than being a separate clear.
+// CTRL bit 7 reaches the reset block above.
 static void
 test_ctrl_bit_7_resets_the_irq_registers(void)
 {
@@ -138,9 +124,7 @@ test_ien_stores_four_enables_and_nothing_else(void)
 	video_write(VERA_IEN, 0x30);
 	check_eq(read_ien() & 0x3F, 0, "IEN bits 5 and 4 store nothing");
 
-	// Through the register alone that is indistinguishable from a fifth bit
-	// stored and then masked out on the way back, so check the byte itself:
-	// top.v:433-436 assign four flops and there is nowhere else to put one.
+	// A fifth stored bit would be masked on read; top.v:433-436 assign four flops.
 	uint8_t stored = 0xFF;
 	video_get_irq_state(&stored, NULL, NULL);
 	check_eq(stored, 0, "and reach no enable register behind it");
@@ -152,8 +136,7 @@ test_ien_stores_four_enables_and_nothing_else(void)
 	check_eq(stored, 0x0Fu, "with only the four enables stored");
 }
 
-// Bit 6 of the read is scanline[8], live, with no write target. Nothing is
-// written to it here, so a set bit can only have come from the counter.
+// Bit 6 reads scanline[8], live, with no write target.
 static void
 test_ien_bit_6_reports_the_scanline(void)
 {
@@ -175,8 +158,7 @@ test_ien_bit_6_reports_the_scanline(void)
 //     if (do_write && access_addr == 5'h08) begin
 //         irq_line_next[7:0] = write_data;
 //     end
-// with bit 8 arriving from IEN at top.v:432, so the compare value is split
-// across two registers and one of them also carries the enables.
+// bit 8 arrives from IEN at top.v:432
 static void
 test_irqline_spans_ien_bit_7_and_9f28(void)
 {
@@ -269,8 +251,7 @@ test_the_irq_line_is_status_and_enable(void)
 {
 	video_reset();
 
-	// AFLOW is set throughout, so a released line is a statement about IEN
-	// rather than about there being nothing to report.
+	// AFLOW is set throughout.
 	check_eq(read_isr() & IRQ_AFLOW, IRQ_AFLOW, "AFLOW is set");
 	check(!video_get_irq_out(), "a status bit with no enable does not assert");
 
@@ -287,9 +268,7 @@ test_the_irq_line_is_status_and_enable(void)
 	check(!video_get_irq_out(), "and clearing that latch releases it");
 }
 
-// Nothing in the read at top.v:175-176 has a side effect; only the write at
-// top.v:438-443 clears. A debugger polling ISR must therefore not cost the
-// program an interrupt.
+// top.v:175-176 reads have no side effect; only the write at top.v:438-443 clears.
 static void
 test_reading_the_status_does_not_clear_it(void)
 {
@@ -313,10 +292,7 @@ test_reading_the_status_does_not_clear_it(void)
 }
 
 // ─── Sprite collision, ISR bits 7:4 ─────────────────────────────────────────
-//
-// Unlike the three status latches, the collision nibble is not part of the
-// interrupt register at all. It belongs to the sprite renderer, and the ISR
-// write path has no way to reach it.
+// The nibble belongs to the sprite renderer; the ISR write path cannot reach it.
 //
 // sprite_renderer.v:37
 //     assign collisions = frame_collision_mask_r;
@@ -328,9 +304,7 @@ test_reading_the_status_does_not_clear_it(void)
 //         cur_collision_mask_next   = 4'b0;
 //     end
 
-// Sixteen lines of 4bpp, eight bytes each, every pixel colour index 1.
-// Collisions are recorded for non-transparent pixels only, so index 0 would
-// never collide however the sprites are placed.
+// Index-1 pixels: collisions are recorded for non-transparent pixels only.
 static void
 fill_sprite_graphics(void)
 {
@@ -339,8 +313,7 @@ fill_sprite_graphics(void)
 	}
 }
 
-// Eight attribute bytes per sprite. Byte 6 holds the collision mask in bits
-// 7:4 and the z-depth in bits 3:2; a z-depth of zero is not drawn.
+// Byte 6: collision mask bits 7:4, z-depth bits 3:2; z-depth 0 is not drawn.
 static void
 place_sprite(unsigned n, uint8_t mask, uint8_t zdepth)
 {
@@ -356,9 +329,7 @@ place_sprite(unsigned n, uint8_t mask, uint8_t zdepth)
 	video_space_write(attr + 7, 0x50);                             // 16x16, palette offset 0
 }
 
-// Two sprites on the same pixels. The second one drawn sees the first one's
-// mask already in the line buffer, so the reported collision is the AND of
-// the two masks.
+// Two sprites on the same pixels; the reported collision is the AND of the masks.
 static void
 arm_two_sprites(uint8_t mask_a, uint8_t mask_b, uint8_t zdepth_b)
 {
@@ -381,9 +352,7 @@ test_a_collision_latches_the_status_and_the_nibble(void)
 	check_eq(read_isr() & IRQ_SPRCOL, IRQ_SPRCOL, "and the collision status latches with it");
 }
 
-// frame_collision_mask_next is assigned unconditionally at frame_done, so the
-// nibble describes the frame just ended and nothing earlier. The status bit
-// beside it is a latch and does not follow.
+// Assigned at frame_done: the nibble is the frame just ended; status is a latch.
 static void
 test_the_nibble_is_replaced_each_frame_while_the_latch_holds(void)
 {
@@ -391,8 +360,7 @@ test_the_nibble_is_replaced_each_frame_while_the_latch_holds(void)
 	step_frame();
 	check_eq(read_isr() & 0xF0, 0x50, "a collision in the first frame");
 
-	// Take the second sprite out of the picture, so the next frame collides
-	// with nothing.
+	// Remove the second sprite so the next frame collides with nothing.
 	place_sprite(1, 0xD0, 0);
 	step_frame();
 
@@ -412,8 +380,7 @@ test_clearing_the_status_leaves_the_nibble(void)
 	check_eq(read_isr() & IRQ_SPRCOL, 0, "the collision status clears when written");
 	check_eq(read_isr() & 0xF0, 0x50, "leaving the nibble it was reported with");
 
-	// The nibble has no clause in the ISR write at all, so the byte a program
-	// reaches for to acknowledge everything at once cannot touch it either.
+	// The ISR write has no clause for the nibble.
 	arm_two_sprites(0x70, 0xD0, 1);
 	step_frame();
 	video_write(VERA_ISR, 0xFF);
@@ -430,10 +397,7 @@ test_clearing_the_status_leaves_the_nibble(void)
 //         linebuf_idx_r < 'd640 &&
 //         (!pixel_is_transparent && sprite_collision_mask_r != 4'b0) ? (linebuf_rddata[15:12] & sprite_collision_mask_r) : 4'b0;
 //
-// The mask is used directly. It was inverted until 4f46cb32 (2023-01-26, "Fix
-// sprite collision and improve write timings (again)"), which is the only
-// change to this expression in the RTL's history -- so masks that share no bit
-// distinguish the two forms rather than merely exercising one.
+// The mask is used directly.
 static void
 test_masks_collide_only_where_they_overlap(void)
 {
@@ -459,8 +423,7 @@ test_the_nibble_cannot_raise_the_interrupt_line(void)
 	}
 	check_eq(read_isr(), 0x50, "with every latch cleared only the nibble is left");
 
-	// Every enable there is: IEN has no bit for the nibble, which is the whole
-	// of why it cannot interrupt.
+	// IEN has no bit for the nibble.
 	video_write(VERA_IEN, 0xFF);
 	check(!video_get_irq_out(), "which no enable can turn into an interrupt");
 }

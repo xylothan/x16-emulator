@@ -1,21 +1,4 @@
 // Checks for runtime debug-info loading (src/dbg_load.c).
-//
-// This exists because an earlier version of the feature was pulled from its PR
-// with four defects, every one of which came from reading globals at the end of
-// a load rather than recording facts as it happened. The checks below are
-// organised around those four, so a regression reintroduces a named failure
-// rather than a vague one:
-//
-//   1. the bank was sampled when the load finished, but a load crossing $C000
-//      moves the RAM bank on as it goes, so the end bank belongs to a different
-//      segment than the one the program started in;
-//   2. one set of globals could not describe two channels open at once;
-//   3. any readable channel reaching EOF looked like a program load, including
-//      a data file read a byte at a time;
-//   4. the debug info was annotated with the bank BEFORE being loaded, and
-//      loading discards the mappings in that range, so the annotation went with
-//      them. (That ordering lives in dbg_load_poll(), which needs dbg_info and
-//      is covered by the emulator-level check in the PR rather than here.)
 
 #include "dbg_load.h"
 #include "dbg_info.h"
@@ -38,9 +21,7 @@ check(bool cond, const char *what)
 	}
 }
 
-// Drive a whole block transfer onto one channel, the way MACPTR does: the
-// destination is reported for every byte but only the first is kept, and the
-// RAM bank steps on whenever the address walks off the end of the window.
+// MACPTR-style transfer: first destination kept, RAM bank steps at the window end.
 static void
 transfer(int channel, uint16_t addr, uint8_t bank, uint32_t bytes, bool to_eof)
 {
@@ -73,8 +54,7 @@ write_file(const char *path, const char *text, size_t len)
 	return wrote == len;
 }
 
-// A minimal cc65 .dbg describing one 300-byte CODE segment at $A000, naming a
-// given source file so two of them can be told apart.
+// Minimal cc65 .dbg: one 300-byte CODE segment at $A000, named source file.
 static bool
 write_dbg(const char *path, const char *source_name, unsigned seg_start)
 {
@@ -98,8 +78,7 @@ int
 main(void)
 {
 	// ── Off by default ──────────────────────────────────────────────────────
-	// Acting on loads lets the emulated program choose which host files get
-	// parsed, so it has to be asked for.
+	// Off until asked for: loads choose which host files get parsed.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(false);
@@ -130,16 +109,13 @@ main(void)
 		check(!dbg_load_take(&ev), "and reports it only once");
 	}
 
-	// ── Defect 1: the bank must be the one it STARTED in ────────────────────
-	// A load into banked RAM that overruns $BFFF continues at $A000 in the next
-	// bank. Sampling the bank at the end names a segment the program did not
-	// start in, and the debug info would then attribute it to the wrong bank.
+	// ── The bank is the one the load started in ─────────────────────────────
+	// A load overrunning $BFFF continues at $A000 in the next bank.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
 
-		// Start near the top of bank 5 and run past the end of the window, so
-		// the transfer finishes in bank 6.
+		// Starts near the top of bank 5, finishes in bank 6.
 		dbg_load_begin(2, "/host/OVERLAY.PRG");
 		transfer(2, 0xBF00, 5, 0x200, true);  // 512 bytes: 256 in bank 5, 256 in bank 6
 
@@ -150,9 +126,8 @@ main(void)
 		check(ev.size == 0x200, "having counted every byte");
 	}
 
-	// ── Defect 2: two channels open at once ─────────────────────────────────
-	// The second file to be opened must not overwrite what the first is still
-	// transferring, or one load is reported with the other's name.
+	// ── Two channels open at once ───────────────────────────────────────────
+	// The second open must not overwrite the first.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -176,16 +151,8 @@ main(void)
 		      "and its own address, bank and size");
 	}
 
-	// ── Defect 3: reading a data file is not loading a program ──────────────
-	// A BASIC program reading a file a byte at a time opens a channel and
-	// reaches EOF exactly like a load does. What distinguishes them is that it
-	// never moves bytes into memory through a block transfer.
-	//
-	// The decision itself lives in ieee.c -- only MACPTR calls note_byte, and
-	// GET#/INPUT# go through ACPTR, which does not -- so what is checked here
-	// is the contract ieee.c relies on: reporting no bytes must never produce a
-	// load, and reporting bytes must. The ieee.c side is covered by driving a
-	// real LOAD through the emulator.
+	// ── Reading a data file is not loading a program ────────────────────────
+	// No bytes reported, no load: only MACPTR calls note_byte, GET#/INPUT# use ACPTR.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -196,9 +163,7 @@ main(void)
 		dbg_load_event_t ev;
 		check(!dbg_load_take(&ev), "a channel that reports no bytes is not a load");
 
-		// The same channel, same path, reporting bytes: this one is a load. The
-		// two together are what make the distinction meaningful rather than
-		// just asserting that nothing happened.
+		// Same channel and path, reporting bytes: a load.
 		dbg_load_begin(1, "/host/SCORES.DAT");
 		transfer(1, 0x0801, 0, 8, true);
 		check(dbg_load_take(&ev) && ev.size == 8,
@@ -217,9 +182,7 @@ main(void)
 		dbg_load_event_t ev;
 		check(!dbg_load_take(&ev), "an abandoned transfer reports nothing");
 
-		// The close has to actually forget the channel, not just fail to
-		// publish: a byte arriving afterwards must not finish the load that was
-		// abandoned.
+		// The close forgets the channel: a later byte completes nothing.
 		dbg_load_note_byte(1, 0x0801, 0, true);
 		check(!dbg_load_take(&ev), "and a byte after the close starts nothing");
 
@@ -260,8 +223,7 @@ main(void)
 	}
 
 	// ── Only the first destination is kept ──────────────────────────────────
-	// MACPTR reports every byte; the one that says where the program begins is
-	// the first.
+	// MACPTR reports every byte; the first is where the program begins.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -302,14 +264,11 @@ main(void)
 		dbg_load_begin(1, longpath);
 		transfer(1, 0x0801, 0, 4, true);
 
-		// Refused, not truncated. A truncated path names a *different* host
-		// file, which the poll would then go and parse -- so a copy that merely
-		// fits inside the buffer is not good enough.
+		// Refused: a truncated path names a different host file.
 		dbg_load_event_t ev;
 		check(!dbg_load_take(&ev), "an over-long path is refused, not truncated");
 
-		// One character shorter than the buffer still fits, so the boundary is
-		// off-by-one safe in both directions.
+		// One character shorter than the buffer fits.
 		char fits[DBG_LOAD_PATH_MAX];
 		memset(fits, 'a', sizeof(fits) - 1);
 		fits[sizeof(fits) - 1] = '\0';
@@ -340,11 +299,7 @@ main(void)
 	}
 
 	// ── The final byte is counted ───────────────────────────────────────────
-	// This is the one that bit: the transfer loop closes its channel as soon as
-	// it sees the end of the file, and when counting a byte and finishing the
-	// load were separate calls, the close landed between them. Every load came
-	// out a byte short. Reporting the last byte is now what finishes the load,
-	// so the count must include it.
+	// Reporting the last byte finishes the load, so the count includes it.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -359,8 +314,7 @@ main(void)
 	}
 
 	// ── Nothing is reported after the load finishes ─────────────────────────
-	// The last byte closes the channel, so anything the file layer reports
-	// afterwards belongs to no load and must not resurrect one.
+	// Reports after the last byte belong to no load.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -374,10 +328,7 @@ main(void)
 		check(!dbg_load_take(&ev), "a stray byte afterwards starts nothing");
 	}
 	// ── A .dbg loaded as if it were a program ───────────────────────────────
-	// A wildcard like LOAD"GAME*" can match GAME.dbg instead of GAME.PRG, and
-	// the machine will read that text file into memory at whatever its first
-	// two bytes happen to spell out. Reading it back as debug info for itself
-	// would attribute its segments to that nonsense address, so it is refused.
+	// A wildcard can match GAME.dbg; it is refused as debug info for itself.
 	{
 		check(dbg_load_path_is_dbg("/host/GAME.dbg"), "recognises a .dbg path");
 		check(dbg_load_path_is_dbg("/host/GAME.DBG"), "whatever its case");
@@ -391,10 +342,7 @@ main(void)
 	}
 
 	// ── The -prg file ───────────────────────────────────────────────────────
-	// -prg never goes through filename resolution: the KERNAL asks for ":*" and
-	// the file layer hands back a handle that was opened before the machine
-	// started. The path has to have been recorded up front, or the commonest
-	// debugging workflow of all is the one that silently gets no symbols.
+	// -prg bypasses filename resolution, so the path is recorded up front.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -456,16 +404,7 @@ main(void)
 	}
 
 	// ── A path is merged into the debug info only once ──────────────────────
-	// dbg_info_load() is additive and dbg_info_unload_range() does not prune
-	// file or equate records, so parsing the same .dbg twice appends a second
-	// copy of every equate -- and lookups return the first match. An overlay
-	// loader swapping the same module in and out would grow without bound and
-	// keep resolving symbols to their first-seen values.
-	//
-	// dbg_load_poll() is what enforces this, and it needs real files on disk,
-	// so what is pinned here is the part that decides: repeated loads of the
-	// same path still each produce an event (the bank may differ), because the
-	// de-duplication must happen at the merge, not by dropping the load.
+	// Repeated loads of one path each produce an event; de-duplication is at the merge.
 	{
 		dbg_load_reset();
 		dbg_load_set_enabled(true);
@@ -481,11 +420,7 @@ main(void)
 	}
 
 	// ── Merging the debug info, against real files ──────────────────────────
-	// The only test that drives dbg_load_poll() end to end, because it needs a
-	// .dbg on disk. It pins the thing the unit-level checks above cannot see:
-	// the same overlay loaded repeatedly must keep being reported, so that its
-	// (possibly new) bank is re-applied every time -- the de-duplication has to
-	// happen at the merge, not by dropping the load.
+	// Drives dbg_load_poll() end to end: repeated loads stay reported.
 	{
 		const char *prg = "dbgload_test_tmp.prg";
 		const char *dbg = "dbgload_test_tmp.dbg";
@@ -505,24 +440,17 @@ main(void)
 			}
 			check(all_reported, "every load of the same overlay is acted on");
 
-			// The .dbg names one source file. Merging it three times would
-			// append three copies, because dbg_info_load() is additive and
-			// nothing prunes its file records -- which is also how stale
-			// equates come to shadow live ones.
+			// Merging three times would append three copies of the file records.
 			check(dbg_info_file_count() == 1,
 			      "but its debug info is merged only once");
 
-			// The bank from the LAST load is the one in force: the same
-			// overlay can legitimately move to a different bank, so the
-			// annotation has to be re-applied even when the merge is skipped.
+			// The last load's bank is in force, even when the merge is skipped.
 			const char *src_file = NULL;
 			int         src_line = 0;
 			check(dbg_info_addr_to_source_banked_ex(0xA000, 6, &src_file, &src_line)
 			          == DBG_BANK_RESOLVED,
 			      "and the bank from the most recent load is the one that sticks");
-			// The bank it was FIRST loaded into no longer resolves. It reports
-			// DBG_BANK_UNKNOWN rather than NO_MATCH, because the address is
-			// still described -- just not as belonging to that bank.
+			// The first bank now reports DBG_BANK_UNKNOWN, not NO_MATCH.
 			check(dbg_info_addr_to_source_banked_ex(0xA000, 4, &src_file, &src_line)
 			          != DBG_BANK_RESOLVED,
 			      "not the bank it was first loaded into");
@@ -532,9 +460,7 @@ main(void)
 			transfer(1, 0xA000, 4, 0x12C, true);
 			check(!dbg_load_poll(), "a program with no .dbg beside it is skipped");
 
-			// The .dbg itself, read as if it were a program, which a wildcard
-			// LOAD can genuinely do. It exists on disk and would parse happily
-			// as debug info for itself, so only the guard stops it.
+			// The .dbg read as a program (wildcard LOAD): only the guard stops it.
 			dbg_load_begin(1, dbg);
 			transfer(1, 0xA000, 4, 0x12C, true);
 			check(!dbg_load_poll(), "a .dbg read as a program is refused");
@@ -548,12 +474,7 @@ main(void)
 	}
 
 	// ── A displaced module comes back ───────────────────────────────────────
-	// Two overlays living at the same address, which is what overlays ARE.
-	// Merging one destroys the other's records, because dbg_info_load_for_file()
-	// unloads the incoming file's range first. So re-merging is how a module
-	// that was swapped out gets restored, and anything that remembers "this was
-	// merged once" and skips it forever leaves the debugger showing the wrong
-	// module's source as authoritative for the code that is actually running.
+	// Two overlays at one address: merging one destroys the other, re-merging restores it.
 	{
 		const char *dbg1 = "dbgload_test_ovl1.dbg";
 		const char *dbg2 = "dbgload_test_ovl2.dbg";
@@ -583,8 +504,7 @@ main(void)
 			      && strstr(src, "ovl2") != NULL,
 			      "loading the second one takes over that address");
 
-			// Back to the first. Its records were destroyed by the second, so
-			// this has to merge again rather than assume it is still there.
+			// The second destroyed its records, so this merges again.
 			dbg_load_begin(1, prg1);
 			transfer(1, 0xA000, 5, 0x12C, true);
 			dbg_load_poll();
@@ -598,10 +518,7 @@ main(void)
 	}
 
 	// ── A module somewhere else is left alone ───────────────────────────────
-	// Only the modules a merge actually displaces should be forgotten. Loading
-	// something at a different address must not cause every other module to be
-	// re-merged next time it loads, which would put the unbounded growth and
-	// the stale-equate shadowing straight back.
+	// Only modules a merge displaces are forgotten.
 	{
 		const char *dbg_lo  = "dbgload_test_lo.dbg";
 		const char *dbg_hi  = "dbgload_test_hi.dbg";
@@ -622,8 +539,7 @@ main(void)
 			transfer(1, 0xA000, 5, 0x12C, true);
 			dbg_load_poll();
 
-			// Both are live now. Re-loading the low one must not merge again:
-			// the high one never touched its range.
+			// Both live: re-loading the low one does not merge.
 			int before = dbg_info_file_count();
 			dbg_load_begin(1, prg_lo);
 			transfer(1, 0x6000, 0, 0x12C, true);
@@ -645,9 +561,7 @@ main(void)
 	}
 
 	// ── Following the debugger, not a snapshot of it ────────────────────────
-	// The running machine can switch the debugger on itself through emu_write,
-	// so a decision made once at startup would be wrong for the rest of the
-	// session.
+	// Follows the debugger state as it changes at runtime (emu_write).
 	{
 		dbg_load_reset();
 
@@ -667,17 +581,14 @@ main(void)
 		dbg_load_note_debugger(true);
 		check(!dbg_load_is_enabled(), "and forced off ignores it too");
 
-		// Order does not matter: the policy can be set before or after the
-		// debugger state is known.
+		// Policy and debugger state may be set in either order.
 		dbg_load_note_debugger(true);
 		dbg_load_set_policy(-1);
 		check(dbg_load_is_enabled(), "the two can be set in either order");
 	}
 
 	// ── A load we cannot describe drops what described that range ───────────
-	// If B overwrites A's address range and B has no .dbg, A's debug info now
-	// describes bytes that are gone. A debugger confidently showing the wrong
-	// source is worse than one showing none, so those records go.
+	// An undescribed load over a module's range drops that module's records.
 	{
 		const char *dbg_a = "dbgload_test_a.dbg";
 		const char *prg_a = "dbgload_test_a.prg";
@@ -717,7 +628,7 @@ main(void)
 	}
 
 	// ── A load somewhere else leaves it alone ───────────────────────────────
-	// The rule above must apply only to the range actually overwritten.
+	// Applies only to the range actually overwritten.
 	{
 		const char *dbg_a = "dbgload_test_keep.dbg";
 		const char *prg_a = "dbgload_test_keep.prg";
@@ -748,14 +659,7 @@ main(void)
 	}
 
 	// ── Loading data into your own buffer keeps your debug info ─────────────
-	// The envelope recorded for a module is the min/max across every segment in
-	// its .dbg, including BSS, so for a real cc65 program it covers most of low
-	// RAM. A program loading a level or a font into one of its own buffers
-	// therefore lands *inside* its own envelope while invalidating nothing. If
-	// a partial overlap discarded debug info, the commonest thing a program can
-	// do would throw away the source mapping for the code that is running, and
-	// nothing would bring it back -- the program is already resident and is
-	// never re-loaded.
+	// A load inside a module's envelope that does not cover it keeps its debug info.
 	{
 		const char *dbg_p = "dbgload_test_partial.dbg";
 		const char *prg_p = "dbgload_test_partial.prg";

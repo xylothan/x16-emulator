@@ -16,7 +16,7 @@ main(void)
 {
 	char out[256];
 
-	// ── No folder: the working directory, as before ─────────────────────────
+	// ── No folder: the working directory ────────────────────────────────────
 	export_set_dir(EXPORT_SCREENSHOT, "");
 	check(export_path(EXPORT_SCREENSHOT, "shot.png", out, sizeof out) && strcmp(out, "shot.png") == 0,
 	      "no folder: the bare name");

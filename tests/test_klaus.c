@@ -1,19 +1,12 @@
 // Klaus Dormann's 6502/65C02 functional tests, run against the CPU core.
 //
-// Covers sequential composition: ~30 million instructions of interdependent
-// code, rather than instructions considered one at a time. Not the per-opcode
-// oracle -- ProcessorTests is -- and it reports a single trap address for a
-// whole run.
+// Sequential composition (~30M instructions); reports one trap address per run.
 //
-// No timing coverage: it verifies results, not cycle counts. mutation_check.py
-// confirms that by dropping the page-cross penalty and watching this pass.
+// No timing coverage: results only, not cycle counts.
 //
-// The .bin is a full 64K image, execution starts at $0400, and the program
-// traps by branching to itself. Success is a trap at one specific address from
-// the listing; a trap anywhere else means a check failed there.
+// 64K image, start $0400; success is a branch-to-self at one listing address.
 //
-// Binaries are fetched by tests/fetch_klaus.py rather than committed: GPL and
-// 64K each. Without them this reports skipped.
+// Binaries are fetched by tests/fetch_klaus.py; without them this reports skipped.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
@@ -28,12 +21,10 @@
 
 #define START_PC 0x0400
 
-// The images are full 64K memory dumps. Named rather than taken from the
-// fixture's memory size, which is now the 65C816's whole 24-bit space.
+// The images are full 64K dumps.
 #define KLAUS_IMAGE_SIZE 0x10000
 
-// Generous: a full functional run is tens of millions of instructions, and the
-// point of the ceiling is only to stop a broken core spinning forever.
+// The ceiling only stops a broken core spinning forever.
 #define MAX_INSTRUCTIONS 200000000u
 
 static const char *
@@ -84,12 +75,7 @@ run_image(const char *path, bool c816)
 	return 0;
 }
 
-// Print the source around the address the test stopped at.
-//
-// A trap address on its own is close to useless: it means opening a listing of
-// several hundred thousand lines and searching by hand. The listing maps the
-// address straight back to the check that failed, and the lines above it say
-// which opcode was under test, so print them.
+// Print the source around the trap address, mapped back through the listing.
 static void
 print_listing_context(const char *bin_name, uint16_t addr)
 {
@@ -111,8 +97,7 @@ print_listing_context(const char *bin_name, uint16_t addr)
 		return;
 	}
 
-	// Keep a window of what came before, since the interesting part -- the
-	// opcode being tested -- is above the line that trapped.
+	// Keep a window of what came before: the opcode under test is above the line that trapped.
 	enum { BEFORE = 14 };
 	static char ring[BEFORE][256];
 	int    count = 0;
@@ -143,10 +128,7 @@ print_listing_context(const char *bin_name, uint16_t addr)
 	printf("     ($%04X not found in %s)\n", addr, lst_name);
 }
 
-// Whether a missing image is a failure rather than a skip. CI sets this, so a
-// broken or deleted fetch step shows up as a red test instead of a green run
-// that quietly checked nothing. Locally it is unset, and the images stay
-// optional.
+// A missing image is a failure rather than a skip when CI sets this; unset locally.
 static bool
 images_required(void)
 {
@@ -198,11 +180,7 @@ main(void)
 	// Documented opcodes and addressing modes. This is the one that gates.
 	run_case("6502_functional_test.bin", FUNCTIONAL_SUCCESS, NULL);
 
-	// The extended test also exercises undefined opcodes, checking their byte
-	// counts by putting INY instructions in the bytes a correctly sized opcode
-	// would skip. It failed while $5C, $DC and $FC were one-byte implied NOPs
-	// rather than three-byte ones, because the operand bytes were executed
-	// instead of skipped.
+	// The extended test also covers undefined opcodes' byte counts.
 	run_case("65C02_extended_opcodes_test.bin", EXTENDED_SUCCESS, NULL);
 
 	return x16_test_summary("klaus");
