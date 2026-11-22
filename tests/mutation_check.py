@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """Check that the tests actually fail when the emulator is wrong.
 
-Every test here is written to pass against correct behaviour, which says
-nothing about whether it would notice incorrect behaviour. A test that asserts
-the wrong thing, or reads a value it never actually exercises, passes exactly
-as convincingly as one that works.
-
-So: break the emulator on purpose, one small change at a time, and check the
-test that should care goes red. A mutation that survives means either the test
-is not covering what it claims, or the code it changed does not matter.
+Break the emulator on purpose, one small change at a time, and check the test
+that should care goes red. A mutation that survives means the test is not
+covering what it claims, or the code it changed does not matter.
 
     python tests/mutation_check.py --build-dir build
 
-Every mutation is reverted afterwards, including on failure or interrupt. The
-source is restored from a copy taken before each edit, so an aborted run leaves
-the tree as it found it.
+Every mutation is reverted afterwards, including on failure or interrupt.
 """
 
 import argparse
@@ -30,17 +23,14 @@ ROOT = Path(__file__).resolve().parent.parent
 CMAKE = os.environ.get("CMAKE", "cmake")
 CTEST = os.environ.get("CTEST", "ctest")
 
-# Each entry breaks one specific behaviour and names the tests that should
-# notice. `count` is how many places the pattern is expected to match, and a
-# mismatch is reported rather than applied -- a pattern that has quietly stopped
-# matching would otherwise look exactly like a mutation the tests caught.
+# Each entry breaks one behaviour and names the tests that should notice.
+# `count` is the expected match count; a mismatch is reported, not applied.
 MUTATIONS = [
     {
         "name": "PCM FIFO accepts one byte too many",
         "file": "src/vera_pcm.c",
         # audio_fifo.v:27  assign full = (wridx_next == rdidx_r);
-        # The ring stores one fewer than its 4096 cells so that full and empty
-        # stay distinguishable. Off by one here makes a full FIFO read as empty.
+        # The ring stores one fewer than its 4096 cells; off by one reads a full FIFO as empty.
         "find": "if (fifo_cnt < sizeof(fifo) - 1) {",
         "into": "if (fifo_cnt <= sizeof(fifo) - 1) {",
         "count": 1,
@@ -50,25 +40,17 @@ MUTATIONS = [
         "name": "PCM almost-empty boundary is off by one",
         "file": "src/vera_pcm.c",
         # audio_fifo.v:28  assign almost_empty = fifo_count < 12'd1024;
-        # Drives the AFLOW interrupt: firing a byte late or early changes when
-        # a program is asked for more audio.
+        # Drives the AFLOW interrupt.
         "find": "return fifo_cnt < 1024;",
         "into": "return fifo_cnt <= 1024;",
         "count": 1,
         "caught_by": ["vera_pcm"],
     },
-    # No mutation for the AUDIO_RATE fold. The test asserts the RTL value
-    # (top.v:480 stores write_data raw) and marks the emulator's fold as a
-    # divergence, so it deliberately does not pin `256 - val`. A mutation of
-    # that expression would survive, and correctly so. Add one once the fold is
-    # removed and the register stores what was written.
+    # No AUDIO_RATE fold mutation: top.v:480 stores raw; recorded as a divergence.
     {
         "name": "VERA debug reads report a constant",
         "file": "src/video.c",
-        # The sweep in test_vera_debug_read.c records exactly which registers
-        # read differently to the debugger than to the machine. Breaking the
-        # debug path further changes that set, which the recorded count fails
-        # on -- so the sweep cannot quietly stop measuring anything.
+        # test_vera_debug_read.c records which registers the debugger reads differently.
         "find": "if (debugOn) return video_get_dc_value(i);",
         "into": "if (debugOn) return 0;",
         "count": 1,
@@ -89,8 +71,7 @@ MUTATIONS = [
         "name": "VERA address increment uses a power-of-two step",
         "file": "src/video.c",
         # addr_data.v:193 gives 40 for code 0x0B. The non-power-of-two steps
-        # exist so a program can walk tile rows, and are exactly what an
-        # implementation "tidying" the series to 1 << n would lose.
+        # The non-power-of-two steps let a program walk tile rows.
         "find": "\t40,  -40,",
         "into": "\t48,  -48,",
         "count": 1,
@@ -109,9 +90,7 @@ MUTATIONS = [
     {
         "name": "PSG sawtooth loses its pulse-width shaping",
         "file": "src/vera_psg.c",
-        # Reverts the waveform to the R47 form. psg.v:163 (R48) XORs the saw
-        # with the inverted pulse width; R47 read the phase directly. This is
-        # the mutation that proves pinning psg.v to R48 does any work.
+        # R47 form. psg.v:163 (R48) XORs the saw with the inverted pulse width.
         "find": "case WF_SAWTOOTH: v = (ch->phase >> 11) ^ ((ch->pw ^ 0x3f) & 0x3f); break;",
         "into": "case WF_SAWTOOTH: v = (ch->phase >> 11); break;",
         "count": 1,
@@ -152,8 +131,7 @@ MUTATIONS = [
         "file": "src/video.c",
         # top.v:440-442 clear a latch when the written bit is one:
         #   irq_status_vsync_next = irq_status_vsync_r & !write_data[0];
-        # Inverting that acknowledges every pending source whenever a program
-        # clears one, which loses interrupts rather than reporting them wrong.
+        # Inverting that acknowledges every pending source whenever a program clears one.
         "find": "isr &= value ^ 0xff;",
         "into": "isr &= value;",
         "count": 1,
@@ -194,8 +172,7 @@ MUTATIONS = [
         "name": "VERA asserts IRQ regardless of the enables",
         "file": "src/video.c",
         # top.v:1200  assign extbus_irq_n = (irq_status & irq_enable) == 0;
-        # Dropping the mask interrupts on every VSYNC whether or not the
-        # program asked for one.
+        # Dropping the mask interrupts on every VSYNC.
         "find": "return (tmp_isr & ien) != 0;",
         "into": "return tmp_isr != 0;",
         "count": 1,
@@ -204,9 +181,7 @@ MUTATIONS = [
     {
         "name": "VERA IEN bit 6 reports a stored bit, not the scanline",
         "file": "src/video.c",
-        # top.v:175 sources bit 6 from scanline[8], live, with nothing writing
-        # it. A debugger reading IEN would otherwise show a raster position
-        # that never moves.
+        # top.v:175 sources bit 6 from scanline[8], live, with nothing writing it.
         "find": "((scanline & 0x100) >> 2)",
         "into": "0",
         "count": 1,
@@ -239,24 +214,16 @@ MUTATIONS = [
         "file": "src/video.c",
         # sprite_renderer.v:328 uses the mask directly:
         #   ... ? (linebuf_rddata[15:12] & sprite_collision_mask_r) : 4'b0;
-        # It was inverted until 4f46cb32 (2023-01-26). This mutation restores
-        # that form, which is the one bug the RTL's own history records here.
         "find": "sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;",
         "into": "sprite_line_collisions |= sprite_line_mask[line_x] & ~props->sprite_collision_mask;",
         "count": 1,
         "caught_by": ["vera_irq"],
     },
-    # No mutation for the ISR write clearing bits 7:4. The test records that as
-    # a divergence rather than asserting it, so mutating video.c:2910 towards
-    # the RTL would make the marker pass unexpectedly -- which is a failure by
-    # design, not a caught mutation. Add one once the write stops reaching the
-    # nibble.
+    # No mutation for ISR writes clearing bits 7:4: a divergence (video.c:2910).
     {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
-        # step6502()'s copy, four-space indented. exec6502()'s is eight-space
-        # and is dead code -- mutating that proves nothing, which is exactly
-        # what an earlier version of this list accidentally did.
+        # step6502()'s copy, four-space indented; exec6502()'s is eight-space and dead code.
         "find": "\n    penaltyd = 0;\n",
         "into": "\n",
         "count": 1,
@@ -268,8 +235,7 @@ MUTATIONS = [
         "find": "if (penaltyop && penaltyaddr) clockticks6502++;",
         "into": "if (0) clockticks6502++;",
         "count": 2,  # exec6502() and step6502() both have it
-        # Not klaus: its functional tests check results, not cycle counts, so
-        # they are blind to timing. Worth knowing.
+        # Not caught by klaus: it checks results, not cycle counts.
         "caught_by": ["cpu_loadstore"],
     },
     {
@@ -291,10 +257,7 @@ MUTATIONS = [
     {
         "name": "a debug read of slow I/O costs cycles",
         "file": "src/memory.c",
-        # The write path guards the same way, so this needs the read's own
-        # continuation to stay unique to it. The read's guard lives in
-        # io_read(), which is a function in its own right so that the value it
-        # returns can be traced -- hence one tab of indent here, not three.
+        # The write path guards alike, so the pattern includes the read's continuation.
         "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
         "into": "if (address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
         "count": 1,
@@ -312,9 +275,7 @@ MUTATIONS = [
     {
         "name": "the overflow flag is never set",
         "file": "src/cpu/support.h",
-        # Masking with 0x00 rather than replacing the condition with 0: the
-        # macro parameters stay referenced, so this compiles under -Werror
-        # where an `if (0)` leaves them unused and GCC refuses.
+        # Mask with 0x00, not `if (0)`: macro parameters stay referenced under -Werror.
         "find": "if (((n) ^ (m)) & ((n) ^ (o)) & 0x80) setoverflow();",
         "into": "if (((n) ^ (m)) & ((n) ^ (o)) & 0x00) setoverflow();",
         "count": 1,
@@ -328,8 +289,7 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["cpu_loadstore", "klaus"],
     },
-    # The three below exist to check ProcessorTests specifically: a baseline
-    # comparison is only worth anything if it moves when behaviour moves.
+    # The three below check ProcessorTests: a baseline comparison must move when behaviour moves.
     {
         "name": "the negative flag is never set",
         "file": "src/cpu/support.h",
@@ -358,8 +318,7 @@ MUTATIONS = [
         "requires": "tests/pt/wdc65c02.bin",
         "caught_by": ["processor_tests"],
     },
-    # The 65C816 fixes below. Each is checked by the suite for the mode it
-    # applies to, so a revert shows up as a named opcode rather than a number.
+    # The 65C816 fixes below, each checked by the suite for its mode.
     {
         "name": "indirect addressing ignores the data bank",
         "file": "src/cpu/modes.h",
@@ -397,8 +356,7 @@ MUTATIONS = [
         "caught_by": ["processor_tests_816_native"],
     },
     {
-        # The two CPUs correct decimal subtraction differently; using one
-        # algorithm for both was the fault this replaced.
+        # The two CPUs correct decimal subtraction differently.
         "name": "the 65C02 decimal SBC algorithm is used on the 65C816",
         "file": "src/cpu/instructions.h",
         "find": "            int16_t adjusted;\n            if (regs.is65c816) {",
@@ -408,10 +366,7 @@ MUTATIONS = [
         "caught_by": ["processor_tests_816_emu"],
     },
     {
-        # WAI is one of the four opcodes ProcessorTests records in a form it
-        # cannot compare, so this is a table change no other test can see. It
-        # is the mutation that shows opcode_spec covers something new rather
-        # than repeating the traces.
+        # WAI: ProcessorTests cannot compare it, so only opcode_spec sees this change.
         "name": "a documented cycle count is changed",
         "file": "src/cpu/65c02.opcodes",
         "find": "wai imp 3 $cb",
@@ -486,10 +441,7 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_layer"],
     },
-    # No mutation for the scroll high bytes reading back whole. That is
-    # recorded as a divergence rather than asserted, so mutating video.c
-    # towards the RTL would make the marker pass unexpectedly -- a failure by
-    # design, not a caught mutation.
+    # No mutation for scroll high bytes reading whole: recorded as a divergence.
     {
         "name": "VERA layer row does not wrap at the layer height",
         "file": "src/video.c",
@@ -525,10 +477,7 @@ MUTATIONS = [
     {
         "name": "VERA default palette entry is wrong",
         "file": "src/video.c",
-        # palette_ram.mem is the table baked into the FPGA bitstream, so the
-        # default palette is hardware and not a ROM convention. One edited
-        # entry in a 256-entry table is how this actually goes wrong, and the
-        # only thing that notices is a comparison against the file.
+        # palette_ram.mem is the bitstream's default palette; compared against the file.
         "find": "0x08f,0xbbb,",
         "into": "0x08f,0xbbc,",
         "count": 1,
@@ -680,9 +629,7 @@ MUTATIONS = [
     {
         "name": "a program write to slow I/O is free",
         "file": "src/memory.c",
-        # The other side of the same guard: a store the program executed still
-        # costs what it costs, and the debug case is only interesting against
-        # it.
+        # The other side of the same guard: an executed store still costs cycles.
         "find": "\t\tif (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
         "into": "\t\tif (false && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
         "count": 1,
@@ -691,9 +638,7 @@ MUTATIONS = [
     {
         "name": "a debug write reports a watchpoint",
         "file": "src/memory.c",
-        # A watchpoint answers "when does the program touch this?". Breaking on
-        # the debugger's own edit answers a question nobody asked, and stops
-        # the machine while someone is typing into it.
+        # A watchpoint must not break on the debugger's own edit.
         "find": "if (!debugOn && debug_wp_armed_cpu_write > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
         "into": "if (debug_wp_armed_cpu_write > 0 && bank == 0 && debug_wp_check_write(address, value)) {",
         "count": 1,
@@ -709,12 +654,8 @@ def run(cmd, **kw):
 def build(build_dir, passes=1):
     """Build the tests, optionally more than once.
 
-    A mutation to an .opcodes file regenerates src/cpu/tables.h during the
-    build, and the objects that include it are only recompiled on the following
-    pass: the header dependency comes from the compiler's depfile, which ninja
-    evaluates before the generator has run. One pass would leave the binaries
-    linked from the unmutated tables, so such a mutation would look like it
-    survived when nothing had actually been tested.
+    An .opcodes mutation regenerates src/cpu/tables.h during the build, and the
+    objects that include it are only recompiled on the following pass.
     """
     out = ""
     for _ in range(passes):
@@ -751,8 +692,7 @@ def main():
         if args.only and args.only not in m["name"]:
             continue
 
-        # Without its fixture the test skips, passes, and looks like the
-        # mutation survived.
+        # Without its fixture the test skips and looks like the mutation survived.
         need = m.get("requires")
         if need and not (ROOT / need).exists():
             print(f"n/a   {m['name']}\n      needs {need}, which is not present")
@@ -760,8 +700,7 @@ def main():
             continue
 
         path = ROOT / m["file"]
-        # Universal newlines, so a pattern written with \n matches a file
-        # checked out with CRLF. The original bytes are restored afterwards.
+        # Universal newlines: \n patterns match a CRLF checkout; bytes are restored after.
         original = path.read_text(encoding="utf-8")
 
         want = m.get("count", 1)
@@ -788,27 +727,14 @@ def main():
             path.write_text(original.replace(m["find"], m["into"]),
                             encoding="utf-8")
 
-            # Delete the generated headers rather than trusting the build to
-            # notice they are stale. The generator fires on a timestamp
-            # comparison against the .opcodes file, and restoring the previous
-            # mutation stamps these to "now" -- so when a whole mutate, build
-            # and restore cycle lands inside one filesystem mtime tick, the
-            # mutated .opcodes is not newer than tables.h, generation is
-            # skipped, and the tests read the PREVIOUS opcode tables. The
-            # mutation then looks survived when nothing was ever built from it.
-            #
-            # That is machine-speed dependent, so it shows up as an occasional
-            # red build on CI and never locally. Deleting them cannot be
-            # defeated by any timestamp.
+            # Delete generated headers: a restore inside one mtime tick skips regeneration.
             if path.suffix == ".opcodes":
                 for gen in gen_backups:
                     gen.unlink(missing_ok=True)
 
             built, out = build(args.build_dir, passes=2)
             if not built:
-                # A mutation that will not compile proves nothing either way,
-                # and is usually a mutation that needs rewriting rather than a
-                # problem with the tests. Show enough to fix it.
+                # A mutation that will not compile proves nothing; show enough to fix it.
                 first = next((l for l in out.splitlines()
                               if "error" in l.lower()), "")
                 print(f"SKIP  {m['name']}\n      does not compile: {first.strip()[:120]}")
@@ -824,10 +750,7 @@ def main():
                 survived.append(m["name"])
         finally:
             shutil.copy2(backup, path)
-            # copy2 preserves mtime, leaving the restored file older than the
-            # object built from the mutated version. Ninja and make skip the
-            # rebuild, so the mutation stays compiled in and every later one
-            # runs against a broken emulator and is reported caught.
+            # Restore mtime after copy2, or the build skips it and the mutation stays in.
             os.utime(path, None)
             backup.unlink(missing_ok=True)
             for gen, saved in gen_backups.items():

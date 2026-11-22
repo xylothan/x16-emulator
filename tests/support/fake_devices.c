@@ -112,16 +112,10 @@ bool YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value);
 bool audio_events_on = false;
 void audio_events_ym_write(uint8_t reg, uint8_t val) { (void)reg; (void)val; }
 
-// memory.c brackets its VERA writes with this so the bandwidth accounting can
-// tell a debugger's poke from a store the guest made. There is no accounting
-// here to tell, and the flag is not part of what these tests assert about, so
-// it is swallowed rather than recorded -- noting it would put an extra event in
-// every trace the write tests compare against.
+// Swallowed: memory.c brackets VERA writes with this; adds no trace event.
 void video_set_debug_write(bool debug) { (void)debug; }
 
-// YM_read_status() has no debug parameter, so this cannot behave differently
-// for a debug read. Recorded as a real read, which is the honest reading of a
-// signature that carries no way to say otherwise.
+// YM_read_status() has no debug parameter, so a debug read cannot differ; recorded as a real read.
 uint8_t
 YM_read_status(void)
 {
@@ -143,8 +137,7 @@ cartridge_write(uint16_t address, uint8_t bank, uint8_t value)
 }
 
 // ---- Everything else memory.c reaches for --------------------------------
-// Inert on purpose: none of it is what these tests are about, and a stub that
-// does nothing cannot quietly become part of the result.
+// Inert on purpose.
 
 void audio_render(void) {}
 void print_iso8859_15_char(char c) { (void)c; }
@@ -161,9 +154,7 @@ void DEBUGBreakOnWatchpoint(void) { fake_break_count++; }
 // vp6502(), the vector-pull callback.
 void stop6502(uint16_t address, uint8_t bank) { (void)address; (void)bank; }
 
-// SDL is reachable from memory.c only through memory_save() and the usage-count
-// dump, neither of which these tests call. Defining them here keeps the test
-// free of an SDL runtime.
+// SDL is reachable only through paths these tests do not call.
 size_t SDL_RWwrite(SDL_RWops *c, const void *p, size_t s, size_t n)
 {
 	(void)c; (void)p; (void)s;
@@ -174,11 +165,7 @@ int SDL_RWclose(SDL_RWops *c) { (void)c; return 0; }
 
 // ---- Machine configuration -----------------------------------------------
 // A Gen1 machine with both VIAs and no MIDI card, which is what the X16 is.
-//
-// Every one of these is initialised deliberately. An uninitialised global is a
-// tentative definition, which some linkers quietly merge with a real one
-// elsewhere and others reject; initialising them means a clash with a linked
-// module is a hard error everywhere rather than only on GCC.
+// Initialised deliberately so a clash with a linked module is a hard error on every linker.
 
 uint8_t *CART = NULL;
 uint8_t  keymap = 0;

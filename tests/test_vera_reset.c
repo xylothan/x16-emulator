@@ -1,26 +1,7 @@
 // What a VERA reset leaves behind.
 //
-// video.c keeps three copies of the sprite attributes: the VRAM mirror the
-// guest reads, a sprite_data[] shadow the renderer's raw source, and a
-// sprite_properties[] array of values derived from that shadow. The hardware
-// keeps one. Every extra copy is a chance for reset to clear some of them and
-// leave the machine describing a state that no longer exists -- which has
-// already happened once for layers, and is why video_reset_layer_pipeline()
-// exists (video.c:255-260).
-//
-// This file checks that reset leaves nothing behind that still describes the
-// pre-reset machine. Sprites are the subject because they are the only derived
-// state with an observation channel that needs no framebuffer: a collision
-// reaches ISR bits 7:4.
-//
 // ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
-// (45cc1f053376dae12173ea63612820e4d289c0da), for the claim that the hardware
-// has nothing to go stale. sprite_renderer.v:73-85 decodes every attribute
-// from sprite_attr, read from the attribute RAM as the sprite is rendered, and
-// sprite_renderer.v:408-417 resets the renderer's own registers. There is no
-// derived copy to refresh.
-//
-// One assertion needs no oracle at all and is marked as such below.
+// (45cc1f053376dae12173ea63612820e4d289c0da)
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -45,9 +26,7 @@ step_frame(void)
 	}
 }
 
-// video_reset() fills VRAM with rand(), so the sprite bitmap has to be laid
-// down after every reset or a collision would depend on the random contents
-// rather than on what this file is measuring.
+// video_reset() randomises VRAM, so the sprite bitmap is rewritten each time.
 static void
 opaque_graphics(void)
 {
@@ -78,8 +57,7 @@ enable_sprites(void)
 	video_write(0x09, 0x41); // DCSEL 0, $9F29: sprites on, VGA output
 }
 
-// Two sprites on the same pixels with masks that share bits 6 and 4, so a
-// collision reports 0x50 in ISR bits 7:4.
+// Masks share bits 6 and 4: a collision reports 0x50 in ISR bits 7:4.
 static void
 arm_colliding_sprites(void)
 {
@@ -96,9 +74,7 @@ collision_after_a_frame(void)
 	return video_read(VERA_ISR, true) & 0xF0;
 }
 
-// The control. Everything below rests on a collision being visible when the
-// sprites are there and absent when they are not, so prove the channel before
-// using it to measure a reset.
+// Control: a collision is visible with the sprites, absent without.
 static void
 test_the_collision_channel_follows_the_attributes(void)
 {
@@ -106,16 +82,12 @@ test_the_collision_channel_follows_the_attributes(void)
 	arm_colliding_sprites();
 	check_eq(collision_after_a_frame(), 0x50, "two armed sprites collide");
 
-	// A guest taking a sprite out of the picture is an ordinary attribute
-	// write, and the renderer follows it.
+	// Zero z-depth stops a sprite.
 	place_sprite(1, 0xD0, 0);
 	check_eq(collision_after_a_frame(), 0x00, "and stop when one is given no z-depth");
 }
 
-// The renderer holds no attribute state of its own -- sprite_renderer.v:73-85
-// decodes each one out of the attribute RAM as it goes -- so clearing the
-// attributes is enough to stop a sprite, and a reset that clears them must
-// stop it too.
+// sprite_renderer.v:73-85 decodes attributes from RAM, so reset stops sprites.
 static void
 test_reset_stops_sprites_configured_before_it(void)
 {
@@ -135,10 +107,7 @@ test_reset_stops_sprites_configured_before_it(void)
 	                "the renderer keeps drawing the pre-reset sprites");
 }
 
-// ORACLE: none, and none is needed. Storing a byte that is already there is a
-// no-op by definition, whatever the hardware does with it. This is the same
-// statement as above with the reset taken out of it, so it holds even if the
-// reset value is ever argued about.
+// ORACLE: none. Storing the byte already held is a no-op.
 static void
 test_writing_a_byte_that_is_already_there_changes_nothing(void)
 {
@@ -152,8 +121,7 @@ test_writing_a_byte_that_is_already_there_changes_nothing(void)
 
 	const uint8_t before = collision_after_a_frame();
 
-	// sprite_data[] reads back as zero for both sprites after the reset, so
-	// this stores the value already held.
+	// sprite_data[] holds zero for both sprites after the reset.
 	video_space_write(SPRITE_ATTR + 0 * 8 + ATTR_ZDEPTH, 0x00);
 	video_space_write(SPRITE_ATTR + 1 * 8 + ATTR_ZDEPTH, 0x00);
 
@@ -163,9 +131,7 @@ test_writing_a_byte_that_is_already_there_changes_nothing(void)
 	                "storing a zero over a zero is what actually stops the sprites");
 }
 
-// The frame accumulator is cleared (video.c:355), matching
-// sprite_renderer.v:416. Recorded so the two halves of the reset are not
-// confused: this one is right, the derived attributes are not.
+// video.c:355 clears the accumulator, matching sprite_renderer.v:416.
 static void
 test_reset_clears_the_collision_accumulator(void)
 {
@@ -179,11 +145,7 @@ test_reset_clears_the_collision_accumulator(void)
 
 	video_reset();
 
-	// Reading ISR here would say nothing -- reset clears ISR itself, so the
-	// nibble is zero whatever the accumulator holds. The accumulator is only
-	// visible once a vblank latches it, so run a frame. The reset also turned
-	// sprites off, so nothing new can accumulate during it and what latches is
-	// exactly what the reset left behind.
+	// Reset clears ISR; a vblank latches what the accumulator kept.
 	check_eq(collision_after_a_frame(), 0x00, "reset clears the pending collisions");
 }
 

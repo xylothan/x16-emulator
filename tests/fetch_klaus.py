@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Fetch Klaus Dormann's 6502/65C02 functional test binaries.
 
-They are not committed: they are GPL-licensed and 64K each, and this repository
-is BSD. tests/test_klaus.c reports them skipped when they are absent, so this is
-optional for a local build and a single step in CI.
+Not committed: GPL-licensed, and this repository is BSD. tests/test_klaus.c
+reports them skipped when absent.
 
     python tests/fetch_klaus.py
 
-The listings that come with them (bin_files/*.lst) map an address to the check
-that stopped there, which is how you read a failure. They are large, so they are
-not fetched here; look them up in the upstream repository when you need one.
+The listings (bin_files/*.lst) map an address to the check that stopped there;
+they are not fetched here.
 """
 
 import sys
@@ -25,9 +23,7 @@ BINARIES = (
     "65C02_extended_opcodes_test.bin",
 )
 
-# The listings map an address back to the check that stopped there, which is
-# what turns "trapped at $0ECE" into a line of source. Large, but the difference
-# between a usable failure and a scavenger hunt.
+# The listings map an address back to the check that stopped there.
 LISTINGS = (
     "6502_functional_test.lst",
     "65C02_extended_opcodes_test.lst",

@@ -1,26 +1,11 @@
 #!/usr/bin/env python3
 """Fetch the VERA Verilog that tests/test_vera_pcm.c cites.
 
-VERA is an FPGA, so the RTL is not a description of the hardware -- it IS the
-hardware, and it is the oracle for every VERA conformance test here. The tests
-quote the lines they rest on so a reader need not fetch anything, but the
-quotes are only trustworthy if they can be checked against the source.
-
     python tests/fetch_vera_rtl.py
 
-Nothing here is committed: it is someone else's repository under its own
-licence, and it is reference material rather than part of the build. No test
-depends on it being present.
-
-Pinned to the tag the emulator reports itself to be, not to a branch. A citation of "top.v:480" is
-meaningless against a moving target, and the whole point is that a reviewer can
-check the quoted line. When the pin moves, the quoted lines must be re-checked.
-
-Use X16Community/vera-module and not fvdhoef/vera-module. The latter is the
-parent repository, but the two diverged at the v0.7 release in 2019 and are now
-different chips: the parent has no audio RTL at all -- no audio directory, no
-PCM, no FIFO, and only eight bus registers against this one's thirty-two. Audio
-was added for production hardware and exists solely in the fork.
+Not committed; no test depends on it. Source is X16Community/vera-module, not
+fvdhoef/vera-module, which has no audio RTL. Re-check quoted lines when a pin
+moves.
 """
 
 import sys
@@ -30,21 +15,10 @@ from pathlib import Path
 DEST = Path(__file__).resolve().parent / "vera-rtl"
 RAW = "https://raw.githubusercontent.com/X16Community/vera-module"
 
-# The tag the VERA tests' citations were checked against. The emulator claims
-# 49.0.6, which has no public RTL, so this stays at v47.0.2; see
-# tests/check_vera_version.py, which fails if either side moves alone.
+# Tag the VERA citations are checked against. See tests/check_vera_version.py.
 COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"  # tag v47.0.2
 
-# psg.v is pinned to R48 instead, because that is the revision the emulator
-# implements. vera_psg.c:122-123 XOR the saw and triangle waveforms with the
-# inverted pulse width, which arrived in the RTL as a8135f32 (2024-10-21) and
-# shipped in v48.0.1; R47 has the unmodulated forms. The emulator backported it
-# in #290 on 2024-08-11, two months before the RTL change landed.
-#
-# psg.v is the only audio file that differs between the two tags -- audio_fifo.v,
-# pcm.v and audio.v are byte-identical -- so this is the whole of the split.
-# See the header of tests/check_vera_version.py for why the emulator is not any
-# single revision.
+# psg.v only: vera_psg.c:122-123 implements the v48.0.1 waveforms.
 COMMIT_PSG = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"  # tag v48.0.1
 
 FILES = (
@@ -56,9 +30,7 @@ FILES = (
     ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
     ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC
     ("fpga/source/audio/psg.v", COMMIT_PSG),        # R48: see above
-    # The VRAM bandwidth model in src/vera_bandwidth.c rests on these. It claims
-    # a per-scanline clock window, a bus width, an access cost and a priority
-    # order, and every one of those numbers is quoted from here.
+    # VRAM bandwidth model, src/vera_bandwidth.c:
     ("fpga/source/vram_if.v", COMMIT),              # the one VRAM bus: 4-way fixed priority, one access per clock
     ("fpga/source/main_ram.v", COMMIT),             # 32k x 32 BRAM array, which is why an access is 4 bytes
     ("fpga/source/video/video_vga.v", COMMIT),      # H_TOTAL 800, V_TOTAL 525: the scanline clock window
@@ -93,10 +65,7 @@ def main():
     for p, ref in FILES:
         print(f"  {Path(p).name:16} {ref[:8]}")
 
-    # Re-fetch when any pin has moved. Skipping on "file exists" alone would
-    # quietly serve the previous revision's RTL under the new commit's name,
-    # and the line numbers cited in the tests would silently stop matching --
-    # which is exactly the failure this whole oracle exists to prevent.
+    # Re-fetch when any pin has moved.
     stamp = DEST / "COMMIT"
     want = manifest()
     have = stamp.read_text() if stamp.exists() else None

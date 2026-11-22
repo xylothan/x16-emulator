@@ -1,11 +1,7 @@
 // Checks that the CPU fixture itself works, before any conformance scenario
 // relies on it.
 //
-// These are deliberately the least interesting assertions in the CPU track:
-// the reset vector is honoured, an instruction executes, memory reads and
-// writes reach the flat array, cycles accumulate, and a reset really does
-// clear the previous scenario. If any of that is wrong then every later CPU
-// result is meaningless, so it is worth stating plainly and separately.
+// Reset vector, execution, memory, cycle count, and reset between scenarios.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
@@ -73,10 +69,7 @@ test_reset_isolates_scenarios(void)
 	check_eq(cpu_stop_count, 0, "reset clears the stop counter");
 }
 
-// Flags leak between scenarios unless the fixture clears them: reset6502() only
-// ever ORs bits into the status register, so N, V, Z and C survive it. A test
-// asserting "this instruction did not touch V" would otherwise pass or fail
-// depending on which scenario ran before it.
+// reset6502() only ORs bits into the status register, so the fixture clears N, V, Z and C.
 static void
 test_reset_clears_flags(void)
 {
@@ -97,10 +90,7 @@ test_reset_clears_flags(void)
 	check(!(regs.status & FLAG_DECIMAL), "reset clears decimal mode");
 }
 
-// penaltyd is set by the 65C816 direct-page addressing modes when the direct
-// page is not page-aligned. It used not to be cleared per instruction, so one
-// misaligned access added a cycle to every instruction thereafter -- which
-// would show up as a scenario that passes alone and fails after another.
+// A misaligned direct-page penalty must not add a cycle to later instructions.
 static void
 test_direct_page_penalty_does_not_persist(void)
 {
@@ -140,8 +130,7 @@ test_cycles_are_per_run(void)
 static void
 test_modes_select_register_width(void)
 {
-	// Naming and the width predicate are what the 65C816 scenarios branch on,
-	// so an error here would quietly mis-label every one of them.
+	// Naming and the width predicate are what the 65C816 scenarios branch on.
 	check(cpu_mode_is_16bit(CPU_816_NATIVE_16), "native 16-bit mode reports 16-bit");
 	check(!cpu_mode_is_16bit(CPU_65C02), "65C02 does not report 16-bit");
 	check(!cpu_mode_is_16bit(CPU_816_EMU), "emulation mode does not report 16-bit");

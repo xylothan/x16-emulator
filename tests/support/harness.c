@@ -35,8 +35,7 @@ check_divergent(bool passed, const char *what, const char *why)
 {
 	x16_checks++;
 	if (passed) {
-		// Better than expected, and still wrong: the marker says this differs
-		// from the hardware, and it no longer does.
+		// The marker says this differs from the hardware, and it no longer does.
 		x16_failures++;
 		printf("FIXED: %s -- this passes now; drop the divergence marker\n", what);
 	} else {
@@ -55,8 +54,7 @@ x16_test_summary(const char *suite)
 	}
 	printf("\n");
 
-	// Said plainly, because a divergence does not fail the run and would
-	// otherwise be invisible to anyone reading a green result.
+	// A divergence does not fail the run, so it is printed.
 	if (x16_divergences > 0) {
 		printf("WARNING: %s differs from real hardware in %d known place%s. "
 		       "See the DIVERGE line%s above.\n",

@@ -6,17 +6,9 @@
 //   tag:    v47.0.2   (commit 45cc1f05)
 //   files:  fpga/source/addr_data.v, fpga/source/top.v
 //
-// This is the first test to link the real video.c. That file is the VERA
-// implementation and the emulator's SDL host in one, and only the first half is
-// under test here -- see tests/support/video_fixture.c for the seam. No test
-// calls video_init(), video_update() or video_end(); video_reset() is
-// deterministic and is called between cases.
-//
-// The data ports are where nearly every VERA access goes: a program sets an
-// address and an auto-increment once, then reads or writes $9F23 in a loop. The
-// increment arithmetic is therefore load-bearing for all of it, and it is also
-// the part a debugger can disturb, because reading the data port MOVES the
-// address on real hardware.
+// Links the real video.c; no test calls video_init(), video_update() or video_end().
+// See tests/support/video_fixture.c for the seam.
+// Reading the data port moves the address, as on real hardware.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -59,10 +51,7 @@ set_address(uint8_t sel, uint32_t addr, unsigned incr_code, bool decrement)
 // {decr, incr}; the emulator packs the same two fields as (incr << 1) | decr
 // and interleaves the signs in its table, which comes to the same thing.
 //
-// The four values that are not powers of two -- 40, 80, 160, 320, 640 -- are
-// the ones worth having in a test: they exist so a program can step whole tile
-// rows and character cells, and they are exactly what a "tidied" implementation
-// would get wrong by assuming the series is 1 << n.
+// The non-powers of two (40, 80, 160, 320, 640) step whole tile rows and character cells.
 static const int expected_increment[16] = {
 	0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 40, 80, 160, 320, 640
 };
@@ -112,9 +101,7 @@ test_address_wraps_at_128k(void)
 	check_eq(video_get_address(0), 0x1FFFFu, "and decrementing below zero wraps to the top");
 }
 
-// addr_data.v:75-78 exposes two independent address registers with their own
-// increments, and top.v:169-170 selects between them. A program relies on that
-// to stream from one place while writing to another.
+// addr_data.v:75-78: two independent address registers, selected by top.v:169-170.
 static void
 test_the_two_address_registers_are_independent(void)
 {
@@ -133,10 +120,7 @@ test_the_two_address_registers_are_independent(void)
 	check_eq(video_get_address(0), 0x0101u, "and leaves the first alone");
 }
 
-// The data port is not idempotent: a read advances the address exactly as a
-// write does. This is the behaviour a debugger most easily breaks, by peeking
-// VRAM through the same path the machine uses -- so it is pinned here, and the
-// debug-read path is pinned separately in the debugOn contract tests.
+// A data-port read advances the address exactly as a write does.
 static void
 test_reading_the_data_port_advances_the_address(void)
 {
@@ -150,9 +134,7 @@ test_reading_the_data_port_advances_the_address(void)
 	check_eq(video_get_address(0), 0x0042u, "and again on the next read");
 }
 
-// Round-trip through VRAM: write a run of bytes with auto-increment, then read
-// them back the same way. Proves the address arithmetic and the memory it
-// indexes agree, which the increment tests alone do not.
+// Write a run of bytes with auto-increment and read them back the same way.
 static void
 test_data_port_round_trip(void)
 {

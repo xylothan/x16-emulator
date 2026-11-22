@@ -1,18 +1,8 @@
 // Checks for VERA VRAM bandwidth accounting (src/vera_bandwidth.c).
 //
-// The module's whole job is to say what VERA's VRAM bus did in a frame, and
-// almost all of that rests on one pure function turning a layer's mode into a
-// fetch count. So the bulk of what follows is that function checked against the
-// RTL's own decode tables, mode by mode -- because if those numbers are wrong
-// every figure built on them is wrong too, and nothing else in the module would
-// notice.
+// The tables are quoted from X16Community/vera-module at tag v47.0.2 (tests/fetch_vera_rtl.py).
 //
-// The tables are quoted from X16Community/vera-module at tag v47.0.2, the pin
-// tests/fetch_vera_rtl.py fetches. Run it and the citations below can be
-// checked line by line.
-//
-// vera_bandwidth.c reaches for no emulator state, so this drives it directly:
-// no CPU, no memory, no video, no SDL.
+// Drives vera_bandwidth.c directly: no CPU, memory, video or SDL.
 
 #include "vera_bandwidth.h"
 #include "support/harness.h"
@@ -157,10 +147,7 @@ main(void)
 
 	// ── The scroll tile ─────────────────────────────────────────────────────
 	//
-	// lb_wridx_start is 0 - subtile_hscroll (layer_renderer.v:499-501), so a
-	// layer scrolled off a tile boundary renders one tile more than the screen
-	// needs. It is the single most common configuration in a scrolling game, so
-	// it is worth being explicit that it is not free.
+	// layer_renderer.v:499-501: a layer off a tile boundary renders one more tile.
 	{
 		check_eq(tile_fetches(BPP8, 0, true), 41 + 162,
 		         "scrolling 8bpp 8px tiles off a boundary costs one more tile: 203");
@@ -179,11 +166,7 @@ main(void)
 		check_eq(bitmap_fetches(BPP4, 0), 80, "4bpp bitmap: 640/8 = 80");
 		check_eq(bitmap_fetches(BPP8, 0), 160, "8bpp bitmap: 640/4 = 160");
 
-		// The one people get wrong. layer_renderer has no scale input at all
-		// (its port list, :3-33) -- DC_HSCALE is the composer's business when it
-		// reads the line buffer. The renderer just fills to line_done at 640
-		// (:488), so a 320-wide bitmap fetches exactly as much as a 640-wide
-		// one and runs off the end of its own line doing it.
+		// layer_renderer.v:3-33 has no scale input; :488 fills to 640, so 320 fetches alike.
 		check_eq(bitmap_fetches(BPP8, 1), bitmap_fetches(BPP8, 0),
 		         "a 320-wide bitmap costs the same bus as a 640-wide one: "
 		         "halving the width buys VRAM, not bandwidth");
@@ -204,10 +187,6 @@ main(void)
 	}
 
 	// ── A heavy line still leaves half the scanline ─────────────────────────
-	//
-	// Pinned because an earlier version charged two clocks per access, and
-	// this same sum then came to exactly H_TOTAL: every ordinary two-layer
-	// game read as over budget on every line.
 	{
 		const uint32_t two_layers = 2u * bitmap_fetches(BPP8, 1) * VERA_BW_ACCESS_CLOCKS;
 		check_eq(two_layers, 320,
@@ -250,9 +229,7 @@ main(void)
 
 	// ── A re-rendered line records the last pass, not the sum ───────────────
 	//
-	// video.c re-renders a scanline when a register changes mid-line, and the
-	// last pass is what stays on screen. Accumulating would report a line that
-	// used twice the bandwidth it really did.
+	// video.c re-renders a scanline on a mid-line register change; the last pass stays.
 	{
 		begin();
 		const vera_bw_layer_t heavy = bitmap_layer(BPP8, 1);   // 160
@@ -286,8 +263,7 @@ main(void)
 		check_eq(f.port_reads, 30, "and 30 read back");
 		check_eq(f.port_accesses, 130, "each byte costs one VRAM access");
 		check_eq(f.port_vram_bytes, 130, "and an ordinary write moves one byte");
-		// The port lands on a line even though no layer rendered it, because
-		// the CPU outranks both layers on the bus (vram_if.v:142-157).
+		// The CPU outranks both layers on the bus (vram_if.v:142-157).
 		check_eq(f.peak_line, 50, "port traffic marks the line it landed on");
 		check_eq(f.lines_active, 1,
 		         "and makes that line active even with both layers off -- a "
@@ -336,8 +312,7 @@ main(void)
 		const vera_bw_layer_t l0 = bitmap_layer(BPP8, 1); // 160 clocks
 		const vera_bw_layer_t l1 = bitmap_layer(BPP8, 1); // 160 clocks
 		vera_bandwidth_line(7, &l0, &l1);
-		// More port traffic than one scanline can take: a test of the
-		// accounting, not a pace an 8 MHz CPU could reach on its own.
+		// More port traffic than a scanline can take; tests the accounting.
 		for (int i = 0; i < 520; i++)
 			vera_bandwidth_note_port(true, 1, 7);
 		vera_bandwidth_frame_end(6);
@@ -360,8 +335,7 @@ main(void)
 		const vera_bw_layer_t light = bitmap_layer(BPP1, 0); // 20 clocks
 		const vera_bw_layer_t heavy = bitmap_layer(BPP8, 1); // 160 clocks
 
-		// 99 quiet lines and one loud one: the peak must show it and the mean
-		// must not drown it.
+		// 99 quiet lines and one loud one: the peak shows it, the mean does not.
 		for (uint16_t y = 0; y < 99; y++)
 			vera_bandwidth_line(y, &light, &none);
 		vera_bandwidth_line(99, &heavy, &none);
@@ -401,13 +375,6 @@ main(void)
 	}
 
 	// ── Layer and port traffic on one line must land on ONE line ────────────
-	//
-	// They are recorded from different places -- the renderer and the CPU's
-	// store -- and if those two ever indexed the array differently the peak
-	// figure would be built from halves of two different scanlines. Pinned
-	// because that is exactly what went wrong once: the layer side was charged
-	// to the scaled source row rather than the display line, so in a 320x240
-	// mode it landed on line y/2 while the port traffic landed on y.
 	{
 		begin();
 		const vera_bw_layer_t l0 = bitmap_layer(BPP4, 0); // 80 fetches
@@ -429,11 +396,7 @@ main(void)
 	}
 
 	// ── Sprite render time is NOT bus time ──────────────────────────────────
-	//
-	// The units trap this module exists on the right side of. sprite_trace
-	// measures render_time_r, which ticks every clock including the ones
-	// painting the line buffer with the bus idle; everything here is bus
-	// occupancy. Subtracting one from the other is wrong by the duty cycle.
+	// sprite_trace's render_time_r ticks while the bus is idle; here everything is bus occupancy.
 	{
 		// 4bpp: one 32-bit word per 8 pixels, one bus clock a fetch.
 		check_eq(vera_bandwidth_sprite_bus_clocks(64, 0), 8,
@@ -444,17 +407,11 @@ main(void)
 		check_eq(vera_bandwidth_sprite_bus_clocks(64, 1), 16,
 		         "the same sprite at 8bpp costs twice the bus");
 		check_eq(vera_bandwidth_sprite_bus_clocks(8, 1), 2, "and an 8-wide one is two words");
-		// A width that is not a whole number of words still fetches the last
-		// partial one.
+		// A partial last word is still fetched.
 		check_eq(vera_bandwidth_sprite_bus_clocks(12, 0), 2,
 		         "a 12-wide 4bpp sprite still pays for its partial last word");
 
-		// The relationship that makes the conversion necessary. A 4bpp sprite
-		// spends about 2 clocks fetching and 8 rendering per word, but holds the
-		// bus for only 1 of them, so its render time is about ten times its
-		// bus time. SPRITE_TRACE_LINE_BUDGET is 798 RENDER
-		// clocks; the bus cost of filling a line with 4bpp sprites is nothing
-		// like that number.
+		// 4bpp: ~2 fetch + 8 render clocks per word, 1 on the bus; budget 798.
 		const uint16_t words_in_a_full_line = 798 / 10; // ~2 fetching + 8 rendering
 		const uint32_t bus = (uint32_t)words_in_a_full_line * VERA_BW_ACCESS_CLOCKS;
 		check_eq(bus, 79,

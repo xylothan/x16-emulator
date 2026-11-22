@@ -1,18 +1,10 @@
 // Sprite multiplexing, end to end through the real video.c.
 //
-// test_sprite_trace.c drives the recorder directly with synthetic scanlines.
-// This one drives VERA: it writes sprite attributes into VRAM, steps the beam a
-// cycle at a time, and rewrites a slot part-way down the frame the way a raster
-// IRQ handler would. What it checks is that the trace's answer comes from what
-// render_sprite_line() actually put on screen -- so a sprite whose bitmap is
-// entirely transparent is *not* counted, even though its attributes are live
-// and its Y span is on screen.
+// Drives VERA: the trace follows what render_sprite_line() put on screen.
 
 #include "support/video_fixture.h"
 
-// SDL redefines main to SDL_main, which makes a plain int main(void) a C4026
-// and, under /WX, fatal. Undoing the macro is what lets this test build on
-// MSVC; several older test files in this tree still trip over it.
+// SDL redefines main to SDL_main, making int main(void) a C4026, fatal under /WX.
 #ifdef main
 #undef main
 #endif
@@ -43,8 +35,7 @@ step_one_cycle(void)
 	video_step(MHZ, 1, false);
 }
 
-// Run until the beam reaches `target`, giving up rather than spinning forever
-// if the video mode is not what the test thinks it is.
+// Run until the beam reaches `target`, giving up if the video mode is not as expected.
 static bool
 step_to_line(uint16_t target)
 {
@@ -120,8 +111,7 @@ setup(void)
 	}
 }
 
-// One slot, two sprites, a raster rewrite between them: the whole point of the
-// exercise, measured through the real renderer.
+// One slot, two sprites, a raster rewrite between them.
 static void
 test_a_slot_rewritten_mid_frame_yields_two_effective_sprites(void)
 {
@@ -169,9 +159,7 @@ test_a_slot_rewritten_mid_frame_yields_two_effective_sprites(void)
 	}
 }
 
-// The trace reports what reached the screen, not what the attribute table says
-// should have. A fully transparent sprite is live, enabled and on screen, and
-// still contributes nothing.
+// The trace reports what reached the screen: a transparent sprite adds nothing.
 static void
 test_a_transparent_sprite_is_not_an_effective_sprite(void)
 {
@@ -233,11 +221,7 @@ test_the_budget_is_charged_on_the_lines_that_did_the_work(void)
 	      "peak demand stays under the hardware ceiling");
 }
 
-// Sprites are never free. Once a scanline runs out of render time, VERA stops
-// both its sprite search and its line renderer until the next line
-// (sprite_renderer.v:171,349), so everything after the cut is off screen. This
-// is the check that the emulator drops them instead of drawing them for
-// nothing.
+// Out of render time, VERA drops later sprites (sprite_renderer.v:171,349).
 static void
 test_a_line_out_of_render_time_drops_the_rest(void)
 {
@@ -245,8 +229,7 @@ test_a_line_out_of_render_time_drops_the_rest(void)
 	sprite_trace_set_enabled(false);
 	check(sprite_trace_set_enabled(true), "tracing re-enables");
 
-	// 64x64 8bpp sprites cost roughly 64 pixels + 16 fetches + 3 dispatch per
-	// line each, so a dozen of them on one line cannot fit in 798 clocks.
+	// 64x64 8bpp: ~64 pixels + 16 fetches + 3 dispatch per line; 12 exceed 798 clocks.
 	const int overload = 24;
 	for (int slot = 0; slot < overload; slot++) {
 		write_sprite_sized(slot, SPRITE_GFX_BIG, slot * 8, 100, 1, 3, 3, 1);
@@ -271,8 +254,7 @@ test_a_line_out_of_render_time_drops_the_rest(void)
 	check(line->drawn < overload, "not every sprite reached the screen");
 	check(f->summary.sprites_dropped > 0, "the frame reports the drops");
 
-	// The cut is ordered: low slots win, high slots lose. That is the whole
-	// reason a multiplexer cares which slot a sprite goes in.
+	// The cut is ordered: low slots win, high slots lose.
 	check(line->cut_slot != SPRITE_TRACE_NO_LINE, "the cut point is recorded");
 	check(f->line_flags[(size_t)120 * SPRITE_TRACE_SLOTS + 0] & SPRITE_TRACE_DREW,
 	      "slot 0 drew: the search reaches it first");
@@ -283,16 +265,8 @@ test_a_line_out_of_render_time_drops_the_rest(void)
 	check(!f->lines[300].exhausted, "a line without sprites has time to spare");
 }
 
-// The counterpart to the test above: stepping over empty slots must not starve
-// the line. VERA's search FSM advances one slot per clock whether or not the
-// line renderer is busy (sprite_renderer.v:146-160), so scanning empties
-// overlaps with drawing. Charging them serially would drop sprites real
-// hardware draws -- a false dropout, which is worse than none at all.
-//
-// Measured as a difference rather than an absolute: the same eight sprites are
-// placed low in the slot table, where the 120 empty slots are scanned after
-// them and overlap with drawing, and then high, where the empties are scanned
-// first and cannot overlap. If the search overlapped, the first costs less.
+// The search FSM advances one slot per clock (sprite_renderer.v:146-160).
+// Eight sprites low then high in the table; if the search overlaps, low costs less.
 static void
 test_stepping_over_empty_slots_overlaps_with_drawing(void)
 {
@@ -337,9 +311,7 @@ test_stepping_over_empty_slots_overlaps_with_drawing(void)
 	      "the same sprites cost more when no drawing overlaps the search");
 }
 
-// How many sprites actually fit on a line, which is the number a multiplexer
-// budgets against. Pinned as a test because it falls out of the timing model:
-// if the per-sprite cost drifts, this moves and someone should know why.
+// How many sprites fit on a line: the number a multiplexer budgets against.
 //
 // Cost per sprite is 2 clocks to dispatch (SF_FIND_SPRITE, SF_START_RENDER),
 // 1 for STATE_IDLE, then 1 per pixel and 1 per 32-bit fetch -- 8 pixels per

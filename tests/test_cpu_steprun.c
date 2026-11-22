@@ -1,16 +1,6 @@
 // Regression: single-stepping must reproduce running.
 //
-// The emulator runs through exec6502() and the debugger steps through
-// step6502(). They are separate loops over the same tables, and everything a
-// debugger tells you rests on them agreeing: if stepping through code produces
-// a different machine than letting it run, then every value the debugger shows
-// is a value the program would not otherwise have had.
-//
-// Each scenario runs the same program from the same starting state both ways
-// and compares the whole visible machine -- registers, memory and the cycle
-// counter. Cycle counts are included deliberately: they are the part most
-// likely to drift, and the part a debugger hook can disturb without changing
-// anything else.
+// Each scenario runs through exec6502() and step6502() and compares state.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
@@ -155,8 +145,7 @@ test_page_cross(void)
 }
 
 // ---- 65C816 native mode, including a misaligned direct page -----------------
-// The direct-page penalty is applied by one loop and not the other, so this is
-// where the two paths are most likely to disagree.
+// The direct-page penalty must agree between the two loops.
 
 static void
 test_native_direct_page(void)

@@ -1,26 +1,13 @@
 // The 65C22's interrupt flags and enables: IFR ($0D) and IER ($0E).
 //
-// Two VIAs sit at $9F00 and $9F10. The interrupt logic is shared between them
-// and is entirely internal to the chip -- no timing model, no peripherals --
-// which makes it the part of via.c that can be pinned exactly.
-//
-// The tests drive VIA 2. via2_read() and via2_write() pass straight through to
-// the generic implementation both VIAs use (via.c:345-355), while VIA 1's
-// ports are wired to I2C, the IEC bus and the NES controllers. Driving the
-// user port exercises the same registers with none of that attached. VIA 1 is
-// used only to show the two do not share state.
+// Driven through VIA 2, whose accessors pass through to the generic
+// implementation (via.c:345-355); VIA 1 is used only to show the two do not
+// share state.
 //
 // ORACLE: C -- WDC W65C22S datasheet, pages 26-27, quoted inline. Fetch it
-// with `python tests/refs/fetch_refs.py`; the text extraction carries
-// `===== page N =====` markers so a citation can be found again.
+// with `python tests/refs/fetch_refs.py`.
 //
-// NOT COVERED, because via.c cannot produce these flags at all: IFR bits 0, 1,
-// 3 and 4 (CA2, CA1, CB2, CB1) and bit 2 (shift register). via.c:206 leaves
-// "Cxx pin and shift register handling" as a TODO, so nothing sets them and no
-// test can arrange for them to be set. The code that clears them, including
-// the PCR "independent input" exception at via.c:47 and via.c:56, is therefore
-// unreachable from outside. That is a gap in the emulator, not in this file,
-// and it is recorded rather than asserted around.
+// NOT COVERED: IFR bits 0-4 (CA2, CA1, SR, CB2, CB1); unset (via.c:206 TODO).
 
 #include "support/harness.h"
 
@@ -51,8 +38,7 @@
 #define IFR_T1   0x40
 #define IFR_IRQ  0x80
 
-// IER bit 7 selects between setting and clearing, so it is written rather than
-// stored. Named so the intent of a write is legible.
+// IER bit 7 selects set or clear, so it is written rather than stored.
 #define IER_SET   0x80
 #define IER_CLEAR 0x00
 
@@ -68,8 +54,7 @@ ier(void)
 	return via2_read(VIA_IER, true);
 }
 
-// The only flags via.c can raise are the two timers. T1 in one-shot mode times
-// out once and sets its flag; counting past it is enough.
+// The only flags via.c can raise are the two timers; T1 one-shot times out once.
 static void
 raise_t1(void)
 {
@@ -107,8 +92,7 @@ test_ier_sets_and_clears_selected_bits(void)
 	via2_write(VIA_IER, IER_SET | IFR_T1 | IFR_CA1);
 	check_eq(ier(), (uint8_t)(0x80 | IFR_T1 | IFR_CA1), "a write with bit 7 set enables those bits");
 
-	// A zero in a position leaves that bit alone, which is the whole point of
-	// the convention: one interrupt can be changed without reading first.
+	// A zero leaves that bit alone.
 	via2_write(VIA_IER, IER_SET | IFR_T2);
 	check_eq(ier(), (uint8_t)(0x80 | IFR_T1 | IFR_T2 | IFR_CA1), "and leaves the others alone");
 
@@ -229,9 +213,7 @@ test_the_timer_flags_clear_on_their_own_accesses(void)
 	check_eq(ifr() & IFR_T2, 0, "writing T2C-H clears T2");
 }
 
-// A debug read is the debugger looking. The flag-clearing side effects above
-// are exactly what it must not perform -- reading $9F14 in a memory view would
-// otherwise acknowledge the guest's timer interrupt for it.
+// A debug read must not perform the flag-clearing side effects above.
 static void
 test_a_debug_read_clears_no_flag(void)
 {

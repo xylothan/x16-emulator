@@ -64,10 +64,7 @@ x16size(struct x16file *f)
 	return (int64_t)end;
 }
 
-// Mirrors the real contract exactly: SDL_RWseek -- and so the real x16seek --
-// returns the resulting stream position, not a success/failure status. A stub
-// that returned fseek()'s 0-on-success would let a parser which tested the
-// result against zero pass here and fail against every real image.
+// Returns the resulting stream position, like SDL_RWseek, not fseek()'s 0-on-success.
 int
 x16seek(struct x16file *f, int64_t pos, int origin)
 {
@@ -634,8 +631,7 @@ test_stale(void)
 	remove(path);
 }
 
-// A file saved while the card is attached: its data is written before its
-// directory entry exists, so the index has to catch up and still credit it.
+// A file saved while attached: data precedes its directory entry; still credited.
 static void
 test_saved_file_is_credited(void)
 {
@@ -707,8 +703,7 @@ test_saved_file_is_credited(void)
 	remove(path);
 }
 
-// The image changed on the host while attached (a build script copying a PRG
-// in): the machine never writes metadata, so only the read can notice.
+// Image changed on the host while attached: only a read can notice.
 static void
 test_host_edit_is_noticed(void)
 {

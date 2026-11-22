@@ -1,21 +1,8 @@
 // Shared test harness: assertion counting and the exit-code convention.
 //
-// The six existing tests each carry their own copy of this. New tests share
-// one so that a test file is assertions and nothing else -- with many scenario
-// files planned, a private harness in each would be a great deal of duplicated
-// bookkeeping. (Converting the existing six is a separate tidy-up; this does
-// not touch them.)
+// Shared by the test files so each is assertions only.
 //
-// The counters have external linkage and live in harness.c rather than being
-// static in this header. A header-static counter gives every translation unit
-// its own copy, so the moment a test spans two files -- a shared assertion
-// helper under tests/support, say -- failures raised in one file would not be
-// counted by the summary in the other, and the suite would report success
-// while printing FAIL lines nobody reads on a green run.
-//
-// check_eq() exists because "FAIL: ADC sets carry" is not enough to debug a
-// conformance failure. Knowing it produced 0x81 where the datasheet says 0x80
-// is the whole point, so the value-comparing form is the one to reach for.
+// Counters have external linkage in harness.c so a test spanning two files shares one tally.
 
 #ifndef X16_TEST_HARNESS_H
 #define X16_TEST_HARNESS_H
@@ -35,10 +22,7 @@ void check_eq(uint32_t got, uint32_t want, const char *what);
 // For a difference from the hardware that is known, understood and not being
 // fixed yet. Prints loudly and is counted, but does not fail the build, so
 // coverage can land before the fix does.
-//
-// If it unexpectedly passes, that IS a failure: the marker is now a lie, and
-// the whole point is that this list only ever shrinks. Delete the marker and
-// make it an ordinary check.
+// Unexpectedly passing is a failure: delete the marker and make it an ordinary check.
 void check_divergent(bool passed, const char *what, const char *why);
 
 // Print the tally and return the process exit status. Never returns the raw

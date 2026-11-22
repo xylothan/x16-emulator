@@ -1,15 +1,5 @@
 // Checks for interrupt context tracking (src/cpu/irq_ctx.c).
-//
-// The CPU core reports an entry from interrupt6502() and a leave from rti(),
-// and the two are paired by the stack pointer. That pairing is the whole
-// design, and it has to survive things a real program does: nested handlers, a
-// handler that returns further than its own frame, an RTI with no matching
-// entry, and a reset in the middle of one. Getting it wrong leaves the debugger
-// permanently convinced the machine is inside an interrupt, or never in one.
-//
-// The 6502 stack grows DOWN, so a deeper frame has a LOWER stack pointer, and
-// an interrupt entry records the pointer BEFORE anything is pushed -- which is
-// exactly what its matching RTI restores.
+// Entries and RTIs pair by stack pointer; an entry records SP before pushing.
 
 #include "cpu/irq_ctx.h"
 
@@ -30,15 +20,12 @@ check(bool cond, const char *what)
 	}
 }
 
-// The vector values the CPU core passes through; their exact numbering does not
-// matter here, only that it is reported back unchanged.
+// Vector values are passed through and reported back unchanged.
 #define VEC_IRQ 0
 #define VEC_NMI 1
 #define VEC_BRK 2
 
-// CPU_IRQ_CTX_MAX comes from the header rather than being restated here: a
-// private copy that drifted from the real limit would leave the boundary checks
-// below passing while no longer testing the boundary.
+// CPU_IRQ_CTX_MAX comes from the header, not a private copy.
 
 int
 main(void)
@@ -73,9 +60,7 @@ main(void)
 	}
 
 	// ── The just-entered flag is a one-shot ─────────────────────────────────
-	// A debugger uses this to notice "an interrupt was just taken" while
-	// stepping. It has to be true exactly once, or every poll would look like a
-	// fresh interrupt.
+	// True exactly once per entry.
 	{
 		cpu_irq_ctx_reset();
 		check(!cpu_irq_take_entered_flag(), "no entry reported before one happens");
@@ -89,8 +74,7 @@ main(void)
 	}
 
 	// ── Nesting ─────────────────────────────────────────────────────────────
-	// An NMI can interrupt an IRQ handler, and a handler that re-enables
-	// interrupts can be interrupted again. Each RTI must unwind exactly one.
+	// An NMI can interrupt an IRQ handler; each RTI unwinds exactly one.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);   // outer
@@ -112,8 +96,7 @@ main(void)
 	}
 
 	// ── Returning past more than one frame ──────────────────────────────────
-	// A handler that unwinds several frames at once, or discards them, must not
-	// leave the depth stuck high for the rest of the session.
+	// Unwinding several frames at once must not leave the depth stuck high.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
@@ -129,9 +112,7 @@ main(void)
 	}
 
 	// ── An RTI with nothing to match ────────────────────────────────────────
-	// A program can RTI without us having seen the entry -- an interrupt
-	// already in flight at startup, or a hand-rolled stack frame. That is not
-	// an error, and must not drive the depth negative.
+	// An RTI whose entry was not seen must not drive the depth negative.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_leave(0x01FD);
@@ -163,8 +144,7 @@ main(void)
 	}
 
 	// ── Deeper nesting than the tracker records detail for ──────────────────
-	// Past its limit the depth still has to count correctly and come back down
-	// to zero; only the per-frame detail is allowed to go missing.
+	// Past the limit the depth still counts and returns to zero; only per-frame detail is lost.
 	{
 		cpu_irq_ctx_reset();
 		uint16_t sp = 0x01FD;
@@ -200,34 +180,19 @@ main(void)
 	}
 
 	// ── A stack that wraps is out of contract ───────────────────────────────
-	// Both rules here read the stack pointer: frames must decrease as nesting
-	// deepens, and a balanced RTI lands exactly on the pointer its entry
-	// recorded. A guest that pushes past the bottom of page 1 breaks the first
-	// one -- an outer frame near the bottom ends up numerically ABOVE the frame
-	// nested inside it, and is indistinguishable from a frame the stack has
-	// legitimately risen back past.
-	//
-	// Nothing based on the stack pointer alone can tell those apart, so this
-	// picks the case that actually happens: overflowing a 256-byte stack has
-	// already destroyed the guest's own return addresses, while a BRK reaching a
-	// warm start happens in every debugging session. The exact behaviour is
-	// pinned rather than bounded, so changing that trade has to come here and
-	// edit it deliberately.
+	// A wrapped stack breaks decreasing frames: the outer frame is retired.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);   // outer, near the bottom
 		cpu_irq_ctx_enter(VEC_NMI, 0x2000, 0x01FE);   // pushes wrapped it round
 
-		// The wrapped outer frame is retired, because it cannot be told from one
-		// the stack has passed. This is the accepted false-low.
+		// The wrapped outer frame is retired (the accepted false-low).
 		check(cpu_irq_depth() == 1, "a wrapped outer frame is retired, not kept");
 
 		cpu_irq_ctx_leave(0x01FE);
 		check(cpu_irq_depth() == 0, "and the inner return closes what is left");
 
-		// What makes this survivable, and better than the alternative: the very
-		// next clean pair reads correctly, so the damage is bounded by the
-		// wrapped handler's own lifetime rather than lasting until reset.
+		// The next clean pair reads correctly.
 		cpu_irq_ctx_enter(VEC_IRQ, 0x3000, 0x01FD);
 		check(cpu_irq_depth() == 1, "the next clean interrupt is tracked normally");
 		check(cpu_irq_return_pc() == 0x3000, "with its own return address");
@@ -236,10 +201,7 @@ main(void)
 	}
 
 	// ── Retirement still works above the recorded frames ────────────────────
-	// Only CPU_IRQ_CTX_MAX levels keep a pointer of their own. Judging the ones
-	// above by the deepest that does is what stops the depth passing the array
-	// and then never coming back down: an interrupt taken at or above the last
-	// recorded frame proves everything from there up is gone.
+	// An interrupt at or above the last recorded frame retires it and all above.
 	{
 		cpu_irq_ctx_reset();
 
@@ -249,12 +211,7 @@ main(void)
 			cpu_irq_ctx_enter(VEC_IRQ, 0x1000, sp--);
 		check(cpu_irq_depth() == CPU_IRQ_CTX_MAX + 6, "nesting can pass the array");
 
-		// An interrupt arrives partway down, at the level frames[8] recorded.
-		// Everything from there up is gone -- the six unrecorded levels and the
-		// seven recorded ones above frames[8] -- while frames[0..7] are still
-		// live and must survive. Landing between two recorded frames is what
-		// makes this test the difference between collapsing to the deepest
-		// surviving frame and simply wiping the depth.
+		// An interrupt at frames[8].sp retires it and above; frames[0..7] survive.
 		cpu_irq_ctx_enter(VEC_IRQ, 0x2000, 0x01F5);   // == frames[8].sp
 		check(cpu_irq_depth() == 9,
 		      "levels above the array collapse onto the deepest surviving frame");
@@ -271,8 +228,7 @@ main(void)
 		check(cpu_irq_depth() == 0, "so the depth comes back to zero");
 	}
 	// ── Nesting that does not wrap is exact ─────────────────────────────────
-	// The ordinary case, which is what the rules are for: each nested frame
-	// sits below the one outside it, and a balanced return unwinds exactly one.
+	// Each nested frame sits below the one outside; a balanced return unwinds exactly one.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
@@ -323,11 +279,7 @@ main(void)
 	}
 
 	// ── A frame abandoned without an RTI ────────────────────────────────────
-	// A BRK reaching a warm start resets the stack instead of returning, so its
-	// entry never gets a matching RTI. Later interrupts must still be tracked
-	// correctly rather than being swallowed by the stale frame, and the depth
-	// must read HIGH rather than low: too high corrects itself at the next
-	// matching return, too low claims nothing is running when something is.
+	// A BRK to warm start resets the stack with no RTI; depth then reads high.
 	{
 		cpu_irq_ctx_reset();
 
@@ -335,16 +287,14 @@ main(void)
 		// Warm start resets the stack to the top; an ordinary IRQ then arrives.
 		cpu_irq_ctx_enter(VEC_IRQ, 0x5000, 0x01FD);
 
-		// Taking that IRQ is what retires the abandoned BRK frame: the stack
-		// had risen back above it, which proves it was gone.
+		// Taking that IRQ retires the abandoned BRK frame.
 		check(cpu_irq_depth() == 1, "an abandoned frame is retired, not stacked");
 
 		cpu_irq_ctx_leave(0x01FD);                    // balanced IRQ return
 		check(cpu_irq_depth() == 0,
 		      "so the depth comes back to zero once the IRQ returns");
 
-		// And it does not accumulate: a second BRK that never returns must not
-		// leave the machine permanently looking like it is inside an interrupt.
+		// A second unreturned BRK does not accumulate.
 		cpu_irq_ctx_enter(VEC_BRK, 0x4100, 0x01F0);
 		cpu_irq_ctx_enter(VEC_IRQ, 0x5100, 0x01FD);
 		cpu_irq_ctx_leave(0x01FD);
@@ -352,9 +302,7 @@ main(void)
 	}
 
 	// ── The program bank is part of the return address ──────────────────────
-	// Native-mode interrupts push the program bank, and the CPU zeroes it on
-	// entry, so a handler cannot recover it. Recording only the low 16 bits
-	// would send a step-over to the right offset in the wrong bank.
+	// Native-mode interrupts push the program bank and zero it on entry.
 	{
 		cpu_irq_ctx_reset();
 
@@ -372,11 +320,7 @@ main(void)
 	}
 
 	// ── Runaway nesting stays safe ──────────────────────────────────────────
-	// A BRK handler that BRKs never returns. Once the depth passes the array
-	// the pointer that retirement judges against is frozen, so interrupts taken
-	// below it pile up with nothing able to retire them. The saturation in the
-	// code is what stops a signed counter overflowing, which would be undefined
-	// behaviour rather than a wrong number.
+	// A BRK handler that BRKs never returns; the depth saturates.
 	{
 		cpu_irq_ctx_reset();
 
@@ -389,15 +333,12 @@ main(void)
 		      "nesting can exceed the frames it records detail for");
 		check(deep == 0x10000, "up to the cap");
 
-		// Entering again while already at the cap must not move it. Without the
-		// clamp this simply keeps counting, and a long enough runaway would
-		// overflow the counter rather than merely report a silly number.
+		// Entering at the cap must not move it.
 		cpu_irq_ctx_enter(VEC_BRK, 0x6000, 0x0000);
 		check(cpu_irq_depth() == 0x10000, "and stays there when it is passed");
 		check(cpu_in_interrupt(), "and still reports an interrupt");
 
-		// No detail is kept past the array, so those come off one at a time;
-		// the recorded ones then close together when the outermost returns.
+		// Unrecorded levels pop singly; recorded ones close when the outermost returns.
 		for (int i = 0; i < deep - CPU_IRQ_CTX_MAX; i++)
 			cpu_irq_ctx_leave(0x0000);
 		check(cpu_irq_depth() == CPU_IRQ_CTX_MAX,
@@ -407,9 +348,7 @@ main(void)
 		check(cpu_irq_depth() == 0, "and the outermost return closes the rest");
 	}
 	// ── A frame abandoned at the same stack level ───────────────────────────
-	// Two interrupts taken at the identical pointer cannot both be live: the
-	// stack being back at that level means the first one's frame is gone. This
-	// is the boundary of the retirement rule, and it has to be inclusive.
+	// Two interrupts at one pointer cannot both be live; the boundary is inclusive.
 	{
 		cpu_irq_ctx_reset();
 
@@ -423,12 +362,7 @@ main(void)
 	}
 
 	// ── A return that matches nothing changes nothing ───────────────────────
-	// A handler can push a fabricated frame and RTI to itself, landing on a
-	// pointer no entry recorded, while the interrupt it is running inside is
-	// still live. Popping on that would report no interrupt during one -- the
-	// one answer a debugger must never give. Frames only close when something
-	// proves they have: a return that lands exactly on them, or a later
-	// interrupt taken at or above them.
+	// A fabricated RTI to an unrecorded pointer pops nothing.
 	{
 		cpu_irq_ctx_reset();
 

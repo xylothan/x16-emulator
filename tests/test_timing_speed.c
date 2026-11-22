@@ -1,15 +1,5 @@
 // Checks for the emulation-speed control in src/timing.c.
-//
-// The speed is an absolute target clock in kHz, not a percentage of something.
-// The machine's own clock comes from -mhz and can be anything from 1 to 40, so
-// a percentage says nothing on its own: "50%" is a different speed on a machine
-// started with -mhz 1 than on one started with -mhz 12. That makes the
-// arithmetic here worth pinning -- particularly that stepping always passes
-// through the machine's own clock, so normal speed is reachable however the
-// emulator was started.
-//
-// timing.c reaches for a handful of emulator globals and SDL; the test supplies
-// its own so it links nothing else.
+// Speed is a target clock in kHz; stepping passes through the machine's clock.
 
 #include "timing.h"
 
@@ -30,8 +20,7 @@ void video_update_title(const char *t) { (void)t; }
 
 // timing.c only uses these to pace; the tests here never call timing_update().
 // Settable, so a check can advance emulated time and wall-clock time
-// independently. Never moved backwards: timing.c subtracts it as uint32_t, so a
-// backwards step wraps to about 4.29e9 ms rather than reading as negative.
+// Settable, never moved backwards: timing.c subtracts it as uint32_t.
 static uint32_t fake_ticks_ms = 0;
 uint32_t SDL_GetTicks(void) { return fake_ticks_ms; }
 void     SDL_PumpEvents(void) {}
@@ -66,10 +55,7 @@ int
 main(void)
 {
 	// ── The state the emulator actually ships in ────────────────────────────
-	// Checked before any setter runs, because nothing outside this test calls
-	// them: unset is the only path the shipping binary ever takes, and a check
-	// placed after a reset exercises a different one and leaves the fallback
-	// untested.
+	// Checked before any setter runs: unset is the only path the shipping binary takes.
 	{
 		MHZ = 8;
 		check(timing_get_speed_khz() == timing_native_khz(),
@@ -100,8 +86,7 @@ main(void)
 	}
 
 	// ── A percentage alone would be ambiguous ───────────────────────────────
-	// The same absolute speed is a different percentage on different machines,
-	// which is exactly why the target is held in kHz.
+	// The same absolute speed is a different percentage on different machines.
 	{
 		MHZ = 8;
 		timing_set_speed_khz(1000);
@@ -171,9 +156,7 @@ main(void)
 	}
 
 	// ── The machine's own clock is always a rung ────────────────────────────
-	// However the emulator was started, stepping has to be able to land back on
-	// normal speed -- otherwise "back to normal" would be unreachable on a
-	// machine whose clock is not one of the presets.
+	// Stepping must be able to land back on normal speed whatever the machine's clock.
 	{
 		const uint8_t odd_clocks[] = { 1, 2, 3, 5, 7, 8, 11, 13, 17, 23, 40 };
 		bool reachable = true;
@@ -214,17 +197,7 @@ main(void)
 	}
 
 	// ── The scaling itself ──────────────────────────────────────────────────
-	// Everything above pins the ladder bookkeeping. This pins the arithmetic
-	// that actually changes how the machine runs, which nothing else did: the
-	// first version of this feature left timing_lead_us() unscaled and the
-	// whole suite still passed. That value alone paces the window-drag path, so
-	// an unscaled one lets a slow target run at full speed while a window is
-	// being dragged, and freezes a fast one.
-	//
-	// timing_lead_us() is how far ahead of real time the emulation is. With
-	// SDL_GetTicks() stubbed at zero, it is the emulated time accrued since the
-	// clock was re-based -- so the counter is zeroed before each re-base, or the
-	// delta it measures would be taken against the previous block's value.
+	// With SDL_GetTicks() at zero, timing_lead_us() is the time since the re-base.
 	{
 		MHZ = 8;
 		timing_reset_speed();
@@ -264,14 +237,7 @@ main(void)
 		timing_init();
 	}
 	// ── The wall-clock side of the lead ─────────────────────────────────────
-	// The checks above pin the scaling of emulated time, but hold wall-clock
-	// time at zero, so they cannot see the term that subtracts it -- nor the
-	// accumulated cpu_ticks that the pending delta is added to. Both survive
-	// deletion without them.
-	//
-	// timing_update() is deliberately never called: its slice loop re-reads the
-	// clock to decide when to stop, and a stub that does not advance during a
-	// sleep would spin forever. timing_update_no_sleep() skips that block.
+	// Wall-clock lead and cpu_ticks; timing_update() would spin on a stubbed clock.
 	{
 		MHZ = 8;
 		timing_reset_speed();
@@ -296,9 +262,7 @@ main(void)
 		check(timing_lead_us() == 320000 - 1000000,
 		      "and the wall-clock side is not scaled with it");
 
-		// Ticks already folded into the running total still count. The wall
-		// clock stays at zero across the update, so the catch-up re-base -- which
-		// would silently rewrite the base and hide this -- cannot trigger.
+		// Ticks in the running total still count; the wall clock stays at zero.
 		timing_reset_speed();
 		fake_ticks_ms  = 0;
 		clockticks6502 = 0;

@@ -6,12 +6,7 @@
 // forming address. Add 1 cycle for STA abs,X" -- indexed reads pay for a
 // crossing, indexed stores pay a fixed cost either way.
 //
-// Cycle counts are asserted alongside the results because timing is part of the
-// specification, and because it is what a debugger hook can disturb without
-// changing any visible register.
-//
-// Programs are written as raw bytes with the mnemonic in a comment. That reads
-// and greps better than a builder DSL would at this size.
+// Cycle counts are asserted alongside the results.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
@@ -67,11 +62,7 @@ test_stores(void)
 	check_eq(cpu_mem[0x0400], 0x5A, "STA absolute writes the accumulator");
 
 	// LDX #$01 ; LDA #$00 ; STA $0500,X
-	// The load comes last so Z is set going into the store, which is what makes
-	// "the store changed no flag" a meaningful claim. Both target bytes are
-	// seeded non-zero first: memory resets to zero, so storing a zero into a
-	// zeroed byte would compare equal however the address was computed, and
-	// would assert nothing at all.
+	// Z is set going into the store; targets are seeded non-zero.
 	const uint8_t flags[] = { 0xA2, 0x01, 0xA9, 0x00, 0x9D, 0x00, 0x05 };
 	cpu_reset_to(CPU_65C02, PROG);
 	cpu_load(PROG, flags, sizeof flags);
@@ -140,8 +131,7 @@ test_addressing_modes(void)
 }
 
 // ---- Zero page indexing wraps inside page zero -----------------------------
-// $FF + 2 addresses $01, not $0101. Getting this wrong reads the wrong page
-// entirely, so it is worth pinning on its own.
+// $FF + 2 addresses $01, not $0101.
 
 static void
 test_zero_page_wrap(void)

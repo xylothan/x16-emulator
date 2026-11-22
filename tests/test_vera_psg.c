@@ -5,19 +5,12 @@
 //   repo:   https://github.com/X16Community/vera-module
 //   tag:    v48.0.1   (commit 6e8bea68)
 //
-// R48 for this file, where the PCM tests use R47. psg.v is the only audio
-// source that differs between the two tags, and the emulator implements the R48
-// form: vera_psg.c:122-123 XOR the saw and triangle waveforms with the inverted
-// pulse width, which entered the RTL as a8135f32 (2024-10-21) and shipped in
-// v48.0.1. R47 has the unmodulated waveforms. The emulator backported it in
-// #290 on 2024-08-11, two months before the RTL change landed, which is why it
-// reports 47.0.2 while behaving like 48 here. See tests/check_vera_version.py.
+// This file cites v48.0.1; the PCM tests cite v47.0.2. vera_psg.c:122-123 XOR saw and
+// triangle with the inverted pulse width (RTL a8135f32, in v48.0.1).
 //
-// Every expectation quotes the RTL line it rests on, so a claim can be checked
-// without fetching the repo. tests/fetch_vera_rtl.py retrieves the sources.
+// tests/fetch_vera_rtl.py retrieves the sources.
 //
-// vera_psg.c includes only its own header and libc, so this links it directly
-// with no fixture and no SDL.
+// Links vera_psg.c directly: no fixture, no SDL.
 
 #include "support/harness.h"
 
@@ -41,8 +34,7 @@ chan(int ch)
 	return c;
 }
 
-// Drive one voice with everything needed to make sound, so a test can vary the
-// single field it cares about.
+// Drive one voice with everything needed to make sound.
 static void
 voice(int ch, uint16_t freq, uint8_t vol, uint8_t waveform, uint8_t pw)
 {
@@ -75,9 +67,7 @@ test_reset_seeds_the_noise_lfsr(void)
 //               cur_pulsewidth = cur_channel_attr_r[29:24];
 //               cur_waveform   = cur_channel_attr_r[31:30];
 //
-// Four attribute bytes per voice, so byte 2 carries volume in bits 5:0 with
-// left on bit 6 and right on bit 7, and byte 3 carries pulse width in bits 5:0
-// with the waveform in bits 7:6.
+// Byte 2: volume 5:0, left 6, right 7. Byte 3: pulse width 5:0, waveform 7:6.
 static void
 test_register_decode(void)
 {
@@ -104,9 +94,7 @@ test_register_decode(void)
 // psg.v:26-28   dpram #(.ADDR_WIDTH(6) ...) audio_attr_ram(
 //                   .rd_addr({cur_channel_r, cur_channel_byte_r[1:0]}),
 //
-// A 6-bit address: sixteen voices of four bytes, and nothing beyond. The
-// emulator masks the register index to match, so a write past the end lands
-// back at the start rather than running off the array.
+// 6-bit address: 16 voices of 4 bytes; a write past the end wraps.
 static void
 test_register_index_wraps_at_64(void)
 {
@@ -126,8 +114,7 @@ test_register_index_wraps_at_64(void)
 // psg.v:47-48   // cur_volume_log = cur_volume * 4                     ; cur_volume < 4
 //               //                = 511 * exp2((cur_volume - 63) / 12) ; cur_volume >= 4
 //
-// Two regimes: linear below 4, then 0.5 dB per step. The joint at 4 is the
-// interesting part, and the ends are fixed points.
+// Linear below 4, then 0.5 dB per step.
 static void
 test_volume_curve(void)
 {
@@ -146,19 +133,14 @@ test_volume_curve(void)
 
 // psg.v:140   new_phase = (cur_left_en | cur_right_en) ? (cur_phase + cur_freq) : 17'd0;
 //
-// A silenced voice does not merely stop being heard, it is held at phase zero.
-// So unmuting always restarts from the beginning of the waveform rather than
-// wherever the voice would have been -- worth pinning because it is the sort of
-// detail an implementation "tidies up" into a plain gate on the output.
+// A silenced voice is held at phase zero, so unmuting restarts the waveform.
 static void
 test_phase_is_held_at_zero_while_silent(void)
 {
 	psg_reset();
 	int16_t buf[256];
 
-	// 0x0700 over 64 samples does not land back on a multiple of the 17-bit
-	// range, so "advanced" is distinguishable from "reset". 0x0800 would wrap
-	// to exactly zero and the check would pass for the wrong reason.
+	// 0x0700 over 64 samples does not wrap to zero; 0x0800 would.
 	voice(0, 0x0700, 63, PSG_WF_SAWTOOTH, 0x20);
 	psg_render(buf, 64);
 	check(chan(0).phase != 0, "an audible voice advances its phase");
@@ -176,17 +158,10 @@ test_phase_is_held_at_zero_while_silent(void)
 // psg.v:124-130   always @(posedge clk ...) lfsr_r <=
 //                     {lfsr_r[14:0], lfsr_r[1] ^ lfsr_r[2] ^ lfsr_r[4] ^ lfsr_r[15]};
 //
-// A 16-bit Fibonacci LFSR with taps at 1, 2, 4 and 15, shifting left, seeded to
-// 1. The tap set is the part worth pinning: a wrong one still produces
-// plausible noise, so only the exact sequence tells them apart.
+// A 16-bit Fibonacci LFSR, taps 1, 2, 4 and 15, shifting left, seeded to 1.
 //
-// The rate is a modelling choice rather than something the RTL fixes at this
-// granularity. In hardware the LFSR advances every system clock while the state
-// machine walks the voices in turn (psg.v:180-188), which is why two voices
-// latching in the same sample see different values. The emulator reproduces
-// that by stepping it once per voice, so sixteen times per rendered sample
-// (vera_psg.c:105-109). That is an approximation of a clock-rate process at
-// sample resolution, and it is what this checks.
+// Hardware steps it every system clock (psg.v:180-188).
+// Emulated once per voice, 16 per sample (vera_psg.c:105-109).
 static void
 test_noise_lfsr_sequence(void)
 {
@@ -210,18 +185,14 @@ test_noise_lfsr_sequence(void)
 //                 new_noise = do_noise_sample ? noise_value_r : cur_noise;
 // psg.v:123       noise_value_r = lfsr_r[6:1];
 //
-// A noise voice does not follow the LFSR sample by sample. It latches six bits
-// of it only when the phase accumulator's top bit falls, so frequency controls
-// the rate of new noise values while the LFSR runs on underneath.
+// A noise voice latches six LFSR bits only when the phase top bit falls.
 static void
 test_noise_is_latched_on_phase_wrap(void)
 {
 	psg_reset();
 	int16_t buf[8];
 
-	// With frequency 0x0800 the 17-bit phase advances 0x800 per sample, so bit
-	// 16 rises at sample 32 and falls when the accumulator wraps at sample 64.
-	// That is exactly one latch in the first 64 samples, at a known point.
+	// Frequency 0x0800: bit 16 falls at sample 64, one latch in the first 64.
 	voice(0, 0x0800, 63, PSG_WF_NOISE, 0);
 
 	unsigned changes = 0;
@@ -284,13 +255,7 @@ renders_same(uint8_t waveform, uint8_t pw_a, uint8_t pw_b)
 //                 signal_triangle = (cur_phase[16] ? ~cur_phase[15:10] : cur_phase[15:10])
 //                                   ^ ~cur_pulsewidth[5:0];
 //
-// This is the R47/R48 divide, and the reason this file is pinned to R48. In R47
-// saw and triangle read the phase directly and ignore the pulse width entirely;
-// in R48 both are XORed with its complement, so the field shapes all three
-// non-noise waveforms rather than only the pulse.
-//
-// Testing that the output *changes* with pulse width is what separates the two
-// revisions, and it does so without depending on the exact sample values.
+// R47 saw and triangle ignore pulse width; R48 XORs both with its complement.
 static void
 test_pulse_width_shapes_saw_and_triangle(void)
 {
@@ -303,17 +268,14 @@ test_pulse_width_shapes_saw_and_triangle(void)
 	check(!renders_same(PSG_WF_TRIANGLE, 0x00, 0x3F),
 	      "pulse width changes the triangle (R48; R47 ignores it)");
 
-	// The complement is what is XORed in, so a full-scale pulse width
-	// contributes nothing and leaves the plain waveform behind.
+	// A full-scale pulse width XORs in zero and leaves the plain waveform.
 	check(renders_same(PSG_WF_SAWTOOTH, 0x3F, 0x3F),
 	      "the same pulse width gives the same sawtooth");
 }
 
 // psg.v:175   signed_signal = signal ^ 6'h20;
 //
-// The waveform is generated unsigned and converted by flipping its top bit, so
-// silence sits at the middle of the range rather than at zero. A voice at
-// volume zero must still produce exactly nothing.
+// Flipping the top bit puts silence mid-range; volume zero must produce exactly nothing.
 static void
 test_silence_at_zero_volume(void)
 {

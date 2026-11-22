@@ -1,33 +1,11 @@
 // The write half of the debugOn contract.
 //
-// tests/test_debugon_contract.c pins the read half: a debug read reports what
-// is there, moves no device state and spends no cycles. This is the other
-// half, which until recently did not exist -- write6502() took no flag, so
-// nothing downstream could tell a debugger's edit from a store the program
-// executed, and every consequence of a store followed.
-//
-// The rule, decided rather than discovered:
-//
 //     a debugger's write updates the machine and does nothing else. The byte
 //     reads as though it had always been there.
 //
-// Two consequences follow, and each is asserted against the real-write case
-// beside it, because either alone reads as an unremarkable fact about slow I/O
-// or about watchpoints:
+// Asserted against a real write: no cycles, no watchpoint; the value still lands.
 //
-//   * No cycles. A debugger that spent them would change program timing by
-//     being used, which is the same reason a debug read spends none.
-//   * No watchpoint. A watchpoint answers "when does the program touch this?",
-//     and the program did not.
-//
-// What a debug write does do is write. The device is updated, its side effects
-// happen, and the value is there afterwards -- that is the point of the edit,
-// and the half that must not be suppressed.
-//
-// ORACLE: none, and none is possible. Whether a debugger's write should be
-// distinguishable from the program's is a design question about this emulator,
-// not a question about hardware: the machine cannot tell that a debugger
-// exists. These assertions pin a decision, not a measurement.
+// ORACLE: none. These assertions pin a design decision.
 //
 // Devices are recording fakes, so what is pinned is how memory.c routes and
 // charges, not how any real device behaves.
@@ -42,8 +20,7 @@
 
 extern uint32_t clockticks6502;
 
-// Defined in fake_devices.c, which does not declare it in its header; the
-// existing watchpoint test externs it the same way.
+// Defined in fake_devices.c, which does not declare it in its header.
 extern int fake_break_count;
 
 // $9F40-$9F5F is the slow IO2 range: three cycles on a real access.
@@ -117,9 +94,7 @@ test_a_debug_write_still_updates_the_machine(void)
 	check_eq(fake_dev[FAKE_VERA].state, 1, "and moves it, because writing the port is the point");
 }
 
-// Everything the machine can see afterwards is the same. Only the things that
-// exist for the debugger's benefit -- the clock and the watchpoint -- differ,
-// and they are what "does nothing else" means.
+// Everything the machine can see afterwards is the same; only the clock and the watchpoint differ.
 static void
 test_the_two_writes_leave_the_same_machine(void)
 {

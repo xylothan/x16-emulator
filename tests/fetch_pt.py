@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Fetch SingleStepTests suites and convert them for test_processor_tests.
 
-Not committed: roughly a gigabyte of JSON per 65C02 variant and three for the
-65C816, one file per opcode. Takes a fixed prefix of each instead.
-
-Prefix, not a random sample: the baseline records exact per-opcode counts, so
-every machine must convert the same cases.
+Not committed: roughly a gigabyte of JSON per 65C02 variant, three for the
+65C816. Takes a fixed prefix of each file, so every machine converts the same
+cases as the baseline's per-opcode counts.
 
     python tests/fetch_pt.py                    # 100 cases/opcode, wdc65c02
     python tests/fetch_pt.py --cases 10000      # everything
@@ -53,8 +51,7 @@ def fetch_opcode(variant: str, op: int, dest: pathlib.Path) -> bool:
     if out.exists() and out.stat().st_size > 0:
         return True
     url = RAW.format(repo=spec["repo"], sub=spec["sub"], name=name)
-    # Hundreds of requests per run, so a transient failure is likely rather
-    # than exceptional. Retry anything that is not a definite 404.
+    # Retry anything that is not a definite 404.
     last = None
     for attempt in range(ATTEMPTS):
         try:
@@ -113,8 +110,7 @@ def main() -> int:
     here = pathlib.Path(__file__).resolve().parent
     out = here / "pt" / f"{args.variant}.bin"
 
-    # The fixture is a megabyte or so and the JSON it came from is gigabytes,
-    # so CI caches only the fixture. Nothing to do when the cache hit.
+    # CI caches only the fixture; nothing to do on a cache hit.
     if out.exists() and out.stat().st_size > 0 and not args.force:
         print(f"{out} already present ({out.stat().st_size / 1e6:.1f} MB); "
               f"pass --force to rebuild")

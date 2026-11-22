@@ -1,22 +1,9 @@
 // The row of a layer that each display line shows.
 //
-// tests/test_vera_layer.c pins the layer registers and the base addresses they
-// name. This pins the other half of the vertical path: given a display line
-// and VSCROLL, which row of the tilemap is fetched and which line inside the
-// tile is drawn.
+// Pins which tilemap row and tile line each display line shows, given VSCROLL.
+// video.c:1326-1328 is compared with the RTL's wrapped row and line, per display line.
 //
-// The emulator carries the answer as one number, the layer row, recorded per
-// scanline for the debug views (video.c:1326-1328). The RTL carries it as two:
-// a wrapped tile row and the line within the tile. This file derives the RTL's
-// two from the emulator's one and compares them, over every display line
-// rather than a chosen few, so an error that only shows up at a wrap boundary
-// has nowhere to hide.
-//
-// Horizontal is still not covered. The RTL adds a pre-shifted HSCROLL to a
-// per-line tile counter (layer_renderer.v:95) while video.c shifts after
-// adding (video.c:574, 587); those differ on carry when HSCROLL is not tile
-// aligned, and settling it needs rendered pixels, which means the framebuffer
-// seam. Nothing here claims to reach it.
+// Not covered: unaligned HSCROLL carry (layer_renderer.v:95, video.c:574, 587).
 //
 // ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
 // (45cc1f053376dae12173ea63612820e4d289c0da), modelled directly below from the
@@ -61,8 +48,7 @@ step_frame(void)
 //         2'd3: wrapped_vmap_idx = {      vmap_idx[7:0]}; // 256
 //     endcase
 //
-// The sum is twelve bits, so it wraps at 4096 pixel rows before anything else
-// happens to it.
+// The sum is twelve bits, so it wraps at 4096 pixel rows.
 static unsigned
 rtl_wrapped_vmap_idx(unsigned line_idx, unsigned vscroll, unsigned tile_height, unsigned map_height)
 {
@@ -89,17 +75,14 @@ configure_layer0(unsigned map_height, unsigned tile_height, unsigned vscroll)
 	video_write(VERA_CTRL, 0x00);
 	video_write(VERA_DC_VIDEO, 0x31);  // VGA output, both layers on
 
-	// 4bpp tile mode, so the layer is neither text nor bitmap and takes its
-	// scroll from the registers below.
+	// 4bpp tile mode, taking scroll from the registers below.
 	video_write(L0_CONFIG, (uint8_t)((map_height << 6) | (2 << 4) | 0x02));
 	video_write(L0_TILEBASE, (uint8_t)(0xFC | (tile_height << 1)));
 	video_write(L0_VSCROLL_L, (uint8_t)(vscroll & 0xFF));
 	video_write(L0_VSCROLL_H, (uint8_t)((vscroll >> 8) & 0x0F));
 }
 
-// The renderer takes the layer row from one register generation and the layout
-// from another, so a change needs a couple of lines to settle. Two frames puts
-// every line of the second one past that.
+// A change needs a couple of lines to settle; two frames put the second past that.
 static void
 settle(void)
 {
@@ -132,10 +115,7 @@ check_every_line_against_the_rtl(unsigned map_height, unsigned tile_height, unsi
 		const unsigned want_tile_row = rtl_wrapped_vmap_idx(eff_y, vscroll, tile_height, map_height);
 		const unsigned want_in_tile  = rtl_line_in_tile(eff_y, vscroll, tile_height);
 
-		// Deliberately not masked to the map height. video.c:587 shifts the row
-		// down and puts it straight into the map index, so whatever wrapping
-		// the map height calls for has to be in the row already. Masking here
-		// would supply it and hide its absence.
+		// Not masked to the map height: video.c:587 uses the shifted row directly.
 		const unsigned got_tile_row = row >> (3 + tile_height);
 		const unsigned got_in_tile  = row & ((1u << (3 + tile_height)) - 1);
 
@@ -153,8 +133,7 @@ check_every_line_against_the_rtl(unsigned map_height, unsigned tile_height, unsi
 		printf("      %s\n", first);
 	}
 
-	// Without this the sweep would pass by examining nothing: an accessor that
-	// reported every line as unrendered leaves no mismatches to count.
+	// Guards against an accessor reporting every line as unrendered.
 	snprintf(what, sizeof what,
 	         "all %u display lines are recorded (map_height %u, tile_height %u, vscroll %u)",
 	         DISPLAY_LINES, map_height, tile_height, vscroll);
@@ -166,10 +145,7 @@ check_every_line_against_the_rtl(unsigned map_height, unsigned tile_height, unsi
 	check_eq(mismatches, 0, what);
 }
 
-// The composer's effective layer Y, which the sweep above feeds to the RTL
-// model as line_idx. At unit vertical scale over a full-height window it is the
-// display line itself; asserting it makes the sweep's input a known quantity
-// rather than whatever the composer happened to produce.
+// The composer's layer Y: the display line at unit scale, full-height window.
 static void
 test_the_layer_y_is_the_display_line_at_unit_scale(void)
 {
@@ -204,10 +180,7 @@ test_the_row_wraps_at_the_map_height(void)
 	}
 }
 
-// VSCROLL moves the start of the sweep. 4095 is the largest the twelve-bit
-// register holds and puts the sum over the wrap for most of the frame; 300 and
-// 7 land it mid-tile, where an off-by-one between the tile row and the line
-// inside the tile shows up.
+// VSCROLL moves the start of the sweep: 4095 is the register maximum; 300 and 7 land mid-tile.
 static void
 test_vscroll_shifts_the_row(void)
 {

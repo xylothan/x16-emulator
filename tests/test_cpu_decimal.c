@@ -5,17 +5,7 @@
 // "Invalid N, V and Z flags", the CMOS part has "Valid flags" and "One
 // additional cycle".
 //
-// This gets its own scenarios because it is the corner most often got wrong,
-// and because those two differences matter to anything running on this machine:
-//
-//   * N and Z reflect the BCD result. On the NMOS part they were taken from
-//     the binary intermediate value and were effectively meaningless.
-//   * ADC and SBC take one cycle longer than in binary mode. That extra cycle
-//     is real and observable, and the X16 ships a 65C02.
-//
-// Only valid BCD operands are used. The result of feeding the decimal adjust
-// a non-decimal nibble is genuinely undefined, so asserting anything about it
-// would be inventing a specification rather than testing one.
+// N, Z reflect the BCD result; ADC/SBC take an extra cycle. Valid BCD only.
 
 #include "support/cpu_fixture.h"
 #include "support/harness.h"
