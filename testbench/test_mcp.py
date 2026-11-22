@@ -9,6 +9,7 @@ else would break a real client.
 """
 
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -190,10 +191,11 @@ def test_tools():
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
-                   "get_vera_state", "lookup_symbol", "list_symbols"}
-        losing = {"reset", "set_registers", "write_memory", "save_state", "load_state"}
+                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory"}
+        losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
+                  "dump_memory", "load_prg"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
-                  "type_text", "send_key", "joystick", "load_symbols"}
+                  "type_text", "send_key", "joystick", "load_symbols", "mouse", "set_warp"}
         case("every tool is listed", names == reading | losing | moving, str(names))
         for t in listed:
             s = t.get("inputSchema", {})
@@ -1868,6 +1870,241 @@ def test_symbols():
             dap.close()
 
 
+def wait_basic(m, secs=20):
+    end = time.time() + secs
+    while time.time() < end:
+        if any(l.startswith("READY.") for l in data(m.call("get_screen")).get("lines", [])):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def mem_bytes(m, **where):
+    return bytes.fromhex(data(m.call("read_memory", **where)).get("hex", "").replace(" ", ""))
+
+
+def test_hash_memory():
+    print("hash_memory")
+    with Mcp() as m:
+        m.init()
+        time.sleep(0.5)
+        plant_loop(m)
+        pattern = bytes((i * 7 + 3) & 0xFF for i in range(200))
+        m.call("write_memory", address=0x0A00, hex=pattern.hex())
+        # Around the SHA-256 padding edges, and past one block.
+        for n in (1, 55, 56, 57, 63, 64, 65, 119, 120, 200):
+            d = data(m.call("hash_memory", address=0x0A00, length=n))
+            want = mem_bytes(m, address=0x0A00, length=n)
+            case(f"{n} bytes hash as the host does",
+                 len(want) == n and d.get("crc32") == "%08x" % zlib.crc32(want) and
+                 d.get("sha256") == hashlib.sha256(want).hexdigest(), str(d))
+        d = data(m.call("hash_memory", address="1B000", length=64, space="vram"))
+        want = mem_bytes(m, address="1B000", length=64, space="vram")
+        case("VRAM hashes too", d.get("sha256") == hashlib.sha256(want).hexdigest() and d.get("space") == "vram", str(d))
+        d = data(m.call("hash_memory", address=0xC000, length=32, bank=4))
+        want = mem_bytes(m, address=0xC000, length=32, bank=4)
+        case("a chosen bank", d.get("sha256") == hashlib.sha256(want).hexdigest(), str(d))
+
+        # No side effects, on the register that has the most of them.
+        set_vera(m, 0x9F20, 0x00, 0x00, 0x10)
+        before = data(m.call("get_vera_state"))
+        m.call("set_breakpoint", address=0x9F23, kind="read")
+        stop = data(m.call("get_status")).get("stopId")
+        m.call("hash_memory", address=0x9F20, length=16)
+        after = data(m.call("get_vera_state"))
+        case("hashing I/O leaves VERA alone", before == after)
+        case("and fires no read watch", data(m.call("get_status")).get("stopId") == stop)
+        m.call("remove_breakpoint", address=0x9F23)
+
+        case("a length is required", is_error(m.call("hash_memory", address=0x0A00)))
+        case("past the end is refused", is_error(m.call("hash_memory", address="1FFF0", length=32, space="vram")))
+        case("too long is refused", is_error(m.call("hash_memory", address=0, length=0x100001)))
+
+
+def test_dump_memory():
+    print("dump_memory")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = os.path.realpath(tmp)
+        root = os.path.join(tmp, "root")
+        outside = root + "2"            # shares the prefix on purpose
+        os.mkdir(root)
+        os.mkdir(outside)
+        os.mkdir(os.path.join(root, "sub"))
+        with Mcp(["-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            body = bytes(range(64))
+            m.call("write_memory", address=0x0A00, hex=body.hex())
+
+            d = data(m.call("dump_memory", address=0x0A00, length=64, path="out.bin"))
+            target = os.path.join(root, "out.bin")
+            case("a plain name lands in the root", os.path.isfile(target) and open(target, "rb").read() == body, str(d))
+            case("and the reply says where", os.path.normcase(d.get("path", "").replace("/", os.sep)) == os.path.normcase(target), str(d))
+            m.call("write_memory", address=0x0A00, hex="FF")
+            r = m.call("dump_memory", address=0x0A00, length=64, path="out.bin")
+            case("an existing file is refused", is_error(r) and open(target, "rb").read() == body)
+            r = m.call("dump_memory", address=0x0A00, length=64, path="out.bin", overwrite=True)
+            case("unless overwrite is given", not is_error(r) and open(target, "rb").read()[0] == 0xFF)
+            m.call("dump_memory", address=0x0A00, length=4, path=os.path.join("sub", "x.bin"))
+            case("a folder inside is fine", os.path.isfile(os.path.join(root, "sub", "x.bin")))
+            m.call("dump_memory", address=0x0A00, length=4, path=os.path.join(root, "abs.bin"))
+            case("an absolute path inside is fine", os.path.isfile(os.path.join(root, "abs.bin")))
+
+            for label, bad in (("..", os.path.join("..", "esc.bin")),
+                               ("a nested ..", os.path.join("sub", "..", "..", "esc.bin")),
+                               ("an absolute path outside", os.path.join(tmp, "esc.bin")),
+                               ("a folder sharing the prefix", os.path.join(outside, "esc.bin")),
+                               ("a missing folder", os.path.join("nope", "x.bin")),
+                               ("the root itself", "."),
+                               ("a trailing separator", "sub" + os.sep)):
+                case(f"{label} is refused", is_error(m.call("dump_memory", address=0x0A00, length=4, path=bad)))
+            case("nothing escaped", not os.path.exists(os.path.join(tmp, "esc.bin")) and not os.listdir(outside))
+
+            if os.name == "nt":
+                for bad in ("NUL", "con.txt", "out.bin:hidden", "C:relative.bin", "\\\\server\\share\\x.bin"):
+                    case(f"{bad} is refused", is_error(m.call("dump_memory", address=0x0A00, length=4, path=bad)))
+            else:
+                os.symlink(tmp, os.path.join(root, "up"))
+                os.symlink(os.path.join(tmp, "dangling.bin"), os.path.join(root, "link.bin"))
+                case("a folder link out is refused",
+                     is_error(m.call("dump_memory", address=0x0A00, length=4, path=os.path.join("up", "esc.bin"))))
+                case("a file link is refused, even dangling",
+                     is_error(m.call("dump_memory", address=0x0A00, length=4, path="link.bin", overwrite=True)) and
+                     not os.path.exists(os.path.join(tmp, "dangling.bin")))
+
+    drive = os.path.abspath(os.sep)
+    with Mcp(["-fsroot", drive]) as m:
+        m.init()
+        time.sleep(0.5)
+        case("a drive root is refused", is_error(m.call("dump_memory", address=0x0A00, length=4, path="x16-dump-test.bin")))
+        case("and writes nothing", not os.path.exists(os.path.join(drive, "x16-dump-test.bin")))
+
+
+def warp_on(m):
+    return json.dumps(data(m.call("perf_stats"))).find('"warpMode": true') >= 0
+
+
+def test_warp():
+    print("set_warp")
+    with Mcp(["-pastewarp"], warp=False) as m:
+        m.init()
+        case("basic is up", wait_basic(m, 40))
+        case("starts off", not warp_on(m))
+        case("on", data(m.call("set_warp", enabled=True)).get("enabled") is True and warp_on(m))
+        case("on again stays on", data(m.call("set_warp", enabled=True)).get("enabled") is True and warp_on(m))
+        m.call("type_text", text="A=1\r")
+        time.sleep(1.0)
+        case("the end of a paste leaves a client's warp on", warp_on(m))
+        case("off", data(m.call("set_warp", enabled=False)).get("enabled") is False and not warp_on(m))
+        m.call("type_text", text="A=2\r")
+        time.sleep(2.0)
+        case("off stays off after a paste", not warp_on(m))
+        case("enabled is required", is_error(m.call("set_warp")))
+        case("and must be a boolean", is_error(m.call("set_warp", enabled=1)))
+
+
+def test_mouse():
+    print("mouse")
+    with Mcp() as m:
+        m.init()
+        case("basic is up", wait_basic(m))
+        d = data(m.call("mouse"))
+        case("reports with the KERNAL mouse off", d.get("kernalMouse") is False and d.get("buttons") == [], str(d))
+        m.call("type_text", text="MOUSE 1\r")
+        time.sleep(0.6)
+        sample = "POKE1024,MX/4:POKE1025,MY/4:POKE1026,MB\r"
+        m.call("type_text", text=sample)
+        time.sleep(0.6)
+        x0, y0, b0 = mem_bytes(m, address=0x0400, length=3)
+        d = data(m.call("mouse", dx=80, dy=40, buttons=["left"]))
+        case("the reply has the state", d.get("buttons") == ["left"] and d.get("kernalMouse") is True, str(d))
+        time.sleep(0.4)
+        m.call("type_text", text=sample)
+        time.sleep(0.6)
+        x1, y1, b1 = mem_bytes(m, address=0x0400, length=3)
+        case("the program sees it move right", x1 > x0, f"{x0} -> {x1}")
+        case("and down", y1 > y0, f"{y0} -> {y1}")
+        case("and the button", b0 == 0 and b1 == 1, f"{b0} -> {b1}")
+        d = data(m.call("mouse", dx=1))
+        case("a move alone keeps the buttons", d.get("buttons") == ["left"], str(d))
+        m.call("mouse", buttons=[])
+        time.sleep(0.4)
+        m.call("type_text", text=sample)
+        time.sleep(0.6)
+        case("an empty list releases", mem_bytes(m, address=0x0402, length=1)[0] == 0)
+        case("a big move is refused", is_error(m.call("mouse", dx=300)))
+        case("an unknown button is refused", is_error(m.call("mouse", buttons=["fourth"])))
+
+
+K_PRG_DBG = (
+    'version\tmajor=2,minor=0\n'
+    'info\tcsym=0,file=1,lib=0,line=1,mod=1,scope=1,seg=1,span=1,sym=1,type=0\n'
+    'file\tid=0,name="prog.s",size=10,mtime=0x00000000,mod=0\n'
+    'seg\tid=0,name="CODE",start=0x000A00,size=0x0010,addrsize=absolute,type=ro,oname="prog.prg"\n'
+    'span\tid=0,seg=0,start=0,size=16,type=0\n'
+    'line\tid=0,file=0,line=1,span=0\n'
+    'sym\tid=0,name="_hello",addrsize=absolute,size=3,scope=0,def=0,val=0x000A00,type=lab\n'
+    'mod\tid=0,name="prog.o",file=0\n')
+
+
+def test_load_prg():
+    print("load_prg")
+    with tempfile.TemporaryDirectory() as tmp:
+        def prg(name, at, body):
+            p = os.path.join(tmp, name)
+            with open(p, "wb") as f:
+                f.write(struct.pack("<H", at) + body)
+            return p
+        body = bytes(0x40 + i for i in range(16))
+        path = prg("prog.prg", 0x0A00, body)
+        with open(os.path.join(tmp, "prog.dbg"), "w") as f:
+            f.write(K_PRG_DBG)
+        plain = prg("plain.prg", 0x0B00, b"\x11\x22\x33")
+
+        with Mcp() as m:
+            m.init()
+            time.sleep(0.5)
+            case("refused while running", is_error(m.call("load_prg", path=path)))
+            plant_loop(m)
+            before = data(m.call("get_registers"))["cpu"]["pc"]
+            d = data(m.call("load_prg", path=path))
+            case("loads at its address", d.get("address") == "0x0A00" and d.get("length") == 16, str(d))
+            case("the bytes land", mem_bytes(m, address=0x0A00, length=16) == body)
+            case("its debug info came with it", d.get("debugInfo") is True, str(d))
+            r = data(m.call("lookup_symbol", name="_hello"))
+            case("so the name resolves", (r.get("matches") or [{}])[0].get("address") == 0x0A00, str(r))
+            case("the machine has not moved", data(m.call("get_registers"))["cpu"]["pc"] == before)
+
+            d = data(m.call("load_prg", path=plain))
+            case("a program with no .dbg still loads",
+                 d.get("debugInfo") is False and mem_bytes(m, address=0x0B00, length=3) == b"\x11\x22\x33", str(d))
+            d = data(m.call("load_prg", path=plain, address="$0C00"))
+            case("an address overrides the header",
+                 d.get("address") == "0x0C00" and mem_bytes(m, address=0x0C00, length=3) == b"\x11\x22\x33", str(d))
+
+            banked = prg("banked.prg", 0xA000, b"\x5A\xA5")
+            m.call("set_registers", ramBank=2)
+            d = data(m.call("load_prg", path=banked))
+            case("the banked window, in the mapped bank", d.get("bank") == 2, str(d))
+            case("lands there", mem_bytes(m, address=0xA000, length=2, bank=2) == b"\x5A\xA5")
+            m.call("set_registers", ramBank=1)
+
+            io_before = data(m.call("get_vera_state"))
+            for label, p in (("over I/O", prg("io.prg", 0x9EFF, b"\x01\x02\x03")),
+                             ("in I/O", prg("io2.prg", 0x9F20, b"\x01")),
+                             ("in ROM", prg("rom.prg", 0xC000, b"\x01")),
+                             ("past the bank window", prg("wrap.prg", 0xBFFF, b"\x01\x02")),
+                             ("over the bank registers", prg("zp.prg", 0x0000, b"\x01"))):
+                case(f"{label} is refused", is_error(m.call("load_prg", path=p)))
+            case("and VERA was not touched", data(m.call("get_vera_state")) == io_before)
+            short = os.path.join(tmp, "short.prg")
+            with open(short, "wb") as f:
+                f.write(b"\x00")
+            case("a file too short is refused", is_error(m.call("load_prg", path=short)))
+            case("a missing file is refused", is_error(m.call("load_prg", path=os.path.join(tmp, "no.prg"))))
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -1877,7 +2114,8 @@ def main():
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
-                 test_vram_watch, test_read_watch, test_symbols):
+                 test_vram_watch, test_read_watch, test_symbols,
+                 test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

@@ -41,6 +41,11 @@
 #include <cjson/cJSON.h>
 #include "x16_hash.h"
 #include "savestate.h"
+#include "dbg_load.h"
+#include "export_paths.h"
+#include "host_write_path.h"
+#include "i2c.h"
+#include "mem_hash.h"
 #include "audio_events.h"
 
 extern bool headless;   // main.c
@@ -6097,6 +6102,330 @@ static int handle_x16_list_symbols(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── Ranges of memory: x16/hashMemory, x16/dumpMemory ────────────────
+
+extern uint8_t *fsroot_path;
+extern bool     fsroot_given;
+
+#define DAP_RANGE_MAX 0x100000
+
+// The whole range or an error: a hash of fewer bytes than were asked for would
+// read as an answer about the range. Through the debugger's read path, because
+// these must not fire read watches or move VERA's data port.
+static uint8_t *dap_read_range(int seq, const char *cmd, cJSON *args,
+                               uint32_t *addr_out, bool *vram_out, size_t *len_out) {
+    cJSON *ri = args ? cJSON_GetObjectItemCaseSensitive(args, "memoryReference") : NULL;
+    cJSON *ci = args ? cJSON_GetObjectItemCaseSensitive(args, "count") : NULL;
+    cJSON *bi = args ? cJSON_GetObjectItemCaseSensitive(args, "x16Bank") : NULL;
+    uint32_t addr = 0;
+    bool is_vram = false;
+    if (!ri || !cJSON_IsString(ri) || !dap_parse_mem_ref(ri->valuestring, &is_vram, &addr)) {
+        send_dap_error_response(seq, cmd, "'memoryReference' must be a CPU address or vram:<hex>");
+        return NULL;
+    }
+    if (!ci || !cJSON_IsNumber(ci) || ci->valuedouble < 1 || ci->valuedouble > DAP_RANGE_MAX ||
+        ci->valuedouble != (double)(int)ci->valuedouble) {
+        send_dap_error_response(seq, cmd, "'count' must be 1 to 1048576");
+        return NULL;
+    }
+    const size_t   n     = (size_t)ci->valuedouble;
+    const uint32_t space = is_vram ? 0x20000u : 0x1000000u;
+    if (addr >= space || n > (size_t)(space - addr)) {
+        send_dap_error_response(seq, cmd, "that range runs past the end of the address space");
+        return NULL;
+    }
+    int x16_bank = USE_CURRENT_X16_BANK;
+    if (bi) {
+        if (is_vram || !cJSON_IsNumber(bi) || bi->valuedouble < 0 || bi->valuedouble > 255) {
+            send_dap_error_response(seq, cmd, "'x16Bank' must be 0-255, and VRAM has no banks");
+            return NULL;
+        }
+        x16_bank = (int)bi->valuedouble;
+    }
+    uint8_t *raw = (uint8_t *)malloc(n);
+    if (!raw) {
+        send_dap_error_response(seq, cmd, "out of memory");
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t cur = addr + (uint32_t)i;
+        raw[i] = is_vram ? video_space_read(cur)
+                         : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), x16_bank);
+    }
+    *addr_out = addr;
+    *vram_out = is_vram;
+    *len_out  = n;
+    return raw;
+}
+
+static void dap_add_range_fields(cJSON *body, uint32_t addr, bool is_vram, size_t n) {
+    char s[16];
+    if (is_vram)                     snprintf(s, sizeof s, "0x%05X", (unsigned)addr);
+    else if (is_gen2 || addr > 0xFFFF) snprintf(s, sizeof s, "0x%06X", (unsigned)addr);
+    else                             snprintf(s, sizeof s, "0x%04X", (unsigned)addr);
+    cJSON_AddStringToObject(body, "address", s);
+    cJSON_AddStringToObject(body, "space", is_vram ? "vram" : "cpu");
+    cJSON_AddNumberToObject(body, "length", (double)n);
+}
+
+static int handle_x16_hash_memory(int seq, cJSON *args) {
+    static const char cmd[] = "x16/hashMemory";
+    uint32_t addr;
+    bool is_vram;
+    size_t n;
+    uint8_t *raw = dap_read_range(seq, cmd, args, &addr, &is_vram, &n);
+    if (!raw) return 0;
+
+    const uint32_t crc = mem_crc32(raw, n);
+    uint8_t sha[32];
+    mem_sha256(raw, n, sha);
+    free(raw);
+
+    char crc_hex[9], sha_hex[65];
+    snprintf(crc_hex, sizeof crc_hex, "%08x", (unsigned)crc);
+    for (int i = 0; i < 32; i++) snprintf(sha_hex + i * 2, 3, "%02x", sha[i]);
+
+    cJSON *body = cJSON_CreateObject();
+    dap_add_range_fields(body, addr, is_vram, n);
+    cJSON_AddStringToObject(body, "crc32", crc_hex);
+    cJSON_AddStringToObject(body, "sha256", sha_hex);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static int handle_x16_dump_memory(int seq, cJSON *args) {
+    static const char cmd[] = "x16/dumpMemory";
+    cJSON *pi = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    cJSON *oi = args ? cJSON_GetObjectItemCaseSensitive(args, "overwrite") : NULL;
+    if (!pi || !cJSON_IsString(pi) || !pi->valuestring[0]) {
+        send_dap_error_response(seq, cmd, "'path' is required");
+        return 0;
+    }
+    if (oi && !cJSON_IsBool(oi)) {
+        send_dap_error_response(seq, cmd, "'overwrite' must be true or false");
+        return 0;
+    }
+
+    // -fsroot if one was chosen, else the dump folder ("" is the working one).
+    const char *folder;
+    if (fsroot_given && fsroot_path) {
+        folder = (const char *)fsroot_path;
+    } else {
+        const char *d = export_dir(EXPORT_DUMP);
+        if (d[0] && !export_make_dir(d)) {
+            send_dap_error_response(seq, cmd, "the dump folder cannot be created");
+            return 0;
+        }
+        folder = d[0] ? d : ".";
+    }
+
+    char target[4200], err[300];
+    bool exists = false;
+    if (!host_write_path(folder, pi->valuestring, target, sizeof target, &exists, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    if (exists && !cJSON_IsTrue(oi)) {
+        send_dap_error_response(seq, cmd, "that file exists; pass overwrite to replace it");
+        return 0;
+    }
+
+    uint32_t addr;
+    bool is_vram;
+    size_t n;
+    uint8_t *raw = dap_read_range(seq, cmd, args, &addr, &is_vram, &n);
+    if (!raw) return 0;
+
+    SDL_RWops *f = SDL_RWFromFile(target, "wb");
+    if (!f) {
+        free(raw);
+        send_dap_error_response(seq, cmd, "cannot open that file for writing");
+        return 0;
+    }
+    const size_t wrote = SDL_RWwrite(f, raw, 1, n);
+    const int closed = SDL_RWclose(f);
+    free(raw);
+    if (wrote != n || closed != 0) {
+        send_dap_error_response(seq, cmd, "the file could not be written in full");
+        return 0;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    dap_add_range_fields(body, addr, is_vram, n);
+    cJSON_AddStringToObject(body, "path", target);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// ─── x16/setWarp, x16/mouse ──────────────────────────────────────────
+
+// An explicit state rather than a toggle, so that a retry cannot undo it.
+static int handle_x16_set_warp(int seq, cJSON *args) {
+    static const char cmd[] = "x16/setWarp";
+    cJSON *e = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
+    if (!e || !cJSON_IsBool(e)) {
+        send_dap_error_response(seq, cmd, "'enabled' is required: true or false");
+        return 0;
+    }
+    warp_held = cJSON_IsTrue(e);
+    machine_set_warp(warp_held);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "enabled", warp_mode);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static bool dap_arg_range_int(cJSON *args, const char *key, int lo, int hi, int *out) {
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, key) : NULL;
+    *out = 0;
+    if (!v) return true;
+    if (!cJSON_IsNumber(v) || v->valuedouble < lo || v->valuedouble > hi ||
+        v->valuedouble != (double)(int)v->valuedouble)
+        return false;
+    *out = (int)v->valuedouble;
+    return true;
+}
+
+static int handle_x16_mouse(int seq, cJSON *args) {
+    static const char cmd[] = "x16/mouse";
+    static const char *const names[3] = {"left", "right", "middle"};
+    int dx, dy, wheel;
+    if (!dap_arg_range_int(args, "dx", -255, 255, &dx) ||
+        !dap_arg_range_int(args, "dy", -255, 255, &dy) ||
+        !dap_arg_range_int(args, "wheel", -7, 7, &wheel)) {
+        send_dap_error_response(seq, cmd, "'dx' and 'dy' must be -255 to 255, 'wheel' -7 to 7");
+        return 0;
+    }
+    cJSON *bi = args ? cJSON_GetObjectItemCaseSensitive(args, "buttons") : NULL;
+    uint8_t held = mouse_buttons();
+    if (bi) {
+        if (!cJSON_IsArray(bi)) {
+            send_dap_error_response(seq, cmd, "'buttons' must be a list: left, right, middle");
+            return 0;
+        }
+        held = 0;
+        cJSON *b;
+        cJSON_ArrayForEach(b, bi) {
+            int which = -1;
+            for (int i = 0; i < 3; i++) {
+                if (cJSON_IsString(b) && !strcmp(b->valuestring, names[i])) which = i;
+            }
+            if (which < 0) {
+                send_dap_error_response(seq, cmd, "'buttons' may hold left, right and middle");
+                return 0;
+            }
+            held |= (uint8_t)(1 << which);
+        }
+    }
+
+    if (bi || dx || dy || wheel) {
+        for (int i = 0; i < 3; i++) {
+            if (held & (1 << i)) mouse_button_down(i);
+            else                 mouse_button_up(i);
+        }
+        if (dx || dy) mouse_move(dx, dy);
+        if (wheel) mouse_set_wheel((int8_t)wheel);
+        mouse_send_state();
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(body, "buttons");
+    for (int i = 0; i < 3; i++) {
+        if (held & (1 << i)) cJSON_AddItemToArray(list, cJSON_CreateString(names[i]));
+    }
+    cJSON_AddBoolToObject(body, "kernalMouse", kernal_mouse_enabled);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// ─── x16/loadPrg ─────────────────────────────────────────────────────
+
+// Reported to the debug-info tracker as this channel. The KERNAL's own loads
+// never use it: 15 is the command channel, which carries no file.
+#define DAP_LOAD_CHANNEL 15
+
+// Places a program's bytes and brings its .dbg with it, through the same tracker
+// a real LOAD reports to, so breakpoints are invalidated and retried. It does
+// not go through BASIC, so BASIC's end-of-program pointer is left alone.
+static int handle_x16_load_prg(int seq, cJSON *args) {
+    static const char cmd[] = "x16/loadPrg";
+    cJSON *pi = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    cJSON *ai = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
+    if (!pi || !cJSON_IsString(pi) || !pi->valuestring[0]) {
+        send_dap_error_response(seq, cmd, "'path' is required");
+        return 0;
+    }
+    if (step.pending || !DEBUGIsPaused()) {
+        send_dap_error_response(seq, cmd, "the machine must be paused");
+        return 0;
+    }
+    int override_at = -1;
+    if (ai) {
+        uint32_t a = 0;
+        bool is_vram = false;
+        if (cJSON_IsNumber(ai) && ai->valuedouble >= 0 && ai->valuedouble <= 0xFFFF) {
+            a = (uint32_t)ai->valuedouble;
+        } else if (!cJSON_IsString(ai) || !dap_parse_mem_ref(ai->valuestring, &is_vram, &a) ||
+                   is_vram || a > 0xFFFF) {
+            send_dap_error_response(seq, cmd, "'address' must be a CPU address in bank 0");
+            return 0;
+        }
+        override_at = (int)a;
+    }
+
+    SDL_RWops *f = SDL_RWFromFile(pi->valuestring, "rb");
+    if (!f) {
+        send_dap_error_response(seq, cmd, "cannot read that file");
+        return 0;
+    }
+    const Sint64 size = SDL_RWsize(f);
+    if (size < 3 || size > 0x10001) {
+        SDL_RWclose(f);
+        send_dap_error_response(seq, cmd, "not a program: expected a 2-byte load address and data");
+        return 0;
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)size);
+    const size_t got = buf ? SDL_RWread(f, buf, 1, (size_t)size) : 0;
+    SDL_RWclose(f);
+    if (got != (size_t)size) {
+        free(buf);
+        send_dap_error_response(seq, cmd, "cannot read that file");
+        return 0;
+    }
+
+    const uint32_t start = override_at >= 0 ? (uint32_t)override_at
+                                            : (uint32_t)(buf[0] | (buf[1] << 8));
+    const uint32_t len = (uint32_t)size - 2;
+    const uint32_t end = start + len - 1;
+    // Low RAM, or the banked window. Never the bank registers, I/O or ROM.
+    const bool fits = (start >= 2 && end < 0x9F00) || (start >= 0xA000 && end <= 0xBFFF);
+    if (!fits) {
+        free(buf);
+        char why[120];
+        snprintf(why, sizeof why, "$%04X-$%04X is not all RAM in one window", (unsigned)start,
+                 (unsigned)(end & 0xFFFFF));
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+
+    const uint8_t ram_bank = memory_get_ram_bank();
+    dbg_load_begin(DAP_LOAD_CHANNEL, pi->valuestring);
+    for (uint32_t i = 0; i < len; i++) {
+        const uint16_t at = (uint16_t)(start + i);
+        debug_write6502(at, 0, buf[i + 2]);
+        dbg_load_note_byte(DAP_LOAD_CHANNEL, at, ram_bank, i == len - 1);
+    }
+    free(buf);
+    const bool debug_info = dbg_load_poll();
+
+    cJSON *body = cJSON_CreateObject();
+    dap_add_range_fields(body, start, false, len);
+    if (start >= 0xA000) cJSON_AddNumberToObject(body, "bank", ram_bank);
+    cJSON_AddBoolToObject(body, "debugInfo", debug_info);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // Run one request, whoever it came from. Returns 1 if execution mode was changed.
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
@@ -6156,6 +6485,11 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/loadSymbols")) result = handle_x16_load_symbols(seq, args);
     else if (!strcmp(cmd, "x16/lookupSymbol")) result = handle_x16_lookup_symbol(seq, args);
     else if (!strcmp(cmd, "x16/listSymbols")) result = handle_x16_list_symbols(seq, args);
+    else if (!strcmp(cmd, "x16/hashMemory")) result = handle_x16_hash_memory(seq, args);
+    else if (!strcmp(cmd, "x16/dumpMemory")) result = handle_x16_dump_memory(seq, args);
+    else if (!strcmp(cmd, "x16/setWarp")) result = handle_x16_set_warp(seq, args);
+    else if (!strcmp(cmd, "x16/mouse")) result = handle_x16_mouse(seq, args);
+    else if (!strcmp(cmd, "x16/loadPrg")) result = handle_x16_load_prg(seq, args);
     else if (!strcmp(cmd, "x16/sdcard"))    result = handle_x16_sdcard(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxStats")) result = handle_x16_sprite_mux_stats(seq, args);
     else if (!strcmp(cmd, "x16/spriteMuxConfig")) result = handle_x16_sprite_mux_config(seq, args);
@@ -6236,6 +6570,7 @@ static const char *const callable_commands[] = {
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols",
+    "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {

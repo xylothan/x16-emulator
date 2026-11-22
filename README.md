@@ -1459,10 +1459,15 @@ debugging it.
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
-| Input | `type_text`, `send_key`, `joystick` |
+| Input | `type_text`, `send_key`, `joystick`, `mouse` |
 | Screen | `get_screen`, `screenshot` |
 | VERA | `get_vera_state` |
+| Files and speed | `hash_memory`, `dump_memory`, `load_prg`, `set_warp` |
 | Other | `save_state`, `load_state`, `perf_stats` |
+
+`dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
+refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
+program or update BASIC's pointers.
 
 Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
 moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` answer when the
