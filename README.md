@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1491,7 +1491,7 @@ debugging it.
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack`, `evaluate` |
-| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints` |
+| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
@@ -1509,6 +1509,13 @@ program or update BASIC's pointers.
 `evaluate` takes the expression language above and nothing else. It cannot assign, and the debug
 console's commands (`bp_clear`, `reset` and the rest) do not exist there. `$C000` is a number, so
 read memory with `byte[$C000]`.
+
+A logpoint prints a line and keeps running. `set_breakpoint` takes it as `log`, a DAP client as
+`logMessage`, and the Breakpoints panel has a field for it on each row. `{expression}` parts use the
+language above and print in hex, `{{` and `}}` are literal braces, and an expression that fails
+prints its error in the line. The machine still stops if another client has a plain breakpoint at
+the same address. The last 1024 lines are kept: the Log panel shows them, a DAP client gets its own
+logpoints as `output` events, and `read_log` takes a cursor and reports how many lines were lost.
 
 `profile_capture` answers at once with the capture's state, so a client polls until it is `done`.
 A capture a client starts is its own to stop, and ends with its session. `perf_config`'s `enabled`

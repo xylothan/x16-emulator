@@ -342,6 +342,9 @@ set(X16_SOURCES
     src/debugger.c
     src/dbg_info.c
     src/dbg_expr.c
+    src/dbg_log.c
+    src/dbg_machine.c
+    src/logpoint.c
     src/dbg_load.c
     src/source_view.c
     src/insn_info.c
@@ -418,6 +421,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/breakpoints_panel.cpp
         src/debug_ui/panels/symbols_panel.cpp
         src/debug_ui/panels/callstack_panel.cpp
+        src/debug_ui/panels/log_panel.cpp
         src/debug_ui/panels/psg_panel.cpp
         src/debug_ui/panels/fm_panel.cpp
         src/debug_ui/panels/pcm_panel.cpp
@@ -752,6 +756,10 @@ x16_add_test(irq_ctx
 # Expressions read the machine through callbacks, so they link alone.
 x16_add_test(dbg_expr
     SOURCES tests/test_dbg_expr.c src/dbg_expr.c)
+
+# Log messages format through the same callbacks, so they link alone as well.
+x16_add_test(dbg_log
+    SOURCES tests/test_dbg_log.c src/dbg_log.c src/dbg_expr.c)
 
 # The unwinder reads memory through a callback, so it links alone too.
 x16_add_test(call_stack

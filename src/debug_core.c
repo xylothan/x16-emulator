@@ -153,7 +153,7 @@ debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoint *o
 }
 
 static void cond_forget_all(void);
-static void dump_release_for(const struct breakpoint *bp, uint16_t owners);
+static void claim_release_for(const struct breakpoint *bp, uint16_t owners);
 
 // ---------------------------------------------------------------------------
 //  Ownership
@@ -256,7 +256,7 @@ debug_bp_remove_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
 	if (idx < 0 || !(breakPoints[idx].owners & bit))
 		return false;
 
-	dump_release_for(&breakPoints[idx], bit);
+	claim_release_for(&breakPoints[idx], bit);
 	breakPoints[idx].owners &= (uint16_t)~bit;
 	if (breakPoints[idx].owners == 0)
 		bp_erase(idx);
@@ -274,7 +274,7 @@ debug_bp_clear_owner(debug_owner_t owner)
 	for (int i = numBreakpoints - 1; i >= 0; i--) {
 		if (!(breakPoints[i].owners & bit))
 			continue;
-		dump_release_for(&breakPoints[i], bit);
+		claim_release_for(&breakPoints[i], bit);
 		breakPoints[i].owners &= (uint16_t)~bit;
 		if (breakPoints[i].owners == 0) {
 			bp_erase(i);
@@ -290,7 +290,7 @@ debug_bp_delete(int pc, uint8_t bank, int x16Bank)
 	int idx = debug_bp_find(pc, bank, x16Bank);
 	if (idx < 0)
 		return false;
-	dump_release_for(&breakPoints[idx], 0xFFFFu);
+	claim_release_for(&breakPoints[idx], 0xFFFFu);
 	bp_erase(idx);
 	return true;
 }
@@ -371,6 +371,8 @@ struct bp_cond {
 	uint32_t ignore;
 	uint32_t hits;
 	struct bp_dump *dump;   // x16Dump: write memory and continue (NULL = stop)
+	void    *log[DEBUG_OWNER_COUNT];   // each owner's logpoint, opaque here
+	uint16_t log_owners;               // the owners that have one
 };
 
 // A DUMP breakpoint does not stop for its own owner: each firing -- after its
@@ -434,6 +436,33 @@ dump_write(struct bp_dump *d)
 	d->writes++;
 }
 
+// A logpoint prints instead of stopping for its own owner. The message and its
+// formatting live outside this file, which links without the emulator.
+void (*debug_bp_log_fire)(void *log, debug_owner_t owner, int pc, uint8_t bank,
+                          int x16Bank) = NULL;
+void (*debug_bp_log_free)(void *log)   = NULL;
+
+static void
+log_release(struct bp_cond *c, uint16_t owners)
+{
+	for (int i = 0; i < DEBUG_OWNER_COUNT; i++) {
+		const uint16_t bit = (uint16_t)(1u << i);
+		if ((owners & bit) && (c->log_owners & bit)) {
+			if (debug_bp_log_free)
+				debug_bp_log_free(c->log[i]);
+			c->log[i] = NULL;
+			c->log_owners &= (uint16_t)~bit;
+		}
+	}
+}
+
+static void
+cond_release(struct bp_cond *c)
+{
+	dump_release(c);
+	log_release(c, 0xFFFFu);
+}
+
 static struct bp_cond *bpConds     = NULL;
 static int             bpCondCount = 0;
 static int             bpCondCap   = 0;
@@ -442,7 +471,7 @@ static void
 cond_forget_all(void)
 {
 	for (int i = 0; i < bpCondCount; i++) {
-		dump_release(&bpConds[i]);
+		cond_release(&bpConds[i]);
 		bpConds[i].used = false;
 	}
 }
@@ -458,14 +487,17 @@ cond_find(int pc, uint8_t bank, int x16Bank){
 	return NULL;
 }
 
-// A dump goes when the owner that set it lets go, whoever else still holds the
-// entry: left on the record, it would keep writing for nobody.
+// A dump or logpoint goes when the owner that set it lets go, whoever else still
+// holds the entry: left on the record, it would keep firing for nobody.
 static void
-dump_release_for(const struct breakpoint *bp, uint16_t owners)
+claim_release_for(const struct breakpoint *bp, uint16_t owners)
 {
 	struct bp_cond *c = cond_find(bp->pc, bp->bank, bp->x16Bank);
-	if (c && c->dump && (c->dump->owner & owners))
+	if (!c)
+		return;
+	if (c->dump && (c->dump->owner & owners))
 		dump_release(c);
+	log_release(c, owners);
 }
 
 static struct bp_cond *
@@ -478,7 +510,7 @@ cond_ensure(int pc, uint8_t bank, int x16Bank)
 	for (int i = 0; i < bpCondCount; i++) {
 		if (!bpConds[i].used) {
 			c = &bpConds[i];
-			dump_release(c);    // a reused slot may still own a dump file
+			cond_release(c);    // a reused slot may still own a dump file or logpoint
 			break;
 		}
 	}
@@ -588,15 +620,22 @@ debug_bp_on_arrival(int pc, uint8_t bank)
 
 		c->hits++;
 		if (c->hits > c->ignore) {
-			const uint16_t dumper = c->dump ? c->dump->owner : 0;
-			if (breakPoints[i].owners & dumper) {
+			const uint16_t owners = breakPoints[i].owners;
+			const uint16_t dumper = (c->dump ? c->dump->owner : 0) & owners;
+			const uint16_t logger = c->log_owners & owners;
+			if (dumper)
 				dump_write(c->dump);
-				// Any other owner on this entry asked for a stop.
-				if (breakPoints[i].owners & (uint16_t)~dumper)
-					stop = true;
-			} else {
-				stop = true;
+			if (logger && debug_bp_log_fire) {
+				for (int o = 0; o < DEBUG_OWNER_COUNT; o++) {
+					if (logger & (1u << o))
+						debug_bp_log_fire(c->log[o], (debug_owner_t)o, breakPoints[i].pc,
+						                  breakPoints[i].bank, breakPoints[i].x16Bank);
+				}
 			}
+			// Any owner here that neither dumps nor logs asked for a stop.
+			const uint16_t quiet = dumper | logger;
+			if (!quiet || (owners & (uint16_t)~quiet))
+				stop = true;
 		}
 		// still inside the ignore count: counted, but keep running
 	}
@@ -630,7 +669,7 @@ debug_bp_forget(int pc, uint8_t bank, int x16Bank)
 {
 	struct bp_cond *c = cond_find(pc, bank, x16Bank);
 	if (c) {
-		dump_release(c);
+		cond_release(c);
 		c->used = false;
 	}
 }
@@ -720,6 +759,46 @@ debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank)
 	return (c && c->dump) ? c->dump->writes : 0;
 }
 
+bool
+debug_bp_set_log(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, void *log)
+{
+	const uint16_t bit = owner_bit(owner);
+	const int      idx = debug_bp_find(pc, bank, x16Bank);
+	if (!bit || !log || idx < 0 || !(breakPoints[idx].owners & bit))
+		return false;
+	struct bp_cond *c = cond_ensure(pc, bank, x16Bank);
+	if (!c)
+		return false;
+	log_release(c, bit);
+	c->log[owner] = log;
+	c->log_owners |= bit;
+	return true;
+}
+
+void
+debug_bp_clear_log_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
+{
+	struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	if (c)
+		log_release(c, owner_bit(owner));
+}
+
+void *
+debug_bp_log_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
+{
+	const struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	return c && (c->log_owners & owner_bit(owner)) ? c->log[owner] : NULL;
+}
+
+uint16_t
+debug_bp_quiet_owners(int pc, uint8_t bank, int x16Bank)
+{
+	const struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	if (!c)
+		return 0;
+	return (uint16_t)((c->dump ? c->dump->owner : 0) | c->log_owners);
+}
+
 void
 debug_bp_set_ignore(int pc, uint8_t bank, int x16Bank, uint32_t ignore)
 {
@@ -775,7 +854,7 @@ debug_core_free(void)
 	bp_map_rebuild();
 
 	for (int i = 0; i < bpCondCount; i++)
-		dump_release(&bpConds[i]);
+		cond_release(&bpConds[i]);
 	free(bpConds);
 	bpConds     = NULL;
 	bpCondCount = 0;

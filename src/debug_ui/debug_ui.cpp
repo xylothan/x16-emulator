@@ -1154,6 +1154,7 @@ static const DebugPanelPlacement s_placement[] = {
     // on -- the loop below takes the first entry per slot as that slot's front.
     {"I/O",          DOCK_BOTTOM},
     {"Profile",      DOCK_BOTTOM},
+    {"Log",          DOCK_BOTTOM},
 };
 
 // A representative, long-established window for each slot. Used to find the

@@ -21,6 +21,30 @@ static uint8_t g_mem[0x10000];
 static uint8_t g_ram_bank = 0;
 static uint8_t g_rom_bank = 0;
 
+// Logpoint hooks: record what fired and what was released.
+#define LOG_TOKENS 8
+static int  g_log_fired[LOG_TOKENS];
+static int  g_log_freed[LOG_TOKENS];
+static int  g_log_owner;
+static int  g_log_pc;
+static char g_log_token[LOG_TOKENS];
+
+static void
+log_fire(void *log, debug_owner_t owner, int pc, uint8_t bank, int x16Bank)
+{
+	(void)bank;
+	(void)x16Bank;
+	g_log_fired[(char *)log - g_log_token]++;
+	g_log_owner = owner;
+	g_log_pc    = pc;
+}
+
+static void
+log_free(void *log)
+{
+	g_log_freed[(char *)log - g_log_token]++;
+}
+
 // The four CPU configurations; three change register comparison width.
 typedef enum { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8, CPU_816_NATIVE_16 } cpu_mode_t;
 
@@ -1662,6 +1686,107 @@ main(void)
 		debug_bp_clear_all();
 		check(!debug_bp_maybe_at(0x8000) && !debug_bp_maybe_at(0x1000),
 		      "map: clear-all empties it");
+		reset_all();
+	}
+
+	// --- Logpoints -----------------------------------------------------------
+	{
+		debug_bp_log_fire = log_fire;
+		debug_bp_log_free = log_free;
+		memset(g_log_fired, 0, sizeof g_log_fired);
+		memset(g_log_freed, 0, sizeof g_log_freed);
+		void *const t0 = &g_log_token[0], *const t1 = &g_log_token[1], *const t2 = &g_log_token[2];
+
+		check(!debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t0),
+		      "log: refused where the owner holds no breakpoint");
+		check(g_log_freed[0] == 0, "log: a refused message is left with the caller");
+
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		check(debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t0), "log: set");
+		check(debug_bp_log_for(0x8000, 0, -1, DEBUG_OWNER_MCP) == t0, "log: reads back");
+		check(!debug_bp_log_for(0x8000, 0, -1, DEBUG_OWNER_UI), "log: is per owner");
+		check(debug_bp_quiet_owners(0x8000, 0, -1) == (1u << DEBUG_OWNER_MCP), "log: owner is quiet");
+
+		check(!debug_bp_on_arrival(0x8000, 0), "log: does not stop its own owner");
+		check(g_log_fired[0] == 1 && g_log_owner == DEBUG_OWNER_MCP && g_log_pc == 0x8000,
+		      "log: fires with its owner and address");
+		check(debug_bp_get_hits(0x8000, 0, -1) == 1, "log: counts the hit");
+
+		// Another owner's plain breakpoint at the same address still stops.
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_on_arrival(0x8000, 0), "log: another owner's plain breakpoint stops");
+		check(g_log_fired[0] == 2, "log: and the logpoint still fires");
+
+		// Both owners logging: nobody asked for a stop.
+		check(debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_DAP_SOURCE, t1), "log: second owner");
+		check(!debug_bp_on_arrival(0x8000, 0), "log: two logpoints do not stop");
+		check(g_log_fired[0] == 3 && g_log_fired[1] == 1, "log: each owner's fires");
+
+		// A third, plain owner stops it again and a release leaves the rest.
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_CLI);
+		check(debug_bp_on_arrival(0x8000, 0), "log: a third owner's plain breakpoint stops");
+		debug_bp_remove_for(0x8000, 0, -1, DEBUG_OWNER_CLI);
+		check(!debug_bp_on_arrival(0x8000, 0), "log: quiet again once it lets go");
+
+		// Replacing frees the old message; removing a claim frees that owner's.
+		check(debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t2), "log: replace");
+		check(g_log_freed[0] == 1, "log: the replaced message is released");
+		debug_bp_remove_for(0x8000, 0, -1, DEBUG_OWNER_MCP);
+		check(g_log_freed[2] == 1, "log: released with its owner's claim");
+		check(g_log_freed[1] == 0, "log: the other owner's stays");
+		check(!debug_bp_on_arrival(0x8000, 0), "log: the survivor still logs");
+		check(g_log_fired[1] == 4 && g_log_fired[2] == 0, "log: and only the survivor");
+
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		check(g_log_freed[1] == 1, "log: released by clearing the owner");
+		check(!debug_bp_is_set(0x8000, 0), "log: nothing left armed");
+		reset_all();
+
+		// The condition and ignore budget gate it like any breakpoint.
+		memset(g_log_fired, 0, sizeof g_log_fired);
+		memset(g_log_freed, 0, sizeof g_log_freed);
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t0);
+		debug_bp_set_condition(0x8000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 7);
+		debug_bp_set_ignore(0x8000, 0, -1, 1);
+		regs.c = 1;
+		check(!debug_bp_on_arrival(0x8000, 0) && g_log_fired[0] == 0, "log: gated by its condition");
+		regs.c = 7;
+		check(!debug_bp_on_arrival(0x8000, 0) && g_log_fired[0] == 0, "log: gated by its ignore count");
+		check(!debug_bp_on_arrival(0x8000, 0) && g_log_fired[0] == 1, "log: fires past both");
+		debug_bp_set_enabled(0x8000, 0, -1, false);
+		check(!debug_bp_on_arrival(0x8000, 0) && g_log_fired[0] == 1, "log: a disabled one is silent");
+		debug_bp_set_enabled(0x8000, 0, -1, true);
+
+		debug_bp_forget(0x8000, 0, -1);
+		check(g_log_freed[0] == 1, "log: released by forget");
+		check(!debug_bp_log_for(0x8000, 0, -1, DEBUG_OWNER_MCP), "log: and gone");
+		reset_all();
+
+		// Delete and clear-all release everyone's.
+		memset(g_log_freed, 0, sizeof g_log_freed);
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_UI);
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t0);
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_UI, t1);
+		check(debug_bp_delete(0x8000, 0, -1), "log: delete");
+		check(g_log_freed[0] == 1 && g_log_freed[1] == 1, "log: delete releases every owner's");
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t2);
+		debug_bp_clear_all();
+		check(g_log_freed[2] == 1, "log: clear-all releases it");
+
+		// One slot of the table, then the pointer is gone: no call through NULL.
+		debug_bp_log_fire = NULL;
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, t0);
+		check(!debug_bp_on_arrival(0x8000, 0), "log: quiet with no hook installed");
+		debug_bp_log_fire = log_fire;
+		memset(g_log_freed, 0, sizeof g_log_freed);
+		debug_core_free();
+		check(g_log_freed[0] == 1, "log: released at shutdown");
+		debug_bp_log_fire = NULL;
+		debug_bp_log_free = NULL;
 		reset_all();
 	}
 

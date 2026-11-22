@@ -1309,6 +1309,11 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     cJSON *dp = args ? cJSON_GetObjectItemCaseSensitive(args, "dump") : NULL;
     if (dp && ki && strcmp(ki->valuestring, "exec"))
         return tool_fail("'dump' applies to an exec breakpoint");
+    cJSON *lg = args ? cJSON_GetObjectItemCaseSensitive(args, "log") : NULL;
+    if (lg && !cJSON_IsString(lg))
+        return tool_fail("'log' must be a string");
+    if (lg && ki && strcmp(ki->valuestring, "exec"))
+        return tool_fail("'log' applies to an exec breakpoint");
 
     cJSON *call = cJSON_CreateObject();
     cJSON_AddStringToObject(call, "address", ref);
@@ -1328,6 +1333,7 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
         }
         cJSON_AddItemToObject(call, "dump", converted);
     }
+    if (lg) cJSON_AddStringToObject(call, "log", lg->valuestring);
     dbg_reply_t r;
     debug_server_call(command, call, &r);
     cJSON_Delete(call);
@@ -1385,6 +1391,10 @@ static cJSON *tool_evaluate(cJSON *args) {
     if (!e || !cJSON_IsString(e))
         return tool_fail("'expression' is required, e.g. \"byte[$0400] + 1\"");
     return tool_forward("mcp/evaluate", args);
+}
+
+static cJSON *tool_read_log(cJSON *args) {
+    return tool_forward("x16/readLog", args);
 }
 
 static cJSON *tool_list_sources(cJSON *args) {
@@ -1964,7 +1974,11 @@ static const mcp_tool_t tools[] = {
       "stopping: a 4-byte hit index, then each region. The file must not exist and must be "
       "inside -fsroot, or the dump folder when there is no -fsroot; it stops growing at 256 MiB. "
       "Another client's plain breakpoint at the same address still stops the machine, and "
-      "alsoStops says so. list_breakpoints reports the writes.",
+      "alsoStops says so. list_breakpoints reports the writes. "
+      "'log' makes an exec breakpoint print a line and keep running, read with read_log. "
+      "{expression} parts use the language of evaluate, {{ and }} are literal braces, and a "
+      "bad expression prints its error in the line. Another client's plain breakpoint at the "
+      "same address still stops the machine, and alsoStops says so.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
@@ -1984,7 +1998,8 @@ static const mcp_tool_t tools[] = {
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}}"
-      "},\"required\":[\"file\",\"regions\"],\"additionalProperties\":false}"
+      "},\"required\":[\"file\",\"regions\"],\"additionalProperties\":false},"
+      "\"log\":{\"type\":\"string\",\"maxLength\":255,\"description\":\"e.g. A={A} at {word[R0]}\"}"
       "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_set_breakpoint },
     { "remove_breakpoint",
@@ -2017,6 +2032,17 @@ static const mcp_tool_t tools[] = {
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
       NO_ARGS, TOOL_READ, tool_list_breakpoints },
+    { "read_log",
+      "Lines printed by logpoints, from every client, oldest first. Changes nothing: pass the "
+      "returned cursor back to get what came after it, so several clients can each follow the "
+      "log. Without a cursor, starts at the oldest line held. The server keeps the last 1024 "
+      "lines, and 'lost' counts those overwritten between your cursor and the oldest. 'more' "
+      "means another call would return lines now.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"cursor\":{\"type\":\"integer\",\"minimum\":0},"
+      "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256,\"default\":100}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_read_log },
     { "load_symbols",
       "Load an ld65 -Ln label file (lines like \"al 00C000 .name\"), so its names work as "
       "addresses and appear in disassembly. Loading the same file again replaces its labels. "
