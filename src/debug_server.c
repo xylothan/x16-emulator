@@ -837,6 +837,17 @@ static const char *dap_path_out(const char *path, char *buf, size_t n) {
     return buf;
 }
 
+// A reply goes to whoever called, and only a DAP client chose a format. An MCP
+// tool always gets 1-based lines and native paths, whatever an attached editor
+// asked for. Events stay on dap_line_out and dap_path_out: they are the editor's
+// even when an MCP request is what caused them.
+static int caller_line_out(int line) {
+    return current_caller == DBG_CALLER_DAP ? dap_line_out(line) : line;
+}
+static const char *caller_path_out(const char *path, char *buf, size_t n) {
+    return current_caller == DBG_CALLER_DAP ? dap_path_out(path, buf, n) : path;
+}
+
 static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON *lb = args ? cJSON_GetObjectItemCaseSensitive(args, "linesStartAt1") : NULL;
     cJSON *cb = args ? cJSON_GetObjectItemCaseSensitive(args, "columnsStartAt1") : NULL;
@@ -4373,7 +4384,7 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
                     && dap_bps[j].x16Bank == bp->x16Bank) {
                     cJSON_AddNumberToObject(o, "dapId", dap_bps[j].dap_id);
                     cJSON_AddStringToObject(o, "file", dap_bps[j].file);
-                    cJSON_AddNumberToObject(o, "line", dap_line_out(dap_bps[j].line));
+                    cJSON_AddNumberToObject(o, "line", caller_line_out(dap_bps[j].line));
                     break;
                 }
             }
@@ -4699,9 +4710,9 @@ static void dap_add_instruction(cJSON *arr, uint8_t bank, const code_map_line_t 
     if (dbg_info_addr_to_source(ln->addr, &src_file, &src_line)) {
         char uri[1024];
         cJSON *source = cJSON_CreateObject();
-        cJSON_AddStringToObject(source, "path", dap_path_out(src_file, uri, sizeof uri));
+        cJSON_AddStringToObject(source, "path", caller_path_out(src_file, uri, sizeof uri));
         cJSON_AddItemToObject(inst, "location", source);
-        cJSON_AddNumberToObject(inst, "line", dap_line_out(src_line));
+        cJSON_AddNumberToObject(inst, "line", caller_line_out(src_line));
     }
     cJSON_AddItemToArray(arr, inst);
 }
