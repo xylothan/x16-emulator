@@ -1,7 +1,7 @@
 // VERA PCM FIFO and registers, checked against the RTL.
 //
 //   repo:  https://github.com/X16Community/vera-module
-//   tag:   v47.0.2 (45cc1f05)
+//   tag:   v48.0.1 (6e8bea68)
 //   files: fpga/source/audio/audio_fifo.v
 //          fpga/source/audio/pcm.v
 //          fpga/source/top.v
@@ -37,7 +37,7 @@ fill(unsigned count, uint8_t first)
 }
 
 // audio_fifo.v:31-34   if (rst) begin wridx_r <= 0; rdidx_r <= 0; rddata <= 0; end
-// top.v:540-544        audio_pcm_sample_rate_r <= 0; ... audio_pcm_volume_r <= 0;
+// top.v:541-545        audio_pcm_sample_rate_r <= 0; ... audio_pcm_volume_r <= 0;
 static void
 test_reset_clears_pointers_and_registers(void)
 {
@@ -75,7 +75,7 @@ test_fifo_depth_is_one_less_than_its_memory(void)
 	         "a write to a full FIFO is dropped");
 }
 
-// top.v:227   5'h1B: rddata = {audio_fifo_full, audio_fifo_empty,
+// top.v:230   5'h1B: rddata = {audio_fifo_full, audio_fifo_empty,
 //                              audio_mode_16bit_r, audio_mode_stereo_r,
 //                              audio_pcm_volume_r};
 //
@@ -116,7 +116,7 @@ test_almost_empty_is_strictly_below_1024(void)
 	check(!state().almost_empty, "and the debug view agrees");
 }
 
-// top.v:473-477   if (do_write && access_addr == 5'h1B) begin
+// top.v:474-478   if (do_write && access_addr == 5'h1B) begin
 //                     audio_fifo_reset_next  = write_data[7];
 //                     audio_mode_16bit_next  = write_data[5];
 //                     audio_mode_stereo_next = write_data[4];
@@ -135,8 +135,8 @@ test_ctrl_stores_mode_and_volume_only(void)
 	check_eq(state().ctrl, 0x15u, "stereo and volume 5 are stored");
 }
 
-// top.v:474   audio_fifo_reset_next = write_data[7];
-// top.v:320   audio_fifo_reset_next = 0;          // default, every cycle
+// top.v:475   audio_fifo_reset_next = write_data[7];
+// top.v:321   audio_fifo_reset_next = 0;          // default, every cycle
 // pcm.v:31    wire audio_fifo_reset = rst || fifo_reset;
 //
 // One-shot: resets both pointers and is not stored.
@@ -151,9 +151,9 @@ test_ctrl_bit7_resets_the_fifo(void)
 }
 
 // top.v:139       reg [7:0] audio_pcm_sample_rate_r, audio_pcm_sample_rate_next;
-// top.v:479-480   if (do_write && access_addr == 5'h1C) begin
+// top.v:480-481   if (do_write && access_addr == 5'h1C) begin
 //                     audio_pcm_sample_rate_next = write_data;
-// top.v:228       5'h1C: rddata = audio_pcm_sample_rate_r;
+// top.v:231       5'h1C: rddata = audio_pcm_sample_rate_r;
 //
 // Stored and read back unchanged.
 static void
@@ -197,7 +197,7 @@ test_rates_above_128_alias(void)
 	check_eq(bytes_played(255, 256), 2u, "rate 255 plays at the speed of 1");
 }
 
-// top.v:473-477   decodes bits 7, 5, 4 and 3:0 of 0x1B; bit 6 is ignored.
+// top.v:474-478   decodes bits 7, 5, 4 and 3:0 of 0x1B; bit 6 is ignored.
 // audio_fifo.v:33,44   the only assignments to rdidx_r.
 static void
 test_ctrl_bit6_is_ignored(void)
@@ -218,7 +218,7 @@ test_ctrl_bit6_is_ignored(void)
 	check_eq(state().fifo_cnt, cnt_before, "bit 6 leaves the queued count alone");
 }
 
-// top.v:474   audio_fifo_reset_next = write_data[7];
+// top.v:475   audio_fifo_reset_next = write_data[7];
 //
 // Bit 7 resets regardless of bit 6. A drained FIFO stays empty.
 static void

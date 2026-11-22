@@ -9,8 +9,7 @@ Compares the two declarations; the RTL need not be present.
 Claim and oracle differ:
 
     claimed    49.0.6     video.c; no public RTL
-    oracle     v47.0.2    VERA test citations
-    psg.v      v48.0.1    vera_psg.c:122-123
+    oracle     v48.0.1    VERA test citations
 """
 
 import re
@@ -24,10 +23,10 @@ FETCH = ROOT / "tests" / "fetch_vera_rtl.py"
 # The version the emulator claims, and the tag the VERA tests cite.
 CLAIMED_VERSION = (49, 0, 6)
 
-# Oracle version. The RTL at this tag reports 47.0.0 (top.v:191, 199, 207).
-EXPECTED_VERSION = (47, 0, 2)
-EXPECTED_TAG = "v47.0.2"
-EXPECTED_COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"
+# Oracle version. The RTL at this tag reports 48.0.1 (top.v:194, 202, 210).
+EXPECTED_VERSION = (48, 0, 1)
+EXPECTED_TAG = "v48.0.1"
+EXPECTED_COMMIT = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"
 
 
 def emulator_version():

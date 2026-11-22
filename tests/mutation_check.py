@@ -46,7 +46,7 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_pcm"],
     },
-    # No AUDIO_RATE fold mutation: top.v:480 stores raw; recorded as a divergence.
+    # No AUDIO_RATE fold mutation: top.v:481 stores raw; recorded as a divergence.
     {
         "name": "VERA debug reads report a constant",
         "file": "src/video.c",
@@ -59,7 +59,7 @@ MUTATIONS = [
     {
         "name": "VERA DCSEL is truncated to four bits",
         "file": "src/video.c",
-        # top.v:86 declares dc_select_r as [5:0] and top.v:336 fills it from
+        # top.v:89 declares dc_select_r as [5:0] and top.v:337 fills it from
         # write_data[6:1]. Narrowing it silently aliases the high banks onto
         # the low ones.
         "find": "io_dcsel = (value >> 1) & 0x3f;",
@@ -129,7 +129,7 @@ MUTATIONS = [
     {
         "name": "VERA ISR clears on a written zero",
         "file": "src/video.c",
-        # top.v:440-442 clear a latch when the written bit is one:
+        # top.v:441-443 clear a latch when the written bit is one:
         #   irq_status_vsync_next = irq_status_vsync_r & !write_data[0];
         # Inverting that acknowledges every pending source whenever a program clears one.
         "find": "isr &= value ^ 0xff;",
@@ -140,7 +140,7 @@ MUTATIONS = [
     {
         "name": "VERA IEN stores a fifth enable bit",
         "file": "src/video.c",
-        # top.v:175 reads bits 5:4 as 2'b0 and top.v:433-436 give them no write
+        # top.v:178 reads bits 5:4 as 2'b0 and top.v:434-437 give them no write
         # target, so a program cannot store anything there.
         "find": "ien = value & 0xF;",
         "into": "ien = value & 0x1F;",
@@ -150,7 +150,7 @@ MUTATIONS = [
     {
         "name": "VERA IRQLINE bit 8 comes from the wrong IEN bit",
         "file": "src/video.c",
-        # top.v:432  irq_line_next[8] = write_data[7];
+        # top.v:433  irq_line_next[8] = write_data[7];
         # The compare value is split across $9F26 and $9F28; taking the high
         # bit from bit 6 puts it where the scanline readback is instead.
         "find": "irq_line = (irq_line & 0xFF) | ((value >> 7) << 8);",
@@ -161,7 +161,7 @@ MUTATIONS = [
     {
         "name": "VERA ISR bit 3 latches instead of following the FIFO",
         "file": "src/video.c",
-        # top.v:176 takes bit 3 from the audio_fifo_low wire, not a latch, so
+        # top.v:179 takes bit 3 from the audio_fifo_low wire, not a latch, so
         # it reports the FIFO level at the instant of the read.
         "find": "case 0x07: return isr | (pcm_is_fifo_almost_empty() ? 8 : 0);",
         "into": "case 0x07: return isr;",
@@ -171,7 +171,7 @@ MUTATIONS = [
     {
         "name": "VERA asserts IRQ regardless of the enables",
         "file": "src/video.c",
-        # top.v:1200  assign extbus_irq_n = (irq_status & irq_enable) == 0;
+        # top.v:1201  assign extbus_irq_n = (irq_status & irq_enable) == 0;
         # Dropping the mask interrupts on every VSYNC.
         "find": "return (tmp_isr & ien) != 0;",
         "into": "return tmp_isr != 0;",
@@ -181,7 +181,7 @@ MUTATIONS = [
     {
         "name": "VERA IEN bit 6 reports a stored bit, not the scanline",
         "file": "src/video.c",
-        # top.v:175 sources bit 6 from scanline[8], live, with nothing writing it.
+        # top.v:178 sources bit 6 from scanline[8], live, with nothing writing it.
         "find": "((scanline & 0x100) >> 2)",
         "into": "0",
         "count": 1,
@@ -411,7 +411,7 @@ MUTATIONS = [
     {
         "name": "VERA tile base takes in the two size bits",
         "file": "src/video.c",
-        # top.v:383-384 forces tile_baseaddr[1:0] to zero on write; bits 1 and 0
+        # top.v:384-385 forces tile_baseaddr[1:0] to zero on write; bits 1 and 0
         # of the register are the tile height and width. Letting them into the
         # address moves the tile data whenever the tile size changes.
         "find": "props->tile_base      = (reg_layer[layer][2] & 0xFC) << 9;",
@@ -433,7 +433,7 @@ MUTATIONS = [
     {
         "name": "VERA layer 1 registers are written to layer 0",
         "file": "src/video.c",
-        # top.v:219-225 gives layer 1 its own registers at 5'h14-5'h1A. One
+        # top.v:222-228 gives layer 1 its own registers at 5'h14-5'h1A. One
         # bank behind both sets of addresses would leave the two layers sharing
         # a configuration.
         "find": "reg_layer[1][reg - 0x14] = value;",
@@ -466,7 +466,7 @@ MUTATIONS = [
     {
         "name": "VERA tile height is read from the tile width bit",
         "file": "src/video.c",
-        # top.v:386-387 takes height from write_data[1] and width from
+        # top.v:387-388 takes height from write_data[1] and width from
         # write_data[0]. Swapping them changes which bits of the scrolled line
         # index select the row, per layer_renderer.v:82.
         "find": "props->tileh_log2 = 3 + ((reg_layer[layer][2] >> 1) & 1);",

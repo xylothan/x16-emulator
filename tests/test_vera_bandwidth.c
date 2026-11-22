@@ -1,6 +1,6 @@
 // Checks for VERA VRAM bandwidth accounting (src/vera_bandwidth.c).
 //
-// The tables are quoted from X16Community/vera-module at tag v47.0.2 (tests/fetch_vera_rtl.py).
+// The tables are quoted from X16Community/vera-module at tag v48.0.1 (tests/fetch_vera_rtl.py).
 //
 // Drives vera_bandwidth.c directly: no CPU, memory, video or SDL.
 

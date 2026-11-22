@@ -1,9 +1,8 @@
 // VERA's interrupt latch and mask: IEN ($9F26) and ISR ($9F27).
 //
-// ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
-// (45cc1f053376dae12173ea63612820e4d289c0da). `python tests/fetch_vera_rtl.py`
-// retrieves the sources. IRQ logic is identical at v48.0.1, three lines further
-// down top.v.
+// ORACLE: B -- X16Community/vera-module Verilog, tag v48.0.1
+// (6e8bea68a5a04687149e27b1b7b3726fb01405f4). `python tests/fetch_vera_rtl.py`
+// retrieves the sources.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -55,7 +54,7 @@ read_ien(void)
 	return video_read(VERA_IEN, false);
 }
 
-// top.v:529-536
+// top.v:530-537
 //     irq_enable_audio_fifo_low_r   <= 0;
 //     irq_enable_vsync_r            <= 0;
 //     irq_enable_line_r             <= 0;
@@ -82,7 +81,7 @@ test_reset_clears_the_enables_the_latches_and_irqline(void)
 	check_eq(line, 0, "reset clears IRQLINE");
 }
 
-// top.v:334-335
+// top.v:335-336
 //     if (do_write && access_addr == 5'h05) begin
 //         fpga_reconfigure_next = write_data[7];
 // CTRL bit 7 reaches the reset block above.
@@ -99,7 +98,7 @@ test_ctrl_bit_7_resets_the_irq_registers(void)
 	check_eq(read_isr() & 0x07, 0, "CTRL bit 7 clears the status latches");
 }
 
-// top.v:431-437
+// top.v:432-438
 //     if (do_write && access_addr == 5'h06) begin
 //         irq_line_next[8]                 = write_data[7];
 //         irq_enable_audio_fifo_low_next   = write_data[3];
@@ -108,7 +107,7 @@ test_ctrl_bit_7_resets_the_irq_registers(void)
 //         irq_enable_vsync_next            = write_data[0];
 //     end
 //
-// top.v:175
+// top.v:178
 //     5'h06: rddata = {irq_line_r[8], scanline[8], 2'b0, irq_enable_audio_fifo_low_r, irq_enable_sprite_collision_r, irq_enable_line_r, irq_enable_vsync_r};
 static void
 test_ien_stores_four_enables_and_nothing_else(void)
@@ -124,7 +123,7 @@ test_ien_stores_four_enables_and_nothing_else(void)
 	video_write(VERA_IEN, 0x30);
 	check_eq(read_ien() & 0x3F, 0, "IEN bits 5 and 4 store nothing");
 
-	// A fifth stored bit would be masked on read; top.v:433-436 assign four flops.
+	// A fifth stored bit would be masked on read; top.v:434-437 assign four flops.
 	uint8_t stored = 0xFF;
 	video_get_irq_state(&stored, NULL, NULL);
 	check_eq(stored, 0, "and reach no enable register behind it");
@@ -154,11 +153,11 @@ test_ien_bit_6_reports_the_scanline(void)
 	check_eq(video_read(VERA_IRQLINE, false), 0, "as the low byte wraps to zero");
 }
 
-// top.v:444-446
+// top.v:445-447
 //     if (do_write && access_addr == 5'h08) begin
 //         irq_line_next[7:0] = write_data;
 //     end
-// bit 8 arrives from IEN at top.v:432
+// bit 8 arrives from IEN at top.v:433
 static void
 test_irqline_spans_ien_bit_7_and_9f28(void)
 {
@@ -179,7 +178,7 @@ test_irqline_spans_ien_bit_7_and_9f28(void)
 	check_eq(line, 0x055, "so setting the enables clears bit 8 with them");
 }
 
-// top.v:438-443
+// top.v:439-444
 //     if (do_write && access_addr == 5'h07) begin
 //         // Clear status bits
 //         irq_status_sprite_collision_next = irq_status_sprite_collision_r & !write_data[2];
@@ -212,7 +211,7 @@ test_isr_latches_are_cleared_by_writing_one(void)
 	check_eq(read_isr(), IRQ_AFLOW, "and clears when its own bit is written");
 }
 
-// top.v:176 takes bit 3 from a wire, and the write above has no clause for it.
+// top.v:179 takes bit 3 from a wire, and the write above has no clause for it.
 //     5'h07: rddata = {sprite_collisions,   audio_fifo_low,              irq_status_sprite_collision_r, irq_status_line_r, irq_status_vsync_r};
 //
 // audio_fifo.v:24,28
@@ -241,7 +240,7 @@ test_aflow_is_live_and_cannot_be_written_away(void)
 	check_eq(read_isr() & IRQ_AFLOW, IRQ_AFLOW, "and emptying the FIFO brings it back");
 }
 
-// top.v:1197-1200
+// top.v:1198-1201
 //     wire [3:0] irq_enable = {irq_enable_audio_fifo_low_r, irq_enable_sprite_collision_r, irq_enable_line_r, irq_enable_vsync_r};
 //     wire [3:0] irq_status = {audio_fifo_low,              irq_status_sprite_collision_r, irq_status_line_r, irq_status_vsync_r};
 //
@@ -268,7 +267,7 @@ test_the_irq_line_is_status_and_enable(void)
 	check(!video_get_irq_out(), "and clearing that latch releases it");
 }
 
-// top.v:175-176 reads have no side effect; only the write at top.v:438-443 clears.
+// top.v:178-179 reads have no side effect; only the write at top.v:439-444 clears.
 static void
 test_reading_the_status_does_not_clear_it(void)
 {
@@ -368,7 +367,7 @@ test_the_nibble_is_replaced_each_frame_while_the_latch_holds(void)
 	check_eq(read_isr() & IRQ_SPRCOL, IRQ_SPRCOL, "while the status latch holds until written");
 }
 
-// top.v:440 clears the status latch and nothing beside it:
+// top.v:441 clears the status latch and nothing beside it:
 //     irq_status_sprite_collision_next = irq_status_sprite_collision_r & !write_data[2];
 static void
 test_clearing_the_status_leaves_the_nibble(void)
@@ -388,7 +387,7 @@ test_clearing_the_status_leaves_the_nibble(void)
 	                "a write of $FF acknowledges the latches without disturbing the nibble",
 	                "video.c:2910 clears all eight bits, but ISR bits 7:4 are "
 	                "sprite_renderer.v's frame_collision_mask_r, which the write at "
-	                "top.v:438-443 cannot reach; on the machine the nibble holds until "
+	                "top.v:439-444 cannot reach; on the machine the nibble holds until "
 	                "the next vblank replaces it");
 }
 
@@ -408,7 +407,7 @@ test_masks_collide_only_where_they_overlap(void)
 	check_eq(read_isr() & IRQ_SPRCOL, 0, "and raise no collision status");
 }
 
-// top.v:1198 builds irq_status from four bits, and the nibble is not among
+// top.v:1199 builds irq_status from four bits, and the nibble is not among
 // them:
 //     wire [3:0] irq_status = {audio_fifo_low, irq_status_sprite_collision_r, irq_status_line_r, irq_status_vsync_r};
 static void
