@@ -348,6 +348,7 @@ dbg_load_poll(void)
 	dbg_load_event_t ev;
 	if (!dbg_load_take(&ev))
 		return false;
+	debug_server_note_program_load(ev.addr, ev.size);
 	if (!enabled || !ev.path[0])
 		return false;
 

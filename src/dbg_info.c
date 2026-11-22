@@ -31,6 +31,7 @@ typedef struct {
 	char  *name;
 	int    owner;     /* which .dbg declared it; see dbg_owner_intern() */
 	bool   hidden;    /* a cc65-generated intermediate; see refresh_line_type_state() */
+	unsigned revision; /* `changes` when its .dbg was last read */
 } dbg_file_t;
 
 typedef struct {
@@ -120,6 +121,7 @@ typedef struct {
 	char *path;
 	int   bank;
 	int   labels;
+	unsigned revision; /* `changes` when it was last read */
 } dbg_label_file_t;
 
 static dbg_label_file_t *label_files;
@@ -464,6 +466,9 @@ static int file_alias_get(long incoming)
 	return (int)incoming + id_base_file;    /* no alias recorded; the usual rule */
 }
 
+/* Bumped by everything that changes what is loaded (dbg_info_changes()). */
+static unsigned changes;
+
 static void parse_file_record(const char *p)
 {
 	long id = parse_int_key(p, "id");
@@ -486,6 +491,7 @@ static void parse_file_record(const char *p)
 		if (files[i].owner == cur_owner && files[i].name &&
 		    strcmp(files[i].name, name) == 0) {
 			file_alias_set(id, files[i].id);
+			files[i].revision = changes;
 			free(name);
 			return;
 		}
@@ -497,6 +503,7 @@ static void parse_file_record(const char *p)
 	files[file_count].name  = name;
 	files[file_count].owner = cur_owner;
 	files[file_count].hidden = false;   /* decided once the whole load is in */
+	files[file_count].revision = changes;
 	file_alias_set(id, files[file_count].id);
 	file_count++;
 }
@@ -1150,9 +1157,6 @@ static char *read_line(FILE *f, char **buf, size_t *cap)
 	}
 }
 
-/* Bumped by everything that changes what is loaded (dbg_info_changes()). */
-static unsigned changes;
-
 unsigned dbg_info_changes(void)
 {
 	return changes;
@@ -1640,6 +1644,7 @@ int dbg_info_load_labels_text(const char *path, const char *text, int bank)
 	/* The address lookups binary-search this. */
 	qsort(syms, (size_t)sym_count, sizeof(dbg_sym_t), sym_cmp);
 	changes++;
+	label_files[file].revision = changes;
 	return label_files[file].labels;
 }
 
@@ -1712,6 +1717,11 @@ bool dbg_info_label_file_at(int index, const char **path, int *bank, int *labels
 	if (labels)
 		*labels = label_files[index].labels;
 	return true;
+}
+
+unsigned dbg_info_label_file_revision(int index)
+{
+	return index >= 0 && index < label_file_count ? label_files[index].revision : 0;
 }
 
 /* ---- Names to addresses ---------------------------------------------------- */
@@ -2274,6 +2284,16 @@ bool dbg_info_all_file_at(int index, const char **name)
 		return false;
 	if (name)
 		*name = files[index].name;
+	return true;
+}
+
+bool dbg_info_source_at(int index, const char **name, unsigned *revision, bool *hidden)
+{
+	if (index < 0 || index >= file_count || !files[index].name)
+		return false;
+	*name     = files[index].name;
+	*revision = files[index].revision;
+	*hidden   = files[index].hidden;
 	return true;
 }
 

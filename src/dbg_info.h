@@ -161,6 +161,10 @@ void dbg_info_free_keep_labels(void);
 // free -- so something built from the debug info can tell it is stale.
 unsigned dbg_info_changes(void);
 
+// One record of the source file table, 0..dbg_info_all_file_count()-1, hidden
+// ones included. `revision` moves each time a .dbg naming the file is read.
+bool dbg_info_source_at(int index, const char **name, unsigned *revision, bool *hidden);
+
 // The .dbg files merged since the last dbg_info_free(), in the order first
 // read, as the paths they were loaded by. A module a later load displaced
 // stays listed: this is what has been read, not what still covers memory.
@@ -250,6 +254,8 @@ bool dbg_info_unload_labels(const char *path);
 int  dbg_info_label_file_count(void);
 // `path` is internal storage. Any of the out pointers may be NULL.
 bool dbg_info_label_file_at(int index, const char **path, int *bank, int *labels);
+// Moves each time the file is read, even with the same content.
+unsigned dbg_info_label_file_revision(int index);
 
 // The label exactly at `addr` that belongs to `bank` or to no bank in particular.
 // Two banks can hold different code at one address, and naming the other bank's

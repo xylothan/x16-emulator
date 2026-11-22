@@ -31,6 +31,9 @@ static inline bool debug_server_wait(uint32_t timeout_ms) { (void)timeout_ms; re
 static inline void debug_server_frame_end(void) { }
 static inline bool debug_server_step_pending(void) { return false; }
 static inline void debug_server_set_no_wait(bool on) { (void)on; }
+static inline void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count) { (void)vram; (void)addr; (void)count; }
+static inline void debug_server_note_registers_changed(void) { }
+static inline void debug_server_note_program_load(uint16_t addr, uint32_t size) { (void)addr; (void)size; }
 
 #else
 
@@ -103,6 +106,14 @@ bool debug_server_wait(uint32_t timeout_ms);
 // Called once per completed emulated frame, at the same point as the -input
 // script's frame tick, so frame numbers agree with input scripts.
 void debug_server_frame_end(void);
+
+// Something other than the DAP client changed the machine. Each only records it,
+// so each is safe inside the CPU loop; the next poll sends one coalesced event to
+// a client that asked for that kind. Never call these for a CPU store.
+void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count);
+void debug_server_note_registers_changed(void);
+// `size` bytes arrived at `addr` from a file, whoever asked.
+void debug_server_note_program_load(uint16_t addr, uint32_t size);
 
 // Whether a client's x16/step is still running frames.
 bool debug_server_step_pending(void);

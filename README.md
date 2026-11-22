@@ -1051,6 +1051,13 @@ Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/save
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
 
+Refresh events are coalesced and sent from the server's poll, and a CPU store never causes one.
+`loadedSource` reports `.dbg` sources and label files arriving, reloading or going, by any route; `loadedSources`
+lists label files too for a DAP client, with `origin` set to `label file`. A client that sets `supportsInvalidatedEvent` gets
+`invalidated` after a state load, a `goto`, or a register or memory write from another front end. One that sets
+`supportsMemoryEvent` gets `memory` after a write from another front end, a `setVariable` or `setExpression` that
+changes memory, or a program load. VRAM ranges use a `vram:` reference.
+
 Four scopes are exposed on every stack frame: **Registers** (including the 65C816 extras and the
 current RAM/ROM bank), **Virtual Registers** (R0–R15), **Zero Page** and **Stack**. Memory reads
 and writes use 24-bit addresses, so the high byte selects the 65C816 program bank on a GS machine.
