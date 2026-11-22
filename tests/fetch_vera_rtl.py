@@ -16,10 +16,7 @@ DEST = Path(__file__).resolve().parent / "vera-rtl"
 RAW = "https://raw.githubusercontent.com/X16Community/vera-module"
 
 # Tag the VERA citations are checked against. See tests/check_vera_version.py.
-COMMIT = "45cc1f053376dae12173ea63612820e4d289c0da"  # tag v47.0.2
-
-# psg.v only: vera_psg.c:122-123 implements the v48.0.1 waveforms.
-COMMIT_PSG = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"  # tag v48.0.1
+COMMIT = "6e8bea68a5a04687149e27b1b7b3726fb01405f4"  # tag v48.0.1
 
 FILES = (
     ("fpga/source/top.v", COMMIT),                  # register decode, incl. 0x1B-0x1D
@@ -29,7 +26,7 @@ FILES = (
     ("fpga/source/audio/audio_fifo.v", COMMIT),     # the PCM FIFO itself
     ("fpga/source/audio/pcm.v", COMMIT),            # rate accumulator, sample fetch, volume
     ("fpga/source/audio/audio.v", COMMIT),          # PCM and PSG into the DAC
-    ("fpga/source/audio/psg.v", COMMIT_PSG),        # R48: see above
+    ("fpga/source/audio/psg.v", COMMIT),            # voices, waveforms, volume and pan
     # VRAM bandwidth model, src/vera_bandwidth.c:
     ("fpga/source/vram_if.v", COMMIT),              # the one VRAM bus: 4-way fixed priority, one access per clock
     ("fpga/source/main_ram.v", COMMIT),             # 32k x 32 BRAM array, which is why an access is 4 bytes
@@ -37,6 +34,10 @@ FILES = (
     ("fpga/source/graphics/composer.v", COMMIT),    # line_render_start, so a line is fetched during the one before it
     ("fpga/source/graphics/layer_line_buffer.v", COMMIT),  # the double buffer that makes that prefetch possible
     ("fpga/source/addr_data.v", COMMIT),            # the $9F23/$9F24 data port and the FX engine behind it
+    ("fpga/source/mult_accum.v", COMMIT),           # FX multiplier and accumulator
+    ("fpga/source/spi/spictrl.v", COMMIT),          # SPI controller
+    ("fpga/source/video/video_composite.v", COMMIT),  # NTSC and 240p timing
+    ("fpga/source/video/video_modulator.v", COMMIT),  # composite and S-video output
 )
 
 

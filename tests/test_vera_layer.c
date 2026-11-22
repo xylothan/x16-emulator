@@ -2,9 +2,8 @@
 //
 // Not covered: horizontal tile-column arithmetic and per-row strides (rendered pixels only).
 //
-// ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
-// (45cc1f053376dae12173ea63612820e4d289c0da), quoted inline.
-// layer_renderer.v is identical at v48.0.1; its last change is a37697832a.
+// ORACLE: B -- X16Community/vera-module Verilog, tag v48.0.1
+// (6e8bea68a5a04687149e27b1b7b3726fb01405f4), quoted inline.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"
@@ -42,7 +41,7 @@ read_layer(unsigned layer, uint8_t l0_reg)
 	return video_read(reg_of(layer, l0_reg), false);
 }
 
-// top.v:211-217 (layer 0; :219-225 repeat it for layer 1)
+// top.v:214-220 (layer 0; :222-228 repeat it for layer 1)
 //     5'h0D: rddata = {l0_map_height_r, l0_map_width_r, l0_attr_mode_r, l0_bitmap_mode_r, l0_color_depth_r};
 //     5'h0E: rddata = l0_map_baseaddr_r;
 //     5'h0F: rddata = {l0_tile_baseaddr_r[7:2], l0_tile_height_r, l0_tile_width_r};
@@ -70,11 +69,11 @@ test_the_full_width_layer_registers_round_trip(void)
 	}
 }
 
-// top.v:215,217
+// top.v:218,220
 //     5'h11: rddata = {4'b0, l0_hscroll_r[11:8]};
 //     5'h13: rddata = {4'b0, l0_vscroll_r[11:8]};
 //
-// top.v:392-400
+// top.v:393-401
 //     if (do_write && access_addr == 5'h11) begin
 //         l0_hscroll_next[11:8] = write_data[3:0];
 //     end
@@ -101,8 +100,8 @@ test_the_scroll_high_bytes_are_four_bits_wide(void)
 			check_divergent(read_layer(layer, highs[i]) == 0x0F,
 			                "the top four bits of a scroll high byte read as zero",
 			                "video.c:2733 and video.c:2741 return the stored byte whole; "
-			                "top.v:215 and top.v:217 read {4'b0, scroll[11:8]} and the write "
-			                "at top.v:392-400 takes only write_data[3:0]");
+			                "top.v:218 and top.v:220 read {4'b0, scroll[11:8]} and the write "
+			                "at top.v:393-401 takes only write_data[3:0]");
 		}
 	}
 }
@@ -190,7 +189,7 @@ test_the_map_extent_follows_width_and_height(void)
 	}
 }
 
-// top.v:382-388
+// top.v:383-389
 //     if (do_write && access_addr == 5'h0F) begin
 //         l0_tile_baseaddr_next[7:2] = write_data[7:2];
 //         l0_tile_baseaddr_next[1:0] = 0;

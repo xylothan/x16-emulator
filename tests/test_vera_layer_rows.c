@@ -5,9 +5,9 @@
 //
 // Not covered: unaligned HSCROLL carry (layer_renderer.v:95, video.c:574, 587).
 //
-// ORACLE: B -- X16Community/vera-module Verilog, tag v47.0.2
-// (45cc1f053376dae12173ea63612820e4d289c0da), modelled directly below from the
-// quoted lines. layer_renderer.v is identical at v48.0.1 and at the tip.
+// ORACLE: B -- X16Community/vera-module Verilog, tag v48.0.1
+// (6e8bea68a5a04687149e27b1b7b3726fb01405f4), modelled directly below from the
+// quoted lines.
 
 #include "support/video_fixture.h"
 #include "support/harness.h"

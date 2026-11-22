@@ -5,8 +5,8 @@
 //   repo:   https://github.com/X16Community/vera-module
 //   tag:    v48.0.1   (commit 6e8bea68)
 //
-// This file cites v48.0.1; the PCM tests cite v47.0.2. vera_psg.c:122-123 XOR saw and
-// triangle with the inverted pulse width (RTL a8135f32, in v48.0.1).
+// vera_psg.c:122-123 XOR saw and triangle with the inverted pulse width (RTL a8135f32,
+// in v48.0.1).
 //
 // tests/fetch_vera_rtl.py retrieves the sources.
 //

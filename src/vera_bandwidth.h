@@ -10,7 +10,7 @@
 // ─── What the bus actually is ───────────────────────────────────────────────
 //
 // Quoted from the RTL, which for an FPGA is not a description of the hardware
-// but IS the hardware. Pinned to X16Community/vera-module tag v47.0.2, the
+// but IS the hardware. Pinned to X16Community/vera-module tag v48.0.1, the
 // same commit tests/fetch_vera_rtl.py fetches; run it to check these.
 //
 //   * ONE VRAM bus, 32 bits wide, one access per clock. main_ram.v:7-10 takes
@@ -18,7 +18,7 @@
 //   * A scanline is 800 clocks. video_vga.v:27-31 -- 640 active + 16 front
 //     porch + 96 sync + 48 back porch. 525 lines a frame (video_vga.v:33-37).
 //   * FIXED PRIORITY, not round-robin: vram_if.v:142-157 is a combinatorial
-//     if/else-if chain, if0 > if1 > if2 > if3. top.v:680-713 wires those to
+//     if/else-if chain, if0 > if1 > if2 > if3. top.v:681-714 wires those to
 //     the CPU-and-FX port ("Interface 0 - 8-bit (highest priority)"), layer 0,
 //     layer 1 and the sprite renderer, in that order. SPRITES COME LAST.
 //   * An access holds the bus for ONE clock. Every client gates its strobe

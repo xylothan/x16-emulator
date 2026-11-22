@@ -3,7 +3,7 @@
 // ORACLE (strength B): the VERA Verilog.
 //
 //   repo:   https://github.com/X16Community/vera-module
-//   tag:    v47.0.2   (commit 45cc1f05)
+//   tag:    v48.0.1   (commit 6e8bea68)
 //   files:  fpga/source/addr_data.v, fpga/source/top.v
 //
 // Links the real video.c; no test calls video_init(), video_update() or video_end().
@@ -85,7 +85,7 @@ test_every_increment_code(void)
 	}
 }
 
-// top.v:169-170 carries vram_addr_0_r[16] through the register interface, so
+// top.v:172-173 carries vram_addr_0_r[16] through the register interface, so
 // the address is 17 bits and wraps at 128K rather than saturating.
 static void
 test_address_wraps_at_128k(void)
@@ -101,7 +101,7 @@ test_address_wraps_at_128k(void)
 	check_eq(video_get_address(0), 0x1FFFFu, "and decrementing below zero wraps to the top");
 }
 
-// addr_data.v:75-78: two independent address registers, selected by top.v:169-170.
+// addr_data.v:75-78: two independent address registers, selected by top.v:172-173.
 static void
 test_the_two_address_registers_are_independent(void)
 {
