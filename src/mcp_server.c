@@ -33,6 +33,7 @@
 #include "debug_core.h"
 #include "dbg_info.h"
 #include "perf_budget.h"
+#include "sdcard.h"
 #include "version.h"
 
 #ifdef _WIN32
@@ -1609,6 +1610,54 @@ static cJSON *tool_host_perf(cJSON *args) {
     return tool_passthrough("x16/hostPerf");
 }
 
+static cJSON *tool_get_sdcard(cJSON *args) {
+    char err[200];
+    int n;
+    cJSON *files = args ? cJSON_GetObjectItemCaseSensitive(args, "files") : NULL;
+    if (files && (!cJSON_IsString(files) || (strcmp(files->valuestring, "touched") &&
+                                             strcmp(files->valuestring, "all") &&
+                                             strcmp(files->valuestring, "none"))))
+        return tool_fail("'files' must be \"touched\", \"all\" or \"none\"");
+    if (!arg_int(args, "history", SDCARD_HISTORY_SIZE, 0, SDCARD_HISTORY_SIZE, &n, err, sizeof err))
+        return tool_fail(err);
+    dbg_reply_t r;
+    debug_server_call("x16/sdcard", args, &r);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON *body = r.body ? r.body : cJSON_CreateObject();
+    const bool attached = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(body, "attached"));
+    return tool_ok(body, attached ? NULL : "No SD card is attached.");
+}
+
+static cJSON *tool_sprite_mux_stats(cJSON *args) {
+    (void)args;
+    dbg_reply_t r;
+    debug_server_call("x16/spriteMuxStats", NULL, &r);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON *body = r.body ? r.body : cJSON_CreateObject();
+    // `frame` in every tool result is the machine's frame number.
+    cJSON *last = cJSON_DetachItemFromObjectCaseSensitive(body, "frame");
+    if (last) cJSON_AddItemToObject(body, "lastFrame", last);
+    return tool_ok(body, NULL);
+}
+
+static cJSON *tool_sprite_mux_config(cJSON *args) {
+    char err[200];
+    int n;
+    if (!arg_bool(args, "enabled", err, sizeof err) || !arg_bool(args, "reset", err, sizeof err) ||
+        !arg_int(args, "burstGap", 128, 8, 2048, &n, err, sizeof err))
+        return tool_fail(err);
+    cJSON *none = args ? NULL : cJSON_CreateObject();  // no arguments is a plain read
+    cJSON *result = tool_forward("x16/spriteMuxConfig", args ? args : none);
+    cJSON_Delete(none);
+    return result;
+}
+
 // Answers at once with the state. A capture spans frames, so a client polls.
 static cJSON *tool_profile_capture(cJSON *args) {
     static const char *const start_keys[] = {"frames", "seconds", "onMarker", "recorders", NULL};
@@ -2086,6 +2135,37 @@ static const mcp_tool_t tools[] = {
       "\"top\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100000,\"default\":50}"
       "},\"additionalProperties\":false}",
       TOOL_DESTRUCTIVE, tool_profile_capture },
+    { "get_sdcard",
+      "The SD card: state and counters, the image's file index, and recent block accesses, newest "
+      "first. With no card, 'attached' is false and nothing else is reported. 'image' is a host "
+      "path. Other paths are inside the card's filesystem. An index the machine has made stale is "
+      "brought up to date first, unless indexing is turned off in the I/O panel; then 'index.ready' "
+      "may be false.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"files\":{\"type\":\"string\",\"enum\":[\"touched\",\"all\",\"none\"],\"default\":\"touched\","
+      "\"description\":\"which index entries to list\"},"
+      "\"history\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":128,"
+      "\"description\":\"most history rows to return; default all held\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_sdcard },
+    { "sprite_mux_stats",
+      "Per-frame sprite multiplexing: how many sprites the frame really drew, attribute writes "
+      "during it, and lines that ran out of render time. The first call turns recording on "
+      "(about 600 KB) as this client's claim, which ends with the session. 'lastFrame' appears "
+      "once a frame completes, so keep the machine running. Its 'peakLine' is a scanline.",
+      NO_ARGS, TOOL_READ, tool_sprite_mux_stats },
+    { "sprite_mux_config",
+      "Configure sprite multiplex recording. With no arguments, reports the settings. 'enabled' "
+      "is this client's own claim: recording keeps running while any other client or panel wants "
+      "it, and the claim ends with the session. 'burstGap' (cycles) is one global value shared "
+      "with every client and the Sprite Multiplex panel, and is not put back afterwards. 'reset' "
+      "discards the shared recording.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"enabled\":{\"type\":\"boolean\"},"
+      "\"burstGap\":{\"type\":\"integer\",\"minimum\":8,\"maximum\":2048},"
+      "\"reset\":{\"type\":\"boolean\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_sprite_mux_config },
     { "get_vera_state",
       "VERA's internal state, which its registers do not all read back: both data ports "
       "(address, increment, prefetch, nibble) whatever ADDRSEL is, interrupts, the scanline, "

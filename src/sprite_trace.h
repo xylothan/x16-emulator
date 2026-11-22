@@ -204,10 +204,11 @@ void sprite_trace_reset(void);
 // Who has asked for tracing. It runs while ANY owner wants it, so a DAP
 // client polling stats is not switched off the moment somebody closes the
 // Sprite Multiplex panel, and closing the panel does not strand a client
-// with a dead feed. Mirrors perf_budget's PERF_OWNER_UI/PERF_OWNER_DAP.
+// with a dead feed. Mirrors perf_budget's owners.
 typedef enum {
 	SPRITE_TRACE_OWNER_UI = 0,  // the ImGui Sprite Multiplex tab
 	SPRITE_TRACE_OWNER_DAP,     // a debug adapter client
+	SPRITE_TRACE_OWNER_MCP,     // an MCP client
 	SPRITE_TRACE_OWNER_COUNT
 } sprite_trace_owner_t;
 

@@ -192,9 +192,11 @@ def test_tools():
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
                    "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
-                   "list_sources", "read_source", "source_location", "host_perf"}
+                   "list_sources", "read_source", "source_location", "host_perf",
+                   "get_sdcard", "sprite_mux_stats"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
-                  "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture"}
+                  "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
+                  "sprite_mux_config"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
                   "type_text", "send_key", "joystick", "load_symbols", "mouse", "set_warp"}
         case("every tool is listed", names == reading | losing | moving, str(names))
@@ -2959,6 +2961,209 @@ def test_perf_tools():
         dap.close()
 
 
+def fat32_image(path):
+    # MBR, one type 0x0C partition, 1 sector per cluster, /HELLO.PRG in cluster 3.
+    start, reserved, clusters = 2048, 32, 66000
+    fat_sectors = ((clusters + 2) * 4 + 511) // 512
+    total = reserved + 2 * fat_sectors + clusters
+    data_lba = start + reserved + 2 * fat_sectors
+
+    mbr = bytearray(512)
+    mbr[0x1BE + 4] = 0x0C
+    struct.pack_into("<II", mbr, 0x1BE + 8, start, total)
+    mbr[510:512] = b"\x55\xAA"
+
+    vbr = bytearray(512)
+    vbr[0:3] = b"\xEB\x58\x90"
+    vbr[3:11] = b"X16TEST "
+    struct.pack_into("<HBHBHHBHHHII", vbr, 11, 512, 1, reserved, 2, 0, 0, 0xF8, 0, 63, 255, start, total)
+    struct.pack_into("<IHHIHH", vbr, 36, fat_sectors, 0, 0, 2, 1, 6)
+    vbr[66] = 0x29
+    vbr[71:82] = b"X16TEST    "
+    vbr[82:90] = b"FAT32   "
+    vbr[510:512] = b"\x55\xAA"
+
+    info = bytearray(512)
+    struct.pack_into("<I", info, 0, 0x41615252)
+    struct.pack_into("<III", info, 484, 0x61417272, 0xFFFFFFFF, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 508, 0xAA550000)
+
+    fat = bytearray(512)
+    struct.pack_into("<IIII", fat, 0, 0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF, 0x0FFFFFFF)
+
+    root = bytearray(512)
+    root[0:11] = b"HELLO   PRG"
+    root[11] = 0x20
+    struct.pack_into("<HHI", root, 20, 0, 0, 0)
+    struct.pack_into("<HI", root, 26, 3, 4)
+
+    with open(path, "wb") as f:
+        for lba, sector in ((0, mbr), (start, vbr), (start + 1, info), (start + 6, vbr),
+                            (start + 7, info), (start + reserved, fat),
+                            (start + reserved + fat_sectors, fat), (data_lba, root),
+                            (data_lba + 1, b"\x01\x08\x00\x00" + bytes(508))):
+            f.seek(lba * 512)
+            f.write(sector)
+        f.truncate((start + total) * 512)
+
+
+def wait_sprite_frame(m):
+    end = time.time() + 20
+    while time.time() < end:
+        d = data(m.call("sprite_mux_stats"))
+        if "lastFrame" in d:
+            return d
+        time.sleep(0.02)
+    return {}
+
+
+def test_device_stats():
+    print("device statistics")
+    with Mcp() as m:
+        m.init()
+        r = m.call("get_sdcard", files="all", history=5)
+        case("no card is not an error", not is_error(r) and data(r).get("attached") is False, str(r)[:200])
+        case("and says so", r.get("content", [{}])[0].get("text") == "No SD card is attached.", str(r)[:200])
+        case("and reports nothing else", "card" not in data(r) and "index" not in data(r), str(r)[:200])
+        for label, args in (("an unknown files", {"files": "banana"}), ("a number for files", {"files": 1}),
+                            ("a negative history", {"history": -1}), ("too much history", {"history": 129}),
+                            ("a fractional history", {"history": 1.5}), ("a text history", {"history": "5"}),
+                            ("reindex", {"reindex": True}), ("an unknown argument", {"path": "a.img"})):
+            case(f"get_sdcard refuses {label}", is_error(m.call("get_sdcard", **args)))
+        case("sprite_mux_stats takes no arguments", is_error(m.call("sprite_mux_stats", reset=True)))
+        for label, args in (("a text enabled", {"enabled": "yes"}), ("a number for reset", {"reset": 1}),
+                            ("a low burstGap", {"burstGap": 7}), ("a high burstGap", {"burstGap": 2049}),
+                            ("a fractional burstGap", {"burstGap": 8.5}), ("a text burstGap", {"burstGap": "128"}),
+                            ("an unknown argument", {"gap": 128})):
+            case(f"sprite_mux_config refuses {label}", is_error(m.call("sprite_mux_config", **args)))
+        d = data(m.call("sprite_mux_config"))
+        case("sprite_mux_config with no arguments reports",
+             d.get("enabled") is False and d.get("burstGap") == 128, str(d))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = os.path.realpath(tmp)
+        image = os.path.join(tmp, "card.img")
+        fat32_image(image)
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-sdcard", image]) as m:
+            m.init()
+            end = time.time() + 30
+            while time.time() < end and not data(m.call("get_sdcard")).get("history"):
+                time.sleep(0.05)
+            time.sleep(1)
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": False,
+                                       "columnsStartAt1": False, "pathFormat": "uri"})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            m.call("pause")
+
+            d = data(m.call("get_sdcard", files="all"))
+            card, index = d.get("card", {}), d.get("index", {})
+            case("a card is attached", d.get("attached") is True, str(d)[:200])
+            case("its image is a native path with a URI client attached",
+                 os.path.normcase(card.get("image", "")) == os.path.normcase(image), str(card.get("image")))
+            case("its size is reported", card.get("imageSize") == os.path.getsize(image), str(card)[:200])
+            case("the index is ready", index.get("ready") is True and index.get("type") == "FAT32", str(index)[:200])
+            paths = [f.get("path") for f in index.get("files", [])]
+            case("all lists the file by its path in the image", "/HELLO.PRG" in paths, str(paths))
+            history = d.get("history", [])
+            case("the boot's reads are in the history", any(h.get("op") == "read" for h in history), str(history)[:200])
+            inner = paths + [h["path"] for h in history if "path" in h]
+            case("image paths are not converted for the client",
+                 all(p.startswith("/") and "file:" not in p for p in inner), str(inner)[:200])
+
+            d = data(m.call("get_sdcard"))
+            touched = [f.get("path") for f in d.get("index", {}).get("files", [])]
+            case("touched is the default", "/" in touched and "/HELLO.PRG" not in touched, str(touched))
+            d = data(m.call("get_sdcard", files="none", history=1))
+            case("none lists no files", "files" not in d.get("index", {}), str(d)[:200])
+            case("history is limited", len(d.get("history", [])) == 1, str(d.get("history")))
+            case("history 0 is empty", data(m.call("get_sdcard", history=0)).get("history") == [])
+
+            def counters():
+                c = data(m.call("get_sdcard", files="none", history=0)).get("card", {})
+                return c.get("commands"), c.get("blocksRead"), c.get("blocksWritten")
+            before = counters()
+            case("reading moves no counter", before[0] and counters() == before, str(before))
+            r = dap.request("x16/sdcard", {"files": "none", "history": 0})
+            case("DAP reads the same image path",
+                 (r or {}).get("body", {}).get("card", {}).get("image") == card.get("image"), str(r)[:200])
+            m.call("continue")
+
+            # An MCP claim, and DAP's beside it. Probed with config: DAP's stats would arm.
+            def dap_on():
+                return (dap.request("x16/spriteMuxConfig", {}) or {}).get("body", {}).get("enabled")
+            case("recording starts off", dap_on() is False)
+            d = data(m.call("sprite_mux_stats"))
+            case("the first poll turns it on", d.get("enabled") is True and d.get("memoryBytes", 0) > 0, str(d)[:200])
+            d = wait_sprite_frame(m)
+            f = d.get("lastFrame", {})
+            case("a frame is reported", all(k in f for k in ("frame", "effectiveSprites", "peakLine", "linesExhausted")),
+                 str(d)[:200])
+            case("frame stays the machine's frame number", isinstance(d.get("frame"), int), str(d.get("frame")))
+            m.call("pause")
+            mine = data(m.call("sprite_mux_stats")).get("lastFrame", {})
+            theirs = (dap.request("x16/spriteMuxStats") or {}).get("body", {}).get("frame", {})
+            case("a scanline is not shifted for a 0-based client",
+                 "peakLine" in mine and mine.get("peakLine") == theirs.get("peakLine"), f"{mine} {theirs}")
+            d = data(m.call("sprite_mux_config", reset=True))
+            case("reset keeps recording on", d.get("enabled") is True, str(d))
+            d = data(m.call("sprite_mux_stats"))
+            case("and discards the frame", "lastFrame" not in d and isinstance(d.get("frame"), int), str(d)[:200])
+            m.call("continue")
+
+            d = data(m.call("sprite_mux_config", burstGap=256))
+            r = dap.request("x16/spriteMuxConfig", {})
+            case("burstGap is shared", d.get("burstGap") == 256 and (r or {}).get("body", {}).get("burstGap") == 256,
+                 str(r)[:200])
+            m.call("sprite_mux_config", burstGap=128)
+
+            d = data(m.call("sprite_mux_config", enabled=False))
+            case("MCP's off stops its own claim", d.get("enabled") is False and dap_on() is False, str(d))
+            dap.request("x16/spriteMuxConfig", {"enabled": True})
+            d = data(m.call("sprite_mux_config", enabled=False))
+            case("MCP's off leaves DAP's claim", d.get("enabled") is True, str(d))
+            r = dap.request("x16/spriteMuxConfig", {"enabled": False})
+            case("and DAP's off, with MCP's gone, stops it",
+                 (r or {}).get("body", {}).get("enabled") is False, str(r)[:200])
+            m.call("sprite_mux_config", enabled=True)
+            r = dap.request("x16/spriteMuxConfig", {"enabled": False})
+            case("DAP's off leaves MCP's claim", (r or {}).get("body", {}).get("enabled") is True, str(r)[:200])
+            dap.close()
+            time.sleep(0.3)
+            dap = Dap(port)
+            case("a DAP disconnect leaves MCP's claim", dap_on() is True)
+            m.call("sprite_mux_config", enabled=False)
+            dap.close()
+
+    # What a client claimed ends with its lease; what another holds does not.
+    port = free_port()
+    with HttpMcp(["-debugport", str(port)], env={"X16_MCP_LEASE_MS": "700"}) as m:
+        m.init()
+        time.sleep(0.4)
+        d = data(m.call("sprite_mux_stats"))
+        case("a poll on a lease arms recording", d.get("enabled") is True, str(d)[:160])
+        time.sleep(1.5)
+        dap = Dap(port)
+        r = dap.request("x16/spriteMuxConfig", {})
+        case("an expired lease releases a poll's claim", (r or {}).get("body", {}).get("enabled") is False, str(r)[:200])
+
+        d = data(m.call("sprite_mux_config", enabled=True))
+        case("a config claim on a lease", d.get("enabled") is True, str(d)[:160])
+        time.sleep(1.5)
+        r = dap.request("x16/spriteMuxConfig", {})
+        case("an expired lease releases a config claim", (r or {}).get("body", {}).get("enabled") is False, str(r)[:200])
+
+        m.call("sprite_mux_config", enabled=True)
+        dap.request("x16/spriteMuxConfig", {"enabled": True})
+        time.sleep(1.5)
+        r = dap.request("x16/spriteMuxConfig", {})
+        case("an expired lease leaves DAP's claim", (r or {}).get("body", {}).get("enabled") is True, str(r)[:200])
+        dap.request("x16/spriteMuxConfig", {"enabled": False})
+        dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -2971,7 +3176,7 @@ def main():
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
-                 test_perf_tools):
+                 test_perf_tools, test_device_stats):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
