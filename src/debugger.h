@@ -126,6 +126,24 @@ typedef struct {
 
 void DEBUGGetStopInfo(debug_stop_info_t *out);
 
+// The interrupt or trap behind a stop with reason "exception".
+typedef struct {
+	uint16_t kind;        // one DEBUG_STOP_* bit
+	bool     has_vector;  // false for STP, which does not vector
+	uint16_t vector;      // the address the handler was read from
+	uint16_t address;     // the BRK or STP, or the instruction an IRQ or NMI preempted
+	uint8_t  bank;        // program bank of `address`
+} debug_stop_exception_t;
+
+// False unless the machine is halted on one, and has not been reset since.
+bool DEBUGGetStopException(debug_stop_exception_t *out);
+
+// An STP ran at `address`, with the PC already past it. `attached` says a debugger
+// is up, and any debugger stops on STP. A client's filter makes that stop an
+// "exception", and stops the machine even if the guest has turned the debugger
+// off. False if nothing wants the stop.
+bool DEBUGBreakOnStp(uint16_t address, uint8_t bank, bool attached);
+
 #define DBG_WIDTH 		(60)									// Char cells across
 #define DBG_HEIGHT 		(60)
 

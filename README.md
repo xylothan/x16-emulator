@@ -1040,7 +1040,7 @@ stop debugging.
 
 Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threads`, `stackTrace`,
 `scopes`, `variables`, `setVariable`, `setBreakpoints`, `setFunctionBreakpoints`,
-`setInstructionBreakpoints`, `setDataBreakpoints`, `setExceptionBreakpoints`, `breakpointLocations`,
+`setInstructionBreakpoints`, `setDataBreakpoints`, `setExceptionBreakpoints`, `exceptionInfo`, `breakpointLocations`,
 `continue`, `next`, `stepIn`, `stepOut`, `pause`, `goto`, `gotoTargets`, `stepInTargets`,
 `evaluate`, `setExpression`, `completions`, `readMemory`, `writeMemory`, `disassemble`,
 `loadedSources`, `source`, `restart`,
@@ -1491,7 +1491,7 @@ debugging it.
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack`, `evaluate` |
-| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints`, `read_log` |
+| Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `set_stop_on`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
@@ -1554,6 +1554,15 @@ client carries on with `wait_for_stop`, passing the last `stopId`.
 A stop caused by a watch also carries a `stop` object: the `address`, `bank`, `value`, `access` and
 `space`, and the `accessingPc` of the instruction that made the access, which the PC has already
 moved past. DAP clients get the same object on the `stopped` event and in `x16/status`.
+
+`set_stop_on` stops the machine on `irq`, `nmi`, `brk` or `stp`, all off by default. DAP clients
+get the same four as exception filters, and `exceptionInfo` names the kind and vector. Each client
+has its own set, which ends with its session and never changes the debugger window's "Break on
+every interrupt" setting. The stop's reason is `exception`, with a `stop` object giving the `kind`,
+`vector`, `address` and `programBank`. `irq`, `nmi` and `brk` stop at the handler's first instruction, with the
+frame already pushed. `stp` stops just past the opcode. Resuming carries on from there, so the same
+instruction does not stop the machine again. A debugger stops on `stp` with or without the filter,
+which only changes how the stop is reported. COP has no filter.
 
 Breakpoints belong to whoever set them: removing one leaves it armed if an editor or the command
 line also holds it. `enable_breakpoint` turns one on or off and keeps its condition and hit count.

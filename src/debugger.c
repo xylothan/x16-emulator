@@ -209,12 +209,62 @@ static const char *lastStopReason = "";
 // the instruction that made it.
 static debug_stop_info_t lastStopAccess;
 
+// The interrupt or trap behind an "exception" stop, and where in the run it
+// happened. Not every later stop records a reason, so a record counts only while
+// no instruction has retired and no reset has happened since.
+static debug_stop_exception_t lastStopException;
+static bool                   lastStopExceptionValid;
+static uint32_t               lastStopExceptionResets;
+static int                    lastStopExceptionInstr;
+
 void
 DEBUGSetStopReason(const char *reason)
 {
 	lastStopReason = reason ? reason : "";
 	if (strcmp(lastStopReason, "data breakpoint"))
 		lastStopAccess.has_access = false;
+	if (strcmp(lastStopReason, "exception"))
+		lastStopExceptionValid = false;
+}
+
+static void
+DEBUGRecordException(const debug_stop_exception_t *ex)
+{
+	lastStopException       = *ex;
+	lastStopExceptionValid  = true;
+	lastStopExceptionResets = cpu_irq_reset_count();
+	lastStopExceptionInstr  = instruction_counter;
+}
+
+// `hit` is the entries a filter asked for. The latest wins when it is one of them.
+static void
+DEBUGRecordEntryException(uint16_t hit)
+{
+	int vec = cpu_irq_last_vector() & 15;
+	if (!(hit & (1u << vec)))
+		vec = (hit & DEBUG_STOP_NMI) ? 0xA : (hit & DEBUG_STOP_IRQ) ? 0xE : 0x6;
+	const uint32_t from = cpu_irq_entered_from(vec);
+
+	debug_stop_exception_t ex;
+	ex.kind       = (uint16_t)(1u << vec);
+	ex.has_vector = true;
+	// In emulation mode BRK shares the IRQ vector.
+	ex.vector  = (uint16_t)((regs.e ? 0xFFF0 : 0xFFE0) + ((regs.e && vec == 0x6) ? 0xE : vec));
+	// BRK pushes the address two past its opcode.
+	ex.address = (uint16_t)((from & 0xFFFF) - (vec == 0x6 ? 2 : 0));
+	ex.bank    = (uint8_t)(from >> 16);
+	DEBUGRecordException(&ex);
+}
+
+bool
+DEBUGGetStopException(debug_stop_exception_t *out)
+{
+	if (currentMode != DMODE_STOP || !lastStopExceptionValid ||
+	    lastStopExceptionResets != cpu_irq_reset_count() ||
+	    lastStopExceptionInstr != instruction_counter)
+		return false;
+	*out = lastStopException;
+	return true;
 }
 
 // Record the reason AND tell a DAP client execution stopped.
@@ -314,11 +364,17 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 	//
 	// The flag is consumed unconditionally -- reading it is what clears it -- so
 	// that a stale entry cannot fire a stop later, after the feature is enabled.
+	//
+	// A client's stop filter is one more reason to stop here, reported as an
+	// exception. Consuming the entry is also what makes resuming safe: the PC is
+	// already in the handler, so the same BRK cannot stop the machine twice.
 	{
-		const bool entered = cpu_irq_take_entered_flag();
+		const uint16_t kinds = cpu_irq_take_entered_kinds();
 		const bool wasStepping = (currentMode == DMODE_STEP) || (stepBreakPoint.pc >= 0);
-		if (entered && (breakOnInterrupt
-		                || (followInterrupts && wasStepping && currentMode != DMODE_STOP))) {
+		const debug_entry_stop_t entry = debug_stop_on_entry(
+			kinds, currentMode == DMODE_STOP, breakOnInterrupt,
+			followInterrupts && wasStepping && currentMode != DMODE_STOP);
+		if (entry != DEBUG_ENTRY_NO_STOP) {
 			currentPC = regs.pc;
 			currentPCBank = regs.k;
 			currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
@@ -327,7 +383,12 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 			stepBreakPoint.bank = 0;
 			stepBreakPoint.x16Bank = -1;
 			srcStepActive = false;   // and any step-by-line it was driving
-			DEBUGAnnounceStop("interrupt");
+			if (entry == DEBUG_ENTRY_EXCEPTION) {
+				DEBUGRecordEntryException(kinds & debug_stop_filters());
+				DEBUGAnnounceStop("exception");
+			} else {
+				DEBUGAnnounceStop("interrupt");
+			}
 		}
 	}
 
@@ -665,6 +726,43 @@ void DEBUGBreakToDebugger(void) {
 	if (wasRunning) {
 		DEBUGAnnounceStop("pause");
 	}
+}
+
+bool
+DEBUGBreakOnStp(uint16_t address, uint8_t bank, bool attached)
+{
+	const bool armed = (debug_stop_filters() & DEBUG_STOP_STP) != 0;
+	if (!armed && !attached)
+		return false;
+	if (!armed) {
+		DEBUGBreakToDebugger();
+		// Store only. BreakToDebugger has already announced the stop to a DAP
+		// client if this was a transition; this just refines the reason the
+		// local UI shows, which is what the source view uses to decide whether
+		// to re-centre.
+		DEBUGSetStopReason("breakpoint");
+		return true;
+	}
+
+	const bool wasRunning = (currentMode != DMODE_STOP);
+	srcStepActive = false;
+	currentMode = DMODE_STOP;
+	currentPC = regs.pc;
+	currentPCBank = regs.k;
+	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+
+	debug_stop_exception_t ex;
+	ex.kind       = DEBUG_STOP_STP;
+	ex.has_vector = false;
+	ex.vector     = 0;
+	ex.address    = address;
+	ex.bank       = bank;
+	DEBUGRecordException(&ex);
+	if (wasRunning)
+		DEBUGAnnounceStop("exception");
+	else
+		DEBUGSetStopReason("exception");
+	return true;
 }
 
 // A watched address was written. Called from the CPU store path, so it does as

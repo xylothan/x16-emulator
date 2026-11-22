@@ -951,6 +951,55 @@ static void caller_path_in(const char *path, char *out, size_t n) {
     else snprintf(out, n, "%s", path);
 }
 
+// ─── Stops on interrupts and exceptions ─────────────────────────────
+
+static const struct {
+    const char *filter, *label, *description;
+    uint16_t    bit;
+} stop_filter_table[] = {
+    { "irq", "IRQ", "Stop at the first instruction of the handler when an IRQ is taken.",
+      DEBUG_STOP_IRQ },
+    { "nmi", "NMI", "Stop at the first instruction of the handler when an NMI is taken.",
+      DEBUG_STOP_NMI },
+    { "brk", "BRK", "Stop at the first instruction of the handler after a BRK.",
+      DEBUG_STOP_BRK },
+    { "stp", "STP", "Report the STP trap as an exception. A debugger stops on it either way.",
+      DEBUG_STOP_STP },
+};
+#define NUM_STOP_FILTERS ((int)(sizeof stop_filter_table / sizeof stop_filter_table[0]))
+
+static uint16_t stop_filter_bit(const char *name) {
+    for (int i = 0; i < NUM_STOP_FILTERS; i++) {
+        if (!strcmp(name, stop_filter_table[i].filter)) return stop_filter_table[i].bit;
+    }
+    return 0;
+}
+
+static cJSON *stop_filter_names(uint16_t mask) {
+    cJSON *names = cJSON_CreateArray();
+    for (int i = 0; i < NUM_STOP_FILTERS; i++) {
+        if (mask & stop_filter_table[i].bit)
+            cJSON_AddItemToArray(names, cJSON_CreateString(stop_filter_table[i].filter));
+    }
+    return names;
+}
+
+static int stop_filter_index(uint16_t bit) {
+    for (int i = 0; i < NUM_STOP_FILTERS; i++) {
+        if (stop_filter_table[i].bit == bit) return i;
+    }
+    return 0;
+}
+
+static void exception_text(const debug_stop_exception_t *ex, char *out, size_t n) {
+    const char *label = stop_filter_table[stop_filter_index(ex->kind)].label;
+    char where[16];
+    if (ex->bank) snprintf(where, sizeof where, "$%02X:%04X", ex->bank, ex->address);
+    else          snprintf(where, sizeof where, "$%04X", ex->address);
+    if (ex->has_vector) snprintf(out, n, "%s at %s, vector $%04X", label, where, ex->vector);
+    else                snprintf(out, n, "%s at %s", label, where);
+}
+
 static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON *lb = args ? cJSON_GetObjectItemCaseSensitive(args, "linesStartAt1") : NULL;
     cJSON *cb = args ? cJSON_GetObjectItemCaseSensitive(args, "columnsStartAt1") : NULL;
@@ -984,6 +1033,16 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsConditionalBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsHitConditionalBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsLogPoints", true);
+    cJSON_AddBoolToObject(caps, "supportsExceptionInfoRequest", true);
+    cJSON *filters = cJSON_AddArrayToObject(caps, "exceptionBreakpointFilters");
+    for (int i = 0; i < NUM_STOP_FILTERS; i++) {
+        cJSON *f = cJSON_CreateObject();
+        cJSON_AddStringToObject(f, "filter", stop_filter_table[i].filter);
+        cJSON_AddStringToObject(f, "label", stop_filter_table[i].label);
+        cJSON_AddStringToObject(f, "description", stop_filter_table[i].description);
+        cJSON_AddBoolToObject(f, "default", false);
+        cJSON_AddItemToArray(filters, f);
+    }
     // Non-standard, so that a client can tell this emulator's performance
     // budget surface from one that would reject the requests.
     cJSON_AddBoolToObject(caps, "supportsX16PerfStats", true);
@@ -1058,9 +1117,11 @@ static int handle_dap_configuration_done(int seq) {
         // the client was still configuring emits its own stopped event, and
         // announcing the same halt again under a different reason confuses a
         // client into thinking it stopped twice.
-        if (!dap_stop_announced)
-            debug_server_notify_stopped(!strcmp(DEBUGGetStopReason(), "data breakpoint")
-                                            ? "data breakpoint" : "breakpoint");
+        if (!dap_stop_announced) {
+            const char *why = DEBUGGetStopReason();
+            debug_server_notify_stopped(!strcmp(why, "data breakpoint") || !strcmp(why, "exception")
+                                            ? why : "breakpoint");
+        }
         return 1;
     }
 
@@ -3045,6 +3106,17 @@ static const char *dap_wp_access_name(uint8_t access) {
 
 void debug_server_add_stop_info(cJSON *body) {
     if (!DEBUGIsPaused()) return;
+    debug_stop_exception_t ex;
+    if (DEBUGGetStopException(&ex)) {
+        cJSON *e = cJSON_AddObjectToObject(body, "stop");
+        cJSON_AddStringToObject(e, "reason", "exception");
+        cJSON_AddStringToObject(e, "kind", stop_filter_table[stop_filter_index(ex.kind)].filter);
+        if (ex.has_vector) cJSON_AddNumberToObject(e, "vector", ex.vector);
+        else               cJSON_AddNullToObject(e, "vector");
+        cJSON_AddNumberToObject(e, "address", ex.address);
+        cJSON_AddNumberToObject(e, "programBank", ex.bank);
+        return;
+    }
     debug_stop_info_t s;
     DEBUGGetStopInfo(&s);
     if (!s.has_access) return;
@@ -5549,6 +5621,87 @@ static int handle_dap_completions(int seq, cJSON *args) {
 
 // The MCP evaluate tool. Only the engine: the console commands in evaluate can
 // clear every client's breakpoints or reset the machine.
+// Replaces this session's filters and nothing else: an editor sends this on every
+// session, usually empty, and that must not touch the debugger window's setting.
+static int handle_dap_set_exception_breakpoints(int seq, cJSON *args) {
+    cJSON *list = args ? cJSON_GetObjectItemCaseSensitive(args, "filters") : NULL;
+    if (list && !cJSON_IsArray(list)) {
+        send_dap_error_response(seq, "setExceptionBreakpoints", "'filters' must be an array");
+        return 0;
+    }
+    uint16_t mask = 0;
+    cJSON *results = cJSON_CreateArray();
+    cJSON *item;
+    cJSON_ArrayForEach(item, list) {
+        const uint16_t bit = cJSON_IsString(item) ? stop_filter_bit(item->valuestring) : 0;
+        cJSON *r = cJSON_CreateObject();
+        const bool ok = bit && !dap_no_debug;
+        cJSON_AddBoolToObject(r, "verified", ok);
+        if (!bit)               cJSON_AddStringToObject(r, "message", "unknown filter");
+        else if (dap_no_debug)  cJSON_AddStringToObject(r, "message", "launched with noDebug");
+        if (ok) mask |= bit;
+        cJSON_AddItemToArray(results, r);
+    }
+    debug_stop_filter_set(DEBUG_OWNER_DAP_SOURCE, mask);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "breakpoints", results);
+    send_dap_response(seq, "setExceptionBreakpoints", true, body);
+    return 0;
+}
+
+static int handle_dap_exception_info(int seq, cJSON *args) {
+    (void)args;
+    debug_stop_exception_t ex;
+    if (!DEBUGGetStopException(&ex)) {
+        send_dap_error_response(seq, "exceptionInfo", "the machine is not stopped on an exception");
+        return 0;
+    }
+    const int i = stop_filter_index(ex.kind);
+    char text[64];
+    exception_text(&ex, text, sizeof text);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "exceptionId", stop_filter_table[i].filter);
+    cJSON_AddStringToObject(body, "description", text);
+    cJSON_AddStringToObject(body, "breakMode", "always");
+    cJSON *details = cJSON_AddObjectToObject(body, "details");
+    cJSON_AddStringToObject(details, "message", text);
+    cJSON_AddStringToObject(details, "typeName", stop_filter_table[i].label);
+    if (ex.has_vector) cJSON_AddNumberToObject(body, "vector", ex.vector);
+    else               cJSON_AddNullToObject(body, "vector");
+    cJSON_AddNumberToObject(body, "address", ex.address);
+    cJSON_AddNumberToObject(body, "programBank", ex.bank);
+    send_dap_response(seq, "exceptionInfo", true, body);
+    return 0;
+}
+
+// With no 'filters', reports. A bad name changes nothing.
+static int handle_mcp_set_stop_on(int seq, cJSON *args) {
+    static const char *const cmd = "mcp/setStopOn";
+    cJSON *list = cJSON_GetObjectItemCaseSensitive(args, "filters");
+    if (list) {
+        if (!cJSON_IsArray(list)) {
+            send_dap_error_response(seq, cmd, "'filters' must be an array of irq, nmi, brk, stp");
+            return 0;
+        }
+        uint16_t mask = 0;
+        cJSON *item;
+        cJSON_ArrayForEach(item, list) {
+            const uint16_t bit = cJSON_IsString(item) ? stop_filter_bit(item->valuestring) : 0;
+            if (!bit) {
+                send_dap_error_response(seq, cmd, "unknown filter: use irq, nmi, brk or stp");
+                return 0;
+            }
+            mask |= bit;
+        }
+        debug_stop_filter_set(DEBUG_OWNER_MCP, mask);
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "filters", stop_filter_names(debug_stop_filter_get(DEBUG_OWNER_MCP)));
+    cJSON_AddItemToObject(body, "armed", stop_filter_names(debug_stop_filters()));
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 static int handle_mcp_evaluate(int seq, cJSON *args) {
     static const char cmd[] = "mcp/evaluate";
     cJSON *ex = cJSON_GetObjectItemCaseSensitive(args, "expression");
@@ -7661,10 +7814,9 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "source"))        result = handle_dap_source(seq, args);
     else if (!strcmp(cmd, "breakpointLocations")) result = handle_dap_breakpoint_locations(seq, args);
     else if (!strcmp(cmd, "stepInTargets")) result = handle_dap_step_in_targets(seq, args);
-    else if (!strcmp(cmd, "setExceptionBreakpoints")) {
-        // VS always sends this — just acknowledge
-        send_dap_response(seq, "setExceptionBreakpoints", true, NULL);
-    }
+    else if (!strcmp(cmd, "setExceptionBreakpoints"))
+        result = handle_dap_set_exception_breakpoints(seq, args);
+    else if (!strcmp(cmd, "exceptionInfo")) result = handle_dap_exception_info(seq, args);
     else if (!strcmp(cmd, "setFunctionBreakpoints")) {
         result = handle_dap_set_function_breakpoints(seq, args);
     }
@@ -7678,6 +7830,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
         result = handle_mcp_read_source(seq, args);
     else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/evaluate"))
         result = handle_mcp_evaluate(seq, args);
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/setStopOn"))
+        result = handle_mcp_set_stop_on(seq, args);
     else {
         fprintf(stderr, "[dap] Unhandled command: %s\n", cmd);
         send_dap_error_response(seq, cmd, "command not supported");
@@ -7737,6 +7891,7 @@ static const char *const callable_commands[] = {
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
+    "mcp/setStopOn",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -7781,6 +7936,7 @@ void debug_server_release_frontend(void) {
         else                                  i++;
     }
     debug_wp_clear_owner(DEBUG_OWNER_MCP);
+    debug_stop_filter_set(DEBUG_OWNER_MCP, 0);
     DEBUGCancelStepFor(DEBUG_OWNER_MCP);
     if (step.pending && step.caller != DBG_CALLER_DAP) {
         step.pending = false;
@@ -7813,6 +7969,7 @@ static void dap_release_breakpoints(void) {
     debug_bp_clear_owner(DEBUG_OWNER_DAP_CONSOLE);
     debug_wp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
     debug_wp_clear_owner(DEBUG_OWNER_DAP_CONSOLE);
+    debug_stop_filter_set(DEBUG_OWNER_DAP_SOURCE, 0);
 
     num_dap_bps   = 0;
     num_func_bps  = 0;
@@ -8326,6 +8483,15 @@ void debug_server_notify_stopped(const char *reason) {
             cJSON_AddItemToObject(body, "hitBreakpointIds", hit_ids);
         } else {
             cJSON_Delete(hit_ids);
+        }
+    } else if (!strcmp(reason, "exception")) {
+        cJSON_AddStringToObject(body, "reason", "exception");
+        debug_stop_exception_t ex;
+        if (DEBUGGetStopException(&ex)) {
+            char text[64];
+            exception_text(&ex, text, sizeof text);
+            cJSON_AddStringToObject(body, "description", "Paused on exception");
+            cJSON_AddStringToObject(body, "text", text);
         }
     } else if (!strcmp(reason, "step")) {
         cJSON_AddStringToObject(body, "reason", "step");
