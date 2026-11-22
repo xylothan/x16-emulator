@@ -30,6 +30,8 @@ extern int showDebugOnRender;
 void DEBUGRenderDisplay(int width,int height);
 void DEBUGBreakToDebugger(void);
 void DEBUGBreakOnWatchpoint(void);
+// Connects the watch table to the VRAM store path. Called once at startup.
+void DEBUGInstallWatchHooks(void);
 int  DEBUGGetCurrentStatus(void);
 // Preserve execution-control and stop checks without entering either debugger
 // UI pump. Used from nested host event loops that cannot safely poll SDL.

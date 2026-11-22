@@ -214,6 +214,11 @@ void debug_ui_write6502(uint16_t address, uint8_t value, uint8_t bank, int16_t x
 static inline bool DEBUGAddWatchPoint(uint16_t addr, uint16_t len) { return debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_UI) != DEBUG_ADD_FULL; }
 static inline bool DEBUGRemoveWatchPoint(uint16_t addr) { return debug_wp_delete(addr, DEBUG_BANK_ANY); }
 static inline bool DEBUGCheckWatchPoint(uint16_t addr) { return debug_wp_covers(addr); }
+static inline bool DEBUGAddVramWatchPoint(uint32_t addr, uint32_t len) {
+    const debug_wp_spec_t spec = { DEBUG_WP_SPACE_VRAM, addr, len, DEBUG_BANK_ANY, false, 0, 0 };
+    const debug_add_result_t added = debug_wp_add_ex(&spec, DEBUG_OWNER_UI);
+    return added == DEBUG_ADD_CREATED || added == DEBUG_ADD_EXISTED;
+}
 
 // ─── Machine model (glue.h) ────────────────────────────────────────────────
 // is_gen2 is true for the X16 GS / Gen-2 machine (-gs): a 65C816 with 24-bit

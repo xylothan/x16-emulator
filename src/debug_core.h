@@ -152,7 +152,8 @@ bool debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoi
 typedef enum {
 	DEBUG_ADD_CREATED = 0, // a new entry, now owned by the caller
 	DEBUG_ADD_EXISTED,     // an entry was already there; the caller now owns it too
-	DEBUG_ADD_FULL         // out of memory; nothing was armed
+	DEBUG_ADD_FULL,        // out of memory; nothing was armed
+	DEBUG_ADD_CONFLICT     // held already with different settings; left alone
 } debug_add_result_t;
 
 // Add `owner`'s reference. Adding one that this owner already holds is
@@ -298,9 +299,15 @@ void debug_core_free(void);
 // roomy enough to watch a whole structure a field at a time.
 #define MAX_WATCHPOINTS 64
 
+// Which memory a watchpoint is on. The same number means different bytes in
+// each: VRAM is reached only through VERA's data ports.
+enum { DEBUG_WP_SPACE_CPU = 0, DEBUG_WP_SPACE_VRAM = 1 };
+
 struct watchpoint {
-	uint16_t addr;
-	uint16_t len;       // 1 = a single byte, >1 = a range starting at addr
+	uint32_t addr;      // 16-bit in CPU space, 17-bit in VRAM
+	uint32_t len;       // 1 = a single byte, >1 = a range starting at addr
+	uint8_t  space;     // DEBUG_WP_SPACE_*
+	uint32_t hits;      // writes that have fired it since it was created
 	int      x16Bank;   // bank selector, as for a breakpoint (see DEBUG_BANK_ANY)
 	bool     active;
 	bool     has_value; // when set, only fire if the written value compares true
@@ -334,6 +341,52 @@ const struct watchpoint *debug_wp_at(int index);
 // agree on the key.
 bool debug_wp_exists(uint16_t addr, int x16Bank);
 
+// A watch in any space, with its filter set in one step. An entry that already
+// exists is shared only if it matches this request exactly and is enabled;
+// otherwise the answer is DEBUG_ADD_CONFLICT and the entry is unchanged, since
+// adopting it would report a watch armed while it does something else.
+typedef struct {
+	uint8_t  space;
+	uint32_t addr;
+	uint32_t len;
+	int      x16Bank;
+	bool     has_value;
+	int      op;
+	uint8_t  value;
+} debug_wp_spec_t;
+debug_add_result_t debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner);
+
+// The index of the watch with this identity, or -1.
+int  debug_wp_find(uint8_t space, uint32_t addr, int x16Bank);
+bool debug_wp_remove_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner);
+bool debug_wp_has_owner_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner);
+
+// Edits by table index, for a UI walking debug_wp_at(). A key would have to
+// carry the space as well, and the row already knows which entry it is.
+bool debug_wp_set_active_at(int index, bool active);
+bool debug_wp_set_value_at(int index, int op, uint8_t value);
+bool debug_wp_clear_value_at(int index);
+bool debug_wp_delete_at(int index);
+
+// How many enabled watches each store path has to consider. Read directly by
+// the hot paths, so a watch on one memory costs the other nothing.
+extern int debug_wp_armed_cpu_write;
+extern int debug_wp_armed_vram;
+// Called after any change to the table. NULL unless something needs to know;
+// debug_core cannot reach video.c itself, because its tests link without it.
+extern void (*debug_wp_changed)(void);
+
+// A guest store landed in VRAM through data port `port`. True if a watch fires,
+// and recorded for debug_wp_last_access().
+bool debug_wp_check_vram(uint32_t addr, uint8_t value, int port);
+// Does an enabled VRAM watch cover this address? For a UI marking watched bytes.
+bool debug_wp_covers_vram(uint32_t addr);
+// The access that most recently fired a watch, in either space. `port` is -1
+// for a CPU store.
+bool debug_wp_last_access(uint8_t *space, uint32_t *addr, uint8_t *value, int *port);
+// debug_wp_fires_on() with the space spelled out.
+bool debug_wp_fires_on_ex(uint8_t space, uint32_t wp_addr, int x16Bank, uint32_t addr, uint8_t value);
+
 // Only fire when the value being written compares true against `value`, so
 // "stop when this becomes zero" does not stop on every other write to it.
 // Returns false if no watchpoint starts at (addr, x16Bank).
@@ -358,7 +411,7 @@ const struct watchpoint *debug_wp_at(int index);
 // debug_wp_count() first and skip this entirely when nothing is being watched.
 bool debug_wp_check_write(uint16_t addr, uint8_t value);
 
-// The write that most recently made debug_wp_check_write() answer yes, so a
+// The CPU write that most recently made debug_wp_check_write() answer yes, so a
 // front end can say which watch stopped the machine. False until one has.
 bool debug_wp_last_hit(uint16_t *addr, uint8_t *value);
 // Would the watchpoint at (wp_addr, x16Bank) fire on this write? Changes nothing.

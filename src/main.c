@@ -2057,6 +2057,8 @@ main(int argc, char **argv)
 	}
 #endif
 
+	DEBUGInstallWatchHooks();
+
 	// The graphical debugger needs a window, and headless mode never opens one:
 	// video_init() below is skipped entirely, so the self-disable inside it
 	// never runs. Clearing the flag here keeps the invariant the rest of the
