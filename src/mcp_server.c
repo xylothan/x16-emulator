@@ -1568,6 +1568,10 @@ static cJSON *tool_dump_memory(cJSON *args) {
     return tool_range("x16/dumpMemory", args, true);
 }
 
+static cJSON *tool_search_memory(cJSON *args) {
+    return tool_forward("x16/searchMemory", args);
+}
+
 static cJSON *tool_set_warp(cJSON *args) {
     return tool_forward("x16/setWarp", args);
 }
@@ -2249,6 +2253,26 @@ static const mcp_tool_t tools[] = {
       "\"space\":{\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
       "},\"required\":[\"address\",\"length\",\"path\"],\"additionalProperties\":false}",
       TOOL_DESTRUCTIVE, tool_dump_memory },
+    { "search_memory",
+      "Find a byte pattern, given as 'hex' (\"A9 00 8D\") or ASCII 'text', without changing "
+      "anything. space \"cpu\" is the 64K map as now banked, I/O registers included. \"ram\" "
+      "($A000-$BFFF) and \"rom\" ($C000-$FFFF, the 32 ROM banks) search one 'bank', or all of "
+      "them if it is left out. \"vram\" is video memory. Every start counts, so matches can "
+      "overlap. A match can cross $BFFF/$C000 in the CPU map, or from one bank into the next "
+      "across all banks, and then has crossesBank: true; with one 'bank' it stays inside it. "
+      "Each call does a bounded amount of work: with more: true, pass the fields of 'next' "
+      "back to go on, and a call can return more: true with no matches.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"hex\":{\"type\":\"string\",\"description\":\"e.g. \\\"A9 00 8D\\\"\"},"
+      "\"text\":{\"type\":\"string\",\"description\":\"ASCII, 1 to 64 characters\"},"
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"ram\",\"rom\",\"vram\"],\"default\":\"cpu\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"start\":{\"type\":[\"string\",\"number\"],\"description\":\"e.g. \\\"$A000\\\"\"},"
+      "\"end\":{\"type\":[\"string\",\"number\"],\"description\":\"last address, inclusive\"},"
+      "\"startBank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024,\"default\":64}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_search_memory },
     { "load_prg",
       "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
       "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "
