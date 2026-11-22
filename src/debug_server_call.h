@@ -9,6 +9,7 @@
 #define _DEBUG_SERVER_CALL_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <cjson/cJSON.h>
 
 typedef enum { DBG_CALLER_DAP, DBG_CALLER_MCP } dbg_caller_t;
@@ -40,6 +41,18 @@ void debug_server_set_frontend(const dbg_frontend_t *frontend);
 // still go to an attached DAP client, so an editor stays truthful about a
 // machine someone else moved. Returns the handler's "mode changed".
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply);
+
+// Where an x16/runTo was sent.
+typedef struct {
+    uint16_t pc;
+    uint8_t  bank;      // program bank
+    int      x16Bank;   // RAM/ROM bank selector, or DEBUG_BANK_ANY
+} dbg_run_target_t;
+
+// The result of a run-to as things stand: `completed` says the machine stopped,
+// and a NULL `reason` takes it from the stop. The caller owns the object.
+cJSON *debug_server_run_to_outcome(const dbg_run_target_t *target, bool completed,
+                                   const char *reason);
 
 // The other front end has gone. Let go of everything it armed, as a DAP session
 // ending does, and resume a stopped machine if nobody is left who could.
