@@ -192,9 +192,9 @@ def test_tools():
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
                    "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
-                   "list_sources", "read_source", "source_location"}
+                   "list_sources", "read_source", "source_location", "host_perf"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
-                  "dump_memory", "load_prg"}
+                  "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
                   "type_text", "send_key", "joystick", "load_symbols", "mouse", "set_warp"}
         case("every tool is listed", names == reading | losing | moving, str(names))
@@ -2672,6 +2672,293 @@ def test_read_paths():
             case("but not the folder next to it", is_error(m.call("load_symbols", path=near)))
 
 
+def wait_capture(m, state="done", secs=30):
+    d = {}
+    end = time.time() + secs
+    while time.time() < end:
+        d = data(m.call("profile_capture", top=5))
+        if d.get("state") == state:
+            break
+        time.sleep(0.05)
+    return d
+
+
+def folder_link(target, name):
+    try:
+        os.symlink(target, name, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name != "nt":
+        return False
+    return subprocess.run(["cmd", "/c", "mklink", "/J", name, target], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def test_perf_tools():
+    print("performance tools")
+    with Mcp() as m:
+        m.init()
+        d = data(m.call("perf_config"))
+        case("perf_config with no arguments reports", d.get("budget", {}).get("enabled") is False, str(d)[:160])
+        d = data(m.call("host_perf"))
+        case("host_perf", "sections" in d and "frames" in d, str(d)[:160])
+        case("host_perf takes no arguments", is_error(m.call("host_perf", reset=True)))
+        d = data(m.call("profile_capture"))
+        case("profile_capture starts idle", d.get("state") == "idle", str(d)[:160])
+        for label, args in (("a low targetFps", {"targetFps": 0}),
+                            ("a text targetFps", {"targetFps": "60"}),
+                            ("an unknown idleMode", {"idleMode": "banana"}),
+                            ("a short history", {"historyFrames": 1}),
+                            ("an empty zone", {"zones": [{"start": 9, "end": 9}]}),
+                            ("a misspelled zone key", {"zones": [{"start": 1, "end": 9, "bnak": 1}]}),
+                            ("too many zones", {"zones": [{"start": 1, "end": 2}] * 17}),
+                            ("overrunEvents", {"overrunEvents": True}),
+                            ("a text enabled", {"enabled": "yes"})):
+            case(f"perf_config refuses {label}", is_error(m.call("perf_config", **args)))
+        for label, args in (("a text reset", {"reset": "yes"}),
+                            ("a caller with no end", {"caller": {"start": 1}}),
+                            ("a caller going backwards", {"caller": {"start": 9, "end": 1}}),
+                            ("a caller with an extra key", {"caller": {"start": 1, "end": 2, "x": 1}}),
+                            ("an empty dump", {"dump": ""})):
+            case(f"perf_history refuses {label}", is_error(m.call("perf_history", **args)))
+        for label, args in (("a misspelled start key", {"start": {"frame": 5}}),
+                            ("zero frames", {"start": {"frames": 0}}),
+                            ("zero seconds", {"start": {"seconds": 0}}),
+                            ("an unknown recorder", {"start": {"recorders": ["banana"]}}),
+                            ("start with stop", {"start": {"frames": 5}, "stop": True}),
+                            ("start with export", {"start": {"frames": 5}, "export": {"json": "a.json"}}),
+                            ("an unknown export", {"export": {"csv": "a.csv"}}),
+                            ("export with nothing to export", {"export": {"json": "a.json"}})):
+            case(f"profile_capture refuses {label}", is_error(m.call("profile_capture", **args)))
+        case("nothing started", data(m.call("profile_capture")).get("state") == "idle")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = os.path.realpath(tmp)
+        root = os.path.join(tmp, "root")
+        outside = os.path.join(tmp, "outside")
+        sibling = root + "2"
+        for folder in (root, outside, sibling, os.path.join(root, "sub")):
+            os.mkdir(folder)
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": False,
+                                       "columnsStartAt1": False, "pathFormat": "uri"})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            m.call("continue")
+
+            # perf_config
+            d = data(m.call("perf_config", enabled=True, targetFps=30, idleMode="markers",
+                            zones=[{"name": "loop", "start": LOOP, "end": LOOP + 10}]))
+            b = d.get("budget", {})
+            case("perf_config applies", b.get("enabled") is True and b.get("targetFps") == 30 and
+                 b.get("idleMode") == "markers", str(b))
+            names = [z.get("name") for z in data(m.call("perf_stats")).get("zones", [])]
+            case("a zone goes in", "loop" in names, str(names))
+            r = dap.request("x16/perfConfig", {})
+            case("MCP's switch leaves the editor's overrun events off",
+                 (r or {}).get("body", {}).get("overrunEvents") is False, str(r)[:200])
+            m.call("perf_config", targetFps=60, idleMode="auto", zones=[])
+            dap.request("x16/perfConfig", {"enabled": True, "overrunEvents": False})
+            d = data(m.call("perf_config", enabled=False))
+            case("MCP's off leaves DAP's claim", d.get("budget", {}).get("enabled") is True, str(d)[:160])
+            r = dap.request("x16/perfConfig", {"enabled": False})
+            case("and DAP's off, with MCP's gone, stops it",
+                 (r or {}).get("body", {}).get("budget", {}).get("enabled") is False, str(r)[:200])
+            m.call("perf_config", enabled=True)
+            r = dap.request("x16/perfConfig", {"enabled": False})
+            case("DAP's off leaves MCP's claim",
+                 (r or {}).get("body", {}).get("budget", {}).get("enabled") is True, str(r)[:200])
+            m.call("perf_config", enabled=False)
+
+            # perf_history
+            d = data(m.call("perf_history", enabled=True, caller={"start": LOOP, "end": LOOP + 10}))
+            case("perf_history arms", d.get("enabled") is True, str(d)[:160])
+            end = time.time() + 15
+            while time.time() < end and data(m.call("perf_history")).get("frames", 0) < 3:
+                time.sleep(0.02)
+            case("and counts frames", data(m.call("perf_history")).get("frames", 0) >= 3)
+            hist = os.path.join(root, "hist.bin")
+            d = data(m.call("perf_history", dump="hist.bin"))
+            case("dump writes inside the root", d.get("dumped", 0) > 0 and os.path.isfile(hist) and
+                 open(hist, "rb").read(4) == b"PHST", str(d)[:160])
+            case("and says where", os.path.normcase(d.get("dumpPath", "").replace("/", os.sep)) ==
+                 os.path.normcase(hist), str(d)[:160])
+            before = open(hist, "rb").read()
+            r = m.call("perf_history", dump="hist.bin")
+            case("an existing dump is refused", is_error(r) and open(hist, "rb").read() == before)
+            case("unless overwrite is given", not is_error(m.call("perf_history", dump="hist.bin", overwrite=True)))
+
+            # A refused file stops the whole request.
+            counted = data(m.call("perf_history")).get("frames", 0)
+            r = m.call("perf_history", reset=True, dump=os.path.join("..", "esc.bin"))
+            case("a refused dump does not reset", is_error(r) and
+                 data(m.call("perf_history")).get("frames", 0) >= counted)
+
+            # profile_capture: JSR $0A10, JMP $0A00; NOP, RTS. The tree needs a call.
+            m.call("pause")
+            m.call("write_memory", address=0x0A00, hex="20100A4C000A")
+            m.call("write_memory", address=0x0A10, hex="EA60")
+            m.call("set_registers", pc=0x0A00)
+            m.call("continue")
+            d = data(m.call("profile_capture", start={"frames": 30, "recorders": ["hist", "tree", "waterfall"]}))
+            case("a capture answers at once, still running", d.get("state") == "running", str(d)[:200])
+            case("with no report yet", "report" not in d, str(d)[:200])
+            case("a second start is refused", is_error(m.call("profile_capture", start={"frames": 5})))
+            for label, args in (("targetFps", {"targetFps": 20}), ("reset", {"reset": True}),
+                                ("zones", {"zones": []}), ("historyFrames", {"historyFrames": 300})):
+                case(f"perf_config {label} is refused during a capture",
+                     is_error(m.call("perf_config", **args)))
+            for label, args in (("enabled", {"enabled": False}), ("reset", {"reset": True}),
+                                ("caller", {"caller": {"start": 0, "end": 0}})):
+                case(f"perf_history {label} is refused during a capture",
+                     is_error(m.call("perf_history", **args)))
+            d = wait_capture(m)
+            case("polling reaches done", d.get("state") == "done" and d.get("ended") == "frame limit", str(d)[:200])
+            case("with a report", d.get("report", {}).get("rowCount", 0) > 0, str(d)[:200])
+
+            d = data(m.call("profile_capture", top=1, export={"folded": "a.folded", "json": "a.json",
+                                                              "trace": "a.trace", "run": "a.run"}))
+            done = d.get("exported", {})
+            for key, name in (("folded", "a.folded"), ("json", "a.json"), ("trace", "a.trace"), ("run", "a.run")):
+                target = os.path.join(root, name)
+                case(f"export {key} writes inside the root", done.get(key, -1) >= 0 and os.path.isfile(target), str(done))
+                case(f"and says where {key} went",
+                     os.path.normcase(done.get("paths", {}).get(key, "").replace("/", os.sep)) ==
+                     os.path.normcase(target), str(done))
+            before = open(os.path.join(root, "a.json"), "rb").read()
+            r = m.call("profile_capture", export={"json": "a.json"})
+            case("an existing export is refused", is_error(r) and open(os.path.join(root, "a.json"), "rb").read() == before)
+            r = m.call("profile_capture", export={"json": "a.json"}, overwrite=True)
+            case("unless overwrite is given", data(r).get("exported", {}).get("json", -1) >= 0, str(r)[:200])
+
+            d = data(m.call("profile_capture", load="a.run", top=1))
+            case("a saved run loads", d.get("report", {}).get("frames") == 30, str(d)[:200])
+            case("its path is native with a URI client attached",
+                 os.path.normcase(d.get("loadedRun", "").replace("/", os.sep)) ==
+                 os.path.normcase(os.path.join(root, "a.run")), str(d.get("loadedRun")))
+
+            # A refused file leaves a running capture running.
+            m.call("profile_capture", start={"frames": 100000000})
+            r = m.call("profile_capture", stop=True, export={"json": os.path.join("..", "esc.json")})
+            case("a refused export does not stop the capture", is_error(r) and
+                 data(m.call("profile_capture")).get("state") == "running")
+            d = data(m.call("profile_capture", stop=True, top=0))
+            case("this client can stop its own", d.get("state") == "done" and d.get("ended") == "stopped", str(d)[:200])
+
+            # DAP's capture is not MCP's to end.
+            dap.request("x16/capture", {"start": {"frames": 100000000}})
+            r = m.call("profile_capture", stop=True)
+            case("another client's capture is not stopped", is_error(r) and
+                 dap.request("x16/capture", {"top": 0})["body"]["state"] == "running", str(r)[:200])
+            r = dap.request("x16/capture", {"stop": True, "top": 0})
+            case("DAP stops its own", (r or {}).get("body", {}).get("state") == "done", str(r)[:200])
+
+            # Every path argument, every way out.
+            secret = os.path.join(outside, "secret.run")
+            with open(os.path.join(root, "a.run"), "rb") as src, open(secret, "wb") as dst:
+                dst.write(src.read())
+            victim = os.path.join(outside, "victim.bin")
+            with open(victim, "wb") as f:
+                f.write(b"keep")
+            up = os.path.join(root, "up")
+            has_folder_link = folder_link(outside, up)
+            file_link = os.path.join(root, "file.lnk")
+            try:
+                os.symlink(victim, file_link)
+                has_file_link = True
+            except (OSError, NotImplementedError):
+                has_file_link = False
+
+            writers = (("dump", lambda path, **o: m.call("perf_history", dump=path, **o)),
+                       ("folded", lambda path, **o: m.call("profile_capture", export={"folded": path}, **o)),
+                       ("json", lambda path, **o: m.call("profile_capture", export={"json": path}, **o)),
+                       ("trace", lambda path, **o: m.call("profile_capture", export={"trace": path}, **o)),
+                       ("run", lambda path, **o: m.call("profile_capture", export={"run": path}, **o)))
+            for arg, write in writers:
+                for label, bad in (("..", os.path.join("..", "esc.bin")),
+                                   ("a nested ..", os.path.join("sub", "..", "..", "esc.bin")),
+                                   ("an absolute path outside", os.path.join(outside, "esc.bin")),
+                                   ("a folder sharing the prefix", os.path.join(sibling, "esc.bin")),
+                                   ("a missing folder", os.path.join("nope", "esc.bin"))):
+                    case(f"{arg} refuses {label}", is_error(write(bad, overwrite=True)))
+                if has_folder_link:
+                    case(f"{arg} refuses a folder link out",
+                         is_error(write(os.path.join("up", "esc.bin"), overwrite=True)))
+                if has_file_link:
+                    case(f"{arg} refuses a file link", is_error(write("file.lnk", overwrite=True)))
+                if os.name == "nt":
+                    for bad in ("NUL", "con.txt", "a.bin:hidden"):
+                        case(f"{arg} refuses {bad}", is_error(write(bad, overwrite=True)))
+            case("nothing escaped", not os.path.exists(os.path.join(tmp, "esc.bin")) and
+                 not os.path.exists(os.path.join(outside, "esc.bin")) and not os.listdir(sibling))
+            case("and the file outside is intact", open(victim, "rb").read() == b"keep")
+
+            for label, bad in (("..", os.path.join("..", "outside", "secret.run")),
+                               ("a nested ..", os.path.join("sub", "..", "..", "outside", "secret.run")),
+                               ("an absolute path outside", secret)):
+                case(f"load refuses {label}", is_error(m.call("profile_capture", load=bad)))
+            if has_folder_link:
+                case("load refuses a folder link out",
+                     is_error(m.call("profile_capture", load=os.path.join("up", "secret.run"))))
+            if has_file_link:
+                run_link = os.path.join(root, "run.lnk")
+                os.symlink(secret, run_link)
+                case("load refuses a file link", is_error(m.call("profile_capture", load="run.lnk")))
+            r = m.call("profile_capture", load=secret)
+            missing = m.call("profile_capture", load=os.path.join(outside, "absent.run"))
+            case("load: outside and missing read the same",
+                 r.get("content") == missing.get("content"), f"{r} != {missing}")
+
+            # The same requests from DAP reach the same places.
+            target = os.path.join(outside, "dap.bin")
+            r = dap.request("x16/perfHist", {"dump": target})
+            case("DAP's dump is not confined", (r or {}).get("body", {}).get("dumped", -1) > 0 and
+                 os.path.isfile(target), str(r)[:200])
+            r = dap.request("x16/capture", {"load": secret, "top": 0})
+            case("DAP's load is not confined", (r or {}).get("success") is True and
+                 r["body"].get("loadedRun") == secret, str(r)[:200])
+            paths = {k: os.path.join(outside, f"dap.{k}") for k in ("folded", "json", "trace", "run")}
+            r = dap.request("x16/capture", {"export": paths, "top": 0})
+            done = (r or {}).get("body", {}).get("exported", {})
+            for key, path in paths.items():
+                case(f"DAP's {key} export is not confined", done.get(key, -1) >= 0 and os.path.isfile(path), str(done))
+            r = dap.request("x16/capture", {"export": {"json": paths["json"]}, "top": 0})
+            case("and DAP still overwrites", (r or {}).get("body", {}).get("exported", {}).get("json", -1) >= 0, str(r)[:200])
+            dap.close()
+
+    # What a client claimed ends with its lease; what another holds does not.
+    port = free_port()
+    with HttpMcp(["-debugport", str(port)], env={"X16_MCP_LEASE_MS": "700"}) as m:
+        m.init()
+        time.sleep(0.4)
+        m.call("perf_config", enabled=True)
+        d = data(m.call("profile_capture", start={"frames": 100000000}))
+        case("a capture on a lease is running", d.get("state") == "running", str(d)[:160])
+        time.sleep(1.5)
+        dap = Dap(port)
+        r = dap.request("x16/capture", {"top": 0})
+        body = (r or {}).get("body", {})
+        case("an expired lease ends its capture", body.get("state") == "done" and body.get("ended") == "stopped", str(r)[:200])
+        r = dap.request("x16/perfConfig", {})
+        case("and its claim on the statistics",
+             (r or {}).get("body", {}).get("budget", {}).get("enabled") is False, str(r)[:200])
+
+        m.call("get_status")
+        dap.request("x16/capture", {"start": {"frames": 100000000}})
+        time.sleep(1.5)
+        r = dap.request("x16/capture", {"top": 0})
+        case("an expired lease leaves another client's capture",
+             (r or {}).get("body", {}).get("state") == "running", str(r)[:200])
+        dap.request("x16/capture", {"stop": True, "top": 0})
+        dap.close()
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -2683,7 +2970,8 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_call_stack, test_sources, test_read_paths):
+                 test_client_format, test_call_stack, test_sources, test_read_paths,
+                 test_perf_tools):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

@@ -3820,14 +3820,50 @@ static cJSON *vera_bandwidth_json(void) {
     return o;
 }
 
+static bool caller_read_path(const char *request, char *out, size_t out_size,
+                             char *err, size_t errn);
+static bool caller_write_path(const char *request, bool overwrite, char *out, size_t out_size,
+                              char *err, size_t errn);
+
+// A capture reads these same counters. An MCP client may not move them under
+// one, whoever started it. `names` ends with NULL.
+static bool refuse_during_capture(int seq, const char *cmd, const cJSON *args,
+                                  const char *const *names) {
+    if (current_caller != DBG_CALLER_MCP || !cap_running() || !args) return false;
+    for (; *names; names++) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(args, *names);
+        if (!item || (!strcmp(*names, "reset") && !cJSON_IsTrue(item))) continue;
+        char why[120];
+        snprintf(why, sizeof why, "'%s' cannot change while a capture is recording", *names);
+        send_dap_error_response(seq, cmd, why);
+        return true;
+    }
+    return false;
+}
+
 // ─── Whole-program histogram (x16/perfHist) ─────────────────────────────────
 // Arguments, all optional, applied in this order:
 //   enabled: bool        arm/disarm (allocates ~21 MB on first arm)
 //   caller:  {start,end} the main-loop range whose JSRs open tasks
 //   reset:   bool        zero everything
 //   dump:    "path"      write the sparse histogram (see perf_hist.h)
+//   overwrite: bool      an MCP client must pass this to replace a file
 // The body always carries the totals and the task table.
 static int handle_x16_perf_hist(int seq, cJSON *args) {
+    static const char *const counters[] = {"enabled", "caller", "reset", NULL};
+    // Judged first, so that a refused file changes nothing below.
+    char dump_path[4200], err[300];
+    cJSON *dump = args ? cJSON_GetObjectItemCaseSensitive(args, "dump") : NULL;
+    const bool dumping = cJSON_IsString(dump) && dump->valuestring;
+    if (dumping &&
+        !caller_write_path(dump->valuestring,
+                           cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "overwrite")),
+                           dump_path, sizeof dump_path, err, sizeof err)) {
+        send_dap_error_response(seq, "x16/perfHist", err);
+        return 0;
+    }
+    if (refuse_during_capture(seq, "x16/perfHist", args, counters)) return 0;
+
     cJSON *item = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
     if (cJSON_IsBool(item) && !perf_hist_arm(cJSON_IsTrue(item))) {
         send_dap_error_response(seq, "x16/perfHist", "could not allocate the histogram");
@@ -3844,9 +3880,8 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
     if (cJSON_IsTrue(item))
         perf_hist_reset();
     long dumped = -2;
-    item = args ? cJSON_GetObjectItemCaseSensitive(args, "dump") : NULL;
-    if (cJSON_IsString(item) && item->valuestring)
-        dumped = perf_hist_dump(item->valuestring);
+    if (dumping)
+        dumped = perf_hist_dump(dump_path);
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddBoolToObject(body, "enabled", perf_hist_enabled);
@@ -3854,8 +3889,11 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
     cJSON_AddNumberToObject(body, "cycles", (double)perf_hist_total_cycles());
     cJSON_AddNumberToObject(body, "irqCycles", (double)perf_hist_irq_cycles());
     cJSON_AddNumberToObject(body, "loopCycles", (double)perf_hist_loop_cycles());
-    if (dumped != -2)
+    if (dumped != -2) {
         cJSON_AddNumberToObject(body, "dumped", (double)dumped);
+        if (current_caller == DBG_CALLER_MCP && dumped >= 0)
+            cJSON_AddStringToObject(body, "dumpPath", dump_path);
+    }
     cJSON *tl = cJSON_CreateArray();
     for (int i = 0; i < perf_hist_task_count(); i++) {
         perf_hist_task_t t;
@@ -3874,6 +3912,14 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
     return 0;
 }
 
+// The capture an MCP client started, by cap_serial(); 0 for none. It is that
+// client's to stop, and it ends when the client goes.
+static uint32_t mcp_capture_serial = 0;
+
+static bool capture_is_live(void) {
+    return cap_state() == CAP_RUNNING || cap_state() == CAP_ARMED;
+}
+
 // ─── Capture mode (x16/capture) ─────────────────────────────────────────────
 // Record a stretch of running with the debugger quiet, then read where the
 // guest's time went, by routine. See profile_capture.h.
@@ -3881,9 +3927,44 @@ static int handle_x16_perf_hist(int seq, cJSON *args) {
 //   start: {frames, seconds, onMarker, recorders: ["hist","budget","vram"]}
 //          begin one (recorders default to ["hist"]); refused while one runs
 //   stop:  true   end a running capture, or cancel one armed for a marker
+//   load:  path   show a saved run in place of the last capture
 //   top:   n      report rows to return (default 50; 0 = none)
+//   export: {folded, json, trace, run}   files to write from the report
+//   overwrite: bool   an MCP client must pass this to replace a file
 // The body always carries the state; once a capture has ended, its report.
 static int handle_x16_capture(int seq, cJSON *args) {
+    static const char *const export_keys[] = {"folded", "json", "trace", "run"};
+    enum { CAP_OUT_FOLDED, CAP_OUT_JSON, CAP_OUT_TRACE, CAP_OUT_RUN, CAP_OUT_KINDS };
+
+    // Every file is judged before anything starts, stops or loads, so that a
+    // refused one leaves the capture as it was.
+    char   export_path[CAP_OUT_KINDS][4200], load_path[4200], path_err[300];
+    bool   exporting[CAP_OUT_KINDS] = {false, false, false, false}, export_any = false;
+    cJSON *ex = args ? cJSON_GetObjectItemCaseSensitive(args, "export") : NULL;
+    const bool overwrite = args && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "overwrite"));
+    for (int i = 0; i < CAP_OUT_KINDS && cJSON_IsObject(ex); i++) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(ex, export_keys[i]);
+        if (!cJSON_IsString(p)) continue;
+        if (!caller_write_path(p->valuestring, overwrite, export_path[i], sizeof export_path[i],
+                               path_err, sizeof path_err)) {
+            send_dap_error_response(seq, "x16/capture", path_err);
+            return 0;
+        }
+        exporting[i] = export_any = true;
+    }
+    cJSON *ld = args ? cJSON_GetObjectItemCaseSensitive(args, "load") : NULL;
+    if (cJSON_IsString(ld) &&
+        !caller_read_path(ld->valuestring, load_path, sizeof load_path, path_err, sizeof path_err)) {
+        send_dap_error_response(seq, "x16/capture", path_err);
+        return 0;
+    }
+    if (current_caller == DBG_CALLER_MCP && args &&
+        cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "stop")) && capture_is_live() &&
+        cap_serial() != mcp_capture_serial) {
+        send_dap_error_response(seq, "x16/capture", "that capture was started by someone else");
+        return 0;
+    }
+
     cJSON *start = args ? cJSON_GetObjectItemCaseSensitive(args, "start") : NULL;
     if (cJSON_IsObject(start)) {
         cap_config_t c = {0};
@@ -3916,15 +3997,20 @@ static int handle_x16_capture(int seq, cJSON *args) {
             send_dap_error_response(seq, "x16/capture", "the recorders could not be armed");
             return 0;
         }
+        if (current_caller == DBG_CALLER_MCP) mcp_capture_serial = cap_serial();
     }
     cJSON *stop = args ? cJSON_GetObjectItemCaseSensitive(args, "stop") : NULL;
     if (cJSON_IsTrue(stop))
         cap_stop();
     // load: path -- show a saved run (profile_run.h) in place of the last one.
     char   run_msg[1200] = "";
-    cJSON *ld = args ? cJSON_GetObjectItemCaseSensitive(args, "load") : NULL;
-    if (cJSON_IsString(ld) && profile_session_load_run(ld->valuestring, run_msg, sizeof run_msg) != 0) {
+    if (cJSON_IsString(ld) && profile_session_load_run(load_path, run_msg, sizeof run_msg) != 0) {
         send_dap_error_response(seq, "x16/capture", run_msg);
+        return 0;
+    }
+    if (current_caller == DBG_CALLER_MCP && export_any &&
+        !(profile_session_report() && (cap_state() == CAP_DONE || profile_session_run_loaded()))) {
+        send_dap_error_response(seq, "x16/capture", "there is no finished capture to export");
         return 0;
     }
     int top = 50;
@@ -4039,24 +4125,27 @@ static int handle_x16_capture(int seq, cJSON *args) {
         cJSON_AddItemToObject(body, "report", rep);
 
         // export: {folded: path, json: path} -- files written by the emulator.
-        cJSON *ex = args ? cJSON_GetObjectItemCaseSensitive(args, "export") : NULL;
         if (cJSON_IsObject(ex)) {
             cJSON *done = cJSON_CreateObject();
-            cJSON *fp = cJSON_GetObjectItemCaseSensitive(ex, "folded");
-            cJSON *jp = cJSON_GetObjectItemCaseSensitive(ex, "json");
-            if (cJSON_IsString(fp))
-                cJSON_AddNumberToObject(done, "folded", profile_session_export_folded(fp->valuestring));
-            if (cJSON_IsString(jp))
-                cJSON_AddNumberToObject(done, "json", profile_session_export_json(jp->valuestring));
-            cJSON *tp = cJSON_GetObjectItemCaseSensitive(ex, "trace");
-            if (cJSON_IsString(tp))
-                cJSON_AddNumberToObject(done, "trace", profile_session_export_trace(tp->valuestring));
+            if (exporting[CAP_OUT_FOLDED])
+                cJSON_AddNumberToObject(done, "folded", profile_session_export_folded(export_path[CAP_OUT_FOLDED]));
+            if (exporting[CAP_OUT_JSON])
+                cJSON_AddNumberToObject(done, "json", profile_session_export_json(export_path[CAP_OUT_JSON]));
+            if (exporting[CAP_OUT_TRACE])
+                cJSON_AddNumberToObject(done, "trace", profile_session_export_trace(export_path[CAP_OUT_TRACE]));
             // run: a saved run, to open again later (0 written, -1 failed).
-            cJSON *rp = cJSON_GetObjectItemCaseSensitive(ex, "run");
-            if (cJSON_IsString(rp)) {
+            if (exporting[CAP_OUT_RUN]) {
                 char m[1200];
-                cJSON_AddNumberToObject(done, "run", profile_session_save_run(rp->valuestring, m, sizeof m));
+                cJSON_AddNumberToObject(done, "run", profile_session_save_run(export_path[CAP_OUT_RUN], m, sizeof m));
                 cJSON_AddStringToObject(done, "runMessage", m);
+            }
+            if (current_caller == DBG_CALLER_MCP) {
+                cJSON *where = cJSON_CreateObject();
+                for (int i = 0; i < CAP_OUT_KINDS; i++) {
+                    if (exporting[i])
+                        cJSON_AddStringToObject(where, export_keys[i], export_path[i]);
+                }
+                cJSON_AddItemToObject(done, "paths", where);
             }
             cJSON_AddItemToObject(body, "exported", done);
         }
@@ -4272,22 +4361,26 @@ static int handle_x16_perf_config(int seq, cJSON *args) {
         send_dap_error_response(seq, "x16/perfConfig", "missing arguments");
         return 0;
     }
+    static const char *const measured[] = {"targetFps", "idleMode", "historyFrames", "zones",
+                                           "reset", NULL};
+    if (refuse_during_capture(seq, "x16/perfConfig", args, measured)) return 0;
 
     cJSON *item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
     if (cJSON_IsBool(item)) {
         const bool want = cJSON_IsTrue(item);
-        if (!perf_budget_arm(PERF_OWNER_DAP, want)) {
+        if (!perf_budget_arm(caller_perf_owner(), want)) {
             send_dap_error_response(seq, "x16/perfConfig",
                                     "could not allocate the history ring");
             return 0;
         }
         // Turning profiling on is as clear a statement of intent as there is,
         // so overrun events follow it unless the client says otherwise below.
-        perf_overrun_events = want;
+        // They go to the DAP client, so only that client's switch moves them.
+        if (current_caller == DBG_CALLER_DAP) perf_overrun_events = want;
         // The bandwidth accounting follows the same switch. Two requests to
         // answer one question ("profile this machine") would be a surface
         // nobody wants to remember.
-        vera_bandwidth_arm(VERA_BW_OWNER_DAP, want);
+        vera_bandwidth_arm(caller_bw_owner(), want);
     }
 
     item = cJSON_GetObjectItemCaseSensitive(args, "targetFps");
@@ -4306,7 +4399,7 @@ static int handle_x16_perf_config(int seq, cJSON *args) {
         perf_budget_set_capacity((int)item->valuedouble);
 
     item = cJSON_GetObjectItemCaseSensitive(args, "overrunEvents");
-    if (cJSON_IsBool(item))
+    if (cJSON_IsBool(item) && current_caller == DBG_CALLER_DAP)
         perf_overrun_events = cJSON_IsTrue(item);
 
     // Zones, when given, REPLACE the address zones wholesale: a client that
@@ -4342,7 +4435,8 @@ static int handle_x16_perf_config(int seq, cJSON *args) {
     cJSON *body = cJSON_CreateObject();
     cJSON_AddItemToObject(body, "budget", perf_budget_json());
     cJSON_AddItemToObject(body, "bandwidth", vera_bandwidth_json());
-    cJSON_AddBoolToObject(body, "overrunEvents", perf_overrun_events);
+    if (current_caller == DBG_CALLER_DAP)
+        cJSON_AddBoolToObject(body, "overrunEvents", perf_overrun_events);
     send_dap_response(seq, "x16/perfConfig", true, body);
     return 0;
 }
@@ -6223,6 +6317,43 @@ static bool caller_read_path(const char *request, char *out, size_t out_size,
     return host_read_path(roots, count, request, out, out_size, err, errn);
 }
 
+// The folder a client's written files stay inside: -fsroot if one was chosen,
+// else the dump folder ("" is the working one). NULL, with `err`, if it cannot
+// be made.
+static const char *client_write_root(char *err, size_t errn) {
+    if (fsroot_given && fsroot_path) return (const char *)fsroot_path;
+    const char *d = export_dir(EXPORT_DUMP);
+    if (d[0] && !export_make_dir(d)) {
+        snprintf(err, errn, "the dump folder cannot be created");
+        return NULL;
+    }
+    return d[0] ? d : ".";
+}
+
+// A host file a client named, to be written. A DAP client is the user's editor
+// and keeps naming what it likes. An MCP client writes only inside the folder
+// above, and replaces a file only when it says so.
+static bool caller_write_path(const char *request, bool overwrite, char *out, size_t out_size,
+                              char *err, size_t errn) {
+    if (current_caller == DBG_CALLER_DAP) {
+        const int n = snprintf(out, out_size, "%s", request);
+        if (n < 0 || (size_t)n >= out_size) {
+            snprintf(err, errn, "that path is too long");
+            return false;
+        }
+        return true;
+    }
+    const char *folder = client_write_root(err, errn);
+    if (!folder) return false;
+    bool exists = false;
+    if (!host_write_path(folder, request, out, out_size, &exists, err, errn)) return false;
+    if (exists && !overwrite) {
+        snprintf(err, errn, "that file exists; pass overwrite to replace it");
+        return false;
+    }
+    return true;
+}
+
 // ─── read_source ────────────────────────────────────────────────────
 //
 // The name must be one the debug info holds, but that does not make it safe: a
@@ -6573,20 +6704,12 @@ static int handle_x16_dump_memory(int seq, cJSON *args) {
         return 0;
     }
 
-    // -fsroot if one was chosen, else the dump folder ("" is the working one).
-    const char *folder;
-    if (fsroot_given && fsroot_path) {
-        folder = (const char *)fsroot_path;
-    } else {
-        const char *d = export_dir(EXPORT_DUMP);
-        if (d[0] && !export_make_dir(d)) {
-            send_dap_error_response(seq, cmd, "the dump folder cannot be created");
-            return 0;
-        }
-        folder = d[0] ? d : ".";
-    }
-
     char target[4200], err[300];
+    const char *folder = client_write_root(err, sizeof err);
+    if (!folder) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
     bool exists = false;
     if (!host_write_path(folder, pi->valuestring, target, sizeof target, &exists, err, sizeof err)) {
         send_dap_error_response(seq, cmd, err);
@@ -6958,6 +7081,7 @@ static const char *const callable_commands[] = {
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
+    "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -7009,6 +7133,7 @@ void debug_server_release_frontend(void) {
     }
     perf_budget_arm(PERF_OWNER_MCP, false);
     vera_bandwidth_arm(VERA_BW_OWNER_MCP, false);
+    if (capture_is_live() && cap_serial() == mcp_capture_serial) cap_stop();
 
     // A headless machine is never left halted with nobody able to restart it.
     if (currentMode == DMODE_STOP && client_sock == SOCKET_INVALID &&
