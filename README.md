@@ -1042,7 +1042,8 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `scopes`, `variables`, `setVariable`, `setBreakpoints`, `setFunctionBreakpoints`,
 `setInstructionBreakpoints`, `setDataBreakpoints`, `setExceptionBreakpoints`, `breakpointLocations`,
 `continue`, `next`, `stepIn`, `stepOut`, `pause`, `goto`, `gotoTargets`, `stepInTargets`,
-`evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
+`evaluate`, `setExpression`, `completions`, `readMemory`, `writeMemory`, `disassemble`,
+`loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
 Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
@@ -1148,6 +1149,34 @@ A name from a loaded `.dbg` evaluates too: a label to its address, an equate to 
 does not matter. A register or command of the same name takes priority, so `x` is always the X
 register. Bank constants (`RAM_BANK*`, `BANK_*` or `*_BANK`, valued 0–255) are kept for bank
 mapping and do not evaluate.
+
+Anything else is an expression. Expressions never change the machine:
+
+| | |
+| --- | --- |
+| Operators | `\|\|` `&&` `\|` `^` `&` `==` `!=` `<` `<=` `>` `>=` `<<` `>>` `+` `-` `*` `/` `%`, unary `-` `!` `~`, and parentheses, with C's precedence |
+| Numbers | `$C000`, `0xC000`, `49152` |
+| Registers | `A` `X` `Y` `SP` `P` `PC` `R0`-`R15` `rambank` `rombank` |
+| Memory | `byte[e]`, `word[e]`, `vbyte[e]` (VRAM), `byte[bank:addr]`, `word[bank:addr]`, or `bank:addr` alone for a byte |
+| Symbols | `name`, `name+4` |
+
+* Values are unsigned 32-bit and wrap, so `-1` is `$FFFFFFFF` and is not less than 0. Division
+  and modulo are unsigned, and by zero are errors. A shift by 32 or more gives 0.
+* `&&` and `||` give 0 or 1 and skip their right side when the left decides.
+* A bare word is a register, then a symbol, and never hex: write `$BEEF`. A decimal has no leading
+  zero, so `0400+1` is an error.
+* A whole expression that is `$C000`, or hex starting with `0` such as `0400` or `0`, is the
+  console's memory peek. In a larger expression `$C000` is the number, so read memory there with
+  `byte[$C000]`.
+* `bank:addr` is an X16 RAM or ROM bank, read without switching to it. Hex needs its `$`:
+  `byte[2:$A000]`. Inside `byte[]` and `word[]` each half is a whole expression. Elsewhere it is one
+  operand that reads a byte, so `2:$A000+1` adds 1 to that byte. A symbol in a bank keeps that bank
+  through `+` and `-`. The high byte of a 24-bit address is the 65C816 bank.
+
+`setExpression` assigns to a register, `byte[]`, `word[]`, `vbyte[]` or `bank:addr`. The value is
+an expression, cut to fit the target, and the reply shows what the target now holds. A CPU write
+cannot name a bank, so a target in a bank that is not mapped is refused. `completions` offers
+register and symbol names.
 
 #### Scripting input for automated tests
 
@@ -1461,7 +1490,7 @@ debugging it.
 | Tools | |
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
-| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack`, `evaluate` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
@@ -1476,6 +1505,10 @@ debugging it.
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
 refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
 program or update BASIC's pointers.
+
+`evaluate` takes the expression language above and nothing else. It cannot assign, and the debug
+console's commands (`bp_clear`, `reset` and the rest) do not exist there. `$C000` is a number, so
+read memory with `byte[$C000]`.
 
 `profile_capture` answers at once with the capture's state, so a client polls until it is `done`.
 A capture a client starts is its own to stop, and ends with its session. `perf_config`'s `enabled`

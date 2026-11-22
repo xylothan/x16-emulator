@@ -1378,6 +1378,15 @@ static cJSON *tool_lookup_symbol(cJSON *args) {
     return tool_forward("x16/lookupSymbol", args);
 }
 
+// Reaches only the expression engine, never the console commands behind the
+// DAP evaluate request, one of which clears every client's breakpoints.
+static cJSON *tool_evaluate(cJSON *args) {
+    cJSON *e = args ? cJSON_GetObjectItemCaseSensitive(args, "expression") : NULL;
+    if (!e || !cJSON_IsString(e))
+        return tool_fail("'expression' is required, e.g. \"byte[$0400] + 1\"");
+    return tool_forward("mcp/evaluate", args);
+}
+
 static cJSON *tool_list_sources(cJSON *args) {
     (void)args;
     return tool_passthrough("loadedSources");
@@ -1916,6 +1925,16 @@ static const mcp_tool_t tools[] = {
       "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256,\"default\":16}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
       TOOL_READ, tool_disassemble },
+    { "evaluate",
+      "Compute an expression without changing anything. Unsigned 32-bit, wrapping, with C "
+      "precedence: || && | ^ & == != < <= > >= << >> + - * / % and unary - ! ~. Operands: $hex, "
+      "0xhex, decimal, A X Y SP P PC R0-R15 rambank rombank, byte[e] word[e] vbyte[e], "
+      "byte[bank:addr], and symbols such as main+4. A bare word is a register, then a symbol, "
+      "and never hex. $C000 is the number, so read memory with byte[$C000].",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"expression\":{\"type\":\"string\",\"description\":\"e.g. word[R0] + X * 2\"}"
+      "},\"required\":[\"expression\"],\"additionalProperties\":false}",
+      TOOL_READ, tool_evaluate },
     { "get_stack",
       "The call stack, innermost first. Frame 0 is the current PC. For a caller, address is "
       "where it returns to, callSite is its JSR, and symbol, file and line describe that JSR. "
