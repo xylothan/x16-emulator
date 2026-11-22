@@ -1,42 +1,10 @@
-// VERA PCM channel: the FIFO the CPU feeds and the two registers that drive it.
+// VERA PCM FIFO and registers, checked against the RTL.
 //
-// ORACLE (strength B): the VERA Verilog. VERA is an FPGA, so the RTL is not a
-// description of the hardware -- it IS the hardware. Documentation and the
-// emulator's own C are both downstream of it and can drift from it.
-//
-//   repo:   https://github.com/X16Community/vera-module
-//   tag:    v47.0.2   (commit 45cc1f05)
-//   files:  fpga/source/audio/audio_fifo.v
-//           fpga/source/audio/pcm.v
-//           fpga/source/top.v                          (register decode)
-//
-// v47.0.2 because it is the newest revision these citations were checked
-// against. The emulator now claims 49.0.6 (VERA_VERSION_* in video.c), which has
-// no public RTL; tests/check_vera_version.py records both and fails if either
-// moves alone.
-//
-// The audio RTL happens to be byte-identical in v48.0.1, so nothing here turns
-// on the choice; the two differ only in the version registers and a bus
-// write-address register. Line numbers in top.v do differ between them, and
-// these are v47.0.2's.
-//
-// Use this repo and no other. X16Community/vera-module is a fork of
-// fvdhoef/vera-module, but the two diverged at the v0.7 release in 2019 and are
-// now different chips: the parent has no audio RTL of any kind -- no audio
-// directory, no PCM, no FIFO, and only eight bus registers. Audio was added for
-// production hardware and exists solely in the fork.
-//
-// Every expectation below quotes the RTL it rests on, so a reader can check the
-// claim here rather than take it on trust or re-derive it from the repo. An
-// assertion with no quoted RTL does not belong in this file.
-//
-// FIFO looping is deliberately absent. It sat on the RTL trunk for five weeks in
-// 2023 (70a03e00) and was reverted as an accidental merge (b1ada295) before any
-// release. VERA firmware is field-flashable, so what matters is what shipped,
-// not what main held at some point.
-//
-// vera_pcm.c includes only its own header and libc, so this links it directly
-// with no fixture and no SDL.
+//   repo:  https://github.com/X16Community/vera-module
+//   tag:   v47.0.2 (45cc1f05)
+//   files: fpga/source/audio/audio_fifo.v
+//          fpga/source/audio/pcm.v
+//          fpga/source/top.v
 
 #include "support/harness.h"
 
@@ -49,9 +17,7 @@
 // audio_fifo.v:26   assign empty = (wridx_r == rdidx_r);
 // audio_fifo.v:27   assign full  = (wridx_next == rdidx_r);
 //
-// 4096 cells exist, but `full` asserts one short of them: the write pointer is
-// never allowed to catch the read pointer, because wridx == rdidx already means
-// empty. So the usable depth is 4095.
+// 4096 cells, 4095 usable: wridx == rdidx means empty.
 #define USABLE (PCM_FIFO_SIZE - 1)
 
 static struct pcm_debug_state
@@ -95,8 +61,7 @@ test_reset_clears_pointers_and_registers(void)
 //                          wridx_r <= wridx_next;
 //                      end
 //
-// The write is gated on !full with no else branch, so a byte arriving at a full
-// FIFO is dropped: nothing wraps, nothing is overwritten, no error is raised.
+// A write to a full FIFO is dropped.
 static void
 test_fifo_depth_is_one_less_than_its_memory(void)
 {
@@ -114,8 +79,7 @@ test_fifo_depth_is_one_less_than_its_memory(void)
 //                              audio_mode_16bit_r, audio_mode_stereo_r,
 //                              audio_pcm_volume_r};
 //
-// Bits 7 and 6 of a read are the live FIFO flags from audio_fifo.v:26-27, not
-// stored register bits.
+// Read bits 7 and 6 are live FIFO flags.
 static void
 test_full_and_empty_status_bits(void)
 {
@@ -135,9 +99,7 @@ test_full_and_empty_status_bits(void)
 // audio_fifo.v:24   wire [11:0] fifo_count = wridx_r - rdidx_r;
 // audio_fifo.v:28   assign almost_empty = fifo_count < 12'd1024;
 //
-// A strict less-than against a literal 1024, on a real subtraction-based count
-// rather than a pointer-MSB approximation. 1023 asserts and 1024 does not, and
-// that edge is what drives the AFLOW interrupt.
+// 1023 asserts, 1024 does not.
 static void
 test_almost_empty_is_strictly_below_1024(void)
 {
@@ -160,9 +122,7 @@ test_almost_empty_is_strictly_below_1024(void)
 //                     audio_mode_stereo_next = write_data[4];
 //                     audio_pcm_volume_next  = write_data[3:0];
 //
-// Bit 5 is the 16-bit flag, bit 4 selects stereo, bits 3:0 are volume. Those
-// six bits are the whole of the stored state, and a read returns them under the
-// two status bits.
+// Bits 5:0 are the stored state.
 static void
 test_ctrl_stores_mode_and_volume_only(void)
 {
@@ -179,9 +139,7 @@ test_ctrl_stores_mode_and_volume_only(void)
 // top.v:320   audio_fifo_reset_next = 0;          // default, every cycle
 // pcm.v:31    wire audio_fifo_reset = rst || fifo_reset;
 //
-// Bit 7 is a one-shot command rather than a stored setting: the default
-// assignment clears it every cycle, so it pulses for the write cycle only and
-// resets both FIFO pointers via audio_fifo.v:32-33.
+// One-shot: resets both pointers and is not stored.
 static void
 test_ctrl_bit7_resets_the_fifo(void)
 {
@@ -197,8 +155,7 @@ test_ctrl_bit7_resets_the_fifo(void)
 //                     audio_pcm_sample_rate_next = write_data;
 // top.v:228       5'h1C: rddata = audio_pcm_sample_rate_r;
 //
-// All 8 bits are stored unchanged -- no fold, no mask, no clamp -- and read back
-// unchanged.
+// Stored and read back unchanged.
 static void
 test_rate_register_stores_the_raw_value(void)
 {
@@ -226,9 +183,7 @@ bytes_played(uint8_t rate, unsigned samples)
 // pcm.v:67   sr_accum_r <= sr_accum_r + sample_rate;
 // pcm.v:72   wire new_sample = next_sample_r && (sr_accum7_r != sr_accum_r[7]);
 //
-// The accumulator is 8 bits and a sample fires when bit 7 flips, so adding r and
-// subtracting 256 - r are the same step: the two fire equally often. 128 flips
-// bit 7 every time and is the fastest; values above it alias back down.
+// 8-bit accumulator: r and 256 - r fire equally often. 128 is fastest.
 static void
 test_rates_above_128_alias(void)
 {
@@ -242,16 +197,12 @@ test_rates_above_128_alias(void)
 	check_eq(bytes_played(255, 256), 2u, "rate 255 plays at the speed of 1");
 }
 
-// top.v:473-477 decodes only bits 7, 5, 4 and 3:0 of a write to 0x1B; bit 6 is
-// never read. audio_fifo.v assigns rdidx_r in exactly two places, :33 (reset,
-// together with wridx_r) and :44 (increment on read), so nothing rewinds the
-// read pointer alone.
+// top.v:473-477   decodes bits 7, 5, 4 and 3:0 of 0x1B; bit 6 is ignored.
+// audio_fifo.v:33,44   the only assignments to rdidx_r.
 static void
 test_ctrl_bit6_is_ignored(void)
 {
-	// The read pointer has to be somewhere other than zero for this to mean
-	// anything: rewinding to zero from zero is indistinguishable from doing
-	// nothing, so render first to advance it.
+	// Advance the read pointer so a rewind would be visible.
 	pcm_reset();
 	fill(100, 0x40);
 	int16_t buf[128];
@@ -269,8 +220,7 @@ test_ctrl_bit6_is_ignored(void)
 
 // top.v:474   audio_fifo_reset_next = write_data[7];
 //
-// Bit 7 resets the FIFO regardless of bit 6, and audio_fifo.v has no re-read
-// path, so a drained FIFO stays empty.
+// Bit 7 resets regardless of bit 6. A drained FIFO stays empty.
 static void
 test_no_loop_mode(void)
 {
@@ -289,8 +239,7 @@ test_no_loop_mode(void)
 // audio_fifo.v:17-18   reg [11:0] wridx_r = 0;  reg [11:0] rdidx_r = 0;
 // audio_fifo.v:22-23   wridx_next = wridx_r + 12'd1;  rdidx_next = rdidx_r + 12'd1;
 //
-// The pointers are 12 bits and wrap mod 4096 by natural overflow, so the RTL
-// needs no explicit bounds check and neither should the emulator.
+// 12-bit pointers wrap mod 4096.
 static void
 test_pointers_wrap_within_the_ring(void)
 {
@@ -313,9 +262,7 @@ test_pointers_wrap_within_the_ring(void)
 
 // audio_fifo.v:42   if (rd_en && !empty) begin
 //
-// Reads are gated on !empty, so an empty FIFO advances nothing. The debug peek
-// has no RTL counterpart -- it exists only for the debugger -- so what is
-// pinned here is that it disturbs none of the state the RTL does define.
+// Reads are gated on !empty. The debug peek changes no FIFO state.
 static void
 test_debug_peek_consumes_nothing(void)
 {
@@ -341,9 +288,7 @@ test_debug_peek_consumes_nothing(void)
 // pcm.v:60    sr_accum_r <= 0;                       // and the sample registers
 // pcm.v:160   right_output_next = mode_stereo ? right_sample : left_sample;
 //
-// With nothing queued the sample state machine never leaves IDLE and the output
-// registers hold. From reset those registers are zero, so rendering an empty
-// FIFO produces silence rather than stale buffer contents.
+// With nothing queued, the outputs hold their reset value of zero.
 static void
 test_empty_fifo_renders_silence(void)
 {
