@@ -1577,7 +1577,8 @@ static const mcp_tool_t tools[] = {
     { "load_symbols",
       "Load an ld65 -Ln label file (lines like \"al 00C000 .name\"), so its names work as "
       "addresses and appear in disassembly. Loading the same file again replaces its labels. "
-      "'bank' says which RAM or ROM bank its labels at $A000 and up belong to.",
+      "'bank' says which RAM or ROM bank its labels at $A000 and up belong to. The file must "
+      "be inside -fsroot (the working folder without one), the dump folder or the -prg folder.",
       "{\"type\":\"object\",\"properties\":{"
       "\"path\":{\"type\":\"string\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
@@ -1660,7 +1661,9 @@ static const mcp_tool_t tools[] = {
     { "load_prg",
       "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
       "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "
-      "program pointers, so set the PC for machine code, and use LOAD for a BASIC program.",
+      "program pointers, so set the PC for machine code, and use LOAD for a BASIC program. "
+      "The file must be inside -fsroot (the working folder without one), the dump folder or "
+      "the -prg folder.",
       "{\"type\":\"object\",\"properties\":{"
       "\"path\":{\"type\":\"string\"},"
       "\"address\":{\"type\":[\"string\",\"number\"]}"

@@ -1,4 +1,4 @@
-// Commander X16 Emulator — where a debugger client may write a host file.
+// Commander X16 Emulator — where a debugger client may read or write a host file.
 //
 // A client names the file, so the name cannot be trusted to stay anywhere in
 // particular. Everything is resolved by the operating system before it is
@@ -15,5 +15,16 @@
 // On failure, `err` says why and nothing has been touched.
 bool host_write_path(const char *root, const char *request, char *out, size_t out_size,
                      bool *exists, char *err, size_t errn);
+
+// Resolve `request`, relative to the first usable root unless absolute, into
+// `out`: an existing regular file that, with every link followed, lies inside
+// one of `roots`. NULL roots, missing folders and drive roots are skipped. A file
+// that is missing and one that is out of bounds get the same answer, so that this
+// cannot be used to find out what exists elsewhere.
+bool host_read_path(const char *const *roots, int root_count, const char *request, char *out,
+                    size_t out_size, char *err, size_t errn);
+
+// Is anything at exactly this path, a dangling link included?
+bool host_path_present(const char *path);
 
 #endif

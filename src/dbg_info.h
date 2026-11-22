@@ -97,6 +97,9 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 // actually landed.
 int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr);
 
+// The .dbg that dbg_info_load_for_file() would read for this file.
+bool dbg_info_dbg_path_for(const char *loaded_path, char *out, size_t out_size);
+
 /* Address -> source, disambiguated by the X16 RAM bank currently mapped at
  * $A000-$BFFF. Programs routinely place several segments at $A000 (one per RAM
  * bank); the .dbg records no bank, so a banked address otherwise matches every

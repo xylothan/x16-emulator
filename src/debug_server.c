@@ -5969,6 +5969,51 @@ static void dap_add_bank_field(cJSON *o, int bank) {
     else           cJSON_AddNullToObject(o, "bank");
 }
 
+extern uint8_t *fsroot_path;
+extern bool     fsroot_given;
+
+// A host file a client named, to be read. A DAP client is the user's editor and
+// keeps naming what it likes. An MCP client reads only what the machine itself
+// can see (-fsroot, or the working folder without one), the dump folder it can
+// write to, and the folder of the program the emulator was started with.
+static bool caller_read_path(const char *request, char *out, size_t out_size,
+                             char *err, size_t errn) {
+    if (current_caller == DBG_CALLER_DAP) {
+        const int n = snprintf(out, out_size, "%s", request);
+        if (n < 0 || (size_t)n >= out_size) {
+            snprintf(err, errn, "that path is too long");
+            return false;
+        }
+        return true;
+    }
+
+    const char *roots[3];
+    int count = 0;
+    roots[count++] = (fsroot_given && fsroot_path) ? (const char *)fsroot_path : ".";
+    if (!fsroot_given) {
+        const char *d = export_dir(EXPORT_DUMP);
+        if (d[0]) roots[count++] = d;
+    }
+    char prg_folder[4200];
+    const char *prg = dbg_load_prg_path();
+    if (prg[0]) {
+        snprintf(prg_folder, sizeof prg_folder, "%s", prg);
+        char *cut = strrchr(prg_folder, '/');
+#ifdef _WIN32
+        char *back = strrchr(prg_folder, '\\');
+        if (back && (!cut || back > cut)) cut = back;
+#endif
+        if (!cut)
+            snprintf(prg_folder, sizeof prg_folder, ".");
+        else if (cut == prg_folder || cut[-1] == ':')
+            cut[1] = '\0';   // the root itself, which the rule then refuses
+        else
+            *cut = '\0';
+        roots[count++] = prg_folder;
+    }
+    return host_read_path(roots, count, request, out, out_size, err, errn);
+}
+
 static int handle_x16_load_symbols(int seq, cJSON *args) {
     static const char cmd[] = "x16/loadSymbols";
     cJSON *pi = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
@@ -5986,7 +6031,12 @@ static int handle_x16_load_symbols(int seq, cJSON *args) {
         }
         bank = (int)bi->valuedouble;
     }
-    const int n = dbg_info_load_labels(pi->valuestring, bank);
+    char source[4200], err[300];
+    if (!caller_read_path(pi->valuestring, source, sizeof source, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    const int n = dbg_info_load_labels(source, bank);
     if (n < 0) {
         send_dap_error_response(seq, cmd, "cannot read that file");
         return 0;
@@ -6114,9 +6164,6 @@ static int handle_x16_list_symbols(int seq, cJSON *args) {
 }
 
 // ─── Ranges of memory: x16/hashMemory, x16/dumpMemory ────────────────
-
-extern uint8_t *fsroot_path;
-extern bool     fsroot_given;
 
 #define DAP_RANGE_MAX 0x100000
 
@@ -6384,7 +6431,22 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
         override_at = (int)a;
     }
 
-    SDL_RWops *f = SDL_RWFromFile(pi->valuestring, "rb");
+    char source[4200], err[300];
+    if (!caller_read_path(pi->valuestring, source, sizeof source, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    // The .dbg beside it gets read too, and a link there could lead anywhere.
+    if (current_caller != DBG_CALLER_DAP) {
+        char beside[1024], resolved[4200];
+        if (dbg_info_dbg_path_for(source, beside, sizeof beside) && host_path_present(beside) &&
+            !caller_read_path(beside, resolved, sizeof resolved, err, sizeof err)) {
+            send_dap_error_response(seq, cmd, "the .dbg beside that file is outside the allowed folders");
+            return 0;
+        }
+    }
+
+    SDL_RWops *f = SDL_RWFromFile(source, "rb");
     if (!f) {
         send_dap_error_response(seq, cmd, "cannot read that file");
         return 0;
@@ -6420,7 +6482,7 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
     }
 
     const uint8_t ram_bank = memory_get_ram_bank();
-    dbg_load_begin(DAP_LOAD_CHANNEL, pi->valuestring);
+    dbg_load_begin(DAP_LOAD_CHANNEL, source);
     for (uint32_t i = 0; i < len; i++) {
         const uint16_t at = (uint16_t)(start + i);
         debug_write6502(at, 0, buf[i + 2]);
