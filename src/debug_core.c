@@ -1029,6 +1029,7 @@ debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 	w->value     = 0;
 	w->op        = BPCMP_EQ;
 	w->owners    = 0;
+	w->ignore    = 0;
 	const int created = numWatchpoints++;
 	wp_table_changed();
 	return created;
@@ -1053,7 +1054,7 @@ debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
 	if (idx >= 0) {
 		// A read-only watch would report this owner armed and never tell it
 		// about a write.
-		if (!(watchPoints[idx].access & DEBUG_WP_ACCESS_WRITE))
+		if (!(watchPoints[idx].access & DEBUG_WP_ACCESS_WRITE) || watchPoints[idx].ignore)
 			return DEBUG_ADD_CONFLICT;
 		// Length and value filter are left as the first owner set them: this
 		// owner is asking to be told about the address, not to redefine
@@ -1080,6 +1081,7 @@ debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
 	w->value     = 0;
 	w->op        = BPCMP_EQ;
 	w->owners    = bit;
+	w->ignore    = 0;
 	numWatchpoints++;
 	wp_table_changed();
 	return DEBUG_ADD_CREATED;
@@ -1097,7 +1099,7 @@ debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
 	int idx = debug_wp_find(spec->space, spec->addr, spec->x16Bank);
 	if (idx >= 0) {
 		struct watchpoint *w = &watchPoints[idx];
-		if (w->len != len || !w->active || w->access != access ||
+		if (w->len != len || !w->active || w->access != access || w->ignore != spec->ignore ||
 		    w->exclude_fetch != exclude_fetch || w->has_value != spec->has_value ||
 		    (spec->has_value && (w->op != spec->op || w->value != spec->value)))
 			return DEBUG_ADD_CONFLICT;
@@ -1120,6 +1122,7 @@ debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
 	w->value     = spec->has_value ? spec->value : 0;
 	w->op        = spec->has_value ? spec->op : BPCMP_EQ;
 	w->owners    = bit;
+	w->ignore    = spec->ignore;
 	numWatchpoints++;
 	wp_table_changed();
 	return DEBUG_ADD_CREATED;
@@ -1189,6 +1192,15 @@ debug_wp_delete_at(int index)
 	if (index < 0 || index >= numWatchpoints)
 		return false;
 	wp_erase(index);
+	return true;
+}
+
+bool
+debug_wp_set_hits_at(int index, uint32_t hits)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	watchPoints[index].hits = hits;
 	return true;
 }
 
@@ -1345,6 +1357,15 @@ wp_record_hit(uint8_t space, uint32_t addr, uint8_t value, int port, uint8_t acc
 	wpLastHitFetch  = fetch;
 }
 
+// Count an access that passed the filter. As for a breakpoint, one still inside
+// its ignore count is counted and does not fire.
+static inline bool
+wp_count_hit(struct watchpoint *w)
+{
+	w->hits++;
+	return w->hits > w->ignore;
+}
+
 // The whole table is walked rather than stopping at the first match, so that
 // overlapping watches each count the write.
 bool
@@ -1354,8 +1375,7 @@ debug_wp_check_write(uint16_t addr, uint8_t value)
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
 		if ((w->access & DEBUG_WP_ACCESS_WRITE) && wp_covers_addr(w, addr) && wp_bank_ok(w) &&
-		    wp_value_passes(w, value)) {
-			w->hits++;
+		    wp_value_passes(w, value) && wp_count_hit(w)) {
 			fired = true;
 		}
 	}
@@ -1371,8 +1391,8 @@ debug_wp_check_read(uint16_t addr, uint8_t value, bool fetch)
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
 		if ((w->access & DEBUG_WP_ACCESS_READ) && !(fetch && w->exclude_fetch) &&
-		    wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value)) {
-			w->hits++;
+		    wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value) &&
+		    wp_count_hit(w)) {
 			fired = true;
 		}
 	}
@@ -1387,8 +1407,7 @@ debug_wp_check_vram(uint32_t addr, uint8_t value, int port)
 	bool fired = false;
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
-		if (wp_covers_vram(w, addr) && wp_value_passes(w, value)) {
-			w->hits++;
+		if (wp_covers_vram(w, addr) && wp_value_passes(w, value) && wp_count_hit(w)) {
 			fired = true;
 		}
 	}
@@ -1448,6 +1467,9 @@ debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr
 		return false;
 	const struct watchpoint *w = &watchPoints[idx];
 	if (!(w->access & access) || (fetch && w->exclude_fetch))
+		return false;
+	// Still inside its count, so this access did not fire it.
+	if (w->ignore && w->hits <= w->ignore)
 		return false;
 	if (space == DEBUG_WP_SPACE_VRAM)
 		return wp_covers_vram(w, addr) && wp_value_passes(w, value);

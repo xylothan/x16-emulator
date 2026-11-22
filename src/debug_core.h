@@ -376,6 +376,7 @@ struct watchpoint {
 	uint8_t  value;
 	int      op;        // BPCMP_* comparison code
 	uint16_t owners;    // bitmask of debug_owner_t; maintained by the core
+	uint32_t ignore;    // accesses to count before it fires, as for a breakpoint
 };
 
 // Watch `len` bytes from `addr` in bank `x16Bank` (see DEBUG_BANK_ANY).
@@ -386,7 +387,8 @@ struct watchpoint {
 // `-wp` on the command line, the debugger and a DAP client can all want one
 // address, and the first remove must not disarm it for the others. A watch that
 // already exists keeps its length and value filter; the new owner is asking to
-// be told about the address, not to redefine someone else's watch.
+// be told about the address, not to redefine someone else's watch. A watch with
+// an ignore count is refused instead, since the new owner would miss those hits.
 debug_add_result_t debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner);
 bool debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner);
 int  debug_wp_clear_owner(debug_owner_t owner);
@@ -417,6 +419,7 @@ typedef struct {
 	uint8_t  value;
 	uint8_t  access;        // DEBUG_WP_ACCESS_*; 0 means write
 	bool     exclude_fetch; // only meaningful with read access
+	uint32_t ignore;        // accesses to count before it fires
 } debug_wp_spec_t;
 debug_add_result_t debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner);
 
@@ -431,6 +434,8 @@ bool debug_wp_set_active_at(int index, bool active);
 bool debug_wp_set_value_at(int index, int op, uint8_t value);
 bool debug_wp_clear_value_at(int index);
 bool debug_wp_delete_at(int index);
+// Put back a count, for a client re-sending a watch it already had.
+bool debug_wp_set_hits_at(int index, uint32_t hits);
 
 // How many enabled watches each store path has to consider. Read directly by
 // the hot paths, so a watch on one memory costs the other nothing.

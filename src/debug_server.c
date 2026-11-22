@@ -182,6 +182,23 @@ static struct {
 
 static void step_finish(const char *reason);
 
+// ─── x16/runTo: run to one place, then answer ───────────────────────
+//
+// A DAP reply is deferred, as for x16/step. MCP waits in its own waiter, so a
+// call cancelled or timed out there leaves nothing here to answer.
+#define RUN_TO_WAIT_DEFAULT 5000
+#define RUN_TO_WAIT_LIMIT   30000
+
+static struct {
+    bool             pending;
+    int              seq;
+    Uint32           deadline;
+    dbg_run_target_t target;
+} run_to;
+
+static void run_to_poll(void);
+static void run_to_finish(bool completed, const char *reason);
+
 // DAP variable reference IDs
 #define VARREF_REGISTERS  1
 #define VARREF_ZEROPAGE   2
@@ -1026,6 +1043,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsFunctionBreakpoints", true);
     // Newly implemented in this build:
     cJSON_AddBoolToObject(caps, "supportsDataBreakpoints", true);
+    cJSON_AddBoolToObject(caps, "supportsDataBreakpointBytes", true);
     cJSON_AddBoolToObject(caps, "supportsInstructionBreakpoints", true);
     cJSON_AddBoolToObject(caps, "supportsLoadedSourcesRequest", true);
     cJSON_AddBoolToObject(caps, "supportsBreakpointLocationsRequest", true);
@@ -1130,6 +1148,7 @@ static int handle_dap_configuration_done(int seq) {
     if (dap_stop_on_entry) {
         dap_stop_on_entry = false;
         currentMode = DMODE_STOP;
+        DEBUGCancelStep();
         debug_server_notify_stopped("entry");
         return 1;
     }
@@ -2208,6 +2227,7 @@ static int handle_dap_disconnect(int seq, cJSON *args) {
 static int handle_dap_restart(int seq, cJSON *args) {
     (void)args;
     machine_reset();
+    DEBUGCancelStep();   // a target from before the reset means nothing after it
     send_dap_response(seq, "restart", true, NULL);
     return 1;
 }
@@ -3577,6 +3597,7 @@ static void step_poll(void) {
         // Refresh the debugger's idea of where it stopped, then record why. The
         // first call announces nothing, since the machine is already stopped.
         DEBUGBreakToDebugger();
+        DEBUGCancelStep();
         DEBUGSetStopReason("step");
         // This is a frame boundary by construction. Recorded here rather than
         // trusting the hook's clock, which an interrupt taken in the same loop
@@ -3587,6 +3608,53 @@ static void step_poll(void) {
     const bool events = step.events;
     step_finish(reason);
     if (by_frames && events) debug_server_notify_stopped("step");
+}
+
+cJSON *debug_server_run_to_outcome(const dbg_run_target_t *t, bool completed, const char *reason) {
+    const bool paused  = DEBUGIsPaused();
+    const bool arrived = completed && paused && regs.pc == t->pc && regs.k == t->bank &&
+                         debug_bank_selector_matches(t->x16Bank, t->pc, t->bank);
+    if (!reason) {
+        const char *stop = DEBUGGetStopReason();
+        reason = (arrived && !strcmp(stop, "step")) ? "target" : step_reason_for_stop(stop);
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "completed", completed);
+    cJSON_AddBoolToObject(body, "arrived", arrived);
+    cJSON_AddStringToObject(body, "reason", reason);
+    cJSON_AddNumberToObject(body, "address", ((uint32_t)t->bank << 16) | t->pc);
+    if (t->x16Bank != DEBUG_BANK_ANY) cJSON_AddNumberToObject(body, "bank", t->x16Bank);
+    else                              cJSON_AddNullToObject(body, "bank");
+    if (paused) {
+        cJSON_AddNumberToObject(body, "pc", regs.pc);
+        cJSON_AddNumberToObject(body, "pbr", regs.k);
+    }
+    return body;
+}
+
+static void run_to_finish(bool completed, const char *reason) {
+    if (!run_to.pending) return;
+    run_to.pending = false;
+    cJSON *body = debug_server_run_to_outcome(&run_to.target, completed, reason);
+    // This can run in the middle of another front end's request.
+    dbg_reply_t *const sink = reply_sink;
+    const dbg_caller_t caller = current_caller;
+    reply_sink = NULL;
+    current_caller = DBG_CALLER_DAP;
+    send_dap_response(run_to.seq, "x16/runTo", true, body);
+    reply_sink = sink;
+    current_caller = caller;
+}
+
+// A timeout leaves the target armed and the machine going.
+static void run_to_poll(void) {
+    if (!run_to.pending) return;
+    if (DEBUGIsPaused())
+        run_to_finish(true, NULL);
+    else if (DEBUGStepOwner() != DEBUG_OWNER_DAP_SOURCE)
+        run_to_finish(false, "cancelled");
+    else if (SDL_TICKS_PASSED(SDL_GetTicks(), run_to.deadline))
+        run_to_finish(false, "timeout");
 }
 
 static bool dap_parse_step_read(cJSON *r, step_read_t *out, char *err, size_t errn) {
@@ -4795,6 +4863,7 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
         cJSON_AddNumberToObject(o, "x16Bank", wp->x16Bank);
         cJSON_AddBoolToObject(o, "active", wp->active);
         cJSON_AddNumberToObject(o, "hits", wp->hits);
+        cJSON_AddNumberToObject(o, "ignoreCount", wp->ignore);
         cJSON_AddStringToObject(o, "access", dap_wp_access_name(wp->access));
         cJSON_AddBoolToObject(o, "excludeFetch", wp->exclude_fetch);
         cJSON_AddItemToObject(o, "owners", owners_bitmask_to_json(wp->owners));
@@ -6253,14 +6322,23 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
     cJSON *name_i = args ? cJSON_GetObjectItemCaseSensitive(args, "name") : NULL;
     cJSON *ref_i  = args ? cJSON_GetObjectItemCaseSensitive(args, "variablesReference") : NULL;
     const int ref = (ref_i && cJSON_IsNumber(ref_i)) ? (int)ref_i->valuedouble : 0;
+    cJSON *as_i = args ? cJSON_GetObjectItemCaseSensitive(args, "asAddress") : NULL;
+    cJSON *by_i = args ? cJSON_GetObjectItemCaseSensitive(args, "bytes") : NULL;
+    const bool as_address = as_i && cJSON_IsTrue(as_i);
+    const bool bytes_ok = !by_i || (cJSON_IsNumber(by_i) && by_i->valuedouble >= 1 &&
+                                    by_i->valuedouble <= 0x20000 &&
+                                    by_i->valuedouble == (uint32_t)by_i->valuedouble);
+    const uint32_t bytes = (by_i && bytes_ok) ? (uint32_t)by_i->valuedouble : 0;
     cJSON *body = cJSON_CreateObject();
     char dataId[32], desc[64];
     bool known = false, vram = false;
-    if (name_i && cJSON_IsString(name_i)) {
-        uint32_t vaddr = 0, vlen = 1;
-        uint16_t addr = 0, len = 1;
-        if (dap_parse_vram_target(name_i->valuestring, &vaddr, &vlen)) {
-            known = true;
+    if (name_i && cJSON_IsString(name_i) && bytes_ok) {
+        const char *name = name_i->valuestring;
+        uint32_t vaddr = 0, vlen = 1, addr = 0, len = 1;
+        uint16_t addr16 = 0, len16 = 1;
+        if (dap_parse_vram_target(name, &vaddr, &vlen)) {
+            if (bytes) vlen = bytes;
+            known = vlen <= 0x20000 - vaddr;
             vram  = true;
             if (vlen > 1) {
                 snprintf(dataId, sizeof dataId, "vram:%05X:%u", (unsigned)vaddr, (unsigned)vlen);
@@ -6270,14 +6348,23 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
                 snprintf(dataId, sizeof dataId, "vram:%05X", (unsigned)vaddr);
                 snprintf(desc, sizeof desc, "VRAM $%05X", (unsigned)vaddr);
             }
-        } else if (dap_data_target(name_i->valuestring, ref, &addr, &len)) {
-            known = true;
+        } else if (as_address ? (dap_strict_num(name, name + strlen(name), &addr) && addr <= 0xFFFF)
+                              : dap_data_target(name, ref, &addr16, &len16)) {
+            if (!as_address) {
+                addr = addr16;
+                len  = len16;
+            }
+            if (bytes) len = bytes;
+            known = len <= 0x10000 - addr;
+            // A CPU watch applies whichever bank is mapped.
+            const char *banks = addr + len > 0xA000 ? " in any bank" : "";
             if (len > 1) {
-                snprintf(dataId, sizeof dataId, "%u:%u", addr, len);
-                snprintf(desc, sizeof desc, "$%04X-$%04X", addr, (unsigned)(addr + len - 1));
+                snprintf(dataId, sizeof dataId, "%u:%u", (unsigned)addr, (unsigned)len);
+                snprintf(desc, sizeof desc, "$%04X-$%04X%s", (unsigned)addr,
+                         (unsigned)(addr + len - 1), banks);
             } else {
-                snprintf(dataId, sizeof dataId, "%u", addr);
-                snprintf(desc, sizeof desc, "$%04X", addr);
+                snprintf(dataId, sizeof dataId, "%u", (unsigned)addr);
+                snprintf(desc, sizeof desc, "$%04X%s", (unsigned)addr, banks);
             }
         }
     }
@@ -6310,7 +6397,7 @@ static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uin
     const char *colon = strchr(s, ':');
     uint32_t a, l = 1;
     if (!dap_strict_num(s, colon ? colon : s + strlen(s), &a) || a > 0xFFFF) return false;
-    if (colon && (!dap_strict_num(colon + 1, colon + strlen(colon), &l) || l == 0 || a + l > 0x10000))
+    if (colon && (!dap_strict_num(colon + 1, colon + strlen(colon), &l) || l == 0 || l > 0x10000 - a))
         return false;
     *space = DEBUG_WP_SPACE_CPU;
     *addr  = a;
@@ -6323,14 +6410,14 @@ static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uin
 // while doing something else, and changing it would alter that owner's watch.
 static const char *dap_arm_watch(uint8_t space, uint8_t access, bool exclude_fetch, uint32_t addr,
                                  uint32_t len, bool has_value, int op, uint8_t value,
-                                 debug_owner_t owner) {
+                                 uint32_t ignore, debug_owner_t owner) {
     const debug_wp_spec_t spec = { space, addr, len, DEBUG_BANK_ANY, has_value, op, value,
-                                   access, exclude_fetch };
+                                   access, exclude_fetch, ignore };
     switch (debug_wp_add_ex(&spec, owner)) {
     case DEBUG_ADD_FULL:
         return "the watchpoint table is full";
     case DEBUG_ADD_CONFLICT:
-        return "another watch at this address has a different range, filter or state";
+        return "another watch at this address has a different range, filter, hit count or state";
     default:
         return NULL;
     }
@@ -6340,6 +6427,13 @@ static const char *dap_arm_watch(uint8_t space, uint8_t access, bool exclude_fet
 static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
     // The client's complete list, so let go of the previous one. Watches the
     // console made are owned separately and are left alone, as are any from -wp.
+    // An entry sent again unchanged keeps its count, as a code breakpoint does.
+    struct watchpoint previous[MAX_WATCHPOINTS];
+    int num_previous = 0;
+    for (int i = 0; i < debug_wp_count(); i++) {
+        const struct watchpoint *w = debug_wp_at(i);
+        if (w->owners & (1u << DEBUG_OWNER_DAP_SOURCE)) previous[num_previous++] = *w;
+    }
     debug_wp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
     num_data_bps = 0;
 
@@ -6376,8 +6470,10 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
             why = "accessType must be read, write or readWrite";
         else if (space == DEBUG_WP_SPACE_VRAM && access != DEBUG_WP_ACCESS_WRITE)
             why = "a VRAM watch catches writes only";
-        else if (hc && (!cJSON_IsString(hc) || hc->valuestring[0]))
-            why = "hitCondition is not supported on data breakpoints";
+        else if (hc && !cJSON_IsString(hc))
+            why = "hitCondition must be a string";
+        else if (hc && hc->valuestring[0] && !dap_check_hit_condition(hc->valuestring))
+            why = "cannot parse hitCondition (expected N: stop from the Nth hit on)";
         else if (c && !cJSON_IsString(c))
             why = "condition must be a string";
         else if (c && c->valuestring[0]) {
@@ -6391,12 +6487,26 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         }
         if (!why && num_data_bps >= MAX_WATCHPOINTS)
             why = "too many data breakpoints";
+        uint32_t hit_at = 1;
+        if (!why && hc && hc->valuestring[0]) dap_parse_hit(hc->valuestring, &hit_at);
         if (!why)
             // A data breakpoint is on data, so bytes fetched as code do not count.
             why = dap_arm_watch(space, access, true, addr, len, has_value, op, (uint8_t)val,
-                                DEBUG_OWNER_DAP_SOURCE);
+                                hit_at - 1, DEBUG_OWNER_DAP_SOURCE);
 
         if (!why) {
+            const int at = debug_wp_find(space, addr, DEBUG_BANK_ANY);
+            const struct watchpoint *w = debug_wp_at(at);
+            for (int k = 0; w && k < num_previous; k++) {
+                const struct watchpoint *p = &previous[k];
+                if (p->space == w->space && p->addr == w->addr && p->len == w->len &&
+                    p->access == w->access && p->has_value == w->has_value &&
+                    (!p->has_value || (p->op == w->op && p->value == w->value)) &&
+                    p->hits > w->hits) {
+                    debug_wp_set_hits_at(at, p->hits);
+                    break;
+                }
+            }
             const int bp_id = next_dap_bp_id++;
             data_bps[num_data_bps].id    = bp_id;
             data_bps[num_data_bps].space = space;
@@ -6538,6 +6648,46 @@ static cJSON *source_location_item(uint32_t addr, int bank, const char *file, in
     return o;
 }
 
+// Where a line generated code, as locations into `arr`. False if the file name
+// fits more than one file, with the candidates in `why`.
+static bool source_line_places(const char *file, int client_line, int bank, cJSON *arr,
+                               bool *truncated, char *why, size_t whyn) {
+    char local[1024];
+    caller_path_in(file, local, sizeof local);
+    const int line = caller_line_in(client_line);
+    *truncated = false;
+
+    const char *names[SOURCE_NAMES_MAX];
+    const int matched = dbg_info_find_source(local, names, SOURCE_NAMES_MAX);
+    if (matched > 1) {
+        source_ambiguous(why, whyn, names, matched);
+        return false;
+    }
+    if (matched == 1) {
+        dbg_line_hit_t hits[SOURCE_HITS_MAX];
+        const int total = dbg_info_line_addrs(names[0], line, hits, SOURCE_HITS_MAX);
+        const int have  = total < SOURCE_HITS_MAX ? total : SOURCE_HITS_MAX;
+        // A bank picks the segments known to be there, or failing that the
+        // ones not known to be anywhere. Those then name one place each.
+        bool exact = false;
+        for (int i = 0; i < have; i++)
+            exact = exact || (bank >= 0 && hits[i].ram_bank == bank);
+        for (int i = 0; i < have; i++) {
+            if (bank >= 0 && hits[i].ram_bank != (exact ? bank : -1)) continue;
+            bool repeated = false;
+            for (int j = 0; bank >= 0 && j < i && !repeated; j++)
+                repeated = hits[j].addr == hits[i].addr &&
+                           hits[j].ram_bank == (exact ? bank : -1);
+            if (repeated) continue;
+            cJSON *o = source_location_item(hits[i].addr, hits[i].ram_bank, hits[i].file, line);
+            if (hits[i].segment) cJSON_AddStringToObject(o, "segment", hits[i].segment);
+            cJSON_AddItemToArray(arr, o);
+        }
+        *truncated = total > SOURCE_HITS_MAX;
+    }
+    return true;
+}
+
 static int handle_x16_source_location(int seq, cJSON *args) {
     static const char cmd[] = "x16/sourceLocation";
     cJSON *ai = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
@@ -6596,44 +6746,167 @@ static int handle_x16_source_location(int seq, cJSON *args) {
             send_dap_error_response(seq, cmd, "'file' and 'line' go together");
             return 0;
         }
-        char local[1024];
-        caller_path_in(fi->valuestring, local, sizeof local);
-        const int line = caller_line_in((int)li->valuedouble);
-
-        const char *names[SOURCE_NAMES_MAX];
-        const int matched = dbg_info_find_source(local, names, SOURCE_NAMES_MAX);
-        if (matched > 1) {
-            char why[256];
-            source_ambiguous(why, sizeof why, names, matched);
+        char why[256];
+        bool truncated = false;
+        if (!source_line_places(fi->valuestring, (int)li->valuedouble, bank, arr, &truncated,
+                                why, sizeof why)) {
             cJSON_Delete(body);
             send_dap_error_response(seq, cmd, why);
             return 0;
         }
-        if (matched == 1) {
-            dbg_line_hit_t hits[SOURCE_HITS_MAX];
-            const int total = dbg_info_line_addrs(names[0], line, hits, SOURCE_HITS_MAX);
-            const int have  = total < SOURCE_HITS_MAX ? total : SOURCE_HITS_MAX;
-            // A bank picks the segments known to be there, or failing that the
-            // ones not known to be anywhere. Those then name one place each.
-            bool exact = false;
-            for (int i = 0; i < have; i++)
-                exact = exact || (bank >= 0 && hits[i].ram_bank == bank);
-            for (int i = 0; i < have; i++) {
-                if (bank >= 0 && hits[i].ram_bank != (exact ? bank : -1)) continue;
-                bool repeated = false;
-                for (int j = 0; bank >= 0 && j < i && !repeated; j++)
-                    repeated = hits[j].addr == hits[i].addr &&
-                               hits[j].ram_bank == (exact ? bank : -1);
-                if (repeated) continue;
-                cJSON *o = source_location_item(hits[i].addr, hits[i].ram_bank, hits[i].file, line);
-                if (hits[i].segment) cJSON_AddStringToObject(o, "segment", hits[i].segment);
-                cJSON_AddItemToArray(arr, o);
-            }
-            if (total > SOURCE_HITS_MAX) cJSON_AddBoolToObject(body, "truncated", true);
-        }
+        if (truncated) cJSON_AddBoolToObject(body, "truncated", true);
     }
     send_dap_response(seq, cmd, true, body);
     return 0;
+}
+
+// ─── x16/runTo ──────────────────────────────────────────────────────
+
+// The one place a source line names. Refused when it has none or several, since
+// a run-to has a single target.
+static bool run_to_line_target(cJSON *fi, cJSON *li, int bank, struct breakpoint *bp,
+                               char *why, size_t whyn) {
+    if (!fi || !cJSON_IsString(fi) || !fi->valuestring[0] || !li || !cJSON_IsNumber(li) ||
+        li->valuedouble < 0 || li->valuedouble > 0x7FFFFFF0 ||
+        li->valuedouble != (int)li->valuedouble) {
+        snprintf(why, whyn, "'file' and 'line' go together");
+        return false;
+    }
+    cJSON *places = cJSON_CreateArray();
+    bool truncated = false;
+    bool ok = source_line_places(fi->valuestring, (int)li->valuedouble, bank, places, &truncated,
+                                 why, whyn);
+    const int n = cJSON_GetArraySize(places);
+    if (ok && n == 0) {
+        snprintf(why, whyn, "no code was generated for that line");
+        ok = false;
+    } else if (ok && (n > 1 || truncated)) {
+        size_t o = (size_t)snprintf(why, whyn, "that line has code in %s%d places:",
+                                    truncated ? "over " : "", n);
+        for (int i = 0; i < n && i < 4 && o < whyn; i++) {
+            cJSON *p = cJSON_GetArrayItem(places, i);
+            cJSON *b = cJSON_GetObjectItemCaseSensitive(p, "bank");
+            cJSON *g = cJSON_GetObjectItemCaseSensitive(p, "segment");
+            const unsigned a = (unsigned)cJSON_GetObjectItemCaseSensitive(p, "address")->valuedouble;
+            char at[24];
+            if (cJSON_IsNumber(b)) snprintf(at, sizeof at, "%02X:%04X", (unsigned)b->valuedouble, a);
+            else                   snprintf(at, sizeof at, "$%04X", a);
+            o += (size_t)snprintf(why + o, whyn - o, " %s%s%.40s", at, cJSON_IsString(g) ? " in " : "",
+                                  cJSON_IsString(g) ? g->valuestring : "");
+        }
+        if (o < whyn) snprintf(why + o, whyn - o, "; give an address, or a 'bank' for one of them");
+        ok = false;
+    } else if (ok) {
+        cJSON *p = cJSON_GetArrayItem(places, 0);
+        cJSON *b = cJSON_GetObjectItemCaseSensitive(p, "bank");
+        ok = debug_bp_from_ref((long)cJSON_GetObjectItemCaseSensitive(p, "address")->valuedouble,
+                               cJSON_IsNumber(b) ? (int)b->valuedouble : DEBUG_BANK_ANY, 0, bp);
+        if (!ok) snprintf(why, whyn, "that line's address cannot be run to");
+    }
+    cJSON_Delete(places);
+    return ok;
+}
+
+// Runs a paused machine to one address, in one bank if it names one, and answers
+// when it stops for any reason.
+static int handle_x16_run_to(int seq, cJSON *args) {
+    static const char cmd[] = "x16/runTo";
+    const debug_owner_t owner = caller_step_owner();
+    if (DEBUGStepHeldByOther(owner)) {
+        send_dap_error_response(seq, cmd, "another client's step or run-to is in progress");
+        return 0;
+    }
+    if (step.pending || run_to.pending) {
+        send_dap_error_response(seq, cmd, step.pending ? "a step is already in progress"
+                                                       : "a run-to is already in progress");
+        return 0;
+    }
+    if (!DEBUGIsPaused()) {
+        send_dap_error_response(seq, cmd, "the machine must be paused");
+        return 0;
+    }
+
+    cJSON *ai = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
+    cJSON *fi = args ? cJSON_GetObjectItemCaseSensitive(args, "file") : NULL;
+    cJSON *li = args ? cJSON_GetObjectItemCaseSensitive(args, "line") : NULL;
+    cJSON *bi = args ? cJSON_GetObjectItemCaseSensitive(args, "bank") : NULL;
+    cJSON *ti = args ? cJSON_GetObjectItemCaseSensitive(args, "timeoutMs") : NULL;
+    if ((ai != NULL) == (fi != NULL || li != NULL)) {
+        send_dap_error_response(seq, cmd, "give 'address', or 'file' and 'line'");
+        return 0;
+    }
+    int bank = -1;
+    if (bi && !cJSON_IsNull(bi)) {
+        if (!cJSON_IsNumber(bi) || bi->valuedouble < 0 || bi->valuedouble > 255 ||
+            bi->valuedouble != (int)bi->valuedouble) {
+            send_dap_error_response(seq, cmd, "'bank' must be a whole number from 0 to 255");
+            return 0;
+        }
+        bank = (int)bi->valuedouble;
+    }
+    int timeout = RUN_TO_WAIT_DEFAULT;
+    if (ti) {
+        if (!cJSON_IsNumber(ti) || ti->valuedouble < 0 || ti->valuedouble > RUN_TO_WAIT_LIMIT ||
+            ti->valuedouble != (int)ti->valuedouble) {
+            send_dap_error_response(seq, cmd, "'timeoutMs' must be a whole number from 0 to 30000");
+            return 0;
+        }
+        timeout = (int)ti->valuedouble;
+    }
+
+    struct breakpoint bp;
+    char why[320];
+    if (ai) {
+        bool ok;
+        if (cJSON_IsNumber(ai))
+            ok = ai->valuedouble >= 0 && ai->valuedouble <= 0xFFFFFF &&
+                 ai->valuedouble == (int)ai->valuedouble &&
+                 debug_bp_from_ref((long)ai->valuedouble, DEBUG_BANK_ANY, 0, &bp);
+        else
+            ok = cJSON_IsString(ai) && dap_parse_instruction_ref(ai->valuestring, 0, &bp);
+        if (!ok) {
+            send_dap_error_response(seq, cmd,
+                                    "unreadable 'address' (expected e.g. $C000, 04:C000 or sym:main)");
+            return 0;
+        }
+    } else if (!run_to_line_target(fi, li, bank, &bp, why, sizeof why)) {
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+
+    int want = bp.x16Bank;
+    if (bank >= 0) {
+        if (want != DEBUG_BANK_ANY && want != bank) {
+            send_dap_error_response(seq, cmd, "'bank' disagrees with the bank in the address");
+            return 0;
+        }
+        want = bank;
+    }
+    if (want != DEBUG_BANK_ANY && debug_normalise_bank(want, bp.pc, bp.bank) == DEBUG_BANK_ANY) {
+        snprintf(why, sizeof why, "$%04X is not in a banked window, so a bank cannot apply",
+                 (unsigned)bp.pc);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+    const dbg_run_target_t target = { (uint16_t)bp.pc, bp.bank,
+                                      debug_normalise_bank(want, bp.pc, bp.bank) };
+
+    if (current_caller == DBG_CALLER_DAP) {
+        run_to.pending  = true;
+        run_to.seq      = seq;
+        run_to.target   = target;
+        run_to.deadline = SDL_GetTicks() + (Uint32)timeout;
+        // The resume hook tells the client it is running. The reply waits.
+        DEBUGRunToBank(target.pc, target.bank, target.x16Bank, owner);
+        return 1;
+    }
+    DEBUGRunToBank(target.pc, target.bank, target.x16Bank, owner);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "pc", target.pc);
+    cJSON_AddNumberToObject(body, "pbr", target.bank);
+    cJSON_AddNumberToObject(body, "x16Bank", target.x16Bank);
+    send_dap_response(seq, cmd, true, body);
+    return 1;
 }
 
 // ─── stepInTargets (the call destination at a JSR/JSL) ───────────────
@@ -6843,7 +7116,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
                            debug_wp_at(held)->owners == (uint16_t)(1u << DEBUG_OWNER_MCP);
         if (rearm) debug_wp_set_active_at(held, true);
         const char *refused = dap_arm_watch(space, access, !(xf && cJSON_IsFalse(xf)), addr, len,
-                                            has_value, op, (uint8_t)val, DEBUG_OWNER_MCP);
+                                            has_value, op, (uint8_t)val, 0, DEBUG_OWNER_MCP);
         if (refused) {
             if (rearm) debug_wp_set_active_at(held, false);
             send_dap_error_response(seq, cmd, refused);
@@ -7734,15 +8007,20 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
 
+    // A stop that has already happened is answered as that, whatever this
+    // request goes on to do.
+    run_to_poll();
+
     // Another request taking over execution ends a step in flight. Answer it
     // now, rather than leave it to complete at some unrelated later stop. A goto
     // on a running machine is refused, so it takes nothing over.
-    if (step.pending &&
+    if ((step.pending || run_to.pending) &&
         (!strcmp(cmd, "continue") || !strcmp(cmd, "next") || !strcmp(cmd, "stepIn") ||
          !strcmp(cmd, "stepOut") || !strcmp(cmd, "restart") ||
          (!strcmp(cmd, "goto") && currentMode == DMODE_STOP) ||
          !strcmp(cmd, "terminate"))) {
         step_finish("cancelled");
+        run_to_finish(false, "cancelled");
     }
 
     if (dap_no_debug &&
@@ -7780,6 +8058,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/type"))      result = handle_x16_type(seq, args);
     else if (!strcmp(cmd, "x16/joystick"))  result = handle_x16_joystick(seq, args);
     else if (!strcmp(cmd, "x16/step"))      result = handle_x16_step(seq, args);
+    else if (!strcmp(cmd, "x16/runTo"))     result = handle_x16_run_to(seq, args);
     else if (!strcmp(cmd, "x16/saveState")) result = handle_x16_save_state(seq, args);
     else if (!strcmp(cmd, "x16/loadState")) result = handle_x16_load_state(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
@@ -7883,7 +8162,7 @@ void debug_server_set_frontend(const dbg_frontend_t *f) {
 static const char *const callable_commands[] = {
     "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
-    "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
+    "x16/step", "x16/runTo", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
@@ -8007,6 +8286,7 @@ static void dap_release_session_state(void) {
     // the user at the keyboard and is left alone; the debugger decides which is
     // which, since it is the one holding the step.
     DEBUGCancelStepFor(DEBUG_OWNER_DAP_SOURCE);
+    run_to.pending = false;
 
     dap_stop_on_entry = false;
     dap_stop_announced = false;
@@ -8307,6 +8587,7 @@ int debug_server_poll(void) {
     // Keep the 64-bit cycle count current even under -headless, which has no
     // frames to do it.
     emulated_cycles();
+    run_to_poll();
 
     // Either front end can be running without the other.
     int mode_changed = mcp_server_poll();

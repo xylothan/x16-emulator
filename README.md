@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1123,8 +1123,31 @@ owner already has at the same address, since a condition belongs to the address.
 
 `dataBreakpointInfo` offers a watch for an address, an `R0`-`R15` virtual register (both bytes) or a
 stack entry. CPU registers and zero-page rows have no single address, so their `dataId` is null.
-`setDataBreakpoints` supports `write` access and a one-byte value `condition` such as `== $05`. Read
-access and hit counts are refused with `verified: false` rather than ignored.
+With `asAddress`, `name` is a CPU address, decimal or `0x` hex, or a `vram:` reference. `bytes` widens
+the watch to a range, and a range that runs off the end of its memory has a null `dataId`. A CPU
+watch covers whichever bank is mapped, so a range may cross `$A000` or `$C000`.
+
+`setDataBreakpoints` takes `write`, `read` or `readWrite` access (VRAM is `write` only), a one-byte
+value `condition` such as `== $05`, and a `hitCondition` of `"5"` or `">= 5"`, which stops from the
+fifth access on. Accesses the value condition filters out are not counted.
+
+#### Running to a place
+
+`x16/runTo` runs a paused machine to one target and answers when it stops:
+
+```
+x16/runTo { "address": "$0810" }
+x16/runTo { "address": "04:A000" }
+x16/runTo { "address": "sym:main", "timeoutMs": 2000 }
+x16/runTo { "file": "main.s", "line": 12, "bank": 2 }
+```
+
+`bank` pins a target in the RAM or ROM window, and a symbol or line that knows its bank pins it
+too. A line with code in several places is refused and lists them. The reply has `completed`,
+`arrived` and `reason`: `target` on getting there, otherwise what stopped it first, which also
+ends the run. At `timeoutMs` (default 5000, at most 30000) the reply has `completed: false` and
+the machine keeps going towards the target. It is refused while another client's step is running,
+and a session ending releases its own.
 
 #### Expressions you can evaluate
 
@@ -1489,7 +1512,7 @@ debugging it.
 
 | Tools | |
 | --- | --- |
-| Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
+| Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `run_to`, `wait_for_stop`, `reset` |
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack`, `evaluate` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `set_stop_on`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
@@ -1547,7 +1570,7 @@ A line with code in several places is refused and the places are listed, so that
 never lands in a bank nobody chose.
 
 Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
-moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` answer when the
+moved the machine between two calls. `step`, `run_frames`, `run_to` and `wait_for_stop` answer when the
 machine stops. At `timeoutMs` they answer `completed: false` and the machine keeps going, so a
 client carries on with `wait_for_stop`, passing the last `stopId`.
 
