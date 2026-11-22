@@ -4011,6 +4011,18 @@ fx_vram_cache_write(uint32_t address, uint8_t value, uint8_t mask)
 	}
 }
 
+void
+video_debug_get_palette(uint8_t out[512])
+{
+	memcpy(out, palette, sizeof palette);
+}
+
+void
+video_debug_get_sprite_attr(int sprite, uint8_t out[8])
+{
+	memcpy(out, sprite_data[sprite & 0x7f], sizeof sprite_data[0]);
+}
+
 uint32_t video_get_fx_accum() {
 	return fx_mult_accumulator;
 }

@@ -308,6 +308,7 @@ set(X16_SOURCES
     src/cpu/fake6502.c
     src/memory.c
     src/io_trace.c
+    src/vera_decode.c
     src/perf_budget.c
     src/perf_hist.c
     src/host_prof.c
@@ -789,6 +790,10 @@ x16_add_test(vera_pcm
 # test links it alone, with no CPU, no memory and no SDL.
 x16_add_test(io_trace
     SOURCES tests/test_io_trace.c tests/support/harness.c src/io_trace.c)
+
+# vera_decode.c reads VRAM through a callback, so the test links it alone.
+x16_add_test(vera_decode
+    SOURCES tests/test_vera_decode.c tests/support/harness.c src/vera_decode.c)
 
 # sprite_trace.c is fed scalars by video.c rather than reaching into it, which is
 # what lets the multiplexing analysis -- generation lifetimes, effective versus

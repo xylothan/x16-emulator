@@ -25,6 +25,7 @@
 #include "debug_ui_image.h"   // GPU-backed panel images for ImGui::Image
 #include "debug_ui_widgets.h" // dbgui_hover_value_tooltip / dbgui_format_binary
 #include "sprite_multiplex_tab.h"
+#include "vera_decode.h"
 
 #include <SDL.h>
 #include <stdint.h>
@@ -32,28 +33,20 @@
 
 namespace {
 
-constexpr uint32_t ADDR_PALETTE     = 0x1FA00; // 256 * 2 bytes, 12-bit RGB
-constexpr uint32_t ADDR_SPRITE_ATTR = 0x1FC00; // 128 * 8 bytes
-constexpr int      NUM_SPRITES      = 128;
+constexpr uint32_t ADDR_PALETTE     = VERA_PALETTE_ADDR;     // 256 * 2 bytes, 12-bit RGB
+constexpr uint32_t ADDR_SPRITE_ATTR = VERA_SPRITE_ATTR_ADDR; // 128 * 8 bytes
+constexpr int      NUM_SPRITES      = VERA_SPRITE_COUNT;
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Expand a 4-bit VERA color channel (0..15) to 8 bits by nibble replication,
-// exactly like refresh_palette() in video.c (x<<4 | x).
-inline uint8_t expand4(uint8_t v) { return (uint8_t)((v << 4) | v); }
-
-// Build the 256-entry palette as ABGR8888 (alpha forced opaque). VERA stores
-// each entry as two bytes: byte0 = GGGGBBBB, byte1 = 0000RRRR.
+// Build the 256-entry palette as ABGR8888 (alpha forced opaque).
 void
 build_palette(uint32_t out[256])
 {
     for (int i = 0; i < 256; ++i) {
-        uint8_t b0 = video_space_read(ADDR_PALETTE + i * 2);     // GGGGBBBB
-        uint8_t b1 = video_space_read(ADDR_PALETTE + i * 2 + 1); // 0000RRRR
-        uint8_t r  = expand4(b1 & 0x0f);
-        uint8_t g  = expand4((b0 >> 4) & 0x0f);
-        uint8_t b  = expand4(b0 & 0x0f);
-        out[i] = 0xFF000000u | ((uint32_t)b << 16) | ((uint32_t)g << 8) | (uint32_t)r;
+        uint8_t b0 = video_space_read(ADDR_PALETTE + i * 2);
+        uint8_t b1 = video_space_read(ADDR_PALETTE + i * 2 + 1);
+        out[i] = vera_color_abgr(vera_palette_decode(b0, b1));
     }
 }
 
@@ -87,10 +80,7 @@ resolve_color(const uint32_t pal[256], int idx, int palette_offset, bool transpa
 {
     if (idx == 0 && transparent0)
         return 0; // fully transparent
-    int ci = idx;
-    if (ci > 0 && ci < 16)
-        ci += palette_offset;
-    return pal[ci & 0xff];
+    return pal[vera_color_index(idx, palette_offset, false)];
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +219,6 @@ draw_tiles_tab(const uint32_t pal[256])
     rows = clampi(rows, 1, 64);
     const int img_w = cols * tw;
     const int img_h = rows * th;
-    const int mask  = (1 << bpp) - 1;
 
     static PixelBuffer buf;
     uint32_t *px = buf.ensure((size_t)img_w * img_h);
@@ -242,11 +231,8 @@ draw_tiles_tab(const uint32_t pal[256])
         const uint32_t tile_addr = (uint32_t)base + (uint32_t)t * bytes_per_tile;
         for (int y = 0; y < th; ++y) {
             for (int x = 0; x < tw; ++x) {
-                const uint32_t bitpos = (uint32_t)(y * tw + x) * bpp;
-                const uint8_t  byte   = video_space_read(tile_addr + (bitpos >> 3));
-                const int      shift  = 8 - bpp - (int)(bitpos & 7);
-                const int      idx    = (byte >> shift) & mask;
-                const uint32_t color  = resolve_color(pal, idx, pal_off << 4, false);
+                const int      idx   = vera_packed_pixel(video_space_read, tile_addr, tw, bpp, x, y);
+                const uint32_t color = resolve_color(pal, idx, pal_off << 4, false);
                 px[(size_t)(ty * th + y) * img_w + (tx * tw + x)] = color;
             }
         }
@@ -289,16 +275,7 @@ draw_tiles_tab(const uint32_t pal[256])
 // ---------------------------------------------------------------------------
 // Sprite viewer tab
 // ---------------------------------------------------------------------------
-struct SpriteInfo {
-    uint32_t address;
-    int      mode; // 0:4bpp 1:8bpp
-    int      w, h;
-    int      x, y;
-    int      zdepth;
-    int      pal_off;
-    bool     hflip, vflip;
-    int      collision;
-};
+using SpriteInfo = vera_sprite_t;
 
 SpriteInfo
 decode_sprite_attr(int i)
@@ -307,23 +284,7 @@ decode_sprite_attr(int i)
     for (int b = 0; b < 8; ++b)
         a[b] = video_space_read(ADDR_SPRITE_ATTR + i * 8 + b);
 
-    SpriteInfo s;
-    s.address   = ((uint32_t)a[0] << 5) | ((uint32_t)(a[1] & 0x0f) << 13);
-    s.mode      = (a[1] >> 7) & 1;
-    s.w         = 1 << (((a[7] >> 4) & 3) + 3);
-    s.h         = 1 << (((a[7] >> 6) & 3) + 3);
-    s.pal_off   = (a[7] & 0x0f) << 4;
-    s.zdepth    = (a[6] >> 2) & 3;
-    s.collision = a[6] & 0xf0;
-    s.hflip     = a[6] & 1;
-    s.vflip     = (a[6] >> 1) & 1;
-    s.x         = a[2] | ((a[3] & 3) << 8);
-    s.y         = a[4] | ((a[5] & 3) << 8);
-    if (s.x >= 0x400 - s.w)
-        s.x -= 0x400;
-    if (s.y >= 0x400 - s.h)
-        s.y -= 0x400;
-    return s;
+    return vera_sprite_decode(a);
 }
 
 // Decode sprite `s` into the atlas cell at (cx, cy). Cells are 64x64 and the
@@ -334,13 +295,7 @@ decode_sprite_pixels(const SpriteInfo &s, const uint32_t pal[256],
 {
     for (int y = 0; y < s.h; ++y) {
         for (int x = 0; x < s.w; ++x) {
-            int idx;
-            if (s.mode) { // 8bpp
-                idx = video_space_read(s.address + (uint32_t)y * s.w + x);
-            } else {      // 4bpp, high nibble = left pixel
-                uint8_t byte = video_space_read(s.address + (uint32_t)y * (s.w / 2) + (x / 2));
-                idx = (x & 1) ? (byte & 0x0f) : (byte >> 4);
-            }
+            const int idx = vera_sprite_pixel(video_space_read, &s, x, y);
             atlas[(size_t)(cy + y) * atlas_w + (cx + x)] =
                 resolve_color(pal, idx, s.pal_off, true);
         }
@@ -440,46 +395,7 @@ draw_sprites_tab(const uint32_t pal[256])
 // ---------------------------------------------------------------------------
 // Layer helpers (shared by Bitmap + Tilemap tabs)
 // ---------------------------------------------------------------------------
-struct LayerRegs {
-    int      color_depth;   // 0..3
-    int      bpp;           // 1,2,4,8
-    bool     bitmap_mode;
-    bool     text_mode;
-    bool     text_256c;
-    uint32_t map_base;
-    uint32_t tile_base;
-    int      mapw, maph;    // in tiles
-    int      tilew, tileh;  // in pixels
-    int      tile_size_log2;
-    int      bitmap_w;      // 320 or 640
-    int      bitmap_pal_off;
-    int      hscroll, vscroll;
-};
-
-LayerRegs
-decode_layer_regs(const uint8_t r[7])
-{
-    uint8_t r0 = r[0], r1 = r[1], r2 = r[2], r3 = r[3], r4 = r[4], r5 = r[5], r6 = r[6];
-
-    LayerRegs L;
-    L.color_depth    = r0 & 3;
-    L.bpp            = 1 << L.color_depth;
-    L.bitmap_mode    = (r0 & 4) != 0;
-    L.text_mode      = (L.color_depth == 0) && !L.bitmap_mode;
-    L.text_256c      = (r0 & 8) != 0;
-    L.map_base       = (uint32_t)r1 << 9;
-    L.tile_base      = (uint32_t)(r2 & 0xFC) << 9;
-    L.mapw           = 1 << (5 + ((r0 >> 4) & 3));
-    L.maph           = 1 << (5 + ((r0 >> 6) & 3));
-    L.tilew          = 1 << (3 + (r2 & 1));
-    L.tileh          = 1 << (3 + ((r2 >> 1) & 1));
-    L.tile_size_log2 = (3 + (r2 & 1)) + (3 + ((r2 >> 1) & 1)) + L.color_depth - 3;
-    L.bitmap_w       = (r2 & 1) ? 640 : 320;
-    L.bitmap_pal_off = (r4 & 0x0f) << 4;
-    L.hscroll        = r3 | ((r4 & 0x0f) << 8);
-    L.vscroll        = r5 | ((r6 & 0x0f) << 8);
-    return L;
-}
+using LayerRegs = vera_layer_t;
 
 LayerRegs
 read_layer_regs(int layer)
@@ -488,7 +404,7 @@ read_layer_regs(int layer)
     uint8_t r[7];
     for (int i = 0; i < 7; ++i)
         r[i] = video_read(base + i, true);
-    return decode_layer_regs(r);
+    return vera_layer_decode(r);
 }
 
 // True when two snapshots describe the same tile geometry, i.e. a per-scanline
@@ -553,7 +469,7 @@ build_raster_row_regs(int layer, const LayerRegs &live, RasterRowRegs &out)
 
         // Only substitute snapshots that keep the image layout identical;
         // anything else would change the texture geometry mid-frame.
-        const LayerRegs LL = decode_layer_regs(r);
+        const LayerRegs LL = vera_layer_decode(r);
         if (!same_layer_geometry(LL, live))
             continue;
 
@@ -633,7 +549,6 @@ draw_bitmap_tab(const uint32_t pal[256])
 
     const int img_w = L.bitmap_w;
     const int img_h = clampi(height, 1, 480);
-    const int mask  = (1 << L.bpp) - 1;
 
     static PixelBuffer buf;
     uint32_t *px = buf.ensure((size_t)img_w * img_h);
@@ -644,14 +559,10 @@ draw_bitmap_tab(const uint32_t pal[256])
         // Registers in effect on the scanline that displayed this bitmap row.
         LayerRegs LR = L;
         if (raster_active && y < MAX_LAYER_ROWS && rr.valid[y])
-            LR = decode_layer_regs(rr.regs[y]);
+            LR = vera_layer_decode(rr.regs[y]);
 
-        const uint32_t row_base = LR.tile_base + (uint32_t)((y * img_w * LR.bpp) >> 3);
         for (int x = 0; x < img_w; ++x) {
-            const uint32_t bitpos = (uint32_t)x * LR.bpp;
-            const uint8_t  byte   = video_space_read(row_base + (bitpos >> 3));
-            const int      shift  = 8 - LR.bpp - (int)(bitpos & 7);
-            const int      idx    = (byte >> shift) & mask;
+            const int idx = vera_packed_pixel(video_space_read, LR.tile_base, img_w, LR.bpp, x, y);
             px[(size_t)y * img_w + x] = resolve_color(pal, idx, LR.bitmap_pal_off, false);
         }
     }
@@ -754,7 +665,6 @@ draw_tilemap_tab(const uint32_t pal[256])
 
     const int img_w = cols * L.tilew;
     const int img_h = rows * L.tileh;
-    const int mask  = (1 << L.bpp) - 1;
 
     static PixelBuffer buf;
     uint32_t *px = buf.ensure((size_t)img_w * img_h);
@@ -767,42 +677,16 @@ draw_tilemap_tab(const uint32_t pal[256])
             const int layer_row = ty * L.tileh + y;
             LayerRegs LR        = L;
             if (raster_active && layer_row < MAX_LAYER_ROWS && rr.valid[layer_row])
-                LR = decode_layer_regs(rr.regs[layer_row]);
+                LR = vera_layer_decode(rr.regs[layer_row]);
 
             uint32_t *dst = px + (size_t)(ty * L.tileh + y) * img_w;
 
             for (int tx = 0; tx < cols; ++tx) {
-                const uint32_t map_addr = LR.map_base + (uint32_t)(ty * LR.mapw + tx) * 2;
-                const uint8_t  byte0    = video_space_read(map_addr);
-                const uint8_t  byte1    = video_space_read(map_addr + 1);
-
-                if (LR.text_mode) {
-                    // Map entry: byte0 = char, byte1 = fg/bg colors (or full fg in 256c).
-                    const int      fg         = LR.text_256c ? byte1 : (byte1 & 0x0f);
-                    const int      bg         = LR.text_256c ? 0 : ((byte1 >> 4) & 0x0f);
-                    const uint32_t glyph_base = LR.tile_base + (uint32_t)byte0 * (LR.tilew * LR.tileh / 8);
-                    for (int x = 0; x < LR.tilew; ++x) {
-                        const uint32_t bitpos = (uint32_t)(y * LR.tilew + x);
-                        const uint8_t  b      = video_space_read(glyph_base + (bitpos >> 3));
-                        const int      on     = (b >> (7 - (bitpos & 7))) & 1;
-                        dst[tx * L.tilew + x] = pal[on ? fg : bg];
-                    }
-                } else {
-                    // Tile mode: byte0 low tile index, byte1 = pal offset + flips + index hi.
-                    const int      tile_index = byte0 | ((byte1 & 3) << 8);
-                    const int      pal_off    = byte1 & 0xf0;
-                    const bool     vflip      = (byte1 >> 3) & 1;
-                    const bool     hflip      = (byte1 >> 2) & 1;
-                    const uint32_t tile_start = LR.tile_base + ((uint32_t)tile_index << LR.tile_size_log2);
-                    const int      sy         = vflip ? (LR.tileh - 1 - y) : y;
-                    for (int x = 0; x < LR.tilew; ++x) {
-                        const int      sx     = hflip ? (LR.tilew - 1 - x) : x;
-                        const uint32_t bitpos = (uint32_t)(sy * LR.tilew + sx) * LR.bpp;
-                        const uint8_t  byte   = video_space_read(tile_start + (bitpos >> 3));
-                        const int      shift  = 8 - LR.bpp - (int)(bitpos & 7);
-                        const int      idx    = (byte >> shift) & mask;
-                        dst[tx * L.tilew + x] = resolve_color(pal, idx, pal_off, false);
-                    }
+                const vera_map_entry_t e = vera_map_read(video_space_read, &LR, tx, ty);
+                for (int x = 0; x < LR.tilew; ++x) {
+                    const int idx = vera_map_pixel(video_space_read, &LR, &e, x, y);
+                    dst[tx * L.tilew + x] = LR.text_mode ? pal[idx ? e.fg : e.bg]
+                                                         : resolve_color(pal, idx, e.pal_off, false);
                 }
             }
         }
