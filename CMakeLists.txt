@@ -341,6 +341,7 @@ set(X16_SOURCES
     src/profile_run.c
     src/debugger.c
     src/dbg_info.c
+    src/dbg_expr.c
     src/dbg_load.c
     src/source_view.c
     src/insn_info.c
@@ -747,6 +748,10 @@ x16_add_test(timing_speed NEEDS_SDL
 # irq_ctx.c is pure bookkeeping with no dependencies, so the test links it alone.
 x16_add_test(irq_ctx
     SOURCES tests/test_irq_ctx.c src/cpu/irq_ctx.c)
+
+# Expressions read the machine through callbacks, so they link alone.
+x16_add_test(dbg_expr
+    SOURCES tests/test_dbg_expr.c src/dbg_expr.c)
 
 # The unwinder reads memory through a callback, so it links alone too.
 x16_add_test(call_stack

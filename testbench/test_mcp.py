@@ -186,7 +186,7 @@ READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "l
                  "wait_for_stop", "get_screen", "screenshot",
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
                  "list_sources", "read_source", "source_location", "host_perf",
-                 "get_sdcard"}
+                 "get_sdcard", "evaluate"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                 "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
                 "sprite_mux_config"}
@@ -3431,6 +3431,95 @@ def test_dump_breakpoint():
             dap.close()
 
 
+def test_evaluate():
+    print("evaluate")
+    labels = ("al 000600 .start\n"
+              "al 000610 .bp_clear\n"
+              "al 00A000 .banked\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "prog.lbl")
+        with open(path, "w") as f:
+            f.write(labels)
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            dap = Dap(port)
+            dap.session()
+
+            def value(expr):
+                return data(m.call("evaluate", expression=expr)).get("value")
+
+            case("arithmetic", value("2+3*4") == 14)
+            case("wraps at 32 bits", value("$FFFFFFFF+1") == 0)
+            case("unsigned", value("-1") == 0xFFFFFFFF and value("-1<0") == 0)
+            d = data(m.call("evaluate", expression="$C000"))
+            case("$addr is a number", d.get("value") == 0xC000 and d.get("text") == "$C000 (49152)", str(d))
+            m.call("write_memory", address="$0500", hex="1234")
+            case("byte[]", value("byte[$0500]") == 0x12)
+            case("word[]", value("word[$0500]") == 0x3412)
+            m.call("set_registers", a=0x21, x=2)
+            case("registers", value("A") == 0x21 and value("x*2") == 4)
+            case("PC", value("PC") == LOOP)
+            m.call("write_memory", address=0x1000, space="vram", hex="5A")
+            case("vbyte[]", value("vbyte[$1000]") == 0x5A)
+
+            m.call("load_symbols", path=path, bank=3)
+            case("a symbol", value("start") == 0x600 and value("start+4") == 0x604)
+            d = data(m.call("evaluate", expression="start"))
+            case("no bank below the banked windows", "bank" not in d and d.get("text") == "$0600 (1536)", str(d))
+            d = data(m.call("evaluate", expression="banked+1"))
+            case("a symbol keeps its bank", d.get("value") == 0xA001 and d.get("bank") == 3, str(d))
+            case("never hex", is_error(m.call("evaluate", expression="beef")))
+            case("a label with a command's name is only a label", value("bp_clear") == 0x610)
+
+            for bad in ("1/0", "1%0", "(1", "", "nosuch", "A=5", "x" * 300, "(" * 40 + "1" + ")" * 40):
+                case(f"{bad[:12]!r} is an error", is_error(m.call("evaluate", expression=bad)))
+            case("no expression is an error", is_error(m.call("evaluate")))
+            case("a number is not an expression", is_error(m.call("evaluate", expression=5)))
+            case("an unknown argument is refused",
+                 is_error(m.call("evaluate", expression="1", context="repl")))
+            case("A=5 assigned nothing", value("A") == 0x21)
+            r = dap.request("mcp/evaluate", {"expression": "1"})
+            case("a DAP client cannot call the MCP request", bool(r) and not r.get("success"), str(r)[:120])
+
+            m.call("set_breakpoint", address=LOOP + 4)
+            dap.request("setInstructionBreakpoints", {"breakpoints": [{"instructionReference": "0x0910"}]})
+            m.call("set_breakpoint", address=0x0700, kind="write")
+            held = data(m.call("list_breakpoints"))
+            case("every owner's breakpoints are set",
+                 len(held.get("breakpoints", [])) == 2 and len(held.get("watchpoints", [])) == 1, str(held)[:200])
+            cycles = data(m.call("get_status")).get("cycles")
+            for command in ("reset", "bp_add C000", "bp_add 0900", "bp_remove 0910", "bp_list",
+                            "regs_all", "watch_add 0500", "watch_remove 0700", "watch_list",
+                            "watch_clear", "vram 1000", "vera_reg", "vera_line 0"):
+                case(f"{command} is not a command here", is_error(m.call("evaluate", expression=command)))
+            r = m.call("evaluate", expression="bp_clear")
+            case("bp_clear only reads a label", not is_error(r) and data(r).get("value") == 0x610, str(r)[:160])
+            after = data(m.call("list_breakpoints"))
+            case("no breakpoint or watch changed",
+                 after.get("breakpoints") == held.get("breakpoints")
+                 and after.get("watchpoints") == held.get("watchpoints"), str(after)[:200])
+            case("nothing ran or reset", data(m.call("get_status")).get("cycles") == cycles)
+
+            for reg, at in (("$9F20", "00"), ("$9F21", "10"), ("$9F22", "10")):
+                m.call("write_memory", address=reg, hex=at)
+            for _ in range(3):
+                m.call("evaluate", expression="byte[$9F23]")
+            case("reading the data port does not advance it",
+                 value("byte[$9F20]") == 0 and value("byte[$9F21]") == 0x10)
+            dap.close()
+
+    port = free_port()
+    with Mcp(["-mcp-readonly", "-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.4)
+        case("works read-only", data(m.call("evaluate", expression="1+1")).get("value") == 2)
+        case("reads memory read-only", "value" in data(m.call("evaluate", expression="byte[$0400]")))
+        case("still no commands", is_error(m.call("evaluate", expression="reset")))
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -3498,7 +3587,7 @@ def main():
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
-                 test_dump_breakpoint, test_readonly):
+                 test_dump_breakpoint, test_evaluate, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
