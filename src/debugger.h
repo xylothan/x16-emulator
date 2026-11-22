@@ -115,6 +115,7 @@ typedef struct {
 	bool        has_access;
 	uint8_t     space;           // DEBUG_STOP_SPACE_*
 	uint8_t     access;          // DEBUG_STOP_ACCESS_*
+	bool        fetch;           // a read that was part of the instruction stream
 	uint32_t    address;
 	int         x16Bank;         // bank selected at that address, -1 where none applies
 	uint8_t     value;

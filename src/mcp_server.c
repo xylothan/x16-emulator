@@ -1120,9 +1120,15 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
 
     cJSON *ki = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
     if (ki && (!cJSON_IsString(ki) ||
-               (strcmp(ki->valuestring, "exec") && strcmp(ki->valuestring, "write"))))
-        return tool_fail("'kind' must be \"exec\" or \"write\"");
-    // Code never runs from VRAM, so the only thing to catch there is a store.
+               (strcmp(ki->valuestring, "exec") && strcmp(ki->valuestring, "write") &&
+                strcmp(ki->valuestring, "read") && strcmp(ki->valuestring, "access"))))
+        return tool_fail("'kind' must be \"exec\", \"write\", \"read\" or \"access\"");
+    cJSON *xf = args ? cJSON_GetObjectItemCaseSensitive(args, "excludeFetch") : NULL;
+    if (xf && !cJSON_IsBool(xf))
+        return tool_fail("'excludeFetch' must be true or false");
+    if (xf && (!ki || (strcmp(ki->valuestring, "read") && strcmp(ki->valuestring, "access"))))
+        return tool_fail("'excludeFetch' applies to kind \"read\" or \"access\"");
+    // Code never runs from VRAM, and only stores are hooked there.
     if (vram && (!ki || strcmp(ki->valuestring, "write")))
         return tool_fail("a VRAM watch needs \"kind\": \"write\"");
     int bank, length;
@@ -1139,6 +1145,7 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     if (ki) cJSON_AddStringToObject(call, "kind", ki->valuestring);
     if (bank >= 0) cJSON_AddNumberToObject(call, "bank", bank);
     if (cJSON_HasObjectItem(args, "length")) cJSON_AddNumberToObject(call, "length", length);
+    if (xf) cJSON_AddBoolToObject(call, "excludeFetch", cJSON_IsTrue(xf));
     if (co) cJSON_AddStringToObject(call, "condition", co->valuestring);
     if (hi) cJSON_AddStringToObject(call, "hitCondition", hi->valuestring);
     dbg_reply_t r;
@@ -1410,17 +1417,19 @@ static const mcp_tool_t tools[] = {
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
       TOOL_READ, tool_disassemble },
     { "set_breakpoint",
-      "Stop when code runs at a CPU address (kind \"exec\") or when it is written (kind "
-      "\"write\", with an optional length). For exec, 'bank' pins a RAM or ROM bank, "
+      "Stop when code runs at a CPU address (kind \"exec\"), or when it is written (\"write\"), "
+      "read (\"read\") or either (\"access\"), with an optional length. A read watch ignores "
+      "bytes fetched as instructions unless excludeFetch is false. For exec, 'bank' pins a RAM or ROM bank, "
       "'condition' is e.g. \"A == $05\" or \"byte[$1234] != 0\", and hitCondition \"N\" "
-      "stops from the Nth hit on. For write, 'condition' filters the byte written, e.g. "
+      "stops from the Nth hit on. For a watch, 'condition' filters the byte moved, e.g. "
       "\"== $05\". With kind \"write\", space \"vram\" watches VERA video memory: it stops "
       "when the program's store lands there through a data port, including FX writes. "
       "A condition is refused where another client's breakpoint differs.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
-      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\",\"read\",\"access\"],\"default\":\"exec\"},"
+      "\"excludeFetch\":{\"type\":\"boolean\",\"default\":true},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
       "\"length\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
       "\"condition\":{\"type\":\"string\"},"
@@ -1433,7 +1442,7 @@ static const mcp_tool_t tools[] = {
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
-      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\"],\"default\":\"exec\"},"
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\",\"read\",\"access\"],\"default\":\"exec\"},"
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
       TOOL_CONTROL, tool_remove_breakpoint },

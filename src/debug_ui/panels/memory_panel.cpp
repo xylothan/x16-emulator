@@ -632,20 +632,32 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
     // write here fire anything", which is wildcard-aware -- so a watchpoint set
     // on one specific bank made this read "Stop breaking on write" while the
     // removal, being an exact match on ANY, found nothing and did nothing.
-    const bool has_wp = debug_wp_exists(start, DEBUG_BANK_ANY);
-    if (ImGui::MenuItem(has_wp ? "Stop breaking on write" : "Break on write")) {
-        if (has_wp)
-            DEBUGRemoveWatchPoint(start);
-        else
-            DEBUGAddWatchPoint(start, len);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Halt the machine as soon as the program writes to %s,\n"
-                          "so you can see what is doing the writing.\n\n"
-                          "Fires on any store, including one that writes back the same\n"
-                          "value - it is not a change detector.\n"
-                          "(%d of %d in use.)",
-                          n > 1 ? "this range" : "this address", debug_wp_count(), MAX_WP);
+    //
+    // All three stay listed, and the one in force is ticked: choosing it again
+    // takes the watch off, and choosing another changes it to that.
+    const int     wp_at = debug_wp_find(DEBUG_WP_SPACE_CPU, start, DEBUG_BANK_ANY);
+    const uint8_t held  = wp_at >= 0 ? debug_wp_at(wp_at)->access : 0;
+    static const struct { const char *label; uint8_t access; const char *verb; } kinds[] = {
+        { "Break on write",  DEBUG_WP_ACCESS_WRITE, "writes to" },
+        { "Break on read",   DEBUG_WP_ACCESS_READ,  "reads" },
+        { "Break on access", DEBUG_WP_ACCESS_BOTH,  "reads or writes" },
+    };
+    for (const auto &k : kinds) {
+        const bool on = held == k.access;
+        if (ImGui::MenuItem(k.label, nullptr, on)) {
+            if (wp_at >= 0)
+                debug_wp_delete_at(wp_at);
+            if (!on)
+                DEBUGAddCpuWatch(start, len, k.access, true);
+            break;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Halt the machine as soon as the program %s %s.\n"
+                              "A write fires even if it stores the same value back.\n"
+                              "A read ignores bytes fetched as instructions.\n"
+                              "(%d of %d in use.)",
+                              k.verb, n > 1 ? "this range" : "this address", debug_wp_count(), MAX_WP);
+        }
     }
 
     if (sel.active) {
