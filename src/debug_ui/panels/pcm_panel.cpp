@@ -82,10 +82,18 @@ sample_level(int16_t v)
     return (float)mag / 32768.0f;
 }
 
+// The rate accumulator is 8 bits and a sample fires when its bit 7 flips, so
+// rate r and 256 - r fire equally often. 128 is the fastest.
+unsigned
+effective_rate_step(uint8_t rate)
+{
+    return (rate > 128) ? 256u - rate : rate;
+}
+
 double
 effective_rate_hz(uint8_t rate)
 {
-    return PCM_AUDIO_CLOCK * (double)rate / 128.0;
+    return PCM_AUDIO_CLOCK * (double)effective_rate_step(rate) / 128.0;
 }
 
 void
@@ -116,16 +124,15 @@ draw_status_tab()
                 fmt.bytes_per_frame == 1 ? "" : "s");
     ImGui::Text("Volume: %d  LUT=%u/64  linear %.4f", volume, (unsigned)VOLUME_LUT[volume],
                 (double)VOLUME_LUT[volume] / 64.0);
-    ImGui::Text("Loop: %s", s.loop ? "enabled" : "disabled");
     ImGui::Separator();
 
-    ImGui::Text("AUDIO_RATE effective divider: %u", (unsigned)s.rate);
+    ImGui::Text("AUDIO_RATE: %u  (effective step %u)", (unsigned)s.rate, effective_rate_step(s.rate));
     ImGui::Text("Playback rate: %s", s.rate == 0 ? "stopped" : "running");
     if (s.rate != 0) {
         ImGui::SameLine();
         ImGui::Text("(%.3f Hz)", rate_hz);
     }
-    ImGui::TextDisabled("AUDIO_RATE writes above 128 are clamped as 256 - value; this is the already-clamped divider.");
+    ImGui::TextDisabled("Values above 128 alias: they play at the speed of 256 - value.");
     ImGui::Separator();
 
     char overlay[80];

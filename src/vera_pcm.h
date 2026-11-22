@@ -30,8 +30,7 @@ bool    pcm_is_fifo_empty(void);
 
 struct pcm_debug_state {
 	uint8_t  ctrl;         // AUDIO_CTRL as stored (bits 5-0; format + volume)
-	uint8_t  rate;         // effective rate divider after the >128 clamp
-	bool     loop;
+	uint8_t  rate;         // AUDIO_RATE as written
 	unsigned fifo_cnt;     // bytes queued
 	unsigned fifo_rdidx;
 	unsigned fifo_wridx;
@@ -66,8 +65,8 @@ unsigned pcm_debug_scope_read(int side, int16_t *dest, unsigned max_samples);
 // For the debugger: scope capture is self-arming and nothing renders audio while
 // paused, so a scope opened at a breakpoint has an empty ring. The FIFO already
 // holds the samples that are about to play, so we can show them. Runs the real
-// pcm_render() over saved-and-restored state, so the rate stepping, FIFO drain
-// order and loop restart all behave exactly as they will on resume.
+// pcm_render() over saved-and-restored state, so the rate stepping and FIFO
+// drain order behave exactly as they will on resume.
 //
 // This is a projection of queued data, not captured output; label it as such.
 //
