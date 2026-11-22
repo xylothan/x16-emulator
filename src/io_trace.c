@@ -20,9 +20,10 @@ static io_event_t *s_ring  = NULL;
 static int         s_cap   = 0;
 static int         s_count = 0;
 static int         s_head  = 0; // where the next event lands
-static uint32_t    s_seq   = 0;
+static uint64_t    s_seq   = 0;
 static uint32_t    s_total = 0;
 static uint32_t    s_dropped = 0;
+static uint32_t    s_owner_mask[IO_TRACE_OWNER_COUNT];
 
 static io_trace_context_fn s_context = NULL;
 
@@ -111,6 +112,50 @@ io_trace_at(int index)
 	return &s_ring[(oldest + index) % s_cap];
 }
 
+uint64_t
+io_trace_next_seq(void)
+{
+	return s_seq + 1;
+}
+
+uint64_t
+io_trace_oldest_seq(void)
+{
+	return s_seq + 1 - (uint64_t)s_count;
+}
+
+const io_event_t *
+io_trace_at_seq(uint64_t seq)
+{
+	const uint64_t oldest = io_trace_oldest_seq();
+	if (seq < oldest || seq > s_seq) {
+		return NULL;
+	}
+	return io_trace_at((int)(seq - oldest));
+}
+
+void
+io_trace_set_owner_mask(io_trace_owner_t owner, uint32_t mask)
+{
+	if ((unsigned)owner >= IO_TRACE_OWNER_COUNT) {
+		return;
+	}
+	s_owner_mask[owner] = mask & IO_TRACE_MASK_ALL;
+
+	uint32_t all = 0;
+	for (int i = 0; i < IO_TRACE_OWNER_COUNT; i++) {
+		all |= s_owner_mask[i];
+	}
+	io_trace_device_mask = all;
+	io_trace_enabled     = all != 0;
+}
+
+uint32_t
+io_trace_owner_mask(io_trace_owner_t owner)
+{
+	return (unsigned)owner < IO_TRACE_OWNER_COUNT ? s_owner_mask[owner] : 0;
+}
+
 // Claims the next slot, stamped with the CPU context and a fresh sequence
 // number. Returns NULL when the ring was never allocated, which is what keeps
 // every call site safe before io_trace_init().
@@ -134,7 +179,7 @@ push(io_device_t dev, io_event_kind_t kind)
 	}
 
 	memset(ev, 0, sizeof(*ev));
-	ev->seq    = ++s_seq;
+	ev->seq    = (uint32_t)++s_seq;
 	ev->device = (uint8_t)dev;
 	ev->kind   = (uint8_t)kind;
 	s_total++;
@@ -216,4 +261,37 @@ io_trace_device_name(io_device_t dev)
 		case IO_DEV_SERIAL: return "Serial";
 		default: return "?";
 	}
+}
+
+static const char *const device_ids[IO_DEV_COUNT] = {
+	[IO_DEV_VIA1]     = "via1",
+	[IO_DEV_VIA2]     = "via2",
+	[IO_DEV_VERA]     = "vera",
+	[IO_DEV_SPI]      = "spi",
+	[IO_DEV_YM]       = "ym",
+	[IO_DEV_EMU]      = "emu",
+	[IO_DEV_MIDI]     = "midi",
+	[IO_DEV_OPENBUS]  = "openbus",
+	[IO_DEV_SDCARD]   = "sdcard",
+	[IO_DEV_IEEE]     = "files",
+	[IO_DEV_I2C]      = "i2c",
+	[IO_DEV_JOYSTICK] = "joystick",
+	[IO_DEV_SERIAL]   = "serial",
+};
+
+const char *
+io_trace_device_id(io_device_t dev)
+{
+	return (unsigned)dev < IO_DEV_COUNT ? device_ids[dev] : NULL;
+}
+
+io_device_t
+io_trace_device_from_id(const char *id)
+{
+	for (int d = 0; d < IO_DEV_COUNT; d++) {
+		if (id != NULL && strcmp(id, device_ids[d]) == 0) {
+			return (io_device_t)d;
+		}
+	}
+	return IO_DEV_COUNT;
 }

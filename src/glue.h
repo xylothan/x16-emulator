@@ -104,6 +104,7 @@ extern bool enable_midline;
 
 extern bool has_midi_card;
 extern uint16_t midi_card_addr;
+extern bool ym2151_irq_support;
 
 extern void machine_dump(const char* reason);
 extern void machine_reset();

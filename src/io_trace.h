@@ -96,10 +96,26 @@ extern uint32_t io_trace_device_mask;
 
 #define IO_TRACE_BIT(dev) (1u << (unsigned)(dev))
 
+#define IO_TRACE_MASK_ALL ((1u << (unsigned)IO_DEV_COUNT) - 1u)
+
 // Everything except VERA's registers and open-bus reads. See the header comment
 // for why VERA is excluded: it would otherwise be the only thing in the ring.
 #define IO_TRACE_MASK_DEFAULT \
-	(~(IO_TRACE_BIT(IO_DEV_VERA) | IO_TRACE_BIT(IO_DEV_OPENBUS)))
+	(IO_TRACE_MASK_ALL & ~(IO_TRACE_BIT(IO_DEV_VERA) | IO_TRACE_BIT(IO_DEV_OPENBUS)))
+
+// Who wants which devices captured. The globals above are the OR of these, and
+// capture is on while that OR is non-zero, so that one owner letting go cannot
+// switch off what another still wants. A client's mask is not a preference: it
+// ends with its session and is never written to the UI's settings.
+typedef enum {
+	IO_TRACE_OWNER_UI = 0,
+	IO_TRACE_OWNER_DAP,
+	IO_TRACE_OWNER_MCP,
+	IO_TRACE_OWNER_COUNT
+} io_trace_owner_t;
+
+void     io_trace_set_owner_mask(io_trace_owner_t owner, uint32_t mask);
+uint32_t io_trace_owner_mask(io_trace_owner_t owner);
 
 // The predicate every call site uses. Kept inline and side-effect-free so that
 // a disabled trace costs a load and a branch on the I/O hot path.
@@ -135,6 +151,14 @@ uint32_t io_trace_dropped(void); // events overwritten by the ring wrapping
 // Index 0 is the OLDEST retained event. Returns NULL when out of range.
 const io_event_t *io_trace_at(int index);
 
+// The same events by sequence number, for a reader that holds a position. Numbers
+// count from 1 for the life of the process and are not cut to 32 bits, unlike
+// io_event_t.seq, so a position stays valid however long capture runs. What is
+// held is always a contiguous run ending at next - 1; empty when oldest == next.
+uint64_t          io_trace_next_seq(void);
+uint64_t          io_trace_oldest_seq(void);
+const io_event_t *io_trace_at_seq(uint64_t seq); // NULL if that event is not held
+
 // Record a raw register access. Call AFTER the device handler for reads, so the
 // value is the one the machine actually saw; reads have side effects (VERA
 // auto-increment, SPI byte consumption) and must never be repeated to observe
@@ -151,6 +175,12 @@ void io_trace_event(io_device_t dev, const char *fmt, ...);
 void io_trace_event_at(io_device_t dev, uint16_t addr, bool is_write, const char *fmt, ...);
 
 const char *io_trace_device_name(io_device_t dev);
+
+// A stable lowercase name for a client to ask for a device by, unlike the display
+// name above. NULL for an unknown device. io_trace_device_from_id() returns
+// IO_DEV_COUNT for a name it does not know.
+const char *io_trace_device_id(io_device_t dev);
+io_device_t io_trace_device_from_id(const char *id);
 
 #ifdef __cplusplus
 }

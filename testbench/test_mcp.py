@@ -185,7 +185,7 @@ def test_protocol():
 READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                  "wait_for_stop", "get_screen", "screenshot",
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack",
-                 "get_audio_state",
+                 "get_audio_state", "get_io_state", "read_io_trace",
                  "list_sources", "read_source", "source_location", "host_perf",
                  "get_sdcard", "evaluate", "read_log"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
@@ -193,7 +193,8 @@ LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_st
                 "sprite_mux_config"}
 MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "run_to", "set_breakpoint", "remove_breakpoint",
                 "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
-                "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on", "set_voice_mute"}
+                "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on", "set_voice_mute",
+                "set_io_capture", "trigger_interrupt"}
 
 
 def test_tools():
@@ -4296,6 +4297,268 @@ def test_audio():
         case("set_voice_mute does not", is_error(m.call("set_voice_mute", chip="psg", muted=True)))
 
 
+T2_SET = "78A9108D089FA9008D099FA240CAD0FD"   # SEI, T2 = $0010, delay past underflow
+T2_READ = "AD089F"
+VIA_BURST = "78A200A020AD089FCAD0FA88D0F7"    # 8192 reads of $9F08
+ALL_IO = ["via1", "via2", "vera", "spi", "ym", "emu", "midi", "openbus", "sdcard", "files", "i2c",
+          "joystick", "serial"]
+
+
+def cpu_regs(m):
+    return data(m.call("get_registers"))["cpu"]
+
+
+def word_at(m, address):
+    return int.from_bytes(bytes.fromhex(data(m.call("read_memory", address=address, length=2))["hex"]), "little")
+
+
+def park(m, status_or=0, status_and=0xFF, code="80FE"):
+    m.call("write_memory", address=0x0810, hex=code)
+    status = cpu_regs(m)["status"]
+    m.call("set_registers", pc=0x0810, status=(status & status_and) | status_or)
+    return cpu_regs(m)
+
+
+def test_io_state(m, dap):
+    d = data(m.call("get_io_state"))
+    for key in ("irq", "via1", "via2", "i2c", "smc", "rtc", "joystick"):
+        case(f"get_io_state has {key}", key in d, str(d)[:160])
+    case("VIA1 is fitted", d["via1"].get("fitted") is True and len(d["via1"].get("regs", [])) == 16)
+    case("an unfitted VIA2 says so", d["via2"] == {"fitted": False}, str(d["via2"]))
+    case("the RTC holds its NVRAM", len(d["rtc"].get("nvram", "")) == 128)
+    only = data(m.call("get_io_state", device="rtc"))
+    case("'device' limits it", "rtc" in only and "via1" not in only and "irq" in only, str(only)[:120])
+    for bad in ("sid", 3):
+        case(f"device {bad!r} is refused", is_error(m.call("get_io_state", device=bad)))
+
+    port = d["joystick"]["ports"][0]
+    case("an undriven port reads high", port.get("port") == 1 and port.get("driven") is False and
+         port.get("source") == "none" and port.get("mask") == 0xFFFF and port.get("shift") == 0xFFFF, str(port))
+    m.call("joystick", port=1, buttons=[])
+    port = data(m.call("get_io_state", device="joystick"))["joystick"]["ports"][0]
+    case("a driven port is reported", port.get("driven") is True and port.get("source") == "virtual" and
+         port.get("buttons") == [], str(port))
+    m.call("joystick", port=1, release=True)
+    port = data(m.call("get_io_state", device="joystick"))["joystick"]["ports"][0]
+    case("a released port is empty again", port.get("driven") is False and port.get("shift") == 0xFFFF, str(port))
+
+    run_planted(m, T2_SET)
+    via = data(m.call("get_io_state", device="via1"))["via1"]
+    case("a VIA flag is pending", "t2" in via.get("flags", []), str(via)[:200])
+
+    def state_hash():
+        return (dap.request("x16/status", {"hash": True}) or {}).get("body", {}).get("hash")
+    before = state_hash()
+    for _ in range(3):
+        m.call("get_io_state")
+        dap.request("x16/io")
+    case("reading I/O state changes no state hash", before is not None and state_hash() == before)
+    via = data(m.call("get_io_state", device="via1"))["via1"]
+    case("and clears no VIA flag", "t2" in via.get("flags", []), str(via)[:200])
+    run_planted(m, T2_READ)
+    via = data(m.call("get_io_state", device="via1"))["via1"]
+    case("the CPU reading T2 does clear it", "t2" not in via.get("flags", []), str(via)[:200])
+
+
+def test_io_capture(m, dap):
+    r = data(m.call("read_io_trace"))
+    c = r.get("capture", {})
+    case("nothing records by default", r.get("entries") == [] and c.get("enabled") is False and
+         c.get("effective") == [], str(r)[:200])
+
+    r = data(m.call("set_io_capture"))
+    c = r.get("capture", {})
+    case("the default leaves out VERA and open bus", "via1" in c.get("mcp", []) and
+         "vera" not in c.get("mcp", []) and "openbus" not in c.get("mcp", []), str(c))
+    case("the UI's selection is untouched", c.get("ui") == [], str(c))
+    start = r.get("cursor")
+    run_planted(m, "AD209F" + T2_READ)
+    page = data(m.call("read_io_trace", cursor=start, limit=1024))
+    entries = page.get("entries", [])
+    case("a register read is recorded", any(e.get("address") == 0x9F08 and e.get("op") == "read" and
+         e.get("device") == "via1" and e.get("kind") == "access" for e in entries), str(entries[:2]))
+    case("VERA stays out of it", not any(e.get("device") == "vera" for e in entries))
+
+    r = (dap.request("x16/ioCapture", {"devices": ["vera"]}) or {}).get("body", {})
+    c = r.get("capture", {})
+    case("DAP has its own set", c.get("dap") == ["vera"] and "via1" in c.get("mcp", []) and
+         "vera" in c.get("effective", []), str(c))
+    start = r.get("cursor")
+    run_planted(m, "AD209F")
+    entries = data(m.call("read_io_trace", cursor=start, limit=1024)).get("entries", [])
+    case("its device is recorded", any(e.get("device") == "vera" for e in entries), str(entries[:2]))
+
+    c = data(m.call("set_io_capture", devices=[])).get("capture", {})
+    case("[] releases only the caller's", c.get("mcp") == [] and c.get("dap") == ["vera"] and
+         c.get("effective") == ["vera"] and c.get("enabled") is True, str(c))
+    for args in ({"devices": ["nope"]}, {"devices": "via1"}, {"devices": [1]}, {"banana": 1}):
+        case(f"set_io_capture refuses {args}", is_error(m.call("set_io_capture", **args)))
+    case("and changes nothing", data(m.call("read_io_trace", limit=1))["capture"]["mcp"] == [])
+    case("read_io_trace takes no capture argument", is_error(m.call("read_io_trace", devices=["via1"])))
+    case("so nothing was armed", data(m.call("read_io_trace", limit=1))["capture"]["mcp"] == [])
+
+    start = data(m.call("set_io_capture", devices=["via1"]))["cursor"]
+    run_planted(m, VIA_BURST)
+    page = data(m.call("read_io_trace", cursor=start, limit=5))
+    e = page.get("entries", [])
+    case("a wrapped ring reports what was lost", page.get("lost", 0) > 0 and len(e) == 5 and
+         e[0].get("seq") == start + page["lost"], str(page)[:200])
+    case("a page is contiguous", [x.get("seq") for x in e] == list(range(e[0]["seq"], e[0]["seq"] + 5)) if e else False)
+    case("and says there is more", page.get("more") is True and page.get("cursor") == e[-1]["seq"] + 1 if e else False)
+    follow = data(m.call("read_io_trace", cursor=page["cursor"], limit=1))
+    case("the cursor carries on", follow.get("lost") == 0 and
+         follow.get("entries", [{}])[0].get("seq") == page["cursor"], str(follow)[:160])
+    newest = data(m.call("set_io_capture", devices=[]))["cursor"]
+    tail = data(m.call("read_io_trace", cursor=newest))
+    case("a cursor at the end reads nothing", tail.get("entries") == [] and tail.get("more") is False, str(tail)[:160])
+    for bad in (newest + 1, -1, 1.5, "x"):
+        case(f"cursor {bad!r} is refused", is_error(m.call("read_io_trace", cursor=bad)))
+    for bad in (0, 1025, 1.5):
+        case(f"limit {bad} is refused", is_error(m.call("read_io_trace", limit=bad)))
+
+
+def test_io_triggers(m, dap):
+    m.call("write_memory", address=0x9F26, hex="00")   # IEN: no VERA source
+
+    b = park(m, status_and=0xFF & ~0x04)
+    case("no device is asserting", data(m.call("get_io_state", device="rtc"))["irq"]["line"] is False)
+    dap.request("x16/status")   # drains events already sent
+    dap.events.clear()
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    a = cpu_regs(m)
+    case("paused, I clear: taken", r.get("taken") is True and r.get("held") is False, str(r))
+    case("it vectors", a["pc"] == word_at(m, 0xFFFE) and r.get("pc") == a["pc"] and
+         r.get("vector") == 0xFFFE, f"{a['pc']:04X} {r}")
+    case("it pushes three bytes", a["sp"] == b["sp"] - 3, f"{a['sp']:X} {b['sp']:X}")
+    case("the return address is the parked PC", word_at(m, a["sp"] + 2) == 0x0810)
+    case("it sets I", a["status"] & 0x04 != 0)
+    case("the machine stays paused", r.get("paused") is True and data(m.call("get_status")).get("paused") is True,
+         str(r))
+    stopped = dap.event("stopped", timeout=3)
+    case("DAP is told the PC moved", (stopped or {}).get("body", {}).get("reason") == "interrupt", str(stopped)[:200])
+
+    b = park(m, status_or=0x04, code="EA80FD")   # NOP, BRA back: each step moves the PC
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    a = cpu_regs(m)
+    case("I set: held and the reply says so", r.get("taken") is False and r.get("held") is True and
+         "note" in r, str(r))
+    case("held: PC and SP do not move", a["pc"] == b["pc"] and a["sp"] == b["sp"], f"{a} {b}")
+
+    m.call("set_registers", status=a["status"] & ~0x04)
+    steps = [data(m.call("step")).get("completed") for _ in range(4)]
+    a = cpu_regs(m)
+    case("a held pulse is not remembered", steps == [True] * 4 and a["pc"] == 0x0810 and a["sp"] == b["sp"],
+         f"{steps} {a['pc']:04X}")
+
+    b = park(m, status_or=0x04, code="CBEA80FE")
+    r = data(m.call("step"))
+    case("parked in WAI", r.get("completed") is True and cpu_regs(m)["pc"] == 0x0811 and
+         data(m.call("get_io_state", device="rtc"))["irq"]["inWai"] is True, str(r)[:160])
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    a = cpu_regs(m)
+    case("a held IRQ wakes WAI", r.get("held") is True and r.get("wokeFromWai") is True and
+         data(m.call("get_io_state", device="rtc"))["irq"]["inWai"] is False, str(r))
+    case("without vectoring, and still paused", a["pc"] == 0x0811 and a["sp"] == b["sp"] and
+         r.get("paused") is True, f"{a['pc']:04X} {r.get('paused')}")
+
+    b = park(m, status_or=0x04)
+    r = data(m.call("trigger_interrupt", kind="nmi"))
+    a = cpu_regs(m)
+    case("an NMI ignores I", r.get("taken") is True and r.get("held") is False and
+         a["pc"] == word_at(m, 0xFFFA) and r.get("vector") == 0xFFFA and a["sp"] == b["sp"] - 3, str(r))
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    case("an IRQ inside the NMI handler is held", r.get("held") is True, str(r))
+
+    # A device's flag survives a trigger; the pulse neither raises nor clears it.
+    run_planted(m, T2_SET)
+    m.call("write_memory", address=0x9F0E, hex="A0")   # IER: T2
+    d = data(m.call("get_io_state", device="via1"))
+    case("a device is asserting the line", d["irq"]["sources"] == ["via1"], str(d["irq"]))
+    park(m, status_or=0x04)
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    d = data(m.call("get_io_state", device="via1"))
+    case("the reply names it", r.get("deviceLines") == ["via1"], str(r))
+    case("a trigger leaves another device's assertion up", "t2" in d["via1"]["flags"] and d["irq"]["line"] is True,
+         str(d["irq"]))
+    m.call("write_memory", address=0x9F0E, hex="20")   # IER off
+    d = data(m.call("get_io_state", device="via1"))
+    case("and the line falls with its source", d["irq"]["line"] is False, str(d["irq"]))
+
+    m.call("set_stop_on", filters=["irq"])
+    park(m, status_and=0xFF & ~0x04)
+    r = data(m.call("trigger_interrupt", kind="irq"))
+    case("taken with a stop filter armed", r.get("taken") is True, str(r))
+    last = data(m.call("get_status")).get("stopId")
+    m.call("continue")
+    d = data(m.call("wait_for_stop", sinceStopId=last, timeoutMs=500))
+    case("an entry taken while paused is not a new stop", d.get("completed") is not True, str(d)[:200])
+    m.call("set_stop_on", filters=[])
+    m.call("pause")
+
+    for args in ({}, {"kind": "brk"}, {"kind": 1}, {"kind": "irq", "banana": 1}):
+        case(f"trigger_interrupt refuses {args}", is_error(m.call("trigger_interrupt", **args)))
+
+
+def test_io():
+    print("I/O state, trace and triggers")
+    port = free_port()
+    with Mcp(["-debugport", str(port), "-deterministic", "-sound", "none"]) as m:
+        m.init()
+        case("booted", wait_basic(m))
+        m.call("pause")
+        dap = Dap(port)
+        dap.session()
+        test_io_state(m, dap)
+        test_io_capture(m, dap)
+        test_io_triggers(m, dap)
+        dap.close()
+        time.sleep(0.3)
+        c = data(m.call("read_io_trace", limit=1)).get("capture", {})
+        case("a DAP session's capture ends with it", c.get("dap") == [] and c.get("effective") == [] and
+             c.get("enabled") is False, str(c))
+
+    with HttpMcp(["-deterministic", "-sound", "none"], env={"X16_MCP_LEASE_MS": "500"}) as m:
+        m.init()
+        c = data(m.call("set_io_capture", devices=["vera"])).get("capture", {})
+        case("the lease's client captures", c.get("mcp") == ["vera"], str(c))
+        time.sleep(1.2)
+        c = data(m.call("read_io_trace", limit=1)).get("capture", {})
+        case("a lease ending releases it", c.get("mcp") == [] and c.get("enabled") is False, str(c))
+
+    with Mcp(["-mcp-readonly"]) as m:
+        m.init()
+        time.sleep(0.2)
+        case("get_io_state works under -mcp-readonly", "via1" in data(m.call("get_io_state")))
+        case("read_io_trace too", data(m.call("read_io_trace")).get("entries") == [])
+        for name, args in (("set_io_capture", {"devices": ["via1"]}), ("trigger_interrupt", {"kind": "nmi"})):
+            r = m.call(name, **args)
+            case(f"{name} does not", is_error(r) and "read-only" in r["content"][0]["text"], str(r)[:160])
+        case("nothing was armed", data(m.call("read_io_trace")).get("capture", {}).get("enabled") is False)
+
+
+def io_capture_run(with_capture):
+    with Mcp(["-deterministic", "-seed", "1", "-sound", "none"]) as m:
+        m.init()
+        m.call("pause")
+        f0 = data(m.call("get_status")).get("frame", 0)
+        m.call("run_frames", frames=600 - f0, timeoutMs=30000)
+        if with_capture:
+            m.call("set_io_capture", devices=ALL_IO)
+        hashes = [data(m.call("run_frames", frames=10, hash=True, timeoutMs=30000)).get("hash") for _ in range(10)]
+        return hashes, data(m.call("set_io_capture", devices=[])).get("cursor", 0)
+
+
+def test_io_determinism():
+    print("I/O trace determinism")
+    plain, n_a = io_capture_run(False)
+    traced, n_b = io_capture_run(True)
+    case("the plain run recorded nothing", n_a == 1, str(n_a))
+    case("the traced run did", n_b > 100, str(n_b))
+    case("every hash was taken", all(plain) and len(plain) == 10, str(plain[:2]))
+    case("capturing every device leaves the machine state hash identical", plain == traced,
+         next((f"frame {600 + 10 * (i + 1)}" for i, (x, y) in enumerate(zip(plain, traced)) if x != y), ""))
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -4364,7 +4627,7 @@ def main():
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
-                 test_stop_on, test_run_to, test_audio, test_readonly):
+                 test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
