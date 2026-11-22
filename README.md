@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sprites`, `x16/palette`, `x16/tilemap`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1519,7 +1519,7 @@ debugging it.
 | Source | `list_sources`, `read_source`, `source_location` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
 | Screen | `get_screen`, `screenshot` |
-| VERA | `get_vera_state` |
+| VERA | `get_vera_state`, `get_sprites`, `get_palette`, `get_tilemap` |
 | Files and speed | `hash_memory`, `dump_memory`, `load_prg`, `set_warp` |
 | Performance | `perf_stats`, `perf_config`, `perf_history`, `host_perf`, `profile_capture` |
 | Devices | `get_io_state`, `read_io_trace`, `set_io_capture`, `trigger_interrupt`, `get_sdcard`, `sprite_mux_stats`, `sprite_mux_config` |
@@ -1581,6 +1581,13 @@ records: `devices` is its whole set, `[]` stops, and without it everything but `
 ports would flood the ring, and `openbus`. Each client's set is ORed with the panel's selection,
 never changes that selection or its saved setting, and ends with the client's session or MCP lease.
 Recording does not change the machine or any state hash.
+
+`get_sprites` (`x16/sprites`), `get_palette` (`x16/palette`) and `get_tilemap` (`x16/tilemap`)
+return decoded VERA state as data and change nothing: they never touch the data ports. Sprites and
+palette take `start` and `count`, and report the values the renderer uses, which can differ from
+the VRAM bytes at `$1FC00` and `$1FA00`. `get_tilemap` takes `layer`, a rectangle in tiles and
+`limit`. Its `status` is `ok`, `disabled` or `bitmap`, and only `ok` has entries. Map and tile
+addresses wrap at the end of VRAM.
 
 `trigger_interrupt` (`x16/interrupt`) pulses `irq` or `nmi` once through the CPU's own entry points.
 No device flag changes, so it cannot leave the shared IRQ line stuck or clear another device's

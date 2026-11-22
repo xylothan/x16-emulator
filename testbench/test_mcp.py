@@ -185,7 +185,7 @@ def test_protocol():
 READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                  "wait_for_stop", "get_screen", "screenshot",
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack",
-                 "get_audio_state", "get_io_state", "read_io_trace",
+                 "get_audio_state", "get_io_state", "read_io_trace", "get_sprites", "get_palette", "get_tilemap",
                  "list_sources", "read_source", "source_location", "host_perf",
                  "get_sdcard", "evaluate", "read_log"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
@@ -4536,6 +4536,203 @@ def test_io():
         case("nothing was armed", data(m.call("read_io_trace")).get("capture", {}).get("enabled") is False)
 
 
+def set_layer(m, layer, *regs):
+    set_vera(m, 0x0D if layer == 0 else 0x14, *regs)
+
+
+def vram(m, address, *values):
+    m.call("write_memory", address=address, hex="".join(f"{v:02X}" for v in values), space="vram")
+
+
+def test_graphics_sprites(m):
+    vram(m, 0x1FC00 + 5 * 8, 0x34, 0x8A, 0xF8, 0x03, 0x43, 0x02, 0x5B, 0x97)
+    d = data(m.call("get_sprites", start=5, count=1))
+    case("one sprite", d.get("count") == 1 and len(d.get("sprites", [])) == 1, str(d)[:200])
+    s = (d.get("sprites") or [{}])[0]
+    case("sprite index", s.get("index") == 5, str(s))
+    case("sprite address", s.get("address") == (0x34 << 5 | 0xA << 13), str(s))
+    case("sprite 8bpp", s.get("bpp") == 8, str(s))
+    case("sprite position, signed", s.get("x") == -8 and s.get("y") == 0x243, str(s))
+    case("sprite size", s.get("width") == 16 and s.get("height") == 32, str(s))
+    case("sprite z", s.get("zDepth") == 2 and s.get("enabled") is True, str(s))
+    case("sprite flips", s.get("hFlip") is True and s.get("vFlip") is True, str(s))
+    case("sprite collision", s.get("collisionMask") == 5, str(s))
+    case("sprite palette offset", s.get("paletteOffset") == 0x70, str(s))
+    case("sprite raw", s.get("attr") == [0x34, 0x8A, 0xF8, 0x03, 0x43, 0x02, 0x5B, 0x97], str(s))
+    d = data(m.call("get_sprites", start=120))
+    case("sprites stop at 127", d.get("count") == 8 and d["sprites"][-1]["index"] == 127, str(d)[:120])
+    case("all 128 by default", len(data(m.call("get_sprites")).get("sprites", [])) == 128)
+    for args in ({"start": 128}, {"count": 0}, {"count": 129}, {"start": -1}, {"start": "a"}, {"banana": 1}):
+        case(f"get_sprites refuses {args}", is_error(m.call("get_sprites", **args)))
+
+
+def test_graphics_palette(m):
+    vram(m, 0x1FA00 + 3 * 2, 0xA5, 0xF3)
+    d = data(m.call("get_palette", start=3, count=2))
+    e = (d.get("entries") or [{}])[0]
+    case("palette range", d.get("count") == 2 and len(d.get("entries", [])) == 2, str(d)[:160])
+    case("palette 12-bit", e.get("index") == 3 and e.get("rgb") == 0x3A5 and e.get("hex") == "3A5", str(e))
+    case("palette channels", e.get("r") == 3 and e.get("g") == 10 and e.get("b") == 5, str(e))
+    d = data(m.call("get_palette", start=250))
+    case("palette stops at 255", d.get("count") == 6 and d["entries"][-1]["index"] == 255, str(d)[:120])
+    case("all 256 by default", len(data(m.call("get_palette")).get("entries", [])) == 256)
+    for args in ({"start": 256}, {"count": 0}, {"count": 257}, {"banana": 1}):
+        case(f"get_palette refuses {args}", is_error(m.call("get_palette", **args)))
+
+
+def test_graphics_renderer_copy(m):
+    # src/video.c: fx_vram_cache_write stores to VRAM only.
+    before = data(m.call("get_palette", start=9, count=1))["entries"][0]["rgb"]
+    set_vera(m, 5, 2 << 1)
+    set_vera(m, 9, 0x40)
+    set_vera(m, 5, 6 << 1)
+    set_vera(m, 9, 0x5A, 0x0C, 0xA5, 0x03)
+    set_vera(m, 5, 0)
+    set_vera(m, 0, 0x10, 0xFA, 0x01)
+    set_vera(m, 3, 0x00)
+    set_vera(m, 5, 2 << 1)
+    set_vera(m, 9, 0x00)
+    set_vera(m, 5, 0)
+    raw = data(m.call("read_memory", address=0x1FA10, length=2, space="vram")).get("hex")
+    now = data(m.call("get_palette", start=8, count=1))["entries"][0]
+    case("an FX cache write moved VRAM only", raw == "5A0C", str(raw))
+    case("the palette reports the renderer's copy", now.get("rgb") != 0xC5A, str(now))
+    case("and other entries did not move",
+         data(m.call("get_palette", start=9, count=1))["entries"][0]["rgb"] == before)
+
+
+def test_graphics_tilemap(m):
+    set_vera(m, 5, 0)
+    set_vera(m, 9, 0x31)                       # VGA, both layers, no sprites
+    set_layer(m, 0, 0x02, 0x10, 0x20)          # 4bpp, 32x32, map $2000, tiles $4000
+    vram(m, 0x2000 + (2 * 32 + 3) * 2, 0x34, 0xBE)
+    d = data(m.call("get_tilemap", layer=0, x=3, y=2, width=1, height=1))
+    case("tile status", d.get("status") == "ok" and d.get("mode") == "tile" and d.get("bpp") == 4, str(d)[:200])
+    case("tile geometry", d.get("mapBase") == 0x2000 and d.get("tileBase") == 0x4000 and
+         d.get("mapWidth") == 32 and d.get("tileWidth") == 8, str(d)[:200])
+    e = (d.get("entries") or [{}])[0]
+    case("tile position", e.get("x") == 3 and e.get("y") == 2 and e.get("address") == 0x2086, str(e))
+    case("tile index", e.get("tile") == 0x234, str(e))
+    case("tile address", e.get("tileAddress") == 0x4000 + 0x234 * 32, str(e))
+    case("tile palette offset", e.get("paletteOffset") == 0xB0, str(e))
+    case("tile flips", e.get("hFlip") is True and e.get("vFlip") is True, str(e))
+
+    for depth, bpp, size in ((1, 2, 16), (3, 8, 64)):
+        set_layer(m, 0, depth, 0x10, 0x20)
+        d = data(m.call("get_tilemap", layer=0, x=3, y=2, width=1, height=1))
+        e = (d.get("entries") or [{}])[0]
+        case(f"{bpp}bpp tile", d.get("bpp") == bpp and e.get("tileAddress") == (0x4000 + 0x234 * size) & 0x1FFFF, str(e))
+
+    set_layer(m, 0, 0x00, 0x10, 0x20)          # 1bpp text
+    vram(m, 0x2000, 0x41, 0x6E)
+    d = data(m.call("get_tilemap", layer=0, width=1, height=1))
+    e = (d.get("entries") or [{}])[0]
+    case("text mode", d.get("mode") == "text" and d.get("bpp") == 1, str(d)[:160])
+    case("text entry", e.get("tile") == 0x41 and e.get("fg") == 0xE and e.get("bg") == 6, str(e))
+    case("a text entry has no flips", "hFlip" not in e, str(e))
+    set_layer(m, 0, 0x08, 0x10, 0x20)          # T256C
+    e = data(m.call("get_tilemap", layer=0, width=1, height=1))["entries"][0]
+    case("T256C text", e.get("fg") == 0x6E and e.get("bg") == 0, str(e))
+
+    set_layer(m, 0, 0xF2, 0xFF, 0x00)          # 256x256 at $1FE00
+    vram(m, 0x00000, 0x77, 0x03)
+    d = data(m.call("get_tilemap", layer=0, y=1, width=1, height=1))
+    e = (d.get("entries") or [{}])[0]
+    case("the map says it wraps", d.get("mapWraps") is True, str(d)[:200])
+    case("a wrapped entry", e.get("address") == 0 and e.get("tile") == 0x377, str(e))
+    d = data(m.call("get_tilemap", layer=0, x=255, y=255, width=1, height=1))
+    case("the last entry of a wrapped map", (d.get("entries") or [{}])[0].get("address") ==
+         (0x1FE00 + (255 * 256 + 255) * 2) & 0x1FFFF, str(d)[:200])
+
+    set_layer(m, 0, 0x02, 0x10, 0x20)
+    d = data(m.call("get_tilemap", layer=0, x=30, y=30, width=8, height=8))
+    case("clipped to the map", d.get("clipped") is True and d.get("width") == 2 and d.get("height") == 2 and
+         len(d.get("entries", [])) == 4, str(d)[:200])
+    d = data(m.call("get_tilemap", layer=0, width=10, height=10, limit=25))
+    case("stops at a whole row", d.get("truncated") is True and d.get("height") == 2 and d.get("nextY") == 2 and
+         len(d.get("entries", [])) == 20, str(d)[:200])
+    d = data(m.call("get_tilemap", layer=0))
+    case("the default is the map, to the limit", d.get("width") == 32 and len(d.get("entries", [])) == 1024, str(d)[:120])
+    for args in ({"layer": 2}, {"layer": -1}, {"x": 256}, {"width": 0}, {"height": 257}, {"limit": 0},
+                 {"limit": 4097}, {"banana": 1}, {"layer": 0, "x": 32}, {"layer": 0, "y": 32},
+                 {"layer": 0, "width": 20, "limit": 10}):
+        case(f"get_tilemap refuses {args}", is_error(m.call("get_tilemap", **args)))
+
+    set_layer(m, 0, 0x06, 0x10, 0x20)          # 4bpp bitmap
+    d = data(m.call("get_tilemap", layer=0))
+    case("a bitmap layer says so", d.get("status") == "bitmap" and "bitmap" in d.get("message", "") and
+         d.get("entries") == [] and "mapWidth" not in d, str(d)[:200])
+    set_layer(m, 0, 0x02, 0x10, 0x20)
+    set_vera(m, 9, 0x21)
+    d = data(m.call("get_tilemap", layer=0))
+    case("a disabled layer says so", d.get("status") == "disabled" and "disabled" in d.get("message", "") and
+         d.get("entries") == [], str(d)[:200])
+    set_vera(m, 9, 0x30)
+    d = data(m.call("get_tilemap", layer=0))
+    case("output off says so", d.get("status") == "disabled" and "off" in d.get("message", "") and
+         d.get("entries") == [], str(d)[:200])
+    set_vera(m, 9, 0x31)
+
+
+def test_graphics_purity(m, dap):
+    vram(m, 0x12340, 0xAB)
+    vram(m, 0x00080, 0x5A)
+    set_vera(m, 5, 0x00)
+    set_vera(m, 0, 0x40, 0x23, 0x11)           # $12340, step 1
+    set_vera(m, 5, 0x01)
+    set_vera(m, 0, 0x80, 0x00, 0x18)           # $00080, step -1
+    set_vera(m, 5, 0x00)
+
+    def snapshot():
+        v = dap.request("x16/vera")["body"]
+        return v.get("ports"), v.get("addrsel"), v.get("dcsel")
+
+    def state_hash():
+        return (dap.request("x16/status", {"hash": True}) or {}).get("body", {}).get("hash")
+
+    before, h = snapshot(), state_hash()
+    case("port 0 steps", before[0][0].get("increment") == 1 and before[0][0].get("address") == 0x12340, str(before[0][0]))
+    case("port 1 steps", before[0][1].get("increment") == -1 and before[0][1].get("address") == 0x80, str(before[0][1]))
+    for _ in range(3):
+        m.call("get_sprites")
+        m.call("get_palette")
+        m.call("get_tilemap", layer=0)
+        m.call("get_tilemap", layer=1)
+        dap.request("x16/sprites")
+        dap.request("x16/palette")
+        dap.request("x16/tilemap", {"layer": 0})
+    case("reading leaves VERA's ports where they were", snapshot() == before, str(snapshot()[0]))
+    case("reading changes no state hash", h is not None and state_hash() == h)
+
+
+def test_graphics():
+    print("decoded graphics state")
+    port = free_port()
+    with Mcp(["-debugport", str(port), "-deterministic", "-sound", "none"]) as m:
+        m.init()
+        case("booted", wait_basic(m))
+        m.call("pause")
+        dap = Dap(port)
+        dap.session()
+        over_dap = dap.request("x16/palette", {"start": 1, "count": 1})["body"]
+        case("the same palette over DAP",
+             over_dap.get("entries") == data(m.call("get_palette", start=1, count=1)).get("entries"), str(over_dap)[:160])
+        case("the boot palette", over_dap.get("entries", [{}])[0].get("rgb") == 0xFFF, str(over_dap)[:160])
+        test_graphics_sprites(m)
+        test_graphics_palette(m)
+        test_graphics_renderer_copy(m)
+        test_graphics_tilemap(m)
+        test_graphics_purity(m, dap)
+        dap.close()
+
+    with Mcp(["-mcp-readonly"]) as m:
+        m.init()
+        time.sleep(0.2)
+        case("get_sprites works under -mcp-readonly", len(data(m.call("get_sprites")).get("sprites", [])) == 128)
+        case("get_palette too", len(data(m.call("get_palette")).get("entries", [])) == 256)
+        case("get_tilemap too", data(m.call("get_tilemap")).get("status") in ("ok", "disabled", "bitmap"))
+
+
 def io_capture_run(with_capture):
     with Mcp(["-deterministic", "-seed", "1", "-sound", "none"]) as m:
         m.init()
@@ -4627,7 +4824,8 @@ def main():
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
-                 test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_readonly):
+                 test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,
+                 test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

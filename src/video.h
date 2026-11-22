@@ -225,6 +225,11 @@ void via1_write(uint8_t reg, uint8_t value);
 uint8_t video_space_read(uint32_t address);
 void video_space_write(uint32_t address, uint8_t value);
 
+// The palette and sprite attributes the renderer uses. These are held apart from
+// VRAM at $1FA00 and $1FC00, and differ from it after a reset or an FX cache write.
+void video_debug_get_palette(uint8_t out[512]);
+void video_debug_get_sprite_attr(int sprite, uint8_t out[8]);
+
 bool video_is_tilemap_address(int addr);
 bool video_is_tiledata_address(int addr);
 bool video_is_special_address(int addr);

@@ -1596,6 +1596,18 @@ static cJSON *tool_trigger_interrupt(cJSON *args) {
     return tool_forward("x16/interrupt", args);
 }
 
+static cJSON *tool_get_sprites(cJSON *args) {
+    return tool_forward("x16/sprites", args);
+}
+
+static cJSON *tool_get_palette(cJSON *args) {
+    return tool_forward("x16/palette", args);
+}
+
+static cJSON *tool_get_tilemap(cJSON *args) {
+    return tool_forward("x16/tilemap", args);
+}
+
 static cJSON *tool_set_warp(cJSON *args) {
     return tool_forward("x16/setWarp", args);
 }
@@ -2320,6 +2332,43 @@ static const mcp_tool_t tools[] = {
       "\"muted\":{\"type\":\"boolean\"}"
       "},\"required\":[\"chip\",\"muted\"],\"additionalProperties\":false}",
       TOOL_CONTROL, tool_set_voice_mute },
+    { "get_sprites",
+      "VERA's sprites, decoded and read without changing anything. 'start' and 'count' pick "
+      "from the 128. Each has its position (signed), size, bpp, VRAM address, z-depth (0 is "
+      "not drawn), flips, 4-bit collision mask, paletteOffset (the value added to colours 1 "
+      "to 15) and raw 'attr' bytes. 'spritesEnabled' is the global switch in DC_VIDEO.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"start\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":127,\"default\":0},"
+      "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128,\"default\":128}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_sprites },
+    { "get_palette",
+      "VERA's palette as the renderer uses it, read without changing anything. 'start' and "
+      "'count' pick from the 256 entries. Each has 12-bit 'rgb' ($0RGB), 'hex', and r, g, b "
+      "from 0 to 15.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"start\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255,\"default\":0},"
+      "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256,\"default\":256}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_palette },
+    { "get_tilemap",
+      "A rectangle of a VERA layer's tile map, decoded and read without changing anything. "
+      "'layer' is 0 or 1 (default 1). 'x', 'y', 'width' and 'height' are in tiles and default "
+      "to the whole map. The rectangle is clipped to the map ('clipped'). Past 'limit' cells "
+      "it stops at a whole row ('truncated'), and 'nextY' is where to continue. A limit below "
+      "the rectangle's width is refused. 'status' is "
+      "ok, disabled, or bitmap, and only ok has entries. Text entries have the character as "
+      "'tile' and fg and bg. Tile entries have a 10-bit 'tile', paletteOffset and flips. "
+      "Addresses wrap at the end of VRAM as VERA's do ('mapWraps').",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"layer\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1,\"default\":1},"
+      "\"x\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255,\"default\":0},"
+      "\"y\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255,\"default\":0},"
+      "\"width\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},"
+      "\"height\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},"
+      "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1024}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_tilemap },
     { "get_io_state",
       "VIA, I2C, SMC, RTC and controller port state, read without changing anything: no VIA "
       "flag clears and the I2C bus does not step. 'device' limits it to one. 'irq' is always "

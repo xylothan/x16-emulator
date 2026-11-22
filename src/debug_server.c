@@ -62,6 +62,7 @@
 #include "audio_decode.h"
 #include "vera_psg.h"
 #include "vera_pcm.h"
+#include "vera_decode.h"
 #include "ymglue.h"
 
 extern bool headless;   // main.c
@@ -8392,6 +8393,228 @@ static int handle_x16_set_voice_mute(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/sprites, x16/palette, x16/tilemap ──────────────────────────
+//
+// Palette and sprite attributes are the copies the renderer draws from, not the
+// VRAM bytes at the same addresses. Map entries come from VRAM by video_space_read.
+// Nothing here goes near the data ports.
+
+#define TILEMAP_DEFAULT_LIMIT 1024
+#define TILEMAP_MAX_LIMIT     4096
+
+static bool gfx_arg_int(cJSON *args, const char *key, int def, int lo, int hi, int *out) {
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, key) : NULL;
+    *out = def;
+    if (!v) return true;
+    if (!cJSON_IsNumber(v) || v->valuedouble < lo || v->valuedouble > hi ||
+        v->valuedouble != (double)(int)v->valuedouble)
+        return false;
+    *out = (int)v->valuedouble;
+    return true;
+}
+
+static int handle_x16_sprites(int seq, cJSON *args) {
+    static const char cmd[] = "x16/sprites";
+    int start, count;
+    if (!gfx_arg_int(args, "start", 0, 0, VERA_SPRITE_COUNT - 1, &start) ||
+        !gfx_arg_int(args, "count", VERA_SPRITE_COUNT, 1, VERA_SPRITE_COUNT, &count)) {
+        send_dap_error_response(seq, cmd, "'start' must be 0 to 127, 'count' 1 to 128");
+        return 0;
+    }
+    if (count > VERA_SPRITE_COUNT - start) count = VERA_SPRITE_COUNT - start;
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "spritesEnabled", vera_sprites_enabled(video_get_dc_value(0)));
+    cJSON_AddNumberToObject(body, "total", VERA_SPRITE_COUNT);
+    cJSON_AddNumberToObject(body, "start", start);
+    cJSON_AddNumberToObject(body, "count", count);
+    cJSON *list = cJSON_AddArrayToObject(body, "sprites");
+    for (int i = start; i < start + count; i++) {
+        uint8_t attr[8];
+        video_debug_get_sprite_attr(i, attr);
+        const vera_sprite_t s = vera_sprite_decode(attr);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "index", i);
+        cJSON_AddBoolToObject(o, "enabled", s.zdepth != 0);
+        cJSON_AddNumberToObject(o, "zDepth", s.zdepth);
+        cJSON_AddNumberToObject(o, "x", s.x);
+        cJSON_AddNumberToObject(o, "y", s.y);
+        cJSON_AddNumberToObject(o, "width", s.w);
+        cJSON_AddNumberToObject(o, "height", s.h);
+        cJSON_AddNumberToObject(o, "bpp", s.mode ? 8 : 4);
+        cJSON_AddNumberToObject(o, "address", s.address);
+        cJSON_AddNumberToObject(o, "paletteOffset", s.pal_off);
+        cJSON_AddBoolToObject(o, "hFlip", s.hflip);
+        cJSON_AddBoolToObject(o, "vFlip", s.vflip);
+        cJSON_AddNumberToObject(o, "collisionMask", s.collision >> 4);
+        cJSON_AddItemToObject(o, "attr", audio_bytes(attr, 8));
+        cJSON_AddItemToArray(list, o);
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static int handle_x16_palette(int seq, cJSON *args) {
+    static const char cmd[] = "x16/palette";
+    int start, count;
+    if (!gfx_arg_int(args, "start", 0, 0, VERA_PALETTE_ENTRIES - 1, &start) ||
+        !gfx_arg_int(args, "count", VERA_PALETTE_ENTRIES, 1, VERA_PALETTE_ENTRIES, &count)) {
+        send_dap_error_response(seq, cmd, "'start' must be 0 to 255, 'count' 1 to 256");
+        return 0;
+    }
+    if (count > VERA_PALETTE_ENTRIES - start) count = VERA_PALETTE_ENTRIES - start;
+
+    uint8_t raw[VERA_PALETTE_ENTRIES * 2];
+    video_debug_get_palette(raw);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "total", VERA_PALETTE_ENTRIES);
+    cJSON_AddNumberToObject(body, "start", start);
+    cJSON_AddNumberToObject(body, "count", count);
+    cJSON *list = cJSON_AddArrayToObject(body, "entries");
+    for (int i = start; i < start + count; i++) {
+        const vera_color_t c = vera_palette_decode(raw[i * 2], raw[i * 2 + 1]);
+        char hex[8];
+        snprintf(hex, sizeof hex, "%03X", (unsigned)c.rgb);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "index", i);
+        cJSON_AddNumberToObject(o, "rgb", c.rgb);
+        cJSON_AddStringToObject(o, "hex", hex);
+        cJSON_AddNumberToObject(o, "r", c.r);
+        cJSON_AddNumberToObject(o, "g", c.g);
+        cJSON_AddNumberToObject(o, "b", c.b);
+        cJSON_AddItemToArray(list, o);
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static void tilemap_add_layer(cJSON *body, const vera_layer_t *L) {
+    cJSON_AddStringToObject(body, "mode", L->bitmap_mode ? "bitmap" : L->text_mode ? "text" : "tile");
+    cJSON_AddNumberToObject(body, "bpp", L->bpp);
+    cJSON_AddBoolToObject(body, "t256c", L->text_256c);
+    cJSON_AddNumberToObject(body, "tileBase", L->tile_base);
+    if (L->bitmap_mode) {
+        cJSON_AddNumberToObject(body, "bitmapWidth", L->bitmap_w);
+        cJSON_AddNumberToObject(body, "paletteOffset", L->bitmap_pal_off);
+        return;
+    }
+    cJSON_AddNumberToObject(body, "mapBase", L->map_base);
+    cJSON_AddNumberToObject(body, "mapWidth", L->mapw);
+    cJSON_AddNumberToObject(body, "mapHeight", L->maph);
+    cJSON_AddNumberToObject(body, "tileWidth", L->tilew);
+    cJSON_AddNumberToObject(body, "tileHeight", L->tileh);
+    cJSON_AddNumberToObject(body, "hScroll", L->hscroll);
+    cJSON_AddNumberToObject(body, "vScroll", L->vscroll);
+    cJSON_AddBoolToObject(body, "mapWraps", vera_map_wraps(L));
+}
+
+static int handle_x16_tilemap(int seq, cJSON *args) {
+    static const char cmd[] = "x16/tilemap";
+    int layer, x, y, width, height, limit;
+    if (!gfx_arg_int(args, "layer", 1, 0, 1, &layer)) {
+        send_dap_error_response(seq, cmd, "'layer' must be 0 or 1");
+        return 0;
+    }
+    if (!gfx_arg_int(args, "x", 0, 0, 255, &x) || !gfx_arg_int(args, "y", 0, 0, 255, &y) ||
+        !gfx_arg_int(args, "width", 0, 1, 256, &width) || !gfx_arg_int(args, "height", 0, 1, 256, &height)) {
+        send_dap_error_response(seq, cmd, "'x' and 'y' must be 0 to 255, 'width' and 'height' 1 to 256");
+        return 0;
+    }
+    if (!gfx_arg_int(args, "limit", TILEMAP_DEFAULT_LIMIT, 1, TILEMAP_MAX_LIMIT, &limit)) {
+        send_dap_error_response(seq, cmd, "'limit' must be 1 to 4096");
+        return 0;
+    }
+
+    uint8_t regs[VERA_LAYER_REG_COUNT];
+    for (int i = 0; i < VERA_LAYER_REG_COUNT; i++)
+        regs[i] = video_read((uint8_t)((layer ? 0x14 : 0x0D) + i), true);
+    const vera_layer_t L = vera_layer_decode(regs);
+    const uint8_t dc = video_get_dc_value(0);
+
+    const char *status = "ok", *message = NULL;
+    char why[80];
+    if (!(dc & 3)) {
+        status = "disabled";
+        message = "Video output is off, so no layer is shown.";
+    } else if (!vera_layer_enabled(dc, layer)) {
+        status = "disabled";
+        snprintf(why, sizeof why, "Layer %d is disabled in DC_VIDEO.", layer);
+        message = why;
+    } else if (L.bitmap_mode) {
+        status = "bitmap";
+        snprintf(why, sizeof why, "Layer %d is in bitmap mode and has no tile map.", layer);
+        message = why;
+    }
+
+    if (!strcmp(status, "ok") && (x >= L.mapw || y >= L.maph)) {
+        snprintf(why, sizeof why, "'x' must be below %d and 'y' below %d on this map", L.mapw, L.maph);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "layer", layer);
+    cJSON_AddStringToObject(body, "status", status);
+    if (message) cJSON_AddStringToObject(body, "message", message);
+    tilemap_add_layer(body, &L);
+    cJSON *list = cJSON_AddArrayToObject(body, "entries");
+    if (message) {
+        send_dap_response(seq, cmd, true, body);
+        return 0;
+    }
+
+    const int avail_w = L.mapw - x, avail_h = L.maph - y;
+    const bool clipped = width > avail_w || height > avail_h;
+    int w = width && width < avail_w ? width : avail_w;
+    int h = height && height < avail_h ? height : avail_h;
+    if (w > limit) {
+        snprintf(why, sizeof why, "'limit' must be at least the rectangle's width (%d)", w);
+        cJSON_Delete(body);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+    bool truncated = false;
+    int next_y = -1;
+    if (w * h > limit) {
+        const int rows = limit / w;
+        next_y = y + rows;
+        h = rows;
+        truncated = true;
+    }
+
+    cJSON_AddNumberToObject(body, "x", x);
+    cJSON_AddNumberToObject(body, "y", y);
+    cJSON_AddNumberToObject(body, "width", w);
+    cJSON_AddNumberToObject(body, "height", h);
+    cJSON_AddBoolToObject(body, "clipped", clipped);
+    cJSON_AddBoolToObject(body, "truncated", truncated);
+    if (next_y >= 0) cJSON_AddNumberToObject(body, "nextY", next_y);
+    for (int row = y; row < y + h; row++) {
+        for (int col = x; col < x + w; col++) {
+            const vera_map_entry_t e = vera_map_read(video_space_read, &L, col, row);
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "x", col);
+            cJSON_AddNumberToObject(o, "y", row);
+            cJSON_AddNumberToObject(o, "address", e.address);
+            cJSON_AddNumberToObject(o, "byte0", e.byte0);
+            cJSON_AddNumberToObject(o, "byte1", e.byte1);
+            cJSON_AddNumberToObject(o, "tile", e.tile);
+            cJSON_AddNumberToObject(o, "tileAddress", e.tile_address);
+            if (L.text_mode) {
+                cJSON_AddNumberToObject(o, "fg", e.fg);
+                cJSON_AddNumberToObject(o, "bg", e.bg);
+            } else {
+                cJSON_AddNumberToObject(o, "paletteOffset", e.pal_off);
+                cJSON_AddBoolToObject(o, "hFlip", e.hflip);
+                cJSON_AddBoolToObject(o, "vFlip", e.vflip);
+            }
+            cJSON_AddItemToArray(list, o);
+        }
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // ─── x16/io, x16/ioTrace, x16/ioCapture, x16/interrupt ──────────────
 
 static cJSON *io_device_names(uint32_t mask) {
@@ -8993,6 +9216,9 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/ioTrace")) result = handle_x16_io_trace(seq, args);
     else if (!strcmp(cmd, "x16/ioCapture")) result = handle_x16_io_capture(seq, args);
     else if (!strcmp(cmd, "x16/interrupt")) result = handle_x16_interrupt(seq, args);
+    else if (!strcmp(cmd, "x16/sprites")) result = handle_x16_sprites(seq, args);
+    else if (!strcmp(cmd, "x16/palette")) result = handle_x16_palette(seq, args);
+    else if (!strcmp(cmd, "x16/tilemap")) result = handle_x16_tilemap(seq, args);
     else if (!strcmp(cmd, "x16/setWarp")) result = handle_x16_set_warp(seq, args);
     else if (!strcmp(cmd, "x16/mouse")) result = handle_x16_mouse(seq, args);
     else if (!strcmp(cmd, "x16/loadPrg")) result = handle_x16_load_prg(seq, args);
@@ -9092,6 +9318,7 @@ static const char *const callable_commands[] = {
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
     "mcp/setStopOn", "x16/audio", "x16/setVoiceMute",
     "x16/io", "x16/ioTrace", "x16/ioCapture", "x16/interrupt",
+    "x16/sprites", "x16/palette", "x16/tilemap",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
