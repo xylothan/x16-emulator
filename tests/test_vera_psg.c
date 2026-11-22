@@ -160,7 +160,8 @@ test_phase_is_held_at_zero_while_silent(void)
 //
 // A 16-bit Fibonacci LFSR, taps 1, 2, 4 and 15, shifting left, seeded to 1.
 //
-// Stepped once per voice, 16 per sample (vera_psg.c:105-109; psg.v:180-188).
+// Hardware steps it every system clock (psg.v:180-188).
+// Emulated once per voice, 16 per sample (vera_psg.c:105-109).
 static void
 test_noise_lfsr_sequence(void)
 {

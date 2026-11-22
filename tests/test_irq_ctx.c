@@ -180,7 +180,7 @@ main(void)
 	}
 
 	// ── A stack that wraps is out of contract ───────────────────────────────
-	// Frames decrease with nesting; a balanced RTI lands on its entry SP.
+	// A wrapped stack breaks decreasing frames: the outer frame is retired.
 	{
 		cpu_irq_ctx_reset();
 		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x0101);   // outer, near the bottom

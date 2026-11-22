@@ -68,7 +68,7 @@ extern uint32_t cpu_stop_count;
 extern uint32_t cpu_vector_pulls;
 
 // Read a register at the width the CPU is currently using.
-// regs.a is the accumulator's low byte; regs.xl and regs.yl are X's and Y's.
+// regs.a is A's low byte; regs.x/y are 16-bit, regs.xl/yl their low bytes.
 uint16_t cpu_a(void);
 uint16_t cpu_x(void);
 uint16_t cpu_y(void);
