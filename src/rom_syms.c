@@ -1,6 +1,7 @@
 // Commander X16 Emulator — ROM symbols. See rom_syms.h.
 
 #include "rom_syms.h"
+#include "al_labels.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -27,22 +28,6 @@ rom_syms_bank_of_file(const char *basename)
 		if (!strcmp(basename, files[i].file))
 			return files[i].bank;
 	return -1;
-}
-
-// ld65's linker-generated segment symbols: __CODE_RUN__, __KRAM_LOAD__ ...
-static bool
-is_segment_symbol(const char *name, size_t len)
-{
-	static const char *const tails[] = {"_RUN__", "_LOAD__", "_SIZE__", "_START__", "_LAST__",
-	                                    "_FILEOFFS__"};
-	if (len < 4 || name[0] != '_' || name[1] != '_')
-		return false;
-	for (size_t i = 0; i < sizeof tails / sizeof tails[0]; i++) {
-		const size_t t = strlen(tails[i]);
-		if (len > t && !memcmp(name + len - t, tails[i], t))
-			return true;
-	}
-	return false;
 }
 
 static bool
@@ -74,25 +59,15 @@ rom_syms_add_text(const char *text, int bank)
 	while (*p) {
 		const char *eol = strchr(p, '\n');
 		const char *end = eol ? eol : p + strlen(p);
-		// "al <hex> .<name>"
-		if (end - p > 4 && p[0] == 'a' && p[1] == 'l' && p[2] == ' ') {
-			char         *after;
-			unsigned long v = strtoul(p + 3, &after, 16);
-			while (after < end && *after == ' ')
-				after++;
-			if (after < end && *after == '.')
-				after++;
-			const char *name = after;
-			size_t      len  = 0;
-			while (name + len < end && !isspace((unsigned char)name[len]))
-				len++;
+		uint32_t    v;
+		const char *name;
+		size_t      len;
+		if (al_parse_line(p, end, &v, &name, &len) && !al_is_segment_symbol(name, len)) {
 			const uint16_t addr = (uint16_t)(v & 0xFFFF);
-			if (len && !is_segment_symbol(name, len)) {
-				if (addr >= 0xC000)
-					kept += push(name, len, addr, (int16_t)bank);
-				else if (bank == 0 && addr >= ROM_SYMS_KRAM_START && addr < ROM_SYMS_KRAM_END)
-					kept += push(name, len, addr, -1);
-			}
+			if (addr >= 0xC000)
+				kept += push(name, len, addr, (int16_t)bank);
+			else if (bank == 0 && addr >= ROM_SYMS_KRAM_START && addr < ROM_SYMS_KRAM_END)
+				kept += push(name, len, addr, -1);
 		}
 		p = eol ? eol + 1 : end;
 	}

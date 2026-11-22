@@ -138,6 +138,7 @@ bool dump_ram = true;
 bool dump_bank = true;
 bool dump_vram = false;
 bool warp_mode = false;
+bool warp_held = false;
 
 // -bench: run `bench_frames` emulated frames after `bench_warmup` frames of
 // warm-up, print where the host's time went, and exit. See host_prof.h.
@@ -178,6 +179,9 @@ gif_recorder_state_t record_gif = RECORD_GIF_DISABLED;
 char *gif_path = NULL;
 char *wav_path = NULL;
 uint8_t *fsroot_path = NULL;
+// hostfs fills fsroot_path in with the working directory when there is no
+// -fsroot, so the pointer alone cannot say whether anyone chose a folder.
+bool fsroot_given = false;
 uint8_t *startin_path = NULL;
 uint8_t keymap = 0; // KERNAL's default
 int window_scale = 1;
@@ -449,6 +453,8 @@ void
 machine_toggle_warp()
 {
 	machine_set_warp(!warp_mode);
+	if (warp_held)
+		warp_held = warp_mode; // turning it off by hand ends a client's hold
 }
 
 
@@ -1754,6 +1760,7 @@ main(int argc, char **argv)
 				usage();
 			}
 			fsroot_path = (uint8_t *)argv[0];
+			fsroot_given = true;
 			argc--;
 			argv++;
 		} else if (!strcmp(argv[0], "-startin")) {
@@ -2563,7 +2570,7 @@ emulator_post_step(void)
 			BRAM[NDX - 0xa000]++;
 		} else {
 			pasting_bas = false;
-			if (warp_pastes) machine_set_warp(false);
+			if (warp_pastes) machine_set_warp(warp_held);
 			paste_text = NULL;
 			if (clipboard_buffer) {
 				SDL_free(clipboard_buffer);
@@ -3309,7 +3316,7 @@ main_state_loaded(void)
 	host_prof_last_cycles = clockticks6502;
 	if (pasting_bas) {
 		pasting_bas = false;
-		if (warp_pastes) machine_set_warp(false);
+		if (warp_pastes) machine_set_warp(warp_held);
 	}
 	paste_text = NULL;
 	if (clipboard_buffer) {

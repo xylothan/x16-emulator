@@ -482,7 +482,7 @@ dbg_load_replace(const char *path, char *msg, size_t msg_size)
 	// Every address a DAP client's source breakpoint was resolved to came from
 	// the debug info about to go.
 	debug_server_invalidate_breakpoints_in_range(0, 0xFFFFFF);
-	dbg_info_free();
+	dbg_info_free_keep_labels();
 	parsed_count = 0; // nothing merged is live any more
 
 	int rc = dbg_info_load(path);

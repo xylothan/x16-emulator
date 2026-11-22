@@ -1923,6 +1923,95 @@ main(void)
 		dbg_info_free();
 	}
 
+	// ── Label files, with no .dbg at all ────────────────────────────────────
+	{
+		dbg_info_free();
+		static const char *k_labels =
+			"al 000810 .start\n"
+			"al 000600 .fade\r\n"
+			"al 00A000 .banked\n"
+			"al 000700 .twice\n"
+			"al 000710 .twice\n"
+			"al 000900 .__CODE_RUN__\n"
+			"not a label line\n"
+			"al 000000\n";
+
+		check(dbg_info_load_labels_text("a.lbl", "nothing here\n", -1) == 0, "a file with no labels loads nothing");
+		check(dbg_info_label_file_count() == 0, "and is not remembered");
+		check(dbg_info_load_labels_text("a.lbl", k_labels, 3) == 5, "reads the labels, without segment symbols");
+		check(!dbg_info_is_loaded(), "labels alone do not claim there are source lines");
+		check(dbg_info_symbol_count() == 5, "they are symbols");
+
+		const char *nm = NULL;
+		dbg_addr_t  at = 0;
+		int         bank = 0;
+		check(dbg_info_addr_to_label(0x0600, &nm) && nm && !strcmp(nm, "fade"), "an address finds its label");
+		check(dbg_info_addr_to_label_nearest(0x0814, &nm, &at) && !strcmp(nm, "start") && at == 0x0810,
+		      "and the nearest one");
+		check(dbg_info_label_to_addr_bank("BANKED", &at, &bank) && at == 0xA000 && bank == 3,
+		      "a name finds its address and the file's bank");
+		check(dbg_info_label_to_addr_bank("fade", &at, &bank) && bank == -1,
+		      "an address below the banked windows has no bank");
+
+		check(dbg_info_addr_to_label_in_bank(0xA000, 3, &nm) && !strcmp(nm, "banked"), "a label in its own bank");
+		check(!dbg_info_addr_to_label_in_bank(0xA000, 1, &nm), "and not in another");
+		check(dbg_info_addr_to_label_in_bank(0x0600, 1, &nm) && !strcmp(nm, "fade"), "an unbanked label in any");
+
+		dbg_resolved_t r;
+		char err[200];
+		check(dbg_info_resolve("fade", &r, err, sizeof err) && r.addr == 0x0600, "a hex-looking word is the label");
+		check(dbg_info_resolve("$fade", &r, err, sizeof err) && r.addr == 0xFADE, "$ makes it a number");
+		check(dbg_info_resolve("0xFADE", &r, err, sizeof err) && r.addr == 0xFADE, "and so does 0x");
+		check(dbg_info_resolve("start+4", &r, err, sizeof err) && r.addr == 0x0814, "name+decimal");
+		check(dbg_info_resolve("start + $10", &r, err, sizeof err) && r.addr == 0x0820, "name+$hex, spaced");
+		check(dbg_info_resolve("start-0x10", &r, err, sizeof err) && r.addr == 0x0800, "name-0xhex");
+		check(dbg_info_resolve("banked+1", &r, err, sizeof err) && r.addr == 0xA001 && r.bank == 3,
+		      "an offset keeps the bank");
+		check(dbg_info_resolve("04:C000", &r, err, sizeof err) && r.addr == 0xC000 && r.bank == 4, "bank:addr");
+		check(!dbg_info_resolve("beef", &r, err, sizeof err) && strstr(err, "$beef"),
+		      "an unknown hex word says how to write the number");
+		check(!dbg_info_resolve("nosuch", &r, err, sizeof err) && strstr(err, "nosuch"), "an unknown name is refused");
+		check(!dbg_info_resolve("twice", &r, err, sizeof err) && strstr(err, "$0700") && strstr(err, "$0710"),
+		      "an ambiguous name lists where it could be");
+		check(!dbg_info_resolve("start-$900", &r, err, sizeof err), "below zero is refused");
+		check(!dbg_info_resolve("$FFFFFF+1", &r, err, sizeof err), "past the address space is refused");
+		check(!dbg_info_resolve("start+x", &r, err, sizeof err), "a bad offset is refused");
+		check(!dbg_info_resolve("", &r, err, sizeof err), "nothing is refused");
+
+		unsigned before = dbg_info_changes();
+		dbg_info_unload_range(0, 0xFFFFFF);
+		check(dbg_info_symbol_count() == 5, "a program loading over the addresses leaves label files");
+		check(dbg_info_load_labels_text("a.lbl", "al 000620 .moved\n", -1) == 1, "reloading replaces");
+		check(dbg_info_changes() != before, "and says something changed");
+		check(dbg_info_symbol_count() == 1 && !dbg_info_label_to_addr("fade", NULL), "the old labels are gone");
+
+		// A second file, then a .dbg over them.
+		dbg_info_load_labels_text("b.lbl", "al 000801 .from_file\nal 000811 ._helper\n", -1);
+		check(dbg_info_label_file_count() == 2, "two files");
+		char *path = write_temp(k_dbg, "x16_dbg_info_labels.dbg");
+		check(path && dbg_info_load(path) == 0, "a .dbg loads alongside");
+		check(dbg_info_addr_to_label(0x0801, &nm) && !strcmp(nm, "_main"), "a .dbg symbol wins at an address");
+		check(dbg_info_addr_to_label_nearest(0x0805, &nm, &at) && !strcmp(nm, "_main"), "and when nearest");
+		check(dbg_info_resolve("_helper", &r, err, sizeof err) && r.addr == 0x0811, "the same name resolves once");
+		check(dbg_info_label_to_addr("from_file", &at) && at == 0x0801, "a label file's own name still works");
+
+		dbg_info_free_keep_labels();
+		check(!dbg_info_is_loaded() && dbg_info_label_file_count() == 2, "replacing a .dbg keeps label files");
+		check(dbg_info_label_to_addr("moved", &at) && at == 0x0620, "with their labels");
+		check(!dbg_info_label_to_addr("_main", NULL), "and without the .dbg's");
+
+		check(dbg_info_unload_labels("a.lbl") && dbg_info_label_file_count() == 1, "unloads one file");
+		check(!dbg_info_label_to_addr("moved", NULL) && dbg_info_label_to_addr("from_file", NULL),
+		      "leaving the other");
+		check(dbg_info_load_labels_text("b.lbl", "al 000802 .again\n", -1) == 1 &&
+		          dbg_info_symbol_count() == 1,
+		      "and the survivor can still be replaced");
+		if (path)
+			remove(path);
+		dbg_info_free();
+		check(dbg_info_symbol_count() == 0 && dbg_info_label_file_count() == 0, "free clears everything");
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;

@@ -30,6 +30,8 @@
 #include "mcp_http.h"
 #include "debug_server_call.h"
 #include "debugger.h"
+#include "debug_core.h"
+#include "dbg_info.h"
 #include "version.h"
 
 #ifdef _WIN32
@@ -445,7 +447,16 @@ static bool arg_int(cJSON *args, const char *name, int def, int lo, int hi, int 
 }
 
 // An address as a debug server memory reference.
-static bool arg_address(cJSON *args, bool vram, char *out, size_t n, char *err, size_t errn) {
+// Whether a CPU address string is written as a number or a bank:addr pair. A
+// bare token is a symbol here, because fade and beef are labels as well as hex.
+static bool is_numeric_address(const char *s) {
+    return s[0] == '$' || (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) || strchr(s, ':');
+}
+
+// `sym_bank` receives the bank of a symbol that belongs to one, else -1.
+static bool arg_address_bank(cJSON *args, bool vram, char *out, size_t n, int *sym_bank,
+                             char *err, size_t errn) {
+    *sym_bank = -1;
     cJSON *a = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
     const char *prefix = vram ? "vram:" : "";
     if (a && cJSON_IsNumber(a) && a->valuedouble >= 0 && a->valuedouble <= 0xFFFFFF &&
@@ -458,11 +469,34 @@ static bool arg_address(cJSON *args, bool vram, char *out, size_t n, char *err, 
             snprintf(err, errn, "give the address alone, and select VRAM with \"space\": \"vram\"");
             return false;
         }
+        if (!vram && !is_numeric_address(a->valuestring)) {
+            dbg_resolved_t r;
+            if (!dbg_info_resolve(a->valuestring, &r, err, errn)) return false;
+            *sym_bank = r.bank;
+            snprintf(out, n, "0x%X", (unsigned)r.addr);
+            return true;
+        }
         snprintf(out, n, "%s%s", prefix, a->valuestring);
         return true;
     }
-    snprintf(err, errn, "'address' is required: a number, or a string like \"$C000\" or \"0xC000\"");
+    snprintf(err, errn, "'address' is required: a number, a string like \"$C000\" or \"0xC000\", "
+                        "or a symbol");
     return false;
+}
+
+// For a request with no way to name a bank: a symbol in one that is not mapped
+// would quietly act on another bank's bytes.
+static bool arg_address(cJSON *args, bool vram, char *out, size_t n, char *err, size_t errn) {
+    int bank;
+    if (!arg_address_bank(args, vram, out, n, &bank, err, errn)) return false;
+    if (bank >= 0) {
+        const unsigned long at = strtoul(out, NULL, 16);
+        if (at <= 0xFFFF && debug_current_x16_bank((int)at, 0) != bank) {
+            snprintf(err, errn, "that symbol is in bank %d, which is not mapped", bank);
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool arg_space(cJSON *args, bool *vram, char *err, size_t errn) {
@@ -585,16 +619,17 @@ static cJSON *tool_list_breakpoints(cJSON *args) {
 }
 
 static cJSON *tool_read_memory(cJSON *args) {
-    char err[160], ref[48];
+    char err[200], ref[48];
     bool vram;
-    int length, bank;
+    int length, bank, sym_bank;
     if (!arg_space(args, &vram, err, sizeof err) ||
-        !arg_address(args, vram, ref, sizeof ref, err, sizeof err) ||
+        !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err) ||
         !arg_int(args, "length", 16, 1, MCP_READ_LIMIT, &length, err, sizeof err) ||
         !arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
         return tool_fail(err);
     if (vram && bank >= 0)
         return tool_fail("VRAM has no banks: leave out 'bank' when 'space' is \"vram\"");
+    if (bank < 0) bank = sym_bank;
 
     cJSON *call = cJSON_CreateObject();
     cJSON_AddStringToObject(call, "memoryReference", ref);
@@ -631,7 +666,7 @@ static cJSON *tool_read_memory(cJSON *args) {
 }
 
 static cJSON *tool_disassemble(cJSON *args) {
-    char err[160], ref[48];
+    char err[200], ref[48];
     int count;
     if (!arg_address(args, false, ref, sizeof ref, err, sizeof err) ||
         !arg_int(args, "count", 16, 1, MCP_DISASM_LIMIT, &count, err, sizeof err))
@@ -650,7 +685,7 @@ static cJSON *tool_disassemble(cJSON *args) {
 
     cJSON *list = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "instructions") : NULL;
     const int rows = cJSON_GetArraySize(list);
-    char *text = (char *)malloc((size_t)rows * 96 + 1);
+    char *text = (char *)malloc((size_t)rows * (96 + 64) + 1);
     size_t o = 0;
     if (text) {
         text[0] = '\0';
@@ -659,6 +694,9 @@ static cJSON *tool_disassemble(cJSON *args) {
             cJSON *a = cJSON_GetObjectItemCaseSensitive(row, "address");
             cJSON *b = cJSON_GetObjectItemCaseSensitive(row, "instructionBytes");
             cJSON *i = cJSON_GetObjectItemCaseSensitive(row, "instruction");
+            cJSON *s = cJSON_GetObjectItemCaseSensitive(row, "symbol");
+            if (s && cJSON_IsString(s))
+                o += (size_t)snprintf(text + o, 64, "%.60s:\n", s->valuestring);
             o += (size_t)snprintf(text + o, 97, "%-9.9s %-12.12s %.60s\n",
                                   a && cJSON_IsString(a) ? a->valuestring : "",
                                   b && cJSON_IsString(b) ? b->valuestring : "",
@@ -877,9 +915,9 @@ static cJSON *read_args(cJSON *rd, char *err, size_t errn) {
     if (!only_keys(rd, keys, "read", err, errn)) return NULL;
     char ref[48];
     bool vram;
-    int length, bank;
+    int length, bank, sym_bank;
     if (!arg_space(rd, &vram, err, errn) ||
-        !arg_address(rd, vram, ref, sizeof ref, err, errn) ||
+        !arg_address_bank(rd, vram, ref, sizeof ref, &sym_bank, err, errn) ||
         !arg_int(rd, "length", 16, 1, MCP_READ_LIMIT, &length, err, errn) ||
         !arg_int(rd, "bank", -1, 0, 255, &bank, err, errn))
         return NULL;
@@ -887,6 +925,7 @@ static cJSON *read_args(cJSON *rd, char *err, size_t errn) {
         snprintf(err, errn, "VRAM has no banks: leave out 'bank' when 'space' is \"vram\"");
         return NULL;
     }
+    if (bank < 0) bank = sym_bank;
     cJSON *out = cJSON_CreateObject();
     cJSON_AddStringToObject(out, "addr", ref);
     cJSON_AddNumberToObject(out, "len", length);
@@ -1055,7 +1094,7 @@ static cJSON *tool_set_registers(cJSON *args) {
 }
 
 static cJSON *tool_write_memory(cJSON *args) {
-    char err[160], ref[48];
+    char err[200], ref[48];
     bool vram;
     if (!arg_space(args, &vram, err, sizeof err) ||
         !arg_address(args, vram, ref, sizeof ref, err, sizeof err))
@@ -1112,10 +1151,11 @@ static cJSON *tool_write_memory(cJSON *args) {
 // ─── Breakpoints ────────────────────────────────────────────────────
 
 static cJSON *breakpoint_call(const char *command, cJSON *args) {
-    char err[160], ref[48];
+    char err[200], ref[48];
     bool vram = false;
+    int sym_bank;
     if (!arg_space(args, &vram, err, sizeof err) ||
-        !arg_address(args, vram, ref, sizeof ref, err, sizeof err))
+        !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err))
         return tool_fail(err);
 
     cJSON *ki = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
@@ -1135,6 +1175,16 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     if (!arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err) ||
         !arg_int(args, "length", 1, 1, 0x20000, &length, err, sizeof err))
         return tool_fail(err);
+    // An exec breakpoint on a banked symbol belongs to that bank. A watch covers
+    // every bank, so it would also stop on whatever shares the address.
+    if (sym_bank >= 0 && bank < 0) {
+        if (ki && strcmp(ki->valuestring, "exec")) {
+            snprintf(err, sizeof err, "that symbol is in bank %d, and a watch covers every bank: "
+                                      "give its address to watch it in all of them", sym_bank);
+            return tool_fail(err);
+        }
+        bank = sym_bank;
+    }
     cJSON *co = args ? cJSON_GetObjectItemCaseSensitive(args, "condition") : NULL;
     cJSON *hi = args ? cJSON_GetObjectItemCaseSensitive(args, "hitCondition") : NULL;
     if ((co && !cJSON_IsString(co)) || (hi && !cJSON_IsString(hi)))
@@ -1177,6 +1227,81 @@ static cJSON *tool_forward(const char *command, cJSON *args) {
         return tool_fail(r.message);
     }
     return tool_ok(r.body ? r.body : cJSON_CreateObject(), NULL);
+}
+
+static cJSON *tool_load_symbols(cJSON *args) {
+    return tool_forward("x16/loadSymbols", args);
+}
+
+static cJSON *tool_lookup_symbol(cJSON *args) {
+    return tool_forward("x16/lookupSymbol", args);
+}
+
+static cJSON *tool_list_symbols(cJSON *args) {
+    return tool_forward("x16/listSymbols", args);
+}
+
+// hash_memory and dump_memory take the same range as read_memory.
+static cJSON *tool_range(const char *command, cJSON *args, bool to_file) {
+    char err[200], ref[48];
+    bool vram;
+    int length, bank, sym_bank;
+    if (!arg_space(args, &vram, err, sizeof err) ||
+        !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err) ||
+        !arg_int(args, "length", 0, 1, 0x100000, &length, err, sizeof err) ||
+        !arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
+        return tool_fail(err);
+    if (!length) return tool_fail("'length' is required");
+    if (vram && bank >= 0)
+        return tool_fail("VRAM has no banks: leave out 'bank' when 'space' is \"vram\"");
+    if (bank < 0) bank = sym_bank;
+
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "memoryReference", ref);
+    cJSON_AddNumberToObject(call, "count", length);
+    if (bank >= 0) cJSON_AddNumberToObject(call, "x16Bank", bank);
+    if (to_file) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(args, "path");
+        cJSON *o = cJSON_GetObjectItemCaseSensitive(args, "overwrite");
+        if (p) cJSON_AddItemToObject(call, "path", cJSON_Duplicate(p, 1));
+        if (o) cJSON_AddItemToObject(call, "overwrite", cJSON_Duplicate(o, 1));
+    }
+    cJSON *result = tool_forward(command, call);
+    cJSON_Delete(call);
+    return result;
+}
+
+static cJSON *tool_hash_memory(cJSON *args) {
+    return tool_range("x16/hashMemory", args, false);
+}
+
+static cJSON *tool_dump_memory(cJSON *args) {
+    return tool_range("x16/dumpMemory", args, true);
+}
+
+static cJSON *tool_set_warp(cJSON *args) {
+    return tool_forward("x16/setWarp", args);
+}
+
+static cJSON *tool_mouse(cJSON *args) {
+    return tool_forward("x16/mouse", args);
+}
+
+static cJSON *tool_load_prg(cJSON *args) {
+    cJSON *p = args ? cJSON_GetObjectItemCaseSensitive(args, "path") : NULL;
+    cJSON *call = cJSON_CreateObject();
+    if (p) cJSON_AddItemToObject(call, "path", cJSON_Duplicate(p, 1));
+    if (args && cJSON_HasObjectItem(args, "address")) {
+        char err[200], ref[48];
+        if (!arg_address(args, false, ref, sizeof ref, err, sizeof err)) {
+            cJSON_Delete(call);
+            return tool_fail(err);
+        }
+        cJSON_AddStringToObject(call, "address", ref);
+    }
+    cJSON *result = tool_forward("x16/loadPrg", call);
+    cJSON_Delete(call);
+    return result;
 }
 
 static cJSON *tool_type_text(cJSON *args) {
@@ -1317,7 +1442,7 @@ typedef struct {
 
 #define NO_ARGS "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
 #define TIMEOUT_ARG "\"timeoutMs\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000,\"default\":5000}"
-#define ADDRESS_ARG "\"address\":{\"type\":[\"string\",\"number\"],\"description\":\"e.g. \\\"$C000\\\" or \\\"0xC000\\\"\"}"
+#define ADDRESS_ARG "\"address\":{\"type\":[\"string\",\"number\"],\"description\":\"$C000, 0xC000, 04:C000, or a symbol such as main+4. A bare word is a symbol, not hex. In VRAM, bare hex.\"}"
 #define REG_ARG     "{\"type\":[\"string\",\"integer\"]}"
 #define PAD_ITEM \
     "{\"type\":\"object\",\"properties\":{" \
@@ -1449,6 +1574,31 @@ static const mcp_tool_t tools[] = {
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
       NO_ARGS, TOOL_READ, tool_list_breakpoints },
+    { "load_symbols",
+      "Load an ld65 -Ln label file (lines like \"al 00C000 .name\"), so its names work as "
+      "addresses and appear in disassembly. Loading the same file again replaces its labels. "
+      "'bank' says which RAM or ROM bank its labels at $A000 and up belong to.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"path\":{\"type\":\"string\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+      "},\"required\":[\"path\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_load_symbols },
+    { "lookup_symbol",
+      "Find a symbol. With 'name', every place it resolves to. With 'address', the nearest "
+      "label at or below it and the offset from that label.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"name\":{\"type\":\"string\"},"
+      "\"address\":{\"type\":[\"string\",\"number\"]}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_lookup_symbol },
+    { "list_symbols",
+      "List known labels in address order, optionally only those containing 'filter'.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"filter\":{\"type\":\"string\"},"
+      "\"start\":{\"type\":\"integer\",\"minimum\":0,\"default\":0},"
+      "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000,\"default\":100}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_list_symbols },
     { "type_text",
       "Type text into the keyboard buffer, as a paste does. \\Xnn is a raw PETSCII byte. "
       "The machine has to be running to read it.",
@@ -1470,6 +1620,52 @@ static const mcp_tool_t tools[] = {
       "up down left right a b x y start select l r.",
       PAD_ITEM,
       TOOL_CONTROL, tool_joystick },
+    { "mouse",
+      "Move the mouse by 'dx' and 'dy' (down is positive) and set the held 'buttons', the "
+      "whole state: left, right, middle. The program sees it once the KERNAL mouse is on, "
+      "which the reply reports as 'kernalMouse'.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"dx\":{\"type\":\"integer\",\"minimum\":-255,\"maximum\":255},"
+      "\"dy\":{\"type\":\"integer\",\"minimum\":-255,\"maximum\":255},"
+      "\"wheel\":{\"type\":\"integer\",\"minimum\":-7,\"maximum\":7},"
+      "\"buttons\":{\"type\":\"array\",\"items\":{\"enum\":[\"left\",\"right\",\"middle\"]}}"
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_mouse },
+    { "set_warp",
+      "Turn warp on or off. Asking for the state it is already in changes nothing.",
+      "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"}},"
+      "\"required\":[\"enabled\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_warp },
+    { "hash_memory",
+      "CRC-32 and SHA-256 of a range of CPU memory or VRAM, read without side effects: no "
+      "read watch fires and VERA's data port does not move. Up to 1 MiB.",
+      "{\"type\":\"object\",\"properties\":{" ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1048576},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"space\":{\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
+      "},\"required\":[\"address\",\"length\"],\"additionalProperties\":false}",
+      TOOL_READ, tool_hash_memory },
+    { "dump_memory",
+      "Write a range of CPU memory or VRAM to a host file, read without side effects. The "
+      "file must be inside -fsroot, or the dump folder when there is no -fsroot. An existing "
+      "file is replaced only with 'overwrite'. Up to 1 MiB.",
+      "{\"type\":\"object\",\"properties\":{" ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1048576},"
+      "\"path\":{\"type\":\"string\"},"
+      "\"overwrite\":{\"type\":\"boolean\",\"default\":false},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"space\":{\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"}"
+      "},\"required\":[\"address\",\"length\",\"path\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_dump_memory },
+    { "load_prg",
+      "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
+      "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "
+      "program pointers, so set the PC for machine code, and use LOAD for a BASIC program.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"path\":{\"type\":\"string\"},"
+      "\"address\":{\"type\":[\"string\",\"number\"]}"
+      "},\"required\":[\"path\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_load_prg },
     { "save_state",
       "Save the machine to a named slot in memory. It must be paused at a frame boundary: "
       "run_frames with frames 1 gets it to one.",
