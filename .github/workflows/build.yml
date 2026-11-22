@@ -201,6 +201,37 @@ jobs:
           name: processor-tests-report
           path: pt-report-*.txt
           if-no-files-found: ignore
+  # The same suite under MSVC, with the runtime and dependencies the Windows
+  # packages use. Compiler-specific breaks in a test build fail here.
+  windows-unit-tests:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure
+        run: >
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DBUILD_TESTS=ON
+          -DENABLE_LTO=OFF
+          -DENABLE_FLUIDSYNTH=OFF
+          -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        run: python tests/fetch_klaus.py
+      - name: Fetch VERA RTL
+        run: python tests/fetch_vera_rtl.py
+      - name: Build Tests
+        run: cmake --build build --config Release --target unit_tests
+      - name: Run Tests
+        env:
+          X16_KLAUS_REQUIRED: 1
+          X16_VERA_RTL_REQUIRED: 1
+        run: ctest --test-dir build -C Release --output-on-failure
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
   # it would catch incorrect behaviour; this is the half that does. Kept out of
@@ -738,6 +769,7 @@ jobs:
       # tests gate it for the same reason.
       - version
       - unit-tests
+      - windows-unit-tests
       - windows
       - windows-legacy
       - linux

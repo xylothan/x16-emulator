@@ -420,15 +420,7 @@ Write-Step "Building $($targets -join ', ') ($Config)"
 $buildStatus = $LASTEXITCODE
 
 if ($buildStatus -ne 0) {
-    # -Tests is expected to be partial on MSVC: several pre-existing test files
-    # define int main(void) while SDL's headers have already redefined main to
-    # SDL_main, which is C4026 and fatal under /WX. Report it rather than
-    # pretending the whole build failed, so the tests that do build still run.
-    if ($Tests) {
-        Write-Host "!!! Some test targets failed to build; running the ones that did." -ForegroundColor Yellow
-    } else {
-        Fail "Build failed."
-    }
+    Fail "Build failed."
 }
 
 if (-not $Tests -and -not $Run -and -not $DapTest -and -not $McpTest) {

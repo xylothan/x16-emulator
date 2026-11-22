@@ -45,25 +45,23 @@ debugger works the same in Release.
 
 ## Tests
 
-`.\build.ps1 -Tests` runs the unit suite.
+`.\build.ps1 -Tests` builds and runs the whole unit suite. A test that does not
+build fails the command.
 
-**11 tests do not compile under MSVC, and that is pre-existing** —
-`test_vera_*`, `test_memory_banking`, `test_debugon_contract`,
-`test_debug_write_path` and `test_watchpoint_purity`. SDL's headers `#define main
-SDL_main`, which collides with their `int main(void)` and raises C4026, fatal
-under `/WX`. They report as *Not Run* rather than failing. The other 25 pass and
-are the ones to watch; do not go hunting for a regression you did not cause.
+Add tests through `x16_add_test`. Tests define `int main(void)`, and on Windows
+SDL's headers `#define main SDL_main` unless `SDL_MAIN_HANDLED` is set, which
+raises C4026, fatal under `/WX`. The function sets it for every test.
 
-**A green local build is necessary, never sufficient.** Because those 11 never
-compile on Windows, their *link step never runs here either* — and four of them
-(`memory_banking`, `debugon_contract`, `debug_write_path`, `watchpoint_purity`)
-link the real `src/memory.c` against `tests/support/fake_devices.c`. So anything
-`memory.c` newly calls must also exist in `fake_devices.c`, and on Windows only
-CI can tell you it does not.
+**A green local build is necessary, never sufficient.** MSVC and glibc still
+differ. Four tests (`memory_banking`, `debugon_contract`, `debug_write_path`,
+`watchpoint_purity`) link the real `src/memory.c` against
+`tests/support/fake_devices.c`, so anything `memory.c` newly calls must also exist
+in `fake_devices.c`.
 
-Two Linux-only link failures have already shipped this way: `lrintf`/`fabsf` out
-of `perf_budget.c` (MSVC intrinsics, glibc libm symbols), and a missing
-`video_set_debug_write` stub after `memory.c` started calling it. Both times the
+Two Linux-only link failures have already shipped past a green Windows build:
+`lrintf`/`fabsf` out of `perf_budget.c` (MSVC intrinsics, glibc libm symbols), and
+a missing `video_set_debug_write` stub after `memory.c` started calling it, from
+when those four tests did not compile on Windows. Both times the
 code was correct on Windows, both times the failure was one push away from being
 visible, and both times **completion was claimed before the push**. That is the
 actual lesson, and it is broader than the MSVC gap:
