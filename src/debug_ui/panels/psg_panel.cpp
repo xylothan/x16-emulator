@@ -15,6 +15,7 @@
 #include "debug_ui_bridge.h"
 #include "debug_ui_scope.h"
 #include "debug_ui_widgets.h"
+#include "audio_decode.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -23,8 +24,7 @@
 namespace {
 
 constexpr uint32_t PSG_BASE_ADDR     = 0x1F9C0;
-constexpr double   PSG_SAMPLE_RATE   = 25000000.0 / 512.0;
-constexpr double   PSG_PHASE_STEPS   = 131072.0;
+constexpr double   PSG_SAMPLE_RATE   = AUDIO_VERA_SAMPLE_HZ;
 constexpr float    PSG_PEAK_FULLSCALE = 16352.0f;
 constexpr float    LEVEL_METER_W      = 92.0f;
 
@@ -36,8 +36,7 @@ struct PsgSnapshot {
 const char *
 waveform_name(uint8_t wf)
 {
-    static const char *names[] = { "Pulse", "Saw", "Tri", "Noise" };
-    return names[wf & 3];
+    return audio_psg_wave_name(wf);
 }
 
 ImU32
@@ -62,29 +61,13 @@ voice_silent(const psg_debug_channel &c)
 double
 freq_hz(uint16_t freq)
 {
-    return (double)freq * PSG_SAMPLE_RATE / PSG_PHASE_STEPS;
+    return audio_psg_hz(freq);
 }
 
 void
 format_note(double hz, char *out, size_t outsz)
 {
-    if (hz <= 0.0) {
-        snprintf(out, outsz, "--");
-        return;
-    }
-
-    static const char *names[] = {
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-    };
-    const double semis = 69.0 + 12.0 * log(hz / 440.0) / log(2.0);
-    const int    note  = (int)floor(semis + 0.5);
-    const int    idx   = ((note % 12) + 12) % 12;
-    const int    oct   = note / 12 - 1;
-    int cents = (int)floor((semis - (double)note) * 100.0 + ((semis >= (double)note) ? 0.5 : -0.5));
-    // Pad name+octave to a constant width so the cents value stays put.
-    char nb[12];
-    snprintf(nb, sizeof nb, "%s%d", names[idx], oct);
-    snprintf(out, outsz, "%-4s %+3d c", nb, cents);
+    audio_note_from_hz(hz, out, outsz);
 }
 
 void
@@ -307,9 +290,11 @@ draw_voices_tab(int *selected_voice)
                                   ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY |
                                   ImGuiTableFlags_ScrollX | ImGuiTableFlags_Resizable;
     const uint16_t mute = psg_debug_get_mute_mask();
+    const uint16_t client_mute = psg_debug_get_client_mute_mask();
     if (dbgui_unmute_all_button(mute)) {
         psg_debug_set_mute_mask(0);
     }
+    dbgui_client_mute_note(client_mute);
     if (ImGui::BeginTable("psg_voices", 11, flags, ImVec2(0, 310))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         // Samples are the widest value each column can ever hold, so the layout
@@ -341,7 +326,8 @@ draw_voices_tab(int *selected_voice)
             }
 
             const bool muted = (mute >> ch) & 1;
-            const int mute_cols = dbgui_mute_row_begin(muted);
+            const bool client_muted = (client_mute >> ch) & 1;
+            const int mute_cols = dbgui_mute_row_begin(muted, client_muted);
 
             // The selectable spans the whole row, so it must allow overlap for
             // the mute button (drawn last, in column 0) to get its clicks.
@@ -382,7 +368,7 @@ draw_voices_tab(int *selected_voice)
             // Full opacity even on a silent voice: muting one before it starts
             // playing is a normal thing to want.
             ImGui::TableSetColumnIndex(0);
-            if (dbgui_mute_button(ch, muted)) {
+            if (dbgui_mute_button(ch, muted, client_muted)) {
                 psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
@@ -493,6 +479,7 @@ draw_scope_tab(int *selected_voice)
     if (dbgui_unmute_all_button(psg_debug_get_mute_mask())) {
         psg_debug_set_mute_mask(0);
     }
+    dbgui_client_mute_note(psg_debug_get_client_mute_mask());
     const float mini_h = ImGui::GetTextLineHeight() * 4.0f;
     if (ImGui::BeginTable("psg_scope_grid", 4, ImGuiTableFlags_SizingStretchSame)) {
         for (int ch = 0; ch < PSG_NUM_CHANNELS; ++ch) {
@@ -509,7 +496,8 @@ draw_scope_tab(int *selected_voice)
             if (ImGui::IsItemClicked()) {
                 *selected_voice = ch;
             }
-            if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> ch) & 1)) {
+            if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> ch) & 1,
+                                        (psg_debug_get_client_mute_mask() >> ch) & 1)) {
                 psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
@@ -528,7 +516,8 @@ draw_scope_tab(int *selected_voice)
                 ImVec2(0, ImGui::GetTextLineHeight() * 8.0f),
                 waveform_color(snap.ch[*selected_voice].waveform, voice_silent(snap.ch[*selected_voice])),
                 ctl.window, ctl.gain, ctl.trigger, overlay);
-    if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> *selected_voice) & 1)) {
+    if (dbgui_scope_mute_toggle((psg_debug_get_mute_mask() >> *selected_voice) & 1,
+                                (psg_debug_get_client_mute_mask() >> *selected_voice) & 1)) {
         psg_debug_set_mute_mask((uint16_t)(psg_debug_get_mute_mask() ^ (1u << *selected_voice)));
     }
 

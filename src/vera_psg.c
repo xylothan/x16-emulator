@@ -49,10 +49,13 @@ static uint16_t volume_lut[64] = {
 static uint16_t noise_state;
 
 // Debugger mute: one bit per voice. A muted voice still runs exactly as before
-// (phase, noise latch, level meter, its own scope trace); it is only left out of
-// the L/R sum that goes to the host. Not part of the machine: psg_reset() leaves
-// it alone and save states do not carry it.
-static uint16_t mute_mask;
+// (phase, noise latch, level meter, its own scope trace) and stays in the mix
+// the machine holds, which save states carry; it is only left out of the
+// separate host mix. Not part of the machine: psg_reset() leaves these alone
+// and save states do not carry them.
+static uint16_t mute_mask;                     // the debugger UI's own selection
+static uint16_t owner_mute[VOICE_MUTE_OWNERS]; // each debug client's
+static uint16_t effective_mute;                // all of them ORed
 
 // Debugger oscilloscope capture. One shared write index keeps every stream
 // time-aligned. `scope_armed` counts down in render() and is refreshed by
@@ -102,10 +105,12 @@ psg_writereg(uint8_t reg, uint8_t val)
 }
 
 static void
-render(int16_t *left, int16_t *right)
+render(int16_t *left, int16_t *right, int16_t *host_left, int16_t *host_right)
 {
 	int16_t l = 0;
 	int16_t r = 0;
+	int16_t hl = 0;
+	int16_t hr = 0;
 
 	const bool capture = scope_armed > 0;
 
@@ -146,46 +151,66 @@ render(int16_t *left, int16_t *right)
 			scope_buf[i][scope_wridx] = val;
 		}
 
-		if (mute_mask & (1u << i)) {
-			continue;
-		}
 		if (ch->left) {
 			l += val >> 3;
 		}
 		if (ch->right) {
 			r += val >> 3;
 		}
+		if (effective_mute & (1u << i)) {
+			continue;
+		}
+		if (ch->left) {
+			hl += val >> 3;
+		}
+		if (ch->right) {
+			hr += val >> 3;
+		}
 	}
 
 	*left  = l;
 	*right = r;
+	*host_left  = hl;
+	*host_right = hr;
 
 	if (capture) {
-		scope_buf[PSG_SCOPE_MIX_L][scope_wridx] = l;
-		scope_buf[PSG_SCOPE_MIX_R][scope_wridx] = r;
+		scope_buf[PSG_SCOPE_MIX_L][scope_wridx] = hl;
+		scope_buf[PSG_SCOPE_MIX_R][scope_wridx] = hr;
 		scope_wridx = (scope_wridx + 1) & (PSG_SCOPE_SAMPLES - 1);
 		scope_armed--;
 	}
 }
 
 void
-psg_render(int16_t *buf, unsigned num_samples)
+psg_render_split(int16_t *buf, int16_t *host_buf, unsigned num_samples)
 {
 	while (num_samples--) {
-		render(&buf[0], &buf[1]);
+		int16_t host_l, host_r;
+		render(&buf[0], &buf[1], &host_l, &host_r);
 		buf += 2;
+		if (host_buf) {
+			host_buf[0] = host_l;
+			host_buf[1] = host_r;
+			host_buf += 2;
+		}
 	}
+}
+
+void
+psg_render(int16_t *buf, unsigned num_samples)
+{
+	psg_render_split(buf, NULL, num_samples);
 }
 
 // ─── Debugger accessors ─────────────────────────────────────────────────────
 
 bool
-psg_debug_get_channel(int ch, struct psg_debug_channel *out)
+psg_debug_peek_channel(int ch, struct psg_debug_channel *out)
 {
 	if (ch < 0 || ch >= PSG_NUM_CHANNELS || out == NULL) {
 		return false;
 	}
-	struct channel *c = &channels[ch];
+	const struct channel *c = &channels[ch];
 
 	out->freq        = c->freq;
 	out->vol_raw     = reg_shadow[ch * 4 + 2] & 0x3F;
@@ -198,8 +223,16 @@ psg_debug_get_channel(int ch, struct psg_debug_channel *out)
 	out->noiseval    = c->noiseval;
 	out->last_sample = c->last_sample;
 	out->peak        = c->peak;
+	return true;
+}
 
-	c->peak = 0; // peak-since-last-read, so a level meter decays naturally
+bool
+psg_debug_get_channel(int ch, struct psg_debug_channel *out)
+{
+	if (!psg_debug_peek_channel(ch, out)) {
+		return false;
+	}
+	channels[ch].peak = 0; // peak-since-last-read, so a level meter decays naturally
 	return true;
 }
 
@@ -215,16 +248,55 @@ psg_debug_get_noise_state(void)
 	return noise_state;
 }
 
+static void
+update_effective_mute(void)
+{
+	effective_mute = mute_mask | psg_debug_get_client_mute_mask();
+}
+
 void
 psg_debug_set_mute_mask(uint16_t mask)
 {
 	mute_mask = mask;
+	update_effective_mute();
 }
 
 uint16_t
 psg_debug_get_mute_mask(void)
 {
 	return mute_mask;
+}
+
+void
+psg_debug_set_owner_mute_mask(voice_mute_owner_t owner, uint16_t mask)
+{
+	if ((int)owner < 0 || owner >= VOICE_MUTE_OWNERS) {
+		return;
+	}
+	owner_mute[owner] = mask;
+	update_effective_mute();
+}
+
+uint16_t
+psg_debug_get_owner_mute_mask(voice_mute_owner_t owner)
+{
+	return ((int)owner < 0 || owner >= VOICE_MUTE_OWNERS) ? 0 : owner_mute[owner];
+}
+
+uint16_t
+psg_debug_get_client_mute_mask(void)
+{
+	uint16_t mask = 0;
+	for (int i = 0; i < VOICE_MUTE_OWNERS; i++) {
+		mask |= owner_mute[i];
+	}
+	return mask;
+}
+
+uint16_t
+psg_debug_get_effective_mute_mask(void)
+{
+	return effective_mute;
 }
 
 unsigned
@@ -268,13 +340,13 @@ psg_debug_scope_predict(int16_t (*dest)[PSG_SCOPE_SAMPLES], unsigned num_samples
 	scope_armed = 0;
 
 	for (unsigned i = 0; i < n; i++) {
-		int16_t l = 0, r = 0;
-		render(&l, &r);
+		int16_t l = 0, r = 0, hl = 0, hr = 0;
+		render(&l, &r, &hl, &hr);
 		for (int c = 0; c < PSG_NUM_CHANNELS; c++) {
 			dest[c][i] = channels[c].last_sample;
 		}
-		dest[PSG_SCOPE_MIX_L][i] = l;
-		dest[PSG_SCOPE_MIX_R][i] = r;
+		dest[PSG_SCOPE_MIX_L][i] = hl;
+		dest[PSG_SCOPE_MIX_R][i] = hr;
 	}
 
 	memcpy(channels, saved_channels, sizeof(channels));

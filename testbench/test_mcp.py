@@ -185,6 +185,7 @@ def test_protocol():
 READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                  "wait_for_stop", "get_screen", "screenshot",
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack",
+                 "get_audio_state",
                  "list_sources", "read_source", "source_location", "host_perf",
                  "get_sdcard", "evaluate", "read_log"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
@@ -192,7 +193,7 @@ LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_st
                 "sprite_mux_config"}
 MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "run_to", "set_breakpoint", "remove_breakpoint",
                 "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
-                "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on"}
+                "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on", "set_voice_mute"}
 
 
 def test_tools():
@@ -4176,6 +4177,125 @@ def test_run_to():
             dap.close()
 
 
+def ym_poke(reg, val):
+    """BIT $9F41 / BMI back, then write one YM2151 register."""
+    return "2C419F30FB" + "A9%02X8D409F" % reg + "A9%02X8D419F" % val
+
+
+def vera_poke(reg, val):
+    return "A9%02X8D%02X9F" % (val, reg)
+
+
+AUDIO_CODE = (
+    "78" + vera_poke(0x25, 0x00) + vera_poke(0x20, 0xCC) + vera_poke(0x21, 0xF9) + vera_poke(0x22, 0x11) +
+    vera_poke(0x23, 0x00) + vera_poke(0x23, 0x04) + vera_poke(0x23, 0xFF) + vera_poke(0x23, 0x60) +
+    vera_poke(0x3C, 0x00) + vera_poke(0x3B, 0x80) + vera_poke(0x3B, 0x3F) +
+    vera_poke(0x3D, 0x11) * 4 +
+    ym_poke(0x22, 0xEF) + ym_poke(0x2A, 0x4A) + ym_poke(0x32, 0x80) + ym_poke(0x3A, 0x52) +
+    ym_poke(0x42, 0x35) + ym_poke(0x62, 0x10) + ym_poke(0x82, 0x9F) +
+    ym_poke(0x19, 0x45) + ym_poke(0x19, 0xA6) + ym_poke(0x08, 0x7A)
+)
+
+
+def test_audio():
+    print("audio state and voice mute")
+    port = free_port()
+    with Mcp(["-debugport", str(port), "-deterministic", "-sound", "none"]) as m:
+        m.init()
+        case("booted", wait_basic(m))
+        m.call("pause")
+        run_planted(m, AUDIO_CODE)
+
+        d = data(m.call("get_audio_state"))
+        case("audio is running", d.get("audioRunning") is True, str(d)[:120])
+        v = d.get("psg", {}).get("voices", [{}] * 16)[3]
+        case("PSG raw registers", v.get("regs") == [0x00, 0x04, 0xFF, 0x60], str(v))
+        case("PSG decode", v.get("wave") == "Saw" and v.get("freq") == 0x0400 and v.get("vol") == 63 and
+             v.get("volLut") == 511 and v.get("left") is True and v.get("right") is True and
+             v.get("pw") == 0x20 and v.get("shapeMask") == 0x1F, str(v))
+        case("PSG pitch in Hz", abs(v.get("hz", 0) - 381.4697265625) < 1e-6, str(v.get("hz")))
+        y = d.get("ym", {})
+        c = y.get("channels", [{}] * 8)[2]
+        case("YM raw registers", c.get("regs") == [0xEF, 0x4A, 0x80, 0x52], str(c)[:200])
+        case("YM decode", c.get("ALG") == 7 and c.get("FB") == 5 and c.get("pan") == "L/R" and
+             c.get("KC") == 0x4A and c.get("KF") == 32 and c.get("PMS") == 5 and c.get("AMS") == 2 and
+             c.get("noteValid") is True, str(c)[:200])
+        case("YM pitch in Hz", abs(c.get("hz", 0) - 440.0 * 2 ** (0.5 / 12)) < 1e-6, str(c.get("hz")))
+        op = (c.get("operators") or [{}])[0]
+        case("YM operator decode", op.get("slot") == "M1" and op.get("DT1") == 3 and op.get("MUL") == 5 and
+             op.get("TL") == 0x10 and op.get("KS") == 2 and op.get("AR") == 0x1F, str(op))
+        case("YM key-on is by slot", c.get("keyOnMask") == 0x0F and op.get("keyOn") is True, str(c.get("keyOnMask")))
+        case("both LFO depths survive sharing $19",
+             y.get("lfo", {}).get("amDepth") == 0x45 and y.get("lfo", {}).get("pmDepth") == 0x26, str(y.get("lfo")))
+        p = d.get("pcm", {})
+        case("PCM decode", p.get("ctrl") == 0x3F and p.get("format") == "stereo 16-bit" and p.get("volume") == 15 and
+             p.get("volumeLut") == 64 and p.get("rate") == 0 and p.get("rateHz") == 0 and
+             p.get("fifoQueued") == 4 and p.get("framesQueued") == 1, str(p))
+        only = data(m.call("get_audio_state", chip="pcm"))
+        case("'chip' limits the reply", "pcm" in only and "psg" not in only and "ym" not in only, str(only)[:160])
+        case("an unknown chip is refused", is_error(m.call("get_audio_state", chip="sid")))
+
+        dap = Dap(port)
+        dap.session()
+        def state_hash():
+            return (dap.request("x16/status", {"hash": True}) or {}).get("body", {}).get("hash")
+        before = state_hash()
+        again = data(m.call("get_audio_state"))
+        case("reading twice gives the same", again.get("pcm") == p and again.get("ym") == y and
+             again.get("psg") == d.get("psg"))
+        case("reading changes no state hash", before is not None and state_hash() == before)
+
+        r = data(m.call("set_voice_mute", chip="psg", voice=3, muted=True))
+        case("MCP mutes a PSG voice", r.get("mcp") == 8 and r.get("ui") == 0 and r.get("effective") == 8, str(r))
+        r = (dap.request("x16/setVoiceMute", {"chip": "psg", "voice": 5, "muted": True}) or {}).get("body", {})
+        case("DAP has its own mask", r.get("dap") == 32 and r.get("mcp") == 8 and r.get("ui") == 0 and
+             r.get("effective") == 40, str(r))
+        r = data(m.call("set_voice_mute", chip="ym", voice=2, muted=True))
+        case("MCP mutes an FM channel", r.get("mcp") == 4 and r.get("effective") == 4, str(r))
+        case("muting changes no state hash", state_hash() == before)
+        s = data(m.call("get_audio_state"))
+        voices = s.get("psg", {}).get("voices", [{}] * 16)
+        case("each voice says who muted it", voices[3].get("mutedBy") == ["mcp"] and voices[3].get("muted") is True and
+             voices[5].get("mutedBy") == ["dap"] and voices[0].get("mutedBy") == [] and voices[0].get("muted") is False,
+             str(voices[3]))
+        case("the FM channel does too", s.get("ym", {}).get("channels", [{}] * 8)[2].get("mutedBy") == ["mcp"])
+        r = data(m.call("set_voice_mute", chip="psg", voice=5, muted=False))
+        case("a client cannot lift another's mute", r.get("dap") == 32 and r.get("effective") == 40, str(r))
+
+        for args in ({"chip": "psg", "voice": 16, "muted": True}, {"chip": "ym", "voice": 8, "muted": True},
+                     {"chip": "pcm", "muted": True}, {"chip": "psg", "voice": 1}, {"voice": 1, "muted": True},
+                     {"chip": "psg", "voice": 1.5, "muted": True}):
+            case(f"set_voice_mute refuses {args}", is_error(m.call("set_voice_mute", **args)))
+
+        dap.close()
+        time.sleep(0.3)
+        r = data(m.call("get_audio_state", chip="pcm")).get("mute", {})
+        case("a DAP session's mutes end with it", r.get("psg", {}).get("dap") == 0 and r.get("psg", {}).get("mcp") == 8,
+             str(r))
+
+    with HttpMcp(["-deterministic", "-sound", "none"], env={"X16_MCP_LEASE_MS": "500"}) as m:
+        m.init()
+        r = data(m.call("set_voice_mute", chip="ym", muted=True))
+        case("the whole chip mutes", r.get("mcp") == 0xFF, str(r))
+        time.sleep(1.2)
+        r = data(m.call("get_audio_state", chip="pcm")).get("mute", {})
+        case("a lease ending releases its mutes", r.get("ym", {}).get("mcp") == 0 and
+             r.get("ym", {}).get("effective") == 0, str(r))
+
+    with Mcp(["-sound", "none"]) as m:
+        m.init()
+        d = data(m.call("get_audio_state"))
+        op = d.get("ym", {}).get("channels", [{"operators": [{}]}])[0]["operators"][0]
+        case("with no sound the chips are reported as not running",
+             d.get("audioRunning") is False and "eg" in op and op["eg"] is None, str(op))
+
+    with Mcp(["-mcp-readonly"]) as m:
+        m.init()
+        time.sleep(0.2)
+        case("get_audio_state works under -mcp-readonly", "psg" in data(m.call("get_audio_state")))
+        case("set_voice_mute does not", is_error(m.call("set_voice_mute", chip="psg", muted=True)))
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -4244,7 +4364,7 @@ def main():
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
-                 test_stop_on, test_run_to, test_readonly):
+                 test_stop_on, test_run_to, test_audio, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

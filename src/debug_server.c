@@ -53,6 +53,11 @@
 #include "mem_hash.h"
 #include "mem_search.h"
 #include "audio_events.h"
+#include "audio.h"
+#include "audio_decode.h"
+#include "vera_psg.h"
+#include "vera_pcm.h"
+#include "ymglue.h"
 
 extern bool headless;   // main.c
 
@@ -8095,6 +8100,293 @@ static int handle_x16_search_memory(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/audio, x16/setVoiceMute ─────────────────────────────────────
+
+typedef struct {
+    unsigned ui, dap, mcp, effective;
+} voice_mute_view_t;
+
+static voice_mute_view_t psg_mute_view(void) {
+    return (voice_mute_view_t){ psg_debug_get_mute_mask(),
+                                psg_debug_get_owner_mute_mask(VOICE_MUTE_DAP),
+                                psg_debug_get_owner_mute_mask(VOICE_MUTE_MCP),
+                                psg_debug_get_effective_mute_mask() };
+}
+
+static voice_mute_view_t ym_mute_view(void) {
+    return (voice_mute_view_t){ YM_debug_get_mute_mask(),
+                                YM_debug_get_owner_mute_mask(VOICE_MUTE_DAP),
+                                YM_debug_get_owner_mute_mask(VOICE_MUTE_MCP),
+                                YM_debug_get_effective_mute_mask() };
+}
+
+static void audio_add_mute_masks(cJSON *o, voice_mute_view_t m) {
+    cJSON_AddNumberToObject(o, "ui", m.ui);
+    cJSON_AddNumberToObject(o, "dap", m.dap);
+    cJSON_AddNumberToObject(o, "mcp", m.mcp);
+    cJSON_AddNumberToObject(o, "effective", m.effective);
+}
+
+static void audio_add_voice_mute(cJSON *o, voice_mute_view_t m, int voice) {
+    const unsigned bit = 1u << voice;
+    cJSON_AddBoolToObject(o, "muted", (m.effective & bit) != 0);
+    cJSON *by = cJSON_CreateArray();
+    if (m.ui & bit)  cJSON_AddItemToArray(by, cJSON_CreateString("ui"));
+    if (m.dap & bit) cJSON_AddItemToArray(by, cJSON_CreateString("dap"));
+    if (m.mcp & bit) cJSON_AddItemToArray(by, cJSON_CreateString("mcp"));
+    cJSON_AddItemToObject(o, "mutedBy", by);
+}
+
+static cJSON *audio_bytes(const uint8_t *v, int n) {
+    cJSON *a = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) cJSON_AddItemToArray(a, cJSON_CreateNumber(v[i]));
+    return a;
+}
+
+static cJSON *audio_psg_state(void) {
+    const voice_mute_view_t mute = psg_mute_view();
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "sampleHz", AUDIO_VERA_SAMPLE_HZ);
+    cJSON_AddNumberToObject(o, "noiseLfsr", psg_debug_get_noise_state());
+    cJSON *list = cJSON_AddArrayToObject(o, "voices");
+    for (int ch = 0; ch < PSG_NUM_CHANNELS; ch++) {
+        struct psg_debug_channel c;
+        if (!psg_debug_peek_channel(ch, &c)) continue;
+        uint8_t regs[4];
+        for (int i = 0; i < 4; i++) regs[i] = psg_debug_get_reg((uint8_t)(ch * 4 + i));
+        const double hz = audio_psg_hz(c.freq);
+        char note[32];
+        audio_note_from_hz(hz, note, sizeof note);
+
+        cJSON *v = cJSON_CreateObject();
+        cJSON_AddNumberToObject(v, "ch", ch);
+        cJSON_AddItemToObject(v, "regs", audio_bytes(regs, 4));
+        cJSON_AddStringToObject(v, "wave", audio_psg_wave_name(c.waveform));
+        cJSON_AddNumberToObject(v, "freq", c.freq);
+        cJSON_AddNumberToObject(v, "hz", hz);
+        cJSON_AddStringToObject(v, "note", note);
+        cJSON_AddNumberToObject(v, "pw", c.pw);
+        if ((c.waveform & 3) == PSG_WF_PULSE)
+            cJSON_AddNumberToObject(v, "dutyPercent", (double)(c.pw + 1) * 100.0 / 128.0);
+        else if ((c.waveform & 3) != PSG_WF_NOISE)
+            cJSON_AddNumberToObject(v, "shapeMask", (c.pw ^ 0x3F) & 0x3F);
+        cJSON_AddNumberToObject(v, "vol", c.vol_raw);
+        cJSON_AddNumberToObject(v, "volLut", c.vol_lut);
+        cJSON_AddBoolToObject(v, "left", c.left);
+        cJSON_AddBoolToObject(v, "right", c.right);
+        cJSON_AddNumberToObject(v, "phase", c.phase & 0x1FFFFu);
+        cJSON_AddNumberToObject(v, "noiseValue", c.noiseval);
+        cJSON_AddNumberToObject(v, "lastSample", c.last_sample);
+        audio_add_voice_mute(v, mute, ch);
+        cJSON_AddItemToArray(list, v);
+    }
+    return o;
+}
+
+static cJSON *audio_ym_operator(int ch, int slot, uint8_t keyon) {
+    static const char *const slots[4] = { "M1", "M2", "C1", "C2" };
+    static const char *const eg[5] = { "-", "Attack", "Decay", "Sustain", "Release" };
+    uint8_t r[6];
+    for (int i = 0; i < 6; i++) r[i] = YM_debug_get_reg((uint8_t)(0x40 + i * 0x20 + slot * 8 + ch));
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "slot", slots[slot]);
+    cJSON_AddItemToObject(o, "regs", audio_bytes(r, 6));
+    cJSON_AddNumberToObject(o, "DT1", (r[0] >> 4) & 7);
+    cJSON_AddNumberToObject(o, "MUL", r[0] & 0x0F);
+    cJSON_AddNumberToObject(o, "TL", r[1] & 0x7F);
+    cJSON_AddNumberToObject(o, "KS", r[2] >> 6);
+    cJSON_AddNumberToObject(o, "AR", r[2] & 0x1F);
+    cJSON_AddNumberToObject(o, "AMS-EN", r[3] >> 7);
+    cJSON_AddNumberToObject(o, "D1R", r[3] & 0x1F);
+    cJSON_AddNumberToObject(o, "DT2", r[4] >> 6);
+    cJSON_AddNumberToObject(o, "D2R", r[4] & 0x1F);
+    cJSON_AddNumberToObject(o, "D1L", r[5] >> 4);
+    cJSON_AddNumberToObject(o, "RR", r[5] & 0x0F);
+    cJSON_AddBoolToObject(o, "keyOn", (keyon >> slot) & 1);
+    struct ym_debug_operator op;
+    if (YM_debug_get_operator(slot * 8 + ch, &op)) {
+        cJSON_AddStringToObject(o, "eg", op.eg_state <= YM_EG_RELEASE ? eg[op.eg_state] : "-");
+        cJSON_AddNumberToObject(o, "egAttenuation", op.eg_attenuation);
+    } else {
+        cJSON_AddNullToObject(o, "eg");
+        cJSON_AddNullToObject(o, "egAttenuation");
+    }
+    return o;
+}
+
+static cJSON *audio_ym_state(void) {
+    static const char *const lfo_waves[4] = { "saw", "square", "triangle", "noise" };
+    const voice_mute_view_t mute = ym_mute_view();
+    const uint8_t status = YM_debug_get_status();
+    const uint8_t r0f = YM_debug_get_reg(0x0F), r14 = YM_debug_get_reg(0x14);
+    const uint8_t r1b = YM_debug_get_reg(0x1B);
+    const uint16_t ta = (uint16_t)((YM_debug_get_reg(0x10) << 2) | (YM_debug_get_reg(0x11) & 3));
+    const uint8_t tb = YM_debug_get_reg(0x12);
+    uint8_t am = 0, pm = 0;
+    YM_debug_get_lfo_depths(&am, &pm);
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "clockHz", AUDIO_YM_CLOCK_HZ);
+    cJSON_AddNumberToObject(o, "sampleHz", AUDIO_YM_SAMPLE_HZ);
+    cJSON_AddNumberToObject(o, "status", status);
+    cJSON_AddBoolToObject(o, "busy", YM_debug_is_busy());
+    cJSON_AddBoolToObject(o, "irq", YM_irq());
+    cJSON *lfo = cJSON_AddObjectToObject(o, "lfo");
+    cJSON_AddNumberToObject(lfo, "rate", YM_debug_get_reg(0x18));
+    cJSON_AddStringToObject(lfo, "waveform", lfo_waves[r1b & 3]);
+    cJSON_AddNumberToObject(lfo, "amDepth", am);
+    cJSON_AddNumberToObject(lfo, "pmDepth", pm);
+    cJSON *noise = cJSON_AddObjectToObject(o, "noise");
+    cJSON_AddBoolToObject(noise, "enabled", (r0f & 0x80) != 0);
+    cJSON_AddNumberToObject(noise, "frequency", r0f & 0x1F);
+    cJSON *ct = cJSON_AddObjectToObject(o, "ct");
+    cJSON_AddNumberToObject(ct, "CT1", (r1b >> 6) & 1);
+    cJSON_AddNumberToObject(ct, "CT2", (r1b >> 7) & 1);
+    cJSON_AddNumberToObject(o, "timerControl", r14);
+    cJSON_AddBoolToObject(o, "csm", (r14 & 0x80) != 0);
+    cJSON *a = cJSON_AddObjectToObject(o, "timerA");
+    cJSON_AddNumberToObject(a, "value", ta);
+    cJSON_AddNumberToObject(a, "ms", audio_ym_timer_a_ms(ta));
+    cJSON_AddBoolToObject(a, "load", (r14 & 0x01) != 0);
+    cJSON_AddBoolToObject(a, "enable", (r14 & 0x04) != 0);
+    cJSON_AddBoolToObject(a, "overflow", (status & 0x01) != 0);
+    cJSON *b = cJSON_AddObjectToObject(o, "timerB");
+    cJSON_AddNumberToObject(b, "value", tb);
+    cJSON_AddNumberToObject(b, "ms", audio_ym_timer_b_ms(tb));
+    cJSON_AddBoolToObject(b, "load", (r14 & 0x02) != 0);
+    cJSON_AddBoolToObject(b, "enable", (r14 & 0x08) != 0);
+    cJSON_AddBoolToObject(b, "overflow", (status & 0x02) != 0);
+
+    cJSON *list = cJSON_AddArrayToObject(o, "channels");
+    for (int ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+        const uint8_t regs[4] = { YM_debug_get_reg((uint8_t)(0x20 + ch)), YM_debug_get_reg((uint8_t)(0x28 + ch)),
+                                  YM_debug_get_reg((uint8_t)(0x30 + ch)), YM_debug_get_reg((uint8_t)(0x38 + ch)) };
+        const uint8_t kc = regs[1] & 0x7F, kf = regs[2] & 0xFC, keyon = YM_debug_get_keyon(ch);
+        struct audio_ym_note note;
+        audio_ym_note_decode(kc, kf, &note);
+        char pan[4] = { (regs[0] & 0x40) ? 'L' : '-', '/', (regs[0] & 0x80) ? 'R' : '-', 0 };
+
+        cJSON *c = cJSON_CreateObject();
+        cJSON_AddNumberToObject(c, "ch", ch);
+        cJSON_AddItemToObject(c, "regs", audio_bytes(regs, 4));
+        cJSON_AddNumberToObject(c, "KC", kc);
+        cJSON_AddNumberToObject(c, "KF", kf >> 2);
+        cJSON_AddStringToObject(c, "note", note.text);
+        cJSON_AddBoolToObject(c, "noteValid", note.valid);
+        cJSON_AddNumberToObject(c, "hz", note.hz);
+        cJSON_AddNumberToObject(c, "ALG", regs[0] & 7);
+        cJSON_AddNumberToObject(c, "FB", (regs[0] >> 3) & 7);
+        cJSON_AddStringToObject(c, "pan", pan);
+        cJSON_AddNumberToObject(c, "PMS", (regs[3] >> 4) & 7);
+        cJSON_AddNumberToObject(c, "AMS", regs[3] & 3);
+        cJSON_AddNumberToObject(c, "keyOnMask", keyon);
+        audio_add_voice_mute(c, mute, ch);
+        cJSON *ops = cJSON_AddArrayToObject(c, "operators");
+        for (int slot = 0; slot < 4; slot++) cJSON_AddItemToArray(ops, audio_ym_operator(ch, slot, keyon));
+        cJSON_AddItemToArray(list, c);
+    }
+    return o;
+}
+
+static cJSON *audio_pcm_state(void) {
+    struct pcm_debug_state s;
+    pcm_debug_get_state(&s);
+    const struct audio_pcm_format fmt = audio_pcm_format_decode(s.ctrl);
+    const double rate_hz = audio_pcm_rate_hz(s.rate);
+    const unsigned frames = s.fifo_cnt / (unsigned)fmt.bytes_per_frame;
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "ctrl", s.ctrl);
+    cJSON_AddNumberToObject(o, "rate", s.rate);
+    cJSON_AddStringToObject(o, "format", fmt.name);
+    cJSON_AddNumberToObject(o, "bytesPerFrame", fmt.bytes_per_frame);
+    cJSON_AddNumberToObject(o, "volume", s.ctrl & 0x0F);
+    cJSON_AddNumberToObject(o, "volumeLut", audio_pcm_volume_lut(s.ctrl));
+    cJSON_AddNumberToObject(o, "rateStep", audio_pcm_rate_step(s.rate));
+    cJSON_AddNumberToObject(o, "rateHz", rate_hz);
+    cJSON_AddNumberToObject(o, "fifoQueued", s.fifo_cnt);
+    cJSON_AddNumberToObject(o, "fifoSize", s.fifo_size);
+    cJSON_AddNumberToObject(o, "fifoUsable", s.fifo_size ? s.fifo_size - 1 : 0);
+    cJSON_AddNumberToObject(o, "framesQueued", frames);
+    cJSON_AddNumberToObject(o, "bufferedMs", rate_hz > 0.0 ? (double)frames * 1000.0 / rate_hz : 0.0);
+    cJSON_AddNumberToObject(o, "readIndex", s.fifo_rdidx);
+    cJSON_AddNumberToObject(o, "writeIndex", s.fifo_wridx);
+    cJSON_AddBoolToObject(o, "almostEmpty", s.almost_empty);
+    cJSON_AddNumberToObject(o, "curL", s.cur_l);
+    cJSON_AddNumberToObject(o, "curR", s.cur_r);
+    cJSON_AddNumberToObject(o, "phase", s.phase);
+    return o;
+}
+
+static int handle_x16_audio(int seq, cJSON *args) {
+    static const char cmd[] = "x16/audio";
+    cJSON *c = args ? cJSON_GetObjectItemCaseSensitive(args, "chip") : NULL;
+    const char *only = NULL;
+    if (c) {
+        if (!cJSON_IsString(c) || (strcmp(c->valuestring, "psg") && strcmp(c->valuestring, "ym") &&
+                                   strcmp(c->valuestring, "pcm"))) {
+            send_dap_error_response(seq, cmd, "'chip' must be psg, ym or pcm");
+            return 0;
+        }
+        only = c->valuestring;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "audioRunning", audio_is_running());
+    if (!only || !strcmp(only, "psg")) cJSON_AddItemToObject(body, "psg", audio_psg_state());
+    if (!only || !strcmp(only, "ym"))  cJSON_AddItemToObject(body, "ym", audio_ym_state());
+    if (!only || !strcmp(only, "pcm")) cJSON_AddItemToObject(body, "pcm", audio_pcm_state());
+    cJSON *mute = cJSON_AddObjectToObject(body, "mute");
+    audio_add_mute_masks(cJSON_AddObjectToObject(mute, "psg"), psg_mute_view());
+    audio_add_mute_masks(cJSON_AddObjectToObject(mute, "ym"), ym_mute_view());
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// An explicit state rather than a toggle, so that a retry cannot undo it. Only
+// the caller's own mask changes.
+static int handle_x16_set_voice_mute(int seq, cJSON *args) {
+    static const char cmd[] = "x16/setVoiceMute";
+    cJSON *c = args ? cJSON_GetObjectItemCaseSensitive(args, "chip") : NULL;
+    cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, "voice") : NULL;
+    cJSON *m = args ? cJSON_GetObjectItemCaseSensitive(args, "muted") : NULL;
+    if (!c || !cJSON_IsString(c) || (strcmp(c->valuestring, "psg") && strcmp(c->valuestring, "ym"))) {
+        send_dap_error_response(seq, cmd, "'chip' is required: psg or ym");
+        return 0;
+    }
+    if (!m || !cJSON_IsBool(m)) {
+        send_dap_error_response(seq, cmd, "'muted' is required: true or false");
+        return 0;
+    }
+    const bool is_psg = !strcmp(c->valuestring, "psg");
+    const int voices = is_psg ? PSG_NUM_CHANNELS : YM_NUM_CHANNELS;
+    unsigned bits = (1u << voices) - 1u;
+    if (v) {
+        if (!cJSON_IsNumber(v) || v->valuedouble < 0 || v->valuedouble >= voices ||
+            v->valuedouble != (double)(int)v->valuedouble) {
+            send_dap_error_response(seq, cmd, is_psg ? "'voice' must be 0 to 15 on psg"
+                                                     : "'voice' must be 0 to 7 on ym");
+            return 0;
+        }
+        bits = 1u << (int)v->valuedouble;
+    }
+
+    const voice_mute_owner_t owner = current_caller == DBG_CALLER_MCP ? VOICE_MUTE_MCP : VOICE_MUTE_DAP;
+    const unsigned held = is_psg ? psg_debug_get_owner_mute_mask(owner) : YM_debug_get_owner_mute_mask(owner);
+    const unsigned next = cJSON_IsTrue(m) ? (held | bits) : (held & ~bits);
+    if (is_psg) psg_debug_set_owner_mute_mask(owner, (uint16_t)next);
+    else        YM_debug_set_owner_mute_mask(owner, (uint8_t)next);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "chip", c->valuestring);
+    if (v) cJSON_AddNumberToObject(body, "voice", (int)v->valuedouble);
+    cJSON_AddBoolToObject(body, "muted", cJSON_IsTrue(m));
+    audio_add_mute_masks(body, is_psg ? psg_mute_view() : ym_mute_view());
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // ─── x16/setWarp, x16/mouse ──────────────────────────────────────────
 
 // An explicit state rather than a toggle, so that a retry cannot undo it.
@@ -8350,6 +8642,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/hashMemory")) result = handle_x16_hash_memory(seq, args);
     else if (!strcmp(cmd, "x16/dumpMemory")) result = handle_x16_dump_memory(seq, args);
     else if (!strcmp(cmd, "x16/searchMemory")) result = handle_x16_search_memory(seq, args);
+    else if (!strcmp(cmd, "x16/audio")) result = handle_x16_audio(seq, args);
+    else if (!strcmp(cmd, "x16/setVoiceMute")) result = handle_x16_set_voice_mute(seq, args);
     else if (!strcmp(cmd, "x16/setWarp")) result = handle_x16_set_warp(seq, args);
     else if (!strcmp(cmd, "x16/mouse")) result = handle_x16_mouse(seq, args);
     else if (!strcmp(cmd, "x16/loadPrg")) result = handle_x16_load_prg(seq, args);
@@ -8447,7 +8741,7 @@ static const char *const callable_commands[] = {
     "x16/hashMemory", "x16/dumpMemory", "x16/searchMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
-    "mcp/setStopOn",
+    "mcp/setStopOn", "x16/audio", "x16/setVoiceMute",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -8501,6 +8795,8 @@ void debug_server_release_frontend(void) {
     perf_budget_arm(PERF_OWNER_MCP, false);
     vera_bandwidth_arm(VERA_BW_OWNER_MCP, false);
     sprite_trace_arm(SPRITE_TRACE_OWNER_MCP, false);
+    psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
+    YM_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
     if (capture_is_live() && cap_serial() == mcp_capture_serial) cap_stop();
 
     // A headless machine is never left halted with nobody able to restart it.
@@ -8585,6 +8881,8 @@ static void dap_release_session_state(void) {
     perf_budget_arm(PERF_OWNER_DAP, false);
     vera_bandwidth_arm(VERA_BW_OWNER_DAP, false);
     sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, false);
+    psg_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0);
+    YM_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0);
 }
 
 static void disconnect_client(void) {

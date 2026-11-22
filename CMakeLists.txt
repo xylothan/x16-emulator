@@ -330,6 +330,7 @@ set(X16_SOURCES
     src/ieee.c
     src/vera_spi.c
     src/audio.c
+    src/audio_decode.c
     src/vera_pcm.c
     src/vera_psg.c
     src/sdcard.c
@@ -868,6 +869,13 @@ x16_add_test(export_paths
 # The host key's bookkeeping: no SDL, nothing else.
 x16_add_test(hostkey
     SOURCES tests/test_hostkey.c tests/support/harness.c src/hostkey.c)
+
+# The sound chips' register decoding is pure.
+x16_add_test(audio_decode
+    SOURCES tests/test_audio_decode.c tests/support/harness.c src/audio_decode.c)
+if(TARGET audio_decode_test AND NOT MSVC)
+    target_link_libraries(audio_decode_test PRIVATE m)
+endif()
 
 # vera_psg.c likewise has no dependency beyond its own header and libc.
 x16_add_test(vera_psg

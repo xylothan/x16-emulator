@@ -295,6 +295,80 @@ test_silence_at_zero_volume(void)
 	check(silent, "volume zero renders exact silence");
 }
 
+static void
+two_voices(void)
+{
+	psg_reset();
+	voice(0, 0x0400, 63, PSG_WF_PULSE, 0x20);
+	voice(1, 0x0733, 40, PSG_WF_SAWTOOTH, 0x10);
+}
+
+static void
+test_mute_changes_only_the_host_mix(void)
+{
+	int16_t plain[256], machine[256], host[256], solo[256];
+
+	two_voices();
+	psg_render(plain, 128);
+
+	two_voices();
+	psg_debug_set_mute_mask(1u << 1);
+	psg_render_split(machine, host, 128);
+	psg_debug_set_mute_mask(0);
+
+	psg_reset();
+	voice(0, 0x0400, 63, PSG_WF_PULSE, 0x20);
+	psg_render(solo, 128);
+
+	check(!memcmp(machine, plain, sizeof plain), "a muted voice stays in the machine mix");
+	check(!memcmp(host, solo, sizeof solo), "the host mix leaves it out");
+	check(memcmp(host, plain, sizeof plain) != 0, "the two mixes differ");
+
+	two_voices();
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 1u << 1);
+	psg_render_split(machine, host, 128);
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
+	check(!memcmp(machine, plain, sizeof plain), "a client's mute stays out of the machine mix");
+	check(!memcmp(host, solo, sizeof solo), "and out of the host mix");
+}
+
+static void
+test_mute_owners_are_separate(void)
+{
+	psg_debug_set_mute_mask(0x0001);
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0x0002);
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0x0005);
+	check_eq(psg_debug_get_mute_mask(), 0x0001, "a client leaves the UI selection alone");
+	check_eq(psg_debug_get_owner_mute_mask(VOICE_MUTE_DAP), 0x0002, "DAP mask");
+	check_eq(psg_debug_get_owner_mute_mask(VOICE_MUTE_MCP), 0x0005, "MCP mask");
+	check_eq(psg_debug_get_client_mute_mask(), 0x0007, "client masks OR");
+	check_eq(psg_debug_get_effective_mute_mask(), 0x0007, "effective mask ORs all");
+
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
+	check_eq(psg_debug_get_effective_mute_mask(), 0x0003, "releasing one keeps the others");
+	psg_debug_set_mute_mask(0);
+	check_eq(psg_debug_get_effective_mute_mask(), 0x0002, "the UI clearing keeps a client's");
+	psg_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0);
+	check_eq(psg_debug_get_effective_mute_mask(), 0, "all released");
+}
+
+static void
+test_peek_keeps_the_peak(void)
+{
+	int16_t buf[128];
+	struct psg_debug_channel a, b;
+
+	psg_reset();
+	voice(0, 0x0400, 63, PSG_WF_PULSE, 0x20);
+	psg_render(buf, 64);
+
+	check(psg_debug_peek_channel(0, &a) && a.peak > 0, "peek reports the peak");
+	check(psg_debug_peek_channel(0, &b) && b.peak == a.peak, "peek does not reset it");
+	check(chan(0).peak == a.peak, "the meter's read still sees it");
+	check(psg_debug_peek_channel(0, &b) && b.peak == 0, "the meter's read resets it");
+	check(!psg_debug_peek_channel(16, &b), "peek refuses an out-of-range voice");
+}
+
 int
 main(void)
 {
@@ -308,5 +382,8 @@ main(void)
 	test_waveform_codes();
 	test_pulse_width_shapes_saw_and_triangle();
 	test_silence_at_zero_volume();
+	test_mute_changes_only_the_host_mix();
+	test_mute_owners_are_separate();
+	test_peek_keeps_the_peak();
 	return x16_test_summary("vera_psg");
 }
