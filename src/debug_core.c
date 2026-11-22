@@ -153,6 +153,7 @@ debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoint *o
 }
 
 static void cond_forget_all(void);
+static void dump_release_for(const struct breakpoint *bp, uint16_t owners);
 
 // ---------------------------------------------------------------------------
 //  Ownership
@@ -255,6 +256,7 @@ debug_bp_remove_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
 	if (idx < 0 || !(breakPoints[idx].owners & bit))
 		return false;
 
+	dump_release_for(&breakPoints[idx], bit);
 	breakPoints[idx].owners &= (uint16_t)~bit;
 	if (breakPoints[idx].owners == 0)
 		bp_erase(idx);
@@ -272,6 +274,7 @@ debug_bp_clear_owner(debug_owner_t owner)
 	for (int i = numBreakpoints - 1; i >= 0; i--) {
 		if (!(breakPoints[i].owners & bit))
 			continue;
+		dump_release_for(&breakPoints[i], bit);
 		breakPoints[i].owners &= (uint16_t)~bit;
 		if (breakPoints[i].owners == 0) {
 			bp_erase(i);
@@ -287,6 +290,7 @@ debug_bp_delete(int pc, uint8_t bank, int x16Bank)
 	int idx = debug_bp_find(pc, bank, x16Bank);
 	if (idx < 0)
 		return false;
+	dump_release_for(&breakPoints[idx], 0xFFFFu);
 	bp_erase(idx);
 	return true;
 }
@@ -369,7 +373,7 @@ struct bp_cond {
 	struct bp_dump *dump;   // x16Dump: write memory and continue (NULL = stop)
 };
 
-// A DUMP breakpoint (x16Dump over DAP) does not stop: each firing -- after its
+// A DUMP breakpoint does not stop for its own owner: each firing -- after its
 // condition and ignore budget, exactly where a plain breakpoint would stop --
 // appends a little-endian uint32 firing index and then each region's bytes to
 // a file.  A stop-read-resume loop pays a debugger round trip per hit; this
@@ -377,7 +381,11 @@ struct bp_cond {
 #define BP_DUMP_MAX_REGIONS 16
 struct bp_dump {
 	FILE    *f;
+	uint16_t owner;       // the owner's bit
 	uint32_t writes;
+	uint64_t bytes;
+	uint64_t max_bytes;   // 0: no limit
+	bool     full;
 	int      nreg;
 	struct { uint32_t addr, len; int x16Bank; } reg[BP_DUMP_MAX_REGIONS];
 };
@@ -400,6 +408,14 @@ dump_write(struct bp_dump *d)
 {
 	if (!d->f)
 		return;
+	uint64_t record = 4;
+	for (int r = 0; r < d->nreg; r++)
+		record += d->reg[r].len;
+	if (d->max_bytes && d->bytes + record > d->max_bytes) {
+		d->full = true;
+		return;
+	}
+	d->bytes += record;
 	uint8_t n[4] = {(uint8_t)d->writes, (uint8_t)(d->writes >> 8), (uint8_t)(d->writes >> 16),
 	                (uint8_t)(d->writes >> 24)};
 	fwrite(n, 1, 4, d->f);
@@ -440,6 +456,16 @@ cond_find(int pc, uint8_t bank, int x16Bank){
 			return &bpConds[i];
 	}
 	return NULL;
+}
+
+// A dump goes when the owner that set it lets go, whoever else still holds the
+// entry: left on the record, it would keep writing for nobody.
+static void
+dump_release_for(const struct breakpoint *bp, uint16_t owners)
+{
+	struct bp_cond *c = cond_find(bp->pc, bp->bank, bp->x16Bank);
+	if (c && c->dump && (c->dump->owner & owners))
+		dump_release(c);
 }
 
 static struct bp_cond *
@@ -544,6 +570,10 @@ cond_satisfied(const struct bp_cond *c)
 bool
 debug_bp_on_arrival(int pc, uint8_t bank)
 {
+	bool stop = false;
+
+	// The whole table, because a later entry for this PC under another bank
+	// selector may hold a dump that has to record this arrival.
 	for (int i = 0; i < numBreakpoints; i++) {
 		if (!bp_matches(pc, bank, &breakPoints[i]))
 			continue;
@@ -558,15 +588,19 @@ debug_bp_on_arrival(int pc, uint8_t bank)
 
 		c->hits++;
 		if (c->hits > c->ignore) {
-			if (c->dump) {
-				dump_write(c->dump);    // a dump breakpoint writes and runs on
-				continue;
+			const uint16_t dumper = c->dump ? c->dump->owner : 0;
+			if (breakPoints[i].owners & dumper) {
+				dump_write(c->dump);
+				// Any other owner on this entry asked for a stop.
+				if (breakPoints[i].owners & (uint16_t)~dumper)
+					stop = true;
+			} else {
+				stop = true;
 			}
-			return true;
 		}
 		// still inside the ignore count: counted, but keep running
 	}
-	return false;
+	return stop;
 }
 
 void
@@ -602,24 +636,46 @@ debug_bp_forget(int pc, uint8_t bank, int x16Bank)
 }
 
 bool
-debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
-                  const uint32_t *addr, const uint32_t *len, const int *regBank)
+debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, const char *path,
+                  int nreg, const uint32_t *addr, const uint32_t *len, const int *regBank)
 {
-	if (nreg < 0 || nreg > BP_DUMP_MAX_REGIONS)
+	if (nreg < 0 || nreg > BP_DUMP_MAX_REGIONS || !owner_bit(owner))
+		return false;
+	// Before the open, which empties the file.
+	struct bp_cond *held = cond_find(pc, bank, x16Bank);
+	if (held && held->dump && held->dump->owner != owner_bit(owner))
+		return false;
+	if (held)
+		dump_release(held);
+	FILE *f = fopen(path, "wb");
+	if (!f)
+		return false;
+	if (!debug_bp_set_dump_file(pc, bank, x16Bank, owner, f, 0, nreg, addr, len, regBank)) {
+		fclose(f);
+		return false;
+	}
+	return true;
+}
+
+bool
+debug_bp_set_dump_file(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, FILE *f,
+                       uint64_t max_bytes, int nreg, const uint32_t *addr, const uint32_t *len,
+                       const int *regBank)
+{
+	const uint16_t bit = owner_bit(owner);
+	if (!f || !bit || nreg < 0 || nreg > BP_DUMP_MAX_REGIONS)
 		return false;
 	struct bp_cond *c = cond_ensure(pc, bank, x16Bank);
-	if (!c)
+	if (!c || (c->dump && c->dump->owner != bit))
 		return false;
-	dump_release(c);
 	struct bp_dump *d = (struct bp_dump *)calloc(1, sizeof(*d));
 	if (!d)
 		return false;
-	d->f = fopen(path, "wb");
-	if (!d->f) {
-		free(d);
-		return false;
-	}
-	d->nreg = nreg;
+	dump_release(c);
+	d->f         = f;
+	d->owner     = bit;
+	d->max_bytes = max_bytes;
+	d->nreg      = nreg;
 	for (int i = 0; i < nreg; i++) {
 		d->reg[i].addr    = addr[i];
 		d->reg[i].len     = len[i];
@@ -630,11 +686,31 @@ debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
 }
 
 void
-debug_bp_clear_dump(int pc, uint8_t bank, int x16Bank)
+debug_bp_clear_dump_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
 {
 	struct bp_cond *c = cond_find(pc, bank, x16Bank);
-	if (c)
+	if (c && c->dump && c->dump->owner == owner_bit(owner))
 		dump_release(c);
+}
+
+bool
+debug_bp_dump_info(int pc, uint8_t bank, int x16Bank, debug_owner_t *owner, uint32_t *writes,
+                   bool *full)
+{
+	const struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	if (!c || !c->dump)
+		return false;
+	if (owner) {
+		for (int i = 0; i < DEBUG_OWNER_COUNT; i++) {
+			if (c->dump->owner == (uint16_t)(1u << i))
+				*owner = (debug_owner_t)i;
+		}
+	}
+	if (writes)
+		*writes = c->dump->writes;
+	if (full)
+		*full = c->dump->full;
+	return true;
 }
 
 uint32_t

@@ -13,9 +13,12 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #define WIDE_PATH_MAX 4096
 #define path_ncmp _strnicmp
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #define path_ncmp strncmp
@@ -262,6 +265,37 @@ host_write_path(const char *root, const char *request, char *out, size_t out_siz
 		return false;
 	}
 	return true;
+}
+
+FILE *
+host_create_new(const char *path)
+{
+#ifdef _WIN32
+	wchar_t wide[WIDE_PATH_MAX];
+	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, WIDE_PATH_MAX))
+		return NULL;
+	HANDLE h = CreateFileW(wide, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+	                       FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		return NULL;
+	const int fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+	if (fd < 0) {
+		CloseHandle(h);
+		return NULL;
+	}
+	FILE *f = _fdopen(fd, "wb");
+	if (!f)
+		_close(fd);
+	return f;
+#else
+	const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+	if (fd < 0)
+		return NULL;
+	FILE *f = fdopen(fd, "wb");
+	if (!f)
+		close(fd);
+	return f;
+#endif
 }
 
 bool

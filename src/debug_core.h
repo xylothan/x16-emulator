@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -267,15 +268,29 @@ void     debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand,
 void     debug_bp_clear_condition(int pc, uint8_t bank, int x16Bank);
 void     debug_bp_forget(int pc, uint8_t bank, int x16Bank);
 
-// DUMP breakpoints (x16Dump over DAP): a firing appends memory to a file and
-// does not stop.  Regions are 24-bit addresses with an x16 bank pin each
-// (USE_CURRENT_X16_BANK = -1 for the live mapping), or DEBUG_DUMP_VRAM for a
-// region in VERA's 17-bit video space, which is not in the CPU map.  The reader
-// is installed by the emulator proper; debug_core.c itself touches no memory.
+// DUMP breakpoints (x16Dump over DAP, `dump` over MCP): a firing appends memory
+// to a file. The machine runs on unless another owner holds the same entry, since
+// that owner asked for a stop. An entry has at most one dump, which belongs to
+// the owner that set it and closes when that owner's claim goes. Regions are
+// 24-bit addresses with an x16 bank pin each (USE_CURRENT_X16_BANK = -1 for the
+// live mapping), or DEBUG_DUMP_VRAM for a region in VERA's 17-bit video space,
+// which is not in the CPU map. The reader is installed by the emulator proper;
+// debug_core.c itself touches no memory.
 #define DEBUG_DUMP_VRAM (-2)
-bool     debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, const char *path, int nreg,
-                           const uint32_t *addr, const uint32_t *len, const int *regBank);
-void     debug_bp_clear_dump(int pc, uint8_t bank, int x16Bank);
+// False, with nothing changed, where another owner's dump is on the entry.
+bool     debug_bp_set_dump(int pc, uint8_t bank, int x16Bank, debug_owner_t owner,
+                           const char *path, int nreg, const uint32_t *addr, const uint32_t *len,
+                           const int *regBank);
+// The same with a file already open, which it takes over on success. A record
+// that would take the file past `max_bytes` (0: no limit) is not written.
+bool     debug_bp_set_dump_file(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, FILE *f,
+                                uint64_t max_bytes, int nreg, const uint32_t *addr,
+                                const uint32_t *len, const int *regBank);
+void     debug_bp_clear_dump_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner);
+// Whether the entry has a dump, and its owner, records written and whether it
+// has reached its limit. Any out-parameter may be NULL.
+bool     debug_bp_dump_info(int pc, uint8_t bank, int x16Bank, debug_owner_t *owner,
+                            uint32_t *writes, bool *full);
 uint32_t debug_bp_dump_writes(int pc, uint8_t bank, int x16Bank);
 extern uint8_t (*debug_bp_dump_read)(uint32_t addr, int x16Bank);
 void     debug_bp_set_ignore(int pc, uint8_t bank, int x16Bank, uint32_t ignore);

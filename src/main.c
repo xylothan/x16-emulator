@@ -835,6 +835,9 @@ usage()
 	printf("\tclient closes stdin. With a port it serves http://127.0.0.1:<port>/mcp\n");
 	printf("\tfor an agent attaching to a running emulator, and refuses requests\n");
 	printf("\tfrom web pages. After 10 idle minutes it releases what that agent set.\n");
+	printf("-mcp-readonly\n");
+	printf("\tWith -mcp, offer and accept only the tools that change nothing: no run\n");
+	printf("\tcontrol, breakpoints, input, memory or register writes, or host files.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-seed <n>\n");
@@ -1541,6 +1544,16 @@ main(int argc, char **argv)
 			                "(cJSON was not available at configure time)\n");
 			return 1;
 #endif
+		} else if (!strcmp(argv[0], "-mcp-readonly")) {
+			argc--;
+			argv++;
+#ifdef HAS_DAP
+			mcp_server_set_readonly(true);
+#else
+			fprintf(stderr, "-mcp-readonly requires a build with the DAP server "
+			                "(cJSON was not available at configure time)\n");
+			return 1;
+#endif
 		} else if (!strcmp(argv[0], "-dbgfile")) {
 			argc--;
 			argv++;
@@ -2060,6 +2073,10 @@ main(int argc, char **argv)
 	// waits for them, so an MCP client would share that pipe or never be answered.
 	if (testbench && mcp_server_is_enabled()) {
 		fprintf(stderr, "-mcp cannot be combined with -testbench\n");
+		return 1;
+	}
+	if (mcp_server_is_readonly() && !mcp_server_is_enabled()) {
+		fprintf(stderr, "-mcp-readonly needs -mcp\n");
 		return 1;
 	}
 #endif
