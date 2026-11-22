@@ -346,6 +346,7 @@ set(X16_SOURCES
     src/insn_info.c
     src/code_map.c
     src/debug_core.c
+    src/call_stack.c
     src/cpu/irq_ctx.c
     src/javascript_interface.c
     src/joystick.c
@@ -746,6 +747,10 @@ x16_add_test(timing_speed NEEDS_SDL
 # irq_ctx.c is pure bookkeeping with no dependencies, so the test links it alone.
 x16_add_test(irq_ctx
     SOURCES tests/test_irq_ctx.c src/cpu/irq_ctx.c)
+
+# The unwinder reads memory through a callback, so it links alone too.
+x16_add_test(call_stack
+    SOURCES tests/test_call_stack.c src/call_stack.c)
 
 # dbg_load.c reports loads to dbg_info and source_view, so the test links those
 # two alongside it. dbg_info.c has no dependency on the emulator core either.

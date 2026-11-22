@@ -191,7 +191,7 @@ def test_tools():
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
-                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory"}
+                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                   "dump_memory", "load_prg"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
@@ -2148,6 +2148,21 @@ def test_client_format():
             plain = views(m)
             case("MCP reports the source line and path",
                  plain == ([3], [source], 3, source), str(plain))
+
+            def at_source(read):
+                # Back on the loop afterwards: past these NOPs is zeroed RAM, a BRK.
+                m.call("pause")
+                m.call("set_registers", pc=0x0A00)
+                top = read()
+                m.call("set_registers", pc=LOOP)
+                return top
+
+            def mcp_top():
+                return data(m.call("get_stack", levels=1))["stackFrames"][0]
+
+            frame = at_source(mcp_top)
+            case("get_stack reports the source line and path",
+                 (frame.get("line"), frame.get("file")) == (3, source), str(frame))
             dap.close()
             time.sleep(0.3)
 
@@ -2157,6 +2172,11 @@ def test_client_format():
             case("and is answered in its format", bp.get("line") == 2, str(bp))
             seen = views(m)
             case("MCP results do not take that format", seen == plain, f"{seen} != {plain}")
+            again = at_source(mcp_top)
+            case("get_stack does not take it either", again == frame, f"{again} != {frame}")
+            own = at_source(lambda: dap.request("x16/callStack", {"levels": 1})["body"]["stackFrames"][0])
+            case("the client's own call stack keeps its format",
+                 own.get("line") == 2 and own.get("file", "").startswith("file://"), str(own))
 
             own = dap.request("x16/listBreakpoints")["body"]["breakpoints"]
             own = [b for b in own if "dapId" in b]
@@ -2184,6 +2204,134 @@ def test_client_format():
             got = ((ev or {}).get("body") or {}).get("breakpoint", {})
             case("an event caused by MCP is in the editor's format",
                  got.get("verified") is True and got.get("line") == 2, str(ev))
+            dap.close()
+
+
+def test_call_stack():
+    print("call stack")
+    # $0A00 calls $0A10, which calls $0A20, which spins.
+    code = ("20100A" + "EA" * 13 + "20200A60" + "EA" * 12 + "EA4C200A")
+    with tempfile.TemporaryDirectory() as tmp:
+        labels = os.path.join(tmp, "stack.lbl")
+        with open(labels, "w") as f:
+            f.write("al 000A00 .outer\nal 000A03 .after\nal 000A10 .inner\n")
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            m.call("write_memory", address=0x0A00, hex=code)
+            m.call("load_symbols", path=labels)
+            status = data(m.call("get_registers"))["cpu"]["status"]
+            m.call("set_registers", pc=0x0A00, sp=0x01FF, status=status | 0x04)
+            m.call("set_breakpoint", address=0x0A20)
+            since = data(m.call("get_status"))["stopId"]
+            m.call("continue")
+            m.call("wait_for_stop", sinceStopId=since)
+
+            before = data(m.call("get_registers")), data(m.call("get_vera_state"))
+            d = data(m.call("get_stack"))
+            after = data(m.call("get_registers")), data(m.call("get_vera_state"))
+            case("reading the stack changes nothing", before == after)
+            frames = d.get("stackFrames", [])
+            case("it says it is a guess", d.get("heuristic") is True, str(d)[:200])
+            case("it counts the frames", d.get("totalFrames") == 3, str(d)[:200])
+            case("innermost first", [f.get("address") for f in frames] == [0x0A20, 0x0A13, 0x0A03],
+                 str(frames))
+            case("frames are numbered", [f.get("index") for f in frames] == [0, 1, 2], str(frames))
+            case("the first is the PC and the rest are returns",
+                 [f.get("kind") for f in frames] == ["current", "return", "return"], str(frames))
+            case("a return is named by the label it is inside",
+                 [(f.get("symbol"), f.get("symbolOffset")) for f in frames[1:]] ==
+                 [("inner", 3), ("outer", 3)], str(frames))
+            case("a caller gives its call site",
+                 [f.get("callSite") for f in frames] == [None, 0x0A10, 0x0A00], str(frames))
+
+            part = data(m.call("get_stack", startFrame=1, levels=1))
+            case("part of the stack", [f.get("address") for f in part.get("stackFrames", [])] == [0x0A13]
+                 and part.get("totalFrames") == 3, str(part))
+            past = data(m.call("get_stack", startFrame=9))
+            case("past the end is empty", past.get("stackFrames") == [] and past.get("totalFrames") == 3,
+                 str(past))
+            for label, args in (("a negative start", {"startFrame": -1}),
+                                ("a fraction", {"levels": 1.5}),
+                                ("too many", {"levels": 65}),
+                                ("text", {"startFrame": "1"})):
+                case(f"get_stack refuses {label}", is_error(m.call("get_stack", **args)))
+            case("get_stack refuses an unknown argument", is_error(m.call("get_stack", banana=1)))
+
+            dap = Dap(port)
+            r = dap.request("initialize", {"adapterID": "test", "linesStartAt1": True,
+                                           "columnsStartAt1": True})
+            case("DAP offers delayed stack loading",
+                 r["body"].get("supportsDelayedStackTraceLoading") is True, str(r)[:200])
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            shown = dap.request("stackTrace", {"threadId": 1})["body"]
+            case("DAP unwinds the same frames",
+                 [int(f["instructionPointerReference"], 16) & 0xFFFF for f in shown["stackFrames"]] ==
+                 [f["address"] for f in frames], str(shown)[:300])
+            page = dap.request("stackTrace", {"threadId": 1, "startFrame": 1, "levels": 1})["body"]
+            case("a DAP page keeps its frame id and the total",
+                 [f["id"] for f in page["stackFrames"]] == [2] and page["totalFrames"] == 3, str(page)[:200])
+            page = dap.request("stackTrace", {"threadId": 1, "startFrame": 2, "levels": 1e12})["body"]
+            case("a huge DAP level count is all that remain",
+                 [f["id"] for f in page["stackFrames"]] == [3], str(page)[:200])
+            page = dap.request("stackTrace", {"threadId": 1, "startFrame": 1e12})["body"]
+            case("a huge DAP start is past the end", page["stackFrames"] == [], str(page)[:200])
+            flat = dap.request("x16/callStack")["body"]["stackFrames"]
+            case("DAP gets the flat stack too", [f["address"] for f in flat] == [f["address"] for f in frames],
+                 str(flat))
+            case("DAP names a caller by its call too",
+                 [f["name"] for f in shown["stackFrames"][1:]] == ["inner+3 ($0A13)", "outer+3 ($0A03)"],
+                 str(shown)[:300])
+            dap.close()
+
+        # A JSR on one line, returning to the first instruction of the next routine.
+        with open(os.path.join(tmp, "site.prg"), "wb") as f:
+            f.write(struct.pack("<H", 0x0A00) + bytes.fromhex("20030AEA4C030A") + b"\xEA" * 9)
+        with open(os.path.join(tmp, "site.dbg"), "w") as f:
+            f.write('version\tmajor=2,minor=0\n'
+                    'info\tcsym=0,file=1,lib=0,line=2,mod=1,scope=1,seg=1,span=2,sym=2,type=0\n'
+                    'file\tid=0,name="site.s",size=10,mtime=0x00000000,mod=0\n'
+                    'seg\tid=0,name="CODE",start=0x000A00,size=0x0010,addrsize=absolute,type=ro,'
+                    'oname="site.prg"\n'
+                    'span\tid=0,seg=0,start=0,size=3,type=0\n'
+                    'span\tid=1,seg=0,start=3,size=13,type=0\n'
+                    'line\tid=0,file=0,line=5,span=0\n'
+                    'line\tid=1,file=0,line=9,span=1\n'
+                    'sym\tid=0,name="_first",addrsize=absolute,size=3,scope=0,def=0,val=0x000A00,type=lab\n'
+                    'sym\tid=1,name="_second",addrsize=absolute,size=3,scope=0,def=0,val=0x000A03,type=lab\n'
+                    'mod\tid=0,name="site.o",file=0\n')
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            m.call("load_prg", path=os.path.join(tmp, "site.prg"))
+            status = data(m.call("get_registers"))["cpu"]["status"]
+            m.call("set_registers", pc=0x0A00, sp=0x01FF, status=status | 0x04)
+            m.call("set_breakpoint", address=0x0A03)
+            since = data(m.call("get_status"))["stopId"]
+            m.call("continue")
+            m.call("wait_for_stop", sinceStopId=since)
+
+            frames = data(m.call("get_stack")).get("stackFrames", [])
+            view = [(f.get("address"), f.get("symbol"), f.get("symbolOffset"), f.get("line")) for f in frames]
+            case("the current frame is its own line",
+                 view[:1] == [(0x0A03, "_second", 0, 9)], str(view))
+            case("a caller is the line and routine of its JSR, not of its return",
+                 view[1:] == [(0x0A03, "_first", 3, 5)], str(view))
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": True, "columnsStartAt1": True})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            shown = dap.request("stackTrace", {"threadId": 1})["body"]["stackFrames"]
+            case("DAP reports the same line and routine",
+                 [(f["name"], f["line"]) for f in shown] ==
+                 [("_second ($0A03)", 9), ("_first+3 ($0A03)", 5)], str(shown)[:300])
+            case("and keeps the return address as the instruction pointer",
+                 int(shown[1]["instructionPointerReference"], 16) == 0x0A03, str(shown)[:300])
             dap.close()
 
 
@@ -2288,7 +2436,7 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_read_paths):
+                 test_client_format, test_call_stack, test_read_paths):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

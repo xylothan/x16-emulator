@@ -1044,7 +1044,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1456,7 +1456,7 @@ debugging it.
 | Tools | |
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `wait_for_stop`, `reset` |
-| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
@@ -1468,6 +1468,10 @@ debugging it.
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
 refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
 program or update BASIC's pointers.
+
+`get_stack` guesses callers from the hardware stack, because the CPU keeps no frame pointer. It
+recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's
+`address` is where it returns to, and its symbol, file and line are those of the `JSR` (`callSite`).
 
 `load_symbols` and `load_prg` read only inside `-fsroot` (the working folder when there is none),
 the dump folder, or the folder of the `-prg` the emulator started with. Links are followed and

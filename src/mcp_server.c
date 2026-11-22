@@ -1241,6 +1241,10 @@ static cJSON *tool_list_symbols(cJSON *args) {
     return tool_forward("x16/listSymbols", args);
 }
 
+static cJSON *tool_get_stack(cJSON *args) {
+    return tool_forward("x16/callStack", args);
+}
+
 // hash_memory and dump_memory take the same range as read_memory.
 static cJSON *tool_range(const char *command, cJSON *args, bool to_file) {
     char err[200], ref[48];
@@ -1541,6 +1545,19 @@ static const mcp_tool_t tools[] = {
       "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256,\"default\":16}"
       "},\"required\":[\"address\"],\"additionalProperties\":false}",
       TOOL_READ, tool_disassemble },
+    { "get_stack",
+      "The call stack, innermost first. Frame 0 is the current PC. For a caller, address is "
+      "where it returns to, callSite is its JSR, and symbol, file and line describe that JSR. "
+      "Callers are a best guess, "
+      "and the result says so with heuristic: true. The CPU keeps no frame pointer, so this "
+      "scans the stack for addresses just past a JSR. Calls through JSL or the KERNAL's far "
+      "call are not recognised, stored data can look like a caller, and 'bank' is what is "
+      "mapped at that address now. startFrame and levels select part of the stack.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":64,\"default\":0},"
+      "\"levels\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":64,\"default\":0,\"description\":\"0 means all\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_stack },
     { "set_breakpoint",
       "Stop when code runs at a CPU address (kind \"exec\"), or when it is written (\"write\"), "
       "read (\"read\") or either (\"access\"), with an optional length. A read watch ignores "

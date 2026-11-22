@@ -1444,6 +1444,24 @@ bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr
 	return true;
 }
 
+bool dbg_info_frame_label(dbg_addr_t addr, int ram_bank, const char **name, dbg_addr_t *label_addr)
+{
+	const char *found = NULL;
+	dbg_addr_t at = addr;
+	if (!dbg_info_addr_to_label(addr, &found) || !found) {
+		const bool covered = dbg_info_addr_to_source_banked(addr, ram_bank, NULL, NULL);
+		if (!covered && dbg_info_is_loaded())
+			return false;
+		if (!dbg_info_addr_to_label_nearest(addr, &found, &at) || !found)
+			return false;
+		if (!covered && addr - at >= 0x400)
+			return false;
+	}
+	*name = found;
+	*label_addr = at;
+	return true;
+}
+
 bool dbg_info_label_to_addr(const char *name, dbg_addr_t *addr)
 {
 	return dbg_info_label_to_addr_bank(name, addr, NULL);
