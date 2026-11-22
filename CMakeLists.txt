@@ -949,6 +949,13 @@ if(TARGET processor_tests_test)
              COMMAND processor_tests_test 816-native)
 endif()
 
+# These find their fixtures from the source root, at any build directory depth.
+foreach(fixture_test klaus processor_tests processor_tests_816_emu processor_tests_816_native)
+    if(TEST ${fixture_test})
+        set_tests_properties(${fixture_test} PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    endif()
+endforeach()
+
 # The generated opcode tables against the published 65C02 spec. ProcessorTests
 # measures what the hardware does; this checks the tables still agree with the
 # documentation, which is a different question and has disagreed once.
