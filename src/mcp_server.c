@@ -1580,6 +1580,22 @@ static cJSON *tool_set_voice_mute(cJSON *args) {
     return tool_forward("x16/setVoiceMute", args);
 }
 
+static cJSON *tool_get_io_state(cJSON *args) {
+    return tool_forward("x16/io", args);
+}
+
+static cJSON *tool_read_io_trace(cJSON *args) {
+    return tool_forward("x16/ioTrace", args);
+}
+
+static cJSON *tool_set_io_capture(cJSON *args) {
+    return tool_forward("x16/ioCapture", args);
+}
+
+static cJSON *tool_trigger_interrupt(cJSON *args) {
+    return tool_forward("x16/interrupt", args);
+}
+
 static cJSON *tool_set_warp(cJSON *args) {
     return tool_forward("x16/setWarp", args);
 }
@@ -2304,6 +2320,49 @@ static const mcp_tool_t tools[] = {
       "\"muted\":{\"type\":\"boolean\"}"
       "},\"required\":[\"chip\",\"muted\"],\"additionalProperties\":false}",
       TOOL_CONTROL, tool_set_voice_mute },
+    { "get_io_state",
+      "VIA, I2C, SMC, RTC and controller port state, read without changing anything: no VIA "
+      "flag clears and the I2C bus does not step. 'device' limits it to one. 'irq' is always "
+      "there: the level the devices are asserting now, by source, and the CPU's I flag. A VIA's "
+      "'regs' are what the CPU would read at each of its 16 addresses. A controller port that "
+      "nothing drives has driven: false and reads high forever (shift $FFFF).",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"device\":{\"type\":\"string\",\"enum\":[\"via1\",\"via2\",\"i2c\",\"smc\",\"rtc\",\"joystick\"]}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_io_state },
+    { "read_io_trace",
+      "I/O events from the shared ring, oldest first: register accesses and decoded device "
+      "events. Changes nothing, and records only what set_io_capture or the I/O panel has "
+      "turned on. Pass the returned cursor back to get what came after it. Without one, starts "
+      "at the oldest event held. 'lost' counts events gone between your cursor and the oldest. "
+      "'more' means another call would return events now.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"cursor\":{\"type\":\"integer\",\"minimum\":0},"
+      "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024,\"default\":100}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_read_io_trace },
+    { "set_io_capture",
+      "Choose which devices this client records into the I/O trace. 'devices' is the whole "
+      "set, and [] stops. Without it, everything except vera, whose data ports flood the ring, "
+      "and openbus. Each client's set is its own, ORed with the I/O panel's, changes no saved "
+      "preference and ends with its session. Recording does not change the machine. The "
+      "returned cursor is where this starts, for read_io_trace.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"devices\":{\"type\":\"array\",\"uniqueItems\":true,\"items\":{\"type\":\"string\","
+      "\"enum\":[\"via1\",\"via2\",\"vera\",\"spi\",\"ym\",\"emu\",\"midi\",\"openbus\","
+      "\"sdcard\",\"files\",\"i2c\",\"joystick\",\"serial\"]}}"
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_io_capture },
+    { "trigger_interrupt",
+      "Pulse the CPU's IRQ or NMI once, between instructions. No device flag changes, so "
+      "nothing stays asserted and no device's own interrupt is cleared. An IRQ with the I flag "
+      "set is not taken (taken: false, held: true) and is not remembered for when I clears, "
+      "though it does wake WAI. An NMI is always taken. On a paused machine the interrupt is "
+      "taken at once and the machine stays paused on the handler's first instruction.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"irq\",\"nmi\"]}"
+      "},\"required\":[\"kind\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_trigger_interrupt },
     { "load_prg",
       "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
       "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "
