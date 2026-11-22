@@ -200,6 +200,24 @@ main(void)
 	check_eq((uint32_t)source_view_path_count(), 1, "one folder left");
 	check(source_view_path_at(1) == NULL, "out of range is NULL");
 
+	// ── Candidates ──────────────────────────────────────────────────────────
+	char        cand[700], expect[700];
+	const char *folder = source_view_path_at(0);
+	check(source_view_candidate(0, "a/x.s", cand, sizeof cand) && !strcmp(cand, "a/x.s"),
+	      "the name first");
+	snprintf(expect, sizeof expect, "%s/a/x.s", folder);
+	check(source_view_candidate(1, "a/x.s", cand, sizeof cand) && !strcmp(cand, expect),
+	      "then whole under a folder");
+	snprintf(expect, sizeof expect, "%s/x.s", folder);
+	check(source_view_candidate(2, "a/x.s", cand, sizeof cand) && !strcmp(cand, expect),
+	      "then its base name there");
+	check(source_view_candidate(3, "a/x.s", cand, sizeof cand) && !strcmp(cand, "x.s"),
+	      "then the base name");
+	check(!source_view_candidate(4, "a/x.s", cand, sizeof cand), "and no more");
+	check(source_view_candidate(1, "/abs/x.s", cand, sizeof cand) && !strcmp(cand, expect),
+	      "an absolute name is not joined to a folder");
+	check(source_view_candidate(0, "a/x.s", cand, 3) && cand[0] == '\0', "too long is empty");
+
 	source_view_free();
 	return x16_test_summary("source_view");
 }

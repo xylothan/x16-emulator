@@ -2263,6 +2263,128 @@ bool dbg_info_source_to_addr_bank(const char *file_path, int line_num, dbg_addr_
 	return false;
 }
 
+int dbg_info_all_file_count(void)
+{
+	return file_count;
+}
+
+bool dbg_info_all_file_at(int index, const char **name)
+{
+	if (index < 0 || index >= file_count || !files[index].name)
+		return false;
+	if (name)
+		*name = files[index].name;
+	return true;
+}
+
+static char path_fold(char c)
+{
+	if (c == '\\')
+		return '/';
+	return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* The length of the shorter path when all of it is the tail of the longer, on a
+ * component boundary. 0 when it is not. */
+static size_t path_tail_match(const char *a, const char *b)
+{
+	while (a[0] == '.' && (a[1] == '/' || a[1] == '\\'))
+		a += 2;
+	while (b[0] == '.' && (b[1] == '/' || b[1] == '\\'))
+		b += 2;
+	const size_t la = strlen(a), lb = strlen(b);
+	const size_t n  = la < lb ? la : lb;
+	if (!n)
+		return 0;
+	for (size_t i = 1; i <= n; i++) {
+		if (path_fold(a[la - i]) != path_fold(b[lb - i]))
+			return 0;
+	}
+	const char  *longer = la > lb ? a : b;
+	const size_t ll     = la > lb ? la : lb;
+	if (ll > n && path_fold(longer[ll - n - 1]) != '/')
+		return 0;
+	return n;
+}
+
+int dbg_info_find_source(const char *query, const char **out, int max)
+{
+	if (!loaded || !query || !query[0])
+		return 0;
+
+	bool   exact = false;
+	size_t best  = 0;
+	for (int i = 0; i < file_count; i++) {
+		if (!files[i].name)
+			continue;
+		if (!strcmp(files[i].name, query))
+			exact = true;
+		const size_t tail = path_tail_match(query, files[i].name);
+		if (tail > best)
+			best = tail;
+	}
+	if (!exact && !best)
+		return 0;
+
+	int n = 0;
+	for (int i = 0; i < file_count; i++) {
+		const char *name = files[i].name;
+		if (!name)
+			continue;
+		if (exact ? strcmp(name, query) != 0 : path_tail_match(query, name) != best)
+			continue;
+		/* Each module of a multi-file load declares its own copy of a name. */
+		bool repeated = false;
+		for (int j = 0; j < i && !repeated; j++)
+			repeated = files[j].name && !strcmp(files[j].name, name);
+		if (repeated)
+			continue;
+		if (n < max && out)
+			out[n] = name;
+		n++;
+	}
+	return n;
+}
+
+int dbg_info_line_addrs(const char *file, int line, dbg_line_hit_t *out, int max)
+{
+	if (!loaded || !file)
+		return 0;
+
+	int n = 0;
+	for (int i = 0; i < addr_map_count; i++) {
+		if (addr_map[i].line_num != line)
+			continue;
+		const dbg_file_t *fi = find_file(addr_map[i].file_id);
+		if (!fi || !fi->name || strcmp(fi->name, file))
+			continue;
+
+		/* addr_map is sorted, so the first entry of a segment is its lowest.
+		 * Segments stay apart even at one address: two that share $A000 are
+		 * different banks whether or not a LOAD has shown which. */
+		bool seen = false;
+		for (int j = 0; j < i && !seen; j++) {
+			if (addr_map[j].line_num != line || addr_map[j].seg_id != addr_map[i].seg_id)
+				continue;
+			const dbg_file_t *fj = find_file(addr_map[j].file_id);
+			seen = fj && fj->name && !strcmp(fj->name, file);
+		}
+		if (seen)
+			continue;
+
+		if (n < max && out) {
+			const dbg_seg_t *sg = find_seg(addr_map[i].seg_id);
+			out[n].addr     = addr_map[i].addr;
+			out[n].ram_bank = seg_observed_bank(addr_map[i].seg_id, addr_map[i].addr);
+			out[n].segment  = sg ? sg->name : NULL;
+			out[n].file     = fi->name;
+			out[n].line     = line;
+		}
+		n++;
+	}
+	return n;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Banked-segment -> RAM bank association                             */
 /*                                                                     */

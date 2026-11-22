@@ -601,6 +601,10 @@ static char *dap_utf8_repaired(const char *text, size_t len, size_t *out_len) {
     return (char *)out;
 }
 
+char *debug_server_utf8_repaired(const char *text, size_t len, size_t *out_len) {
+    return dap_utf8_repaired(text, len, out_len);
+}
+
 static void send_dap_message(cJSON *json) {
     if (client_sock == SOCKET_INVALID) {
         cJSON_Delete(json);
@@ -847,6 +851,13 @@ static int caller_line_out(int line) {
 }
 static const char *caller_path_out(const char *path, char *buf, size_t n) {
     return current_caller == DBG_CALLER_DAP ? dap_path_out(path, buf, n) : path;
+}
+static int caller_line_in(int line) {
+    return current_caller == DBG_CALLER_DAP ? dap_line_in(line) : line;
+}
+static void caller_path_in(const char *path, char *out, size_t n) {
+    if (current_caller == DBG_CALLER_DAP) dap_path_in(path, out, n);
+    else snprintf(out, n, "%s", path);
 }
 
 static int handle_dap_initialize(int seq, cJSON *args) {
@@ -5678,16 +5689,19 @@ static int handle_dap_loaded_sources(int seq, cJSON *args) {
     (void)args;
     cJSON *body = cJSON_CreateObject();
     cJSON *arr  = cJSON_CreateArray();
-    int n = dbg_info_file_count();
+    // Which generated files are left out depends on what is on disk, and the
+    // names come from a .dbg an MCP client may have written.
+    const bool all = current_caller == DBG_CALLER_MCP;
+    int n = all ? dbg_info_all_file_count() : dbg_info_file_count();
     for (int i = 0; i < n; i++) {
         const char *nm = NULL;
-        if (dbg_info_file_at(i, &nm) && nm) {
+        if ((all ? dbg_info_all_file_at(i, &nm) : dbg_info_file_at(i, &nm)) && nm) {
             const char *base = nm;
             for (const char *p = nm; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
             char uri[1024];
             cJSON *src = cJSON_CreateObject();
             cJSON_AddStringToObject(src, "name", base);
-            cJSON_AddStringToObject(src, "path", dap_path_out(nm, uri, sizeof uri));
+            cJSON_AddStringToObject(src, "path", caller_path_out(nm, uri, sizeof uri));
             cJSON_AddItemToArray(arr, src);
         }
     }
@@ -5766,6 +5780,130 @@ static int handle_dap_breakpoint_locations(int seq, cJSON *args) {
     }
     cJSON_AddItemToObject(body, "breakpoints", arr);
     send_dap_response(seq, "breakpointLocations", true, body);
+    return 0;
+}
+
+// ─── x16/sourceLocation (an address's line, or a line's addresses) ───
+
+#define SOURCE_NAMES_MAX 8
+#define SOURCE_HITS_MAX  32
+
+// A file name that fits more than one file in the debug info.
+static void source_ambiguous(char *out, size_t n, const char *const *names, int total) {
+    size_t o = (size_t)snprintf(out, n, "that could be any of:");
+    const int shown = total < SOURCE_NAMES_MAX ? total : SOURCE_NAMES_MAX;
+    for (int i = 0; i < shown && o < n; i++)
+        o += (size_t)snprintf(out + o, n - o, "%s %s", i ? "," : "", names[i]);
+    if (total > shown && o < n)
+        snprintf(out + o, n - o, " and %d more", total - shown);
+}
+
+static cJSON *source_location_item(uint32_t addr, int bank, const char *file, int line) {
+    char uri[1024];
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "address", addr);
+    if (bank >= 0) cJSON_AddNumberToObject(o, "bank", bank);
+    else           cJSON_AddNullToObject(o, "bank");
+    cJSON_AddStringToObject(o, "file", caller_path_out(file, uri, sizeof uri));
+    cJSON_AddNumberToObject(o, "line", caller_line_out(line));
+    return o;
+}
+
+static int handle_x16_source_location(int seq, cJSON *args) {
+    static const char cmd[] = "x16/sourceLocation";
+    cJSON *ai = args ? cJSON_GetObjectItemCaseSensitive(args, "address") : NULL;
+    cJSON *fi = args ? cJSON_GetObjectItemCaseSensitive(args, "file") : NULL;
+    cJSON *li = args ? cJSON_GetObjectItemCaseSensitive(args, "line") : NULL;
+    cJSON *bi = args ? cJSON_GetObjectItemCaseSensitive(args, "bank") : NULL;
+    if ((ai != NULL) == (fi != NULL || li != NULL)) {
+        send_dap_error_response(seq, cmd, "give 'address', or 'file' and 'line'");
+        return 0;
+    }
+    int bank = -1;
+    if (bi && !cJSON_IsNull(bi)) {
+        if (!cJSON_IsNumber(bi) || bi->valuedouble < 0 || bi->valuedouble > 255 ||
+            bi->valuedouble != (int)bi->valuedouble) {
+            send_dap_error_response(seq, cmd, "'bank' must be a whole number from 0 to 255");
+            return 0;
+        }
+        bank = (int)bi->valuedouble;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *arr  = cJSON_CreateArray();
+    cJSON_AddItemToObject(body, "locations", arr);
+
+    if (ai) {
+        uint32_t addr = 0;
+        bool is_vram = false, ok;
+        if (cJSON_IsNumber(ai)) {
+            ok = ai->valuedouble >= 0 && ai->valuedouble <= 0xFFFF &&
+                 ai->valuedouble == (int)ai->valuedouble;
+            if (ok) addr = (uint32_t)ai->valuedouble;
+        } else {
+            ok = cJSON_IsString(ai) && dap_parse_mem_ref(ai->valuestring, &is_vram, &addr) &&
+                 !is_vram && addr <= 0xFFFF;
+        }
+        if (!ok) {
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, "'address' must be a CPU address from $0000 to $FFFF");
+            return 0;
+        }
+        const int ram_bank = bank >= 0 ? bank : (int)memory_get_ram_bank();
+        const char *file = NULL;
+        int line = 0;
+        const dbg_bank_result_t how = dbg_info_addr_to_source_banked_ex(addr, ram_bank, &file, &line);
+        if (how != DBG_BANK_NO_MATCH && file) {
+            const bool banked = addr >= 0xA000 && addr < 0xC000;
+            cJSON *o = source_location_item(addr, banked ? ram_bank : -1, file, line);
+            cJSON_AddBoolToObject(o, "bankKnown", how == DBG_BANK_RESOLVED);
+            cJSON_AddItemToArray(arr, o);
+        }
+    } else {
+        if (!fi || !cJSON_IsString(fi) || !fi->valuestring[0] || !li || !cJSON_IsNumber(li) ||
+            li->valuedouble < 0 || li->valuedouble > 0x7FFFFFF0 ||
+            li->valuedouble != (int)li->valuedouble) {
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, "'file' and 'line' go together");
+            return 0;
+        }
+        char local[1024];
+        caller_path_in(fi->valuestring, local, sizeof local);
+        const int line = caller_line_in((int)li->valuedouble);
+
+        const char *names[SOURCE_NAMES_MAX];
+        const int matched = dbg_info_find_source(local, names, SOURCE_NAMES_MAX);
+        if (matched > 1) {
+            char why[256];
+            source_ambiguous(why, sizeof why, names, matched);
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, why);
+            return 0;
+        }
+        if (matched == 1) {
+            dbg_line_hit_t hits[SOURCE_HITS_MAX];
+            const int total = dbg_info_line_addrs(names[0], line, hits, SOURCE_HITS_MAX);
+            const int have  = total < SOURCE_HITS_MAX ? total : SOURCE_HITS_MAX;
+            // A bank picks the segments known to be there, or failing that the
+            // ones not known to be anywhere. Those then name one place each.
+            bool exact = false;
+            for (int i = 0; i < have; i++)
+                exact = exact || (bank >= 0 && hits[i].ram_bank == bank);
+            for (int i = 0; i < have; i++) {
+                if (bank >= 0 && hits[i].ram_bank != (exact ? bank : -1)) continue;
+                bool repeated = false;
+                for (int j = 0; bank >= 0 && j < i && !repeated; j++)
+                    repeated = hits[j].addr == hits[i].addr &&
+                               hits[j].ram_bank == (exact ? bank : -1);
+                if (repeated) continue;
+                cJSON *o = source_location_item(hits[i].addr, hits[i].ram_bank, hits[i].file, line);
+                if (hits[i].segment) cJSON_AddStringToObject(o, "segment", hits[i].segment);
+                cJSON_AddItemToArray(arr, o);
+            }
+            if (total > SOURCE_HITS_MAX) cJSON_AddBoolToObject(body, "truncated", true);
+        }
+    }
+    send_dap_response(seq, cmd, true, body);
     return 0;
 }
 
@@ -6083,6 +6221,106 @@ static bool caller_read_path(const char *request, char *out, size_t out_size,
         roots[count++] = prg_folder;
     }
     return host_read_path(roots, count, request, out, out_size, err, errn);
+}
+
+// ─── read_source ────────────────────────────────────────────────────
+//
+// The name must be one the debug info holds, but that does not make it safe: a
+// client can write a .dbg with dump_memory. So each place the Source window would
+// look is judged by the read rule, and only one inside it is opened.
+
+#define MCP_SOURCE_MAX (4u * 1024 * 1024)
+
+static int handle_mcp_read_source(int seq, cJSON *args) {
+    static const char cmd[] = "mcp/readSource";
+    // The same words for missing and refused, so that this cannot be used to
+    // learn what exists outside the folders a client may read.
+    static const char unavailable[] = "that source file is not in the folders a client may read";
+
+    cJSON *fi = cJSON_GetObjectItemCaseSensitive(args, "file");
+    cJSON *si = cJSON_GetObjectItemCaseSensitive(args, "startLine");
+    cJSON *ci = cJSON_GetObjectItemCaseSensitive(args, "lineCount");
+    if (!fi || !cJSON_IsString(fi) || !fi->valuestring[0]) {
+        send_dap_error_response(seq, cmd, "'file' is required");
+        return 0;
+    }
+    const int start = cJSON_IsNumber(si) ? (int)si->valuedouble : 1;
+    const int count = cJSON_IsNumber(ci) ? (int)ci->valuedouble : 200;
+
+    const char *names[SOURCE_NAMES_MAX];
+    const int matched = dbg_info_find_source(fi->valuestring, names, SOURCE_NAMES_MAX);
+    if (!matched) {
+        send_dap_error_response(seq, cmd, "that file is not in the loaded debug info");
+        return 0;
+    }
+    if (matched > 1) {
+        char why[256];
+        source_ambiguous(why, sizeof why, names, matched);
+        send_dap_error_response(seq, cmd, why);
+        return 0;
+    }
+
+    char candidate[4096], full[4200], resolved[4200], why[200];
+    bool readable = false;
+    for (int i = 0; !readable && source_view_candidate(i, names[0], candidate, sizeof candidate); i++) {
+        if (candidate[0] && host_path_from_cwd(candidate, full, sizeof full))
+            readable = caller_read_path(full, resolved, sizeof resolved, why, sizeof why);
+    }
+    SDL_RWops *rw = readable ? SDL_RWFromFile(resolved, "rb") : NULL;
+    if (!rw) {
+        send_dap_error_response(seq, cmd, unavailable);
+        return 0;
+    }
+    const Sint64 size = SDL_RWsize(rw);
+    if (size < 0) {
+        SDL_RWclose(rw);
+        send_dap_error_response(seq, cmd, unavailable);
+        return 0;
+    }
+    if ((uint64_t)size > MCP_SOURCE_MAX) {
+        SDL_RWclose(rw);
+        send_dap_error_response(seq, cmd, "that source file is larger than 4 MiB");
+        return 0;
+    }
+    char *text = (char *)malloc((size_t)size + 1);
+    if (!text) {
+        SDL_RWclose(rw);
+        send_dap_error_response(seq, cmd, "out of memory");
+        return 0;
+    }
+    const size_t got = SDL_RWread(rw, text, 1, (size_t)size);
+    SDL_RWclose(rw);
+    text[got] = '\0';
+    // A JSON string built from this stops at NUL. 0xFF is never valid UTF-8, so
+    // the reply shows it as U+FFFD like any other byte that is not text.
+    for (size_t i = 0; i < got; i++)
+        if (!text[i]) text[i] = (char)0xFF;
+
+    cJSON *lines = cJSON_CreateArray();
+    int total = 0;
+    for (char *p = text, *end = text + got; p < end; ) {
+        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+        char *stop = nl ? nl : end;
+        total++;
+        if (total >= start && total - start < count) {
+            size_t len = (size_t)(stop - p);
+            if (len && p[len - 1] == '\r') len--;
+            const char kept = p[len];
+            p[len] = '\0';
+            cJSON_AddItemToArray(lines, cJSON_CreateString(p));
+            p[len] = kept;
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(text);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "file", names[0]);
+    cJSON_AddNumberToObject(body, "startLine", start);
+    cJSON_AddNumberToObject(body, "totalLines", total);
+    cJSON_AddItemToObject(body, "lines", lines);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
 }
 
 static int handle_x16_load_symbols(int seq, cJSON *args) {
@@ -6595,6 +6833,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "threads"))       result = handle_dap_threads(seq);
     else if (!strcmp(cmd, "stackTrace"))    result = handle_dap_stack_trace(seq, args);
     else if (!strcmp(cmd, "x16/callStack")) result = handle_x16_call_stack(seq, args);
+    else if (!strcmp(cmd, "x16/sourceLocation")) result = handle_x16_source_location(seq, args);
     else if (!strcmp(cmd, "scopes"))        result = handle_dap_scopes(seq, args);
     else if (!strcmp(cmd, "variables"))     result = handle_dap_variables(seq, args);
     else if (!strcmp(cmd, "setBreakpoints"))result = handle_dap_set_breakpoints(seq, args);
@@ -6661,6 +6900,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
         result = handle_mcp_set_breakpoint(seq, args);
     else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/removeBreakpoint"))
         result = handle_mcp_remove_breakpoint(seq, args);
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/readSource"))
+        result = handle_mcp_read_source(seq, args);
     else {
         fprintf(stderr, "[dap] Unhandled command: %s\n", cmd);
         send_dap_error_response(seq, cmd, "command not supported");
@@ -6715,6 +6956,7 @@ static const char *const callable_commands[] = {
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
+    "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
 };
 

@@ -6,6 +6,7 @@
 #define _SOURCE_VIEW_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +51,12 @@ void source_view_retry_missing(void);
 // reading or caching it. The cache holds only a few files, so a caller that
 // checks many (a list of every file in the debug info) must use this instead.
 bool source_view_can_find(const char *name);
+
+// The paths to try for `name`, as text only: nothing is opened. source_view_get()'s
+// order, except that a relative name with folders is first tried whole under each
+// search folder, so that a/main.s is not taken for b/main.s. False past the last.
+// `out` is empty for one too long to fit.
+bool source_view_candidate(int index, const char *name, char *out, size_t n);
 
 // Look for a file named like `name` (its last path component, compared without
 // regard to case) anywhere under `root`, and write the folder that holds it to

@@ -314,17 +314,21 @@ static void rpc_send(cJSON *msg) {
     char *printed = cJSON_PrintUnformatted(msg);
     cJSON_Delete(msg);
     if (!printed) return;
-    const size_t len = strlen(printed);
+    size_t len = strlen(printed);
+    char *repaired = debug_server_utf8_repaired(printed, len, &len);
+    const char *body = repaired ? repaired : printed;
     if (http_mode) {
-        http_answer(printed, len);
+        http_answer(body, len);
+        free(repaired);
         cJSON_free(printed);
         return;
     }
     char *text = (char *)malloc(len + 2);
     if (text) {
-        memcpy(text, printed, len + 1);
+        memcpy(text, body, len + 1);
         out_send(text);
     }
+    free(repaired);
     cJSON_free(printed);
 }
 
@@ -1150,12 +1154,90 @@ static cJSON *tool_write_memory(cJSON *args) {
 
 // ─── Breakpoints ────────────────────────────────────────────────────
 
+// The one place a source line generated code, as a breakpoint address. A line
+// with code in several places is refused rather than guessed: two segments at
+// $A000 are different banks even before a LOAD has shown which.
+static bool source_line_ref(cJSON *args, bool vram, char *ref, size_t ref_n, int *sym_bank,
+                            char *file, size_t file_n, int *line, char *err, size_t errn) {
+    cJSON *f = cJSON_GetObjectItemCaseSensitive(args, "file");
+    cJSON *k = cJSON_GetObjectItemCaseSensitive(args, "kind");
+    if (cJSON_HasObjectItem(args, "address")) {
+        snprintf(err, errn, "give 'address', or 'file' and 'line', not both");
+        return false;
+    }
+    if (vram || (k && (!cJSON_IsString(k) || strcmp(k->valuestring, "exec")))) {
+        snprintf(err, errn, "'file' and 'line' name code, so they set an exec breakpoint in CPU memory");
+        return false;
+    }
+    if (!f || !cJSON_IsString(f) || !f->valuestring[0] || !cJSON_HasObjectItem(args, "line")) {
+        snprintf(err, errn, "'file' and 'line' go together");
+        return false;
+    }
+    int bank;
+    if (!arg_int(args, "line", 0, 1, 0x7FFFFFF0, line, err, errn) ||
+        !arg_int(args, "bank", -1, 0, 255, &bank, err, errn))
+        return false;
+
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "file", f->valuestring);
+    cJSON_AddNumberToObject(call, "line", *line);
+    if (bank >= 0) cJSON_AddNumberToObject(call, "bank", bank);
+    dbg_reply_t r;
+    debug_server_call("x16/sourceLocation", call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        snprintf(err, errn, "%s", r.message);
+        return false;
+    }
+    cJSON *hits = cJSON_GetObjectItemCaseSensitive(r.body, "locations");
+    const int count = cJSON_GetArraySize(hits);
+    if (count != 1) {
+        if (!count) {
+            snprintf(err, errn, "no code at %s:%d", f->valuestring, *line);
+        } else {
+            size_t o = (size_t)snprintf(err, errn, "%s:%d has code in %d places:",
+                                        f->valuestring, *line, count);
+            for (int i = 0; i < count && o < errn; i++) {
+                cJSON *h = cJSON_GetArrayItem(hits, i);
+                cJSON *a = cJSON_GetObjectItemCaseSensitive(h, "address");
+                cJSON *b = cJSON_GetObjectItemCaseSensitive(h, "bank");
+                cJSON *s = cJSON_GetObjectItemCaseSensitive(h, "segment");
+                o += (size_t)snprintf(err + o, errn - o, "%s $%04X", i ? "," : "",
+                                      a ? (unsigned)a->valuedouble : 0u);
+                if (o < errn && cJSON_IsString(s))
+                    o += (size_t)snprintf(err + o, errn - o, " in %s", s->valuestring);
+                if (o < errn && cJSON_IsNumber(b))
+                    o += (size_t)snprintf(err + o, errn - o, " bank %d", (int)b->valuedouble);
+            }
+            if (o < errn) snprintf(err + o, errn - o, ". Give 'bank', or the address.");
+        }
+        cJSON_Delete(r.body);
+        return false;
+    }
+    cJSON *h = cJSON_GetArrayItem(hits, 0);
+    cJSON *a = cJSON_GetObjectItemCaseSensitive(h, "address");
+    cJSON *b = cJSON_GetObjectItemCaseSensitive(h, "bank");
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(h, "file");
+    snprintf(ref, ref_n, "0x%X", a ? (unsigned)a->valuedouble : 0u);
+    *sym_bank = cJSON_IsNumber(b) ? (int)b->valuedouble : -1;
+    snprintf(file, file_n, "%s", cJSON_IsString(n) ? n->valuestring : f->valuestring);
+    cJSON_Delete(r.body);
+    return true;
+}
+
 static cJSON *breakpoint_call(const char *command, cJSON *args) {
-    char err[200], ref[48];
+    char err[512], ref[48], where[512] = "";
     bool vram = false;
-    int sym_bank;
-    if (!arg_space(args, &vram, err, sizeof err) ||
-        !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err))
+    int sym_bank, where_line = 0;
+    const bool by_line = cJSON_HasObjectItem(args, "file") || cJSON_HasObjectItem(args, "line");
+    if (!by_line && !cJSON_HasObjectItem(args, "address"))
+        return tool_fail("give 'address', or 'file' and 'line'");
+    if (!arg_space(args, &vram, err, sizeof err))
+        return tool_fail(err);
+    if (by_line ? !source_line_ref(args, vram, ref, sizeof ref, &sym_bank, where, sizeof where,
+                                   &where_line, err, sizeof err)
+                : !arg_address_bank(args, vram, ref, sizeof ref, &sym_bank, err, sizeof err))
         return tool_fail(err);
 
     cJSON *ki = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
@@ -1205,7 +1287,12 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
         cJSON_Delete(r.body);
         return tool_fail(r.message);
     }
-    return tool_ok(r.body ? r.body : cJSON_CreateObject(), NULL);
+    cJSON *body = r.body ? r.body : cJSON_CreateObject();
+    if (by_line) {
+        cJSON_AddStringToObject(body, "file", where);
+        cJSON_AddNumberToObject(body, "line", where_line);
+    }
+    return tool_ok(body, NULL);
 }
 
 static cJSON *tool_set_breakpoint(cJSON *args) {
@@ -1235,6 +1322,62 @@ static cJSON *tool_load_symbols(cJSON *args) {
 
 static cJSON *tool_lookup_symbol(cJSON *args) {
     return tool_forward("x16/lookupSymbol", args);
+}
+
+static cJSON *tool_list_sources(cJSON *args) {
+    (void)args;
+    return tool_passthrough("loadedSources");
+}
+
+static cJSON *tool_read_source(cJSON *args) {
+    char err[200];
+    int start, count;
+    cJSON *f = args ? cJSON_GetObjectItemCaseSensitive(args, "file") : NULL;
+    if (!f || !cJSON_IsString(f) || !f->valuestring[0])
+        return tool_fail("'file' is required: a name from list_sources");
+    if (!arg_int(args, "startLine", 1, 1, 0x7FFFFFF0, &start, err, sizeof err) ||
+        !arg_int(args, "lineCount", 200, 1, 2000, &count, err, sizeof err))
+        return tool_fail(err);
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "file", f->valuestring);
+    cJSON_AddNumberToObject(call, "startLine", start);
+    cJSON_AddNumberToObject(call, "lineCount", count);
+    cJSON *result = tool_forward("mcp/readSource", call);
+    cJSON_Delete(call);
+    return result;
+}
+
+static cJSON *tool_source_location(cJSON *args) {
+    char err[200], ref[48];
+    int bank, line = 0, sym_bank = -1;
+    cJSON *f = args ? cJSON_GetObjectItemCaseSensitive(args, "file") : NULL;
+    const bool has_address = cJSON_HasObjectItem(args, "address");
+    const bool has_line    = cJSON_HasObjectItem(args, "line");
+    if (has_address == (f != NULL || has_line))
+        return tool_fail("give 'address', or 'file' and 'line'");
+    if (!arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
+        return tool_fail(err);
+    if (has_address) {
+        if (!arg_address_bank(args, false, ref, sizeof ref, &sym_bank, err, sizeof err))
+            return tool_fail(err);
+    } else {
+        if (!f || !cJSON_IsString(f) || !f->valuestring[0] || !has_line)
+            return tool_fail("'file' and 'line' go together");
+        if (!arg_int(args, "line", 0, 1, 0x7FFFFFF0, &line, err, sizeof err))
+            return tool_fail(err);
+    }
+    cJSON *call = cJSON_CreateObject();
+    if (has_address) {
+        cJSON_AddStringToObject(call, "address", ref);
+    } else {
+        cJSON_AddStringToObject(call, "file", f->valuestring);
+        cJSON_AddNumberToObject(call, "line", line);
+    }
+    if (bank < 0) bank = sym_bank;
+    if (bank >= 0) cJSON_AddNumberToObject(call, "bank", bank);
+    cJSON *result = tool_forward("x16/sourceLocation", call);
+    cJSON_Delete(call);
+    return result;
 }
 
 static cJSON *tool_list_symbols(cJSON *args) {
@@ -1560,7 +1703,10 @@ static const mcp_tool_t tools[] = {
       TOOL_READ, tool_get_stack },
     { "set_breakpoint",
       "Stop when code runs at a CPU address (kind \"exec\"), or when it is written (\"write\"), "
-      "read (\"read\") or either (\"access\"), with an optional length. A read watch ignores "
+      "read (\"read\") or either (\"access\"), with an optional length. Instead of 'address', "
+      "'file' and 'line' set an exec breakpoint on a source line, and a line with code in "
+      "several places is refused until 'bank' picks one. "
+      "A read watch ignores "
       "bytes fetched as instructions unless excludeFetch is false. For exec, 'bank' pins a RAM or ROM bank, "
       "'condition' is e.g. \"A == $05\" or \"byte[$1234] != 0\", and hitCondition \"N\" "
       "stops from the Nth hit on. For a watch, 'condition' filters the byte moved, e.g. "
@@ -1575,18 +1721,23 @@ static const mcp_tool_t tools[] = {
       "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
       "\"length\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
       "\"condition\":{\"type\":\"string\"},"
-      "\"hitCondition\":{\"type\":\"string\"}"
-      "},\"required\":[\"address\"],\"additionalProperties\":false}",
+      "\"hitCondition\":{\"type\":\"string\"},"
+      "\"file\":{\"type\":\"string\"},"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1}"
+      "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_set_breakpoint },
     { "remove_breakpoint",
-      "Remove a breakpoint or watch this client set. One another client or the command "
-      "line also holds at that address stays armed, and stillArmed says so.",
+      "Remove a breakpoint or watch this client set, by 'address' or by 'file' and 'line'. "
+      "One another client or the command line also holds at that address stays armed, and "
+      "stillArmed says so.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
       "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\",\"read\",\"access\"],\"default\":\"exec\"},"
-      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
-      "},\"required\":[\"address\"],\"additionalProperties\":false}",
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"file\":{\"type\":\"string\"},"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1}"
+      "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_remove_breakpoint },
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
@@ -1617,6 +1768,33 @@ static const mcp_tool_t tools[] = {
       "\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000,\"default\":100}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_list_symbols },
+    { "list_sources",
+      "The source files named by the loaded debug info, including generated ones.",
+      NO_ARGS, TOOL_READ, tool_list_sources },
+    { "read_source",
+      "Lines of a source file from the loaded debug info. 'file' is a name from list_sources, "
+      "or enough of its path to pick one. The file must be inside -fsroot (the working folder "
+      "without one), the dump folder or the -prg folder, even if the debug info names it "
+      "elsewhere. Lines count from 1. Bytes that are not UTF-8 appear as U+FFFD.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"file\":{\"type\":\"string\"},"
+      "\"startLine\":{\"type\":\"integer\",\"minimum\":1,\"default\":1},"
+      "\"lineCount\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2000,\"default\":200}"
+      "},\"required\":[\"file\"],\"additionalProperties\":false}",
+      TOOL_READ, tool_read_source },
+    { "source_location",
+      "Map between code and source. With 'address' (a number, \"$C000\" or a symbol), the file "
+      "and line there; bankKnown is false when that line may belong to another bank at the same "
+      "address. With 'file' and 'line', every segment with code for that line, at its lowest "
+      "address, with bank null until a LOAD has shown it. 'bank' narrows either. An empty list "
+      "means no code.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"address\":{\"type\":[\"string\",\"number\"]},"
+      "\"file\":{\"type\":\"string\"},"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_source_location },
     { "type_text",
       "Type text into the keyboard buffer, as a paste does. \\Xnn is a raw PETSCII byte. "
       "The machine has to be running to read it.",

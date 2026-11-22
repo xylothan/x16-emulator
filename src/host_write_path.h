@@ -9,6 +9,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// `path` as the process would open it: a relative one joined to the working
+// folder, since host_read_path() would otherwise take it from its first root.
+// Nothing is opened. False if it does not fit.
+bool host_path_from_cwd(const char *path, char *out, size_t n);
+
 // Resolve `request`, relative to `root` unless absolute, into `out`. Its folder
 // must exist and lie inside `root`, which must exist and not be a drive root.
 // The file itself may not be a link. `*exists` says whether it is already there.

@@ -286,6 +286,31 @@ bool source_view_can_find(const char *name)
 	return file_exists(base);
 }
 
+bool source_view_candidate(int index, const char *name, char *out, size_t n)
+{
+	if (!name || !name[0] || !out || !n)
+		return false;
+	const char *base     = basename_ptr(name);
+	const bool  absolute = name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':');
+	const int   whole    = (base != name && !absolute) ? search_path_count : 0;
+	int         w;
+	if (index < 0)
+		return false;
+	if (index == 0)
+		w = snprintf(out, n, "%s", name);
+	else if (index <= whole)
+		w = snprintf(out, n, "%s/%s", search_paths[index - 1], name);
+	else if (index <= whole + search_path_count)
+		w = snprintf(out, n, "%s/%s", search_paths[index - whole - 1], base);
+	else if (index == whole + search_path_count + 1)
+		w = snprintf(out, n, "%s", base);
+	else
+		return false;
+	if (w < 0 || (size_t)w >= n)
+		out[0] = '\0';
+	return true;
+}
+
 static bool same_name(const char *a, const char *b)
 {
 	for (; *a && *b; a++, b++)

@@ -46,4 +46,9 @@ void debug_server_release_frontend(void);
 // machine is paused because a watch fired. Otherwise adds nothing.
 void debug_server_add_stop_info(cJSON *body);
 
+// A copy of `text` with each invalid UTF-8 byte replaced by U+FFFD, or NULL when
+// it is already valid. Free it with free(). File names and contents reach a
+// reply unchanged, and need not be UTF-8.
+char *debug_server_utf8_repaired(const char *text, size_t len, size_t *out_len);
+
 #endif

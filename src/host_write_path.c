@@ -17,6 +17,7 @@
 #define path_ncmp _strnicmp
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #define path_ncmp strncmp
 #endif
 
@@ -308,6 +309,29 @@ host_read_path(const char *const *roots, int root_count, const char *request, ch
 	}
 	snprintf(err, errn, "no such file in the folders a client may read (%s)", base);
 	return false;
+}
+
+bool
+host_path_from_cwd(const char *path, char *out, size_t n)
+{
+	int w;
+	if (is_absolute(path)) {
+		w = snprintf(out, n, "%s", path);
+	} else {
+		char cwd[NARROW_PATH_MAX];
+#ifdef _WIN32
+		wchar_t wide[WIDE_PATH_MAX];
+		const DWORD len = GetCurrentDirectoryW(WIDE_PATH_MAX, wide);
+		if (!len || len >= WIDE_PATH_MAX ||
+		    !WideCharToMultiByte(CP_UTF8, 0, wide, -1, cwd, (int)sizeof cwd, NULL, NULL))
+			return false;
+#else
+		if (!getcwd(cwd, sizeof cwd))
+			return false;
+#endif
+		w = snprintf(out, n, "%s/%s", cwd, path);
+	}
+	return w >= 0 && (size_t)w < n;
 }
 
 bool
