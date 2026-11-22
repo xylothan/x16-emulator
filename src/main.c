@@ -822,10 +822,13 @@ usage()
 	       DEBUG_SERVER_DEFAULT_PORT);
 	printf("\teditor can set breakpoints and step through source. The emulator\n");
 	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
-	printf("-mcp\n");
-	printf("\tServe the Model Context Protocol on stdin and stdout, so an agent can\n");
-	printf("\tlaunch the emulator and debug it. The emulator's own output moves\n");
-	printf("\tto stderr, and it exits when the client closes stdin.\n");
+	printf("-mcp [port]\n");
+	printf("\tServe the Model Context Protocol so an agent can debug the machine.\n");
+	printf("\tWith no port it uses stdin and stdout, for an agent that launches the\n");
+	printf("\temulator: its own output moves to stderr, and it exits when the\n");
+	printf("\tclient closes stdin. With a port it serves http://127.0.0.1:<port>/mcp\n");
+	printf("\tfor an agent attaching to a running emulator, and refuses requests\n");
+	printf("\tfrom web pages. After 10 idle minutes it releases what that agent set.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-seed <n>\n");
@@ -978,6 +981,10 @@ main(int argc, char **argv)
 #ifdef HAS_DAP
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-mcp")) {
+			// With a port it is HTTP, stdout stays as it was, and it starts
+			// with the other flags below.
+			if (i + 1 < argc && argv[i + 1][0] != '-')
+				break;
 			if (mcp_server_init_stdio() != 0) {
 				fprintf(stderr, "Failed to start the MCP server\n");
 				return 1;
@@ -1506,9 +1513,23 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 #ifdef HAS_DAP
-			// Started above. As with -debugport, this is the breakpoint machinery
-			// and deliberately not a local debugger UI.
+			// As with -debugport, this is the breakpoint machinery and
+			// deliberately not a local debugger UI.
 			debugger_enabled = true;
+			if (argc && argv[0][0] != '-') {
+				char *end = NULL;
+				const long port = strtol(argv[0], &end, 10);
+				if (end == argv[0] || *end || port < 1 || port > 65535) {
+					fprintf(stderr, "-mcp takes a port number from 1 to 65535\n");
+					return 1;
+				}
+				if (mcp_server_init_http((int)port) != 0) {
+					fprintf(stderr, "Failed to start the MCP server on port %ld\n", port);
+					return 1;
+				}
+				argc--;
+				argv++;
+			}
 #else
 			fprintf(stderr, "-mcp requires a build with the DAP server "
 			                "(cJSON was not available at configure time)\n");
