@@ -228,12 +228,15 @@ class Dap:
 class Emu:
     """kind is "launch", "attach", or None for a session that sent neither."""
 
-    def __init__(self, kind="attach", extra=(), handshake=True, warp=True, kind_args=None):
+    def __init__(self, kind="attach", extra=(), handshake=True, warp=True, kind_args=None, files=None):
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         self.port = probe.getsockname()[1]
         probe.close()
         self.dir = tempfile.TemporaryDirectory()
+        for name, text in (files or {}).items():
+            with open(os.path.join(self.dir.name, name), "w", newline="\n") as f:
+                f.write(text)
         cmd = [EXE, "-rom", ROM, "-debugport", str(self.port), "-hidden", "-zeroram"]
         if warp:
             cmd.append("-warp")
@@ -922,6 +925,205 @@ def test_instruction_stop():
         case("the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [bp_id], str(ev))
 
 
+FLAG = 0x1000
+CBINV = 0x0316      # KERNAL's BRK vector in RAM
+
+
+def wait_booted(d):
+    end = time.time() + 20
+    while time.time() < end and d.status().get("frame", 0) < 200:
+        time.sleep(0.05)
+
+
+def plant_brk(d):
+    # BRK at $0810. The KERNAL's BRK path lands in a loop at $0820 that sets a flag.
+    d.pause()
+    put_mem(d, CBINV, [0x20, 0x08])
+    put_mem(d, 0x0810, [0x00, 0x00])
+    put_mem(d, 0x0820, [0xA9, 0x01, 0x8D, 0x00, 0x10, 0x4C, 0x20, 0x08])
+    put_mem(d, FLAG, [0])
+    set_reg(d, "P (Status)", "$24")
+    set_reg(d, "PC", "$0810")
+
+
+def plant_stp(d):
+    # STP at $0810, then a loop that sets a flag.
+    d.pause()
+    put_mem(d, 0x0810, [0xDB, 0xA9, 0x01, 0x8D, 0x00, 0x10, 0x4C, 0x11, 0x08])
+    put_mem(d, FLAG, [0])
+    set_reg(d, "P (Status)", "$24")
+    set_reg(d, "PC", "$0810")
+
+
+def runs_on(d):
+    start = len(d.msgs)
+    d.req("continue", {"threadId": 1})
+    stopped = d.wait_event("stopped", start, 0.6)
+    running = not d.status().get("paused")
+    d.pause()
+    return stopped is None and running and get_byte(d, FLAG) == 1
+
+
+def test_exception_stops():
+    print("exception stops")
+    with Emu(kind=None, handshake=False) as e:
+        d = e.d
+        caps = d.req("initialize", {"adapterID": "conformance", "linesStartAt1": True,
+                                    "columnsStartAt1": True, "pathFormat": "path"})["body"]
+        filters = caps.get("exceptionBreakpointFilters", [])
+        case("four filters", [f.get("filter") for f in filters] == ["irq", "nmi", "brk", "stp"], str(filters))
+        case("all off by default", all(f.get("default") is False for f in filters), str(filters))
+        case("exceptionInfo advertised", caps.get("supportsExceptionInfoRequest") is True)
+        d.req("attach", {})
+        d.req("configurationDone")
+        wait_booted(d)
+
+        r = d.req("exceptionInfo", {"threadId": 1})
+        case("exceptionInfo needs an exception stop", r and r.get("success") is False, str(r))
+
+        r = d.req("setExceptionBreakpoints", {"filters": ["brk", "nope", 5]})
+        b = (r or {}).get("body", {}).get("breakpoints", [])
+        case("one result per filter", len(b) == 3, str(b))
+        case("a known filter is verified", len(b) == 3 and b[0].get("verified") is True, str(b))
+        case("an unknown name is not", len(b) == 3 and b[1].get("verified") is False and b[1].get("message"), str(b))
+        case("nor a non-string", len(b) == 3 and b[2].get("verified") is False, str(b))
+        r = d.req("setExceptionBreakpoints", {"filters": "brk"})
+        case("filters must be an array", r and r.get("success") is False, str(r))
+
+        plant_brk(d)
+        ev = go(d)
+        body = (ev or {}).get("body", {})
+        case("brk: reason", body.get("reason") == "exception", str(ev))
+        case("brk: text names it", "BRK at $0810" in body.get("text", ""), str(body))
+        case("brk: event carries the stop", body.get("stop", {}).get("kind") == "brk", str(body))
+        info = (d.req("exceptionInfo", {"threadId": 1}) or {}).get("body", {})
+        case("brk: exceptionId", info.get("exceptionId") == "brk", str(info))
+        case("brk: breakMode", info.get("breakMode") == "always", str(info))
+        case("brk: vector", info.get("vector") == 0xFFFE, str(info))
+        case("brk: address of the opcode", info.get("address") == 0x0810 and info.get("programBank") == 0, str(info))
+        case("brk: in the description", "$FFFE" in info.get("description", ""), str(info))
+        case("brk: stopped in the handler", not str(d.var("PC")).startswith("$0810"), str(d.var("PC")))
+        case("brk: resuming runs the handler, no second stop", runs_on(d))
+
+        d.req("setExceptionBreakpoints", {"filters": []})
+        plant_stp(d)
+        ev = go(d)
+        body = (ev or {}).get("body", {})
+        case("stp unarmed: still stops", bool(ev), str(ev))
+        case("stp unarmed: not an exception", body.get("reason") != "exception", str(body))
+        r = d.req("exceptionInfo", {"threadId": 1})
+        case("stp unarmed: no exceptionInfo", r and r.get("success") is False, str(r))
+        case("stp unarmed: PC past the opcode", str(d.var("PC")).startswith("$0811"), str(d.var("PC")))
+        case("stp unarmed: resumes", runs_on(d))
+
+        d.req("setExceptionBreakpoints", {"filters": ["stp"]})
+        plant_stp(d)
+        ev = go(d)
+        body = (ev or {}).get("body", {})
+        case("stp: reason", body.get("reason") == "exception", str(ev))
+        info = (d.req("exceptionInfo", {"threadId": 1}) or {}).get("body", {})
+        case("stp: exceptionId", info.get("exceptionId") == "stp", str(info))
+        case("stp: no vector", "vector" in info and info["vector"] is None, str(info))
+        case("stp: address", info.get("address") == 0x0810, str(info))
+        case("stp: PC past the opcode", str(d.var("PC")).startswith("$0811"), str(d.var("PC")))
+        case("stp: resuming runs on, no second stop", runs_on(d))
+
+        # ldx #$42 / ldy #3 / lda #0 / jsr i2c_write_byte / jmp *: the SMC raises an NMI.
+        d.req("setExceptionBreakpoints", {"filters": ["nmi"]})
+        d.pause()
+        put_mem(d, 0x0810, [0xA2, 0x42, 0xA0, 0x03, 0xA9, 0x00, 0x20, 0xC9, 0xFE, 0x4C, 0x19, 0x08])
+        set_reg(d, "P (Status)", "$24")
+        set_reg(d, "PC", "$0810")
+        ev = go(d, 5)
+        body = (ev or {}).get("body", {})
+        case("nmi: reason", body.get("reason") == "exception", str(ev))
+        info = (d.req("exceptionInfo", {"threadId": 1}) or {}).get("body", {})
+        case("nmi: exceptionId", info.get("exceptionId") == "nmi", str(info))
+        case("nmi: vector", info.get("vector") == 0xFFFA, str(info))
+
+        d.req("setExceptionBreakpoints", {"filters": ["irq"]})
+        set_reg(d, "P (Status)", "$20")
+        set_reg(d, "PC", "$0820")
+        ev = go(d, 10)
+        body = (ev or {}).get("body", {})
+        case("irq: reason", body.get("reason") == "exception", str(ev))
+        info = (d.req("exceptionInfo", {"threadId": 1}) or {}).get("body", {})
+        case("irq: exceptionId", info.get("exceptionId") == "irq", str(info))
+        case("irq: vector", info.get("vector") == 0xFFFE, str(info))
+        s = d.status().get("stop", {})
+        case("irq: in x16/status", s.get("kind") == "irq" and s.get("reason") == "exception", str(s))
+        d.req("restart")
+        r = d.req("exceptionInfo", {"threadId": 1})
+        case("a reset ends the exception", r and r.get("success") is False, str(r))
+        d.req("setExceptionBreakpoints", {"filters": []})
+        d.req("continue", {"threadId": 1})
+
+        d.req("setExceptionBreakpoints", {"filters": ["brk"]})
+        d.close()
+        time.sleep(0.3)
+        d2 = Dap(e.port)
+        e.d = d2
+        d2.req("initialize", {"adapterID": "conformance", "linesStartAt1": True,
+                              "columnsStartAt1": True, "pathFormat": "path"})
+        d2.req("attach", {})
+        d2.req("configurationDone")
+        wait_booted(d2)
+        plant_brk(d2)
+        case("a session's filters end with it", runs_on(d2))
+
+        d2.req("setExceptionBreakpoints", {"filters": ["brk"]})
+        plant_brk(d2)
+        case("brk stops again", (go(d2) or {}).get("body", {}).get("reason") == "exception")
+        d2.close()
+        time.sleep(0.3)
+        d3 = Dap(e.port)
+        e.d = d3
+        d3.req("initialize", {"adapterID": "conformance", "linesStartAt1": True,
+                              "columnsStartAt1": True, "pathFormat": "path"})
+        start = len(d3.msgs)
+        d3.req("launch", {"stopOnEntry": True})
+        d3.req("configurationDone")
+        ev = d3.wait_event("stopped", start)
+        body = (ev or {}).get("body", {})
+        case("a later stop is not the old exception", body.get("reason") == "entry" and "stop" not in body, str(ev))
+        r = d3.req("exceptionInfo", {"threadId": 1})
+        case("and has no exceptionInfo", r and r.get("success") is False, str(r))
+
+    with session({}, {"noDebug": True}) as e:
+        d = e.d
+        r = d.req("setExceptionBreakpoints", {"filters": ["brk"]})
+        b = (r or {}).get("body", {}).get("breakpoints", [])
+        case("noDebug arms no filter", len(b) == 1 and b[0].get("verified") is False, str(b))
+        wait_booted(d)
+        plant_brk(d)
+        case("and a BRK runs through", runs_on(d))
+
+
+def test_saved_interrupt_setting():
+    print("saved break-on-interrupt setting")
+    ini = "[X16Debugger][Prefs]\nBreakOnInterrupt=1\n"
+    with Emu(extra=["-imgui"], files={"imgui.ini": ini}) as e:
+        d = e.d
+        d.drain(0.5)   # configurationDone can report a stop after its response
+        ev = go(d, 12)
+        if not ev:
+            print("  SKIP no graphical debugger in this environment")
+            return
+        case("the saved setting stops the machine", ev["body"]["reason"] == "interrupt", str(ev))
+        case("empty filters are acknowledged",
+             (d.req("setExceptionBreakpoints", {"filters": []}) or {}).get("success") is True)
+        ev = go(d, 12)
+        case("empty filters leave the saved setting in force",
+             bool(ev) and ev["body"]["reason"] == "interrupt", str(ev))
+        d.req("setExceptionBreakpoints", {"filters": ["irq"]})
+        ev = go(d, 12)
+        case("a filter reports as an exception", bool(ev) and ev["body"]["reason"] == "exception", str(ev))
+        d.req("setExceptionBreakpoints", {"filters": []})
+        ev = go(d, 12)
+        case("clearing it returns to the saved setting",
+             bool(ev) and ev["body"]["reason"] == "interrupt", str(ev))
+
+
 def test_data_breakpoints():
     print("data breakpoints")
     with Emu() as e:
@@ -1196,6 +1398,7 @@ def main():
     for test in (test_evaluate_contexts, test_expressions, test_disconnect, test_terminate, test_dropped_socket,
                  test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
                  test_source_breakpoints, test_logpoints, test_function_breakpoints, test_instruction_stop,
+                 test_exception_stops, test_saved_interrupt_setting,
                  test_data_breakpoints, test_stack_frames, test_line_base, test_uri_paths,
                  test_no_debug, test_disassemble, test_read_memory, test_wire_format,
                  test_step_granularity):

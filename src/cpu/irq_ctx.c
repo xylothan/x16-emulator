@@ -37,12 +37,20 @@ static uint32_t         taken;
 static uint8_t          last_vector;
 bool                    cpu_irq_just_entered;
 
+// For the debugger only, and outside the save state.
+#define ENTERED_SLOTS 16
+static uint16_t entered_kinds;
+static uint32_t entered_from[ENTERED_SLOTS];
+static uint32_t resets;
+
 void
 cpu_irq_ctx_enter(int vector, uint32_t from_pc, uint16_t sp)
 {
 	taken++;
 	last_vector  = (uint8_t)vector;
 	cpu_irq_just_entered = true;
+	entered_kinds |= (uint16_t)(1u << ((unsigned)vector % ENTERED_SLOTS));
+	entered_from[(unsigned)vector % ENTERED_SLOTS] = from_pc;
 
 	// Retire frames the stack has already passed. Nesting drives the pointer
 	// DOWN, so open frames must be strictly decreasing in sp; one recorded at or
@@ -134,6 +142,8 @@ cpu_irq_ctx_reset(void)
 	taken        = 0;
 	last_vector  = 0;
 	cpu_irq_just_entered = false;
+	entered_kinds = 0;
+	resets++;
 	memset(frames, 0, sizeof(frames));
 }
 
@@ -175,7 +185,29 @@ cpu_irq_take_entered_flag(void)
 {
 	const bool v = cpu_irq_just_entered;
 	cpu_irq_just_entered = false;
+	entered_kinds = 0;
 	return v;
+}
+
+uint16_t
+cpu_irq_take_entered_kinds(void)
+{
+	const uint16_t kinds = cpu_irq_just_entered ? entered_kinds : 0;
+	cpu_irq_just_entered = false;
+	entered_kinds = 0;
+	return kinds;
+}
+
+uint32_t
+cpu_irq_entered_from(int vector)
+{
+	return entered_from[(unsigned)vector % ENTERED_SLOTS];
+}
+
+uint32_t
+cpu_irq_reset_count(void)
+{
+	return resets;
 }
 
 // ─── Save states ─────────────────────────────────────────────────────────────
@@ -237,4 +269,10 @@ irq_ctx_state_load(ss_reader *r)
 	last_vector          = ss_get_u8(r);
 	cpu_irq_just_entered = ss_get_bool(r);
 	ss_close(r);
+
+	entered_kinds = 0;
+	if (cpu_irq_just_entered) {
+		entered_kinds = (uint16_t)(1u << (last_vector % ENTERED_SLOTS));
+		entered_from[last_vector % ENTERED_SLOTS] = cpu_irq_return_pc();
+	}
 }

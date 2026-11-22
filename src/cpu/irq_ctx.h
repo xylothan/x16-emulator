@@ -79,6 +79,15 @@ uint32_t cpu_irq_return_pc(void);  // where the innermost handler returns to (24
 // work out whether it changed.
 bool cpu_irq_take_entered_flag(void);
 
+// The same, as a mask of (1 << vector) for every entry since the last take. One
+// instruction can enter two: a BRK, then an NMI before the next poll. Not saved;
+// a pending entry in a loaded state comes back as its last vector.
+uint16_t cpu_irq_take_entered_kinds(void);
+// The PC that the latest entry through this vector interrupted (24-bit).
+uint32_t cpu_irq_entered_from(int vector);
+// Resets so far, so a record taken before one can be told apart.
+uint32_t cpu_irq_reset_count(void);
+
 // ---- Control flow, for a profiler ------------------------------------------
 // When set, the core reports every call, return, interrupt entry and RTI.
 // NULL (the default) costs one load and branch at each of those, and nothing

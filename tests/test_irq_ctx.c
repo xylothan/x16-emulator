@@ -377,6 +377,32 @@ main(void)
 		check(cpu_irq_depth() == 0, "and the real return still closes it");
 	}
 
+	// ── Which kinds were entered ────────────────────────────────────────────
+	{
+		cpu_irq_ctx_reset();
+		check(cpu_irq_take_entered_kinds() == 0, "no kinds before an entry");
+
+		cpu_irq_ctx_enter(VEC_BRK, 0x1002, 0x01FD);
+		cpu_irq_ctx_enter(VEC_NMI, 0x8000, 0x01FA);
+		check(cpu_irq_entered_pending(), "kinds pending");
+		check(cpu_irq_entered_from(VEC_BRK) == 0x1002, "from: first entry's PC");
+		check(cpu_irq_entered_from(VEC_NMI) == 0x8000, "from: second entry's PC");
+		check(cpu_irq_take_entered_kinds() == ((1u << VEC_BRK) | (1u << VEC_NMI)),
+		      "both kinds reported");
+		check(!cpu_irq_entered_pending(), "taking kinds clears the flag");
+		check(cpu_irq_take_entered_kinds() == 0, "and reports them once");
+
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		check(cpu_irq_take_entered_flag(), "the flag still reports an entry");
+		check(cpu_irq_take_entered_kinds() == 0, "taking the flag clears the kinds");
+
+		const uint32_t before = cpu_irq_reset_count();
+		cpu_irq_ctx_enter(VEC_IRQ, 0x1000, 0x01FD);
+		cpu_irq_ctx_reset();
+		check(cpu_irq_reset_count() == before + 1, "resets are counted");
+		check(cpu_irq_take_entered_kinds() == 0, "a reset clears the kinds");
+	}
+
 	if (failures) {
 		printf("\nFAILED (%d failures)\n", failures);
 		return 1;

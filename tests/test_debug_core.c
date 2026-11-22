@@ -1790,6 +1790,46 @@ main(void)
 		reset_all();
 	}
 
+	// ---- Stop filters -----------------------------------------------------
+	{
+		check(debug_stop_filters() == 0, "stop: nothing armed by default");
+		check(debug_stop_on_entry(DEBUG_STOP_IRQ, false, false, false) == DEBUG_ENTRY_NO_STOP,
+		      "stop: an entry with nothing armed runs on");
+
+		debug_stop_filter_set(DEBUG_OWNER_DAP_SOURCE, DEBUG_STOP_IRQ);
+		debug_stop_filter_set(DEBUG_OWNER_MCP, DEBUG_STOP_BRK);
+		check(debug_stop_filters() == (DEBUG_STOP_IRQ | DEBUG_STOP_BRK), "stop: owners are ORed");
+		check(debug_stop_filter_get(DEBUG_OWNER_MCP) == DEBUG_STOP_BRK, "stop: each owner keeps its own");
+		check(debug_stop_on_entry(DEBUG_STOP_BRK, false, false, false) == DEBUG_ENTRY_EXCEPTION,
+		      "stop: an armed kind is an exception");
+		check(debug_stop_on_entry(DEBUG_STOP_NMI, false, false, false) == DEBUG_ENTRY_NO_STOP,
+		      "stop: an unarmed kind runs on");
+		check(debug_stop_on_entry(DEBUG_STOP_IRQ, true, false, false) == DEBUG_ENTRY_NO_STOP,
+		      "stop: an existing halt keeps its reason");
+		check(debug_stop_on_entry(DEBUG_STOP_IRQ, false, true, false) == DEBUG_ENTRY_EXCEPTION,
+		      "stop: a filter outranks the saved setting");
+
+		debug_stop_filter_set(DEBUG_OWNER_DAP_SOURCE, 0);
+		check(debug_stop_filters() == DEBUG_STOP_BRK, "stop: clearing one leaves the other");
+		debug_stop_filter_set(DEBUG_OWNER_MCP, 0);
+		check(debug_stop_filters() == 0, "stop: all released");
+
+		check(debug_stop_on_entry(DEBUG_STOP_IRQ, false, true, false) == DEBUG_ENTRY_INTERRUPT,
+		      "stop: empty filters leave the saved setting in force");
+		check(debug_stop_on_entry(1u << 0x4, false, true, false) == DEBUG_ENTRY_INTERRUPT,
+		      "stop: the saved setting covers COP");
+		check(debug_stop_on_entry(DEBUG_STOP_IRQ, false, false, true) == DEBUG_ENTRY_INTERRUPT,
+		      "stop: a followed step still stops");
+		check(debug_stop_on_entry(0, false, true, true) == DEBUG_ENTRY_NO_STOP,
+		      "stop: no entry, no stop");
+
+		debug_stop_filter_set(DEBUG_OWNER_COUNT, DEBUG_STOP_IRQ);
+		check(debug_stop_filters() == 0, "stop: an invalid owner is ignored");
+		debug_stop_filter_set(DEBUG_OWNER_MCP, 0xFFFF);
+		check(debug_stop_filter_get(DEBUG_OWNER_MCP) == DEBUG_STOP_ALL, "stop: unknown bits are dropped");
+		debug_stop_filter_set(DEBUG_OWNER_MCP, 0);
+	}
+
 	debug_core_free();
 
 	if (failures) {

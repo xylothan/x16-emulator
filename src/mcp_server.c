@@ -1393,6 +1393,15 @@ static cJSON *tool_evaluate(cJSON *args) {
     return tool_forward("mcp/evaluate", args);
 }
 
+static cJSON *tool_set_stop_on(cJSON *args) {
+    cJSON *f = args ? cJSON_GetObjectItemCaseSensitive(args, "filters") : NULL;
+    cJSON *call = cJSON_CreateObject();
+    if (f) cJSON_AddItemToObject(call, "filters", cJSON_Duplicate(f, 1));
+    cJSON *result = tool_forward("mcp/setStopOn", call);
+    cJSON_Delete(call);
+    return result;
+}
+
 static cJSON *tool_read_log(cJSON *args) {
     return tool_forward("x16/readLog", args);
 }
@@ -2029,6 +2038,18 @@ static const mcp_tool_t tools[] = {
       "\"line\":{\"type\":\"integer\",\"minimum\":1}"
       "},\"required\":[\"enabled\"],\"additionalProperties\":false}",
       TOOL_CONTROL, tool_enable_breakpoint },
+    { "set_stop_on",
+      "Stop when an interrupt or trap happens: any of irq, nmi, brk, stp. 'filters' replaces "
+      "this client's set, [] clears it, and leaving it out only reports. 'armed' is every "
+      "client's together. The set ends with the session. A stop has stopReason \"exception\" and "
+      "a 'stop' object with the kind, vector and address. irq, nmi and brk stop at the handler's "
+      "first instruction and stp just after the opcode, so resuming carries on from there and "
+      "does not stop on the same one again.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"filters\":{\"type\":\"array\",\"uniqueItems\":true,\"items\":{\"type\":\"string\","
+      "\"enum\":[\"irq\",\"nmi\",\"brk\",\"stp\"]}}"
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_stop_on },
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
       NO_ARGS, TOOL_READ, tool_list_breakpoints },

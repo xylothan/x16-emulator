@@ -4724,18 +4724,10 @@ stop6502(uint16_t address, uint8_t bank) {
 	if (testbench) {
 		printf("STP\n");
 		fflush(stdout);
-	} else if (debugger_enabled || imgui_debugger_enabled) {
-		// STP is the 6502-side "break into the debugger". Either debugger will
-		// do: with -imgui alone this used to fall through to the modal message
-		// box below, which blocks inside instruction dispatch and whose "Reset
-		// Machine" button resets the machine mid-instruction.
-		DEBUGBreakToDebugger();
-		// Store only. BreakToDebugger has already announced the stop to a DAP
-		// client if this was a transition; this just refines the reason the
-		// local UI shows, which is what the source view uses to decide whether
-		// to re-centre.
-		DEBUGSetStopReason("breakpoint");
-	} else {
+	} else if (!DEBUGBreakOnStp(address, bank, debugger_enabled || imgui_debugger_enabled)) {
+		// No debugger wants it. One that is up must never land here: this modal
+		// box blocks inside instruction dispatch, and its "Reset Machine" button
+		// resets the machine mid-instruction.
 		int return_btn;
 		char error_message[80];
 		const SDL_MessageBoxButtonData btns[2] = {
