@@ -51,7 +51,13 @@ struct ym_register_fields : ymfm::opm_registers {
 // Debugger mute: one bit per channel, applied only to what goes to the host.
 // File scope rather than per instance so the scratch chip used for scope
 // projections hears the same mix as the live one.
-static uint8_t s_mute_mask;
+static uint8_t s_mute_mask;                     // the debugger UI's own selection
+static uint8_t s_owner_mute[VOICE_MUTE_OWNERS]; // each debug client's
+static uint8_t s_effective_mute;                // all of them ORed
+
+static inline int16_t clamp_sample(int32_t v) {
+	return (int16_t)std::min(32767, std::max(-32768, v));
+}
 
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:
@@ -121,19 +127,24 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			return true;
 		}
 
-		void generate(int16_t* output, uint32_t numsamples) {
+		// `output` is the machine's mix of every channel; `host_output` the
+		// same without the muted ones.
+		void generate(int16_t* output, int16_t* host_output, uint32_t numsamples) {
 			int s = 0;
-			int ls, rs;
 			update_clocks(numsamples);
 			for (uint32_t i = 0; i < numsamples; i++) {
 				m_chip.generate(&opm_out);
-				apply_mute(opm_out);
-				ls = opm_out.data[0];
-				rs = opm_out.data[1];
-				if (ls < -32768) ls = -32768;
-				if (ls > 32767) ls = 32767;
-				if (rs < -32768) rs = -32768;
-				if (rs > 32767) rs = 32767;
+				const int16_t ls = clamp_sample(opm_out.data[0]);
+				const int16_t rs = clamp_sample(opm_out.data[1]);
+				int16_t hl = ls, hr = rs;
+				if (s_effective_mute != 0) {
+					ymfm::ym2151::output_data host = opm_out;
+					apply_mute(host);
+					hl = clamp_sample(host.data[0]);
+					hr = clamp_sample(host.data[1]);
+				}
+				host_output[s] = hl;
+				host_output[s + 1] = hr;
 				output[s++] = ls;
 				output[s++] = rs;
 				// Re-test per sample rather than hoisting: capture_sample()
@@ -141,7 +152,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				// hoisted test would keep decrementing past zero and wrap the
 				// unsigned counter — leaving capture armed forever.
 				if (m_scope_armed > 0) {
-					capture_sample((int16_t)ls, (int16_t)rs);
+					capture_sample(hl, hr);
 				}
 			}
 		}
@@ -179,6 +190,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		bool debug_busy() {
 			return ymfm_is_busy();
+		}
+
+		// $19 is one write address for two depths, split on bit 7, so only
+		// the chip knows both.
+		void debug_lfo_depths(uint8_t *am, uint8_t *pm) {
+			const ymfm::opm_registers &regs = m_chip.engine().regs();
+			*am = (uint8_t)regs.lfo_am_depth();
+			*pm = (uint8_t)regs.lfo_pm_depth();
 		}
 
 		// ─── Save states ────────────────────────────────────────────────
@@ -361,19 +380,19 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_keyon[value & 7] = slots;
 		}
 
-		// Replace `out` (just produced by generate()) with the mix minus the
-		// muted channels. generate() itself always runs every channel, and must:
-		// output() also computes each channel's operator-1 feedback input, which
-		// the next clock() consumes, so leaving a channel out of generate()
+		// Replace `out` (a copy of what generate() produced) with the mix minus
+		// the muted channels. generate() itself always runs every channel, and
+		// must: output() also computes each channel's operator-1 feedback input,
+		// which the next clock() consumes, so leaving a channel out of generate()
 		// would change how it sounds afterwards and what a save state holds.
 		// This second pass recomputes those same values from unchanged inputs
 		// (the argument sample_streams() below relies on too), so it changes
 		// nothing but the samples handed to the host.
 		void apply_mute(ymfm::ym2151::output_data &out) {
-			if (s_mute_mask == 0) {
+			if (s_effective_mute == 0) {
 				return;
 			}
-			m_chip.engine().output(out.clear(), 0, 32767, 0xffu & ~(uint32_t)s_mute_mask);
+			m_chip.engine().output(out.clear(), 0, 32767, 0xffu & ~(uint32_t)s_effective_mute);
 			out.roundtrip_fp();
 		}
 
@@ -437,8 +456,8 @@ extern "C" {
 		initialized = true;
 	}
 
-	void YM_stream_update(uint16_t* output, uint32_t numsamples) {
-		if (initialized) opm_iface.generate((int16_t*)output, numsamples);
+	void YM_stream_update(uint16_t* output, uint16_t* host_output, uint32_t numsamples) {
+		if (initialized) opm_iface.generate((int16_t*)output, (int16_t*)host_output, numsamples);
 	}
 
 	bool YM_write_reg(uint8_t reg, uint8_t val) {
@@ -493,12 +512,41 @@ extern "C" {
 		ss_close(r);
 	}
 
+	static void update_effective_mute() {
+		s_effective_mute = s_mute_mask | YM_debug_get_client_mute_mask();
+	}
+
 	void YM_debug_set_mute_mask(uint8_t mask) {
 		s_mute_mask = mask;
+		update_effective_mute();
 	}
 
 	uint8_t YM_debug_get_mute_mask() {
 		return s_mute_mask;
+	}
+
+	void YM_debug_set_owner_mute_mask(voice_mute_owner_t owner, uint8_t mask) {
+		if ((int)owner < 0 || owner >= VOICE_MUTE_OWNERS) return;
+		s_owner_mute[owner] = mask;
+		update_effective_mute();
+	}
+
+	uint8_t YM_debug_get_owner_mute_mask(voice_mute_owner_t owner) {
+		return ((int)owner < 0 || owner >= VOICE_MUTE_OWNERS) ? 0 : s_owner_mute[owner];
+	}
+
+	uint8_t YM_debug_get_client_mute_mask() {
+		uint8_t mask = 0;
+		for (uint8_t m : s_owner_mute) mask |= m;
+		return mask;
+	}
+
+	uint8_t YM_debug_get_effective_mute_mask() {
+		return s_effective_mute;
+	}
+
+	void YM_debug_get_lfo_depths(uint8_t *am, uint8_t *pm) {
+		opm_iface.debug_lfo_depths(am, pm);
 	}
 
 	bool YM_debug_is_busy() {

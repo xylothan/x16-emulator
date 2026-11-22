@@ -1572,6 +1572,14 @@ static cJSON *tool_search_memory(cJSON *args) {
     return tool_forward("x16/searchMemory", args);
 }
 
+static cJSON *tool_get_audio_state(cJSON *args) {
+    return tool_forward("x16/audio", args);
+}
+
+static cJSON *tool_set_voice_mute(cJSON *args) {
+    return tool_forward("x16/setVoiceMute", args);
+}
+
 static cJSON *tool_set_warp(cJSON *args) {
     return tool_forward("x16/setWarp", args);
 }
@@ -2273,6 +2281,29 @@ static const mcp_tool_t tools[] = {
       "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024,\"default\":64}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_search_memory },
+    { "get_audio_state",
+      "PSG, YM2151 and PCM state, read without changing anything: each voice's raw registers "
+      "('regs') beside what they decode to, under the names the debugger panels use. Pitches "
+      "are in Hz, timer periods in ms, and volumes as written with their table value. 'chip' "
+      "limits it to psg, ym or pcm. Phases, samples and the FIFO are as of the last time the "
+      "chips caught up with the CPU, which can trail it by a few milliseconds. 'mute' gives "
+      "each owner's mask (bit n is voice n): ui, dap, mcp, and effective, which is their OR.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"chip\":{\"type\":\"string\",\"enum\":[\"psg\",\"ym\",\"pcm\"]}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_audio_state },
+    { "set_voice_mute",
+      "Mute or unmute a voice on the host output, for this client only. 'voice' is 0-15 on "
+      "psg or 0-7 on ym; without it, the whole chip. The chip keeps playing the voice and the "
+      "machine does not change: it is only left out of what the speakers and a WAV recording "
+      "hear. The debugger UI's own mutes are not touched, and this client's end with its "
+      "session. PCM has no voices to mute.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"chip\":{\"type\":\"string\",\"enum\":[\"psg\",\"ym\"]},"
+      "\"voice\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":15},"
+      "\"muted\":{\"type\":\"boolean\"}"
+      "},\"required\":[\"chip\",\"muted\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_set_voice_mute },
     { "load_prg",
       "Place a .PRG in RAM while paused, at its 2-byte load address or 'address', and load "
       "the .dbg beside it. It only places the bytes: it does not run them or update BASIC's "

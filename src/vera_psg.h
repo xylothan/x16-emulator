@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "voice_mute.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -14,6 +16,9 @@ extern "C" {
 void psg_reset(void);
 void psg_writereg(uint8_t reg, uint8_t val);
 void psg_render(int16_t *buf, unsigned num_samples);
+// As psg_render(), which gives the machine's mix of every voice. `host_buf`, if
+// not NULL, also receives the mix without the muted voices, for the host.
+void psg_render_split(int16_t *buf, int16_t *host_buf, unsigned num_samples);
 
 // ─── Debugger accessors ─────────────────────────────────────────────────────
 // Read-only views of the PSG for the ImGui debugger's PSG panel. All of these
@@ -50,6 +55,10 @@ struct psg_debug_channel {
 // Returns false (and leaves *out untouched) for an out-of-range index.
 bool psg_debug_get_channel(int ch, struct psg_debug_channel *out);
 
+// The same snapshot without resetting `peak`, for readers other than the
+// meter that owns it.
+bool psg_debug_peek_channel(int ch, struct psg_debug_channel *out);
+
 // Raw register byte as last written. VERA also mirrors these into video_ram at
 // $1F9C0+reg, but that mirror survives psg_reset(), so prefer this shadow.
 uint8_t psg_debug_get_reg(uint8_t reg);
@@ -58,13 +67,20 @@ uint8_t psg_debug_get_reg(uint8_t reg);
 uint16_t psg_debug_get_noise_state(void);
 
 // Host-output mute, one bit per voice (bit n = voice n). A muted voice keeps
-// running exactly as it would otherwise and still feeds its level meter and its
-// own scope trace; it is only left out of the mixed output sent to the host
-// (and so out of the scope's mix streams and any WAV recording). It is a
-// debugger setting, not machine state: psg_reset() keeps it and save states
-// neither store nor restore it.
+// running exactly as it would otherwise, stays in the mix the machine holds, and
+// still feeds its level meter and its own scope trace; it is only left out of
+// the mixed output sent to the host (and so out of the scope's mix streams and
+// any WAV recording). It is a debugger setting, not machine state: psg_reset()
+// keeps it and save states neither store nor restore it.
+//
+// set/get_mute_mask are the debugger UI's own selection. Each debug client has
+// a separate mask; what is muted is the OR of them all.
 void     psg_debug_set_mute_mask(uint16_t mask);
 uint16_t psg_debug_get_mute_mask(void);
+void     psg_debug_set_owner_mute_mask(voice_mute_owner_t owner, uint16_t mask);
+uint16_t psg_debug_get_owner_mute_mask(voice_mute_owner_t owner);
+uint16_t psg_debug_get_client_mute_mask(void);    // every client's, ORed
+uint16_t psg_debug_get_effective_mute_mask(void); // UI and clients, ORed
 
 // ─── Scope capture ──────────────────────────────────────────────────────────
 // Self-arming per-voice sample capture backing the debugger's oscilloscope.

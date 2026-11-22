@@ -294,12 +294,15 @@ dbgui_audio_predicted_note(const char *what)
 // YM_debug_set_mute_mask); only what reaches the speakers changes.
 
 #define DBGUI_MUTE_COLOR IM_COL32(200, 60, 60, 255)
+// A voice muted by a debug client rather than from this panel.
+#define DBGUI_CLIENT_MUTE_COLOR IM_COL32(235, 165, 45, 255)
 
 // Speaker glyph in a `size` x `size` box at `p0`: a small box and a flared cone,
 // then either two sound-wave arcs (playing) or a slash through the whole glyph
 // (muted) - the usual volume / mute iconography, drawn so it needs no icon font.
 static inline void
-dbgui_draw_speaker(ImDrawList *dl, ImVec2 p0, float size, ImU32 col, bool muted)
+dbgui_draw_speaker(ImDrawList *dl, ImVec2 p0, float size, ImU32 col, bool muted,
+                   ImU32 slash = DBGUI_MUTE_COLOR)
 {
     const float s  = size;
     const float x  = p0.x + s * 0.10f;
@@ -321,21 +324,23 @@ dbgui_draw_speaker(ImDrawList *dl, ImVec2 p0, float size, ImU32 col, bool muted)
         const ImVec2 a(p0.x + s * 0.12f, p0.y + s * 0.12f);
         const ImVec2 b(p0.x + s * 0.88f, p0.y + s * 0.88f);
         dl->AddLine(a, b, IM_COL32(20, 20, 24, 255), th + 2.0f);
-        dl->AddLine(a, b, DBGUI_MUTE_COLOR, th + 0.4f);
+        dl->AddLine(a, b, slash, th + 0.4f);
     }
 }
 
 // Speaker toggle for a voice-table row: speaker with sound waves while audible,
-// speaker with a red slash while muted. Returns true when clicked; the caller
-// flips its bit. Rows with a SpanAllColumns selectable must create it with
-// ImGuiSelectableFlags_AllowOverlap and draw this afterwards, or the selectable
-// takes the click.
+// speaker with a red slash while muted here, an amber slash while only a debug
+// client mutes it, and a red slash with an amber dot for both. `muted` is this
+// panel's own selection, which is what a click changes. Returns true when
+// clicked; the caller flips its bit. Rows with a SpanAllColumns selectable must
+// create it with ImGuiSelectableFlags_AllowOverlap and draw this afterwards, or
+// the selectable takes the click.
 //
 // The ID is scoped under "mute" rather than pushed as the bare voice number:
 // TableHeadersRow() pushes each header's column index as its ID, so voice 0 in
 // column 0 would otherwise collide with that column's header.
 static inline bool
-dbgui_mute_button(int voice, bool muted)
+dbgui_mute_button(int voice, bool muted, bool client_muted = false)
 {
     ImGui::PushID("mute");
     ImGui::PushID(voice);
@@ -346,10 +351,18 @@ dbgui_mute_button(int voice, bool muted)
     if (ImGui::IsItemHovered()) {
         dl->AddRectFilled(p0, ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_ButtonHovered), 3.0f);
     }
-    const ImU32 col = muted ? IM_COL32(150, 150, 158, 255) : ImGui::GetColorU32(ImGuiCol_Text);
-    dbgui_draw_speaker(dl, p0, sz, col, muted);
-    ImGui::SetItemTooltip(muted ? "Muted on the host output; the chip still plays it.\nClick to unmute."
-                                : "Mute this voice on the host output.\nThe chip keeps playing it; only the speakers stop hearing it.");
+    const bool  silenced = muted || client_muted;
+    const ImU32 col = silenced ? IM_COL32(150, 150, 158, 255) : ImGui::GetColorU32(ImGuiCol_Text);
+    dbgui_draw_speaker(dl, p0, sz, col, silenced, muted ? DBGUI_MUTE_COLOR : DBGUI_CLIENT_MUTE_COLOR);
+    if (muted && client_muted) {
+        dl->AddCircleFilled(ImVec2(p0.x + sz * 0.84f, p0.y + sz * 0.18f), sz * 0.14f, DBGUI_CLIENT_MUTE_COLOR);
+    }
+    ImGui::SetItemTooltip(muted && client_muted
+                              ? "Muted here and by a debug client.\nClick to remove your mute; the client's lasts until its session ends."
+                          : muted ? "Muted on the host output; the chip still plays it.\nClick to unmute."
+                          : client_muted
+                              ? "Muted by a debug client, not from this panel.\nIt ends with that client's session. Click to mute it here as well."
+                              : "Mute this voice on the host output.\nThe chip keeps playing it; only the speakers stop hearing it.");
     ImGui::PopID();
     ImGui::PopID();
     return clicked;
@@ -359,19 +372,23 @@ dbgui_mute_button(int voice, bool muted)
 // and returns true on a right-click, which toggles mute (left-click already
 // selects the voice in both panels).
 static inline bool
-dbgui_scope_mute_toggle(bool muted)
+dbgui_scope_mute_toggle(bool muted, bool client_muted = false)
 {
     const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
-    if (muted) {
+    if (muted || client_muted) {
+        const ImU32  edge = muted ? DBGUI_MUTE_COLOR : DBGUI_CLIENT_MUTE_COLOR;
         const ImVec2 p0 = ImGui::GetItemRectMin();
         const ImVec2 p1 = ImGui::GetItemRectMax();
         ImDrawList  *dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p0, p1, IM_COL32(60, 10, 10, 90));
-        dl->AddRect(p0, p1, DBGUI_MUTE_COLOR, 0.0f, 0, 2.0f);
+        dl->AddRectFilled(p0, p1, muted ? IM_COL32(60, 10, 10, 90) : IM_COL32(60, 40, 5, 90));
+        dl->AddRect(p0, p1, edge, 0.0f, 0, 2.0f);
         const float sz = ImGui::GetTextLineHeight() + 2.0f;
-        dbgui_draw_speaker(dl, ImVec2(p1.x - sz - 3.0f, p0.y + 2.0f), sz, IM_COL32(200, 200, 208, 255), true);
+        dbgui_draw_speaker(dl, ImVec2(p1.x - sz - 3.0f, p0.y + 2.0f), sz, IM_COL32(200, 200, 208, 255), true, edge);
     }
-    ImGui::SetItemTooltip(muted ? "Right-click to unmute" : "Right-click to mute on the host output");
+    ImGui::SetItemTooltip(muted && client_muted ? "Right-click to remove your mute; a debug client's stays"
+                          : muted               ? "Right-click to unmute"
+                          : client_muted        ? "Muted by a debug client. Right-click to mute it here as well"
+                                                : "Right-click to mute on the host output");
     return clicked;
 }
 
@@ -383,12 +400,20 @@ dbgui_scope_mute_toggle(bool muted)
 // is drawn by the selectable OVER the row background, so a muted row that was
 // also the selected one showed as selected, not muted. While muted, the
 // selectable's own highlight colours turn red too, so the row reads as muted
-// in every state - plain, hovered and selected.
+// in every state - plain, hovered and selected. Amber when only a debug client
+// mutes the voice.
 static inline int
-dbgui_mute_row_begin(bool muted)
+dbgui_mute_row_begin(bool muted, bool client_muted = false)
 {
-    if (!muted) {
+    if (!muted && !client_muted) {
         return 0;
+    }
+    if (!muted) {
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(120, 85, 20, 90));
+        ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(170, 120, 35, 150));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(190, 135, 45, 170));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(210, 150, 50, 200));
+        return 3;
     }
     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(120, 30, 30, 90));
     ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(170, 45, 45, 150));
@@ -419,10 +444,30 @@ dbgui_unmute_all_button(unsigned mask)
     const bool clicked = ImGui::Button(label, ImVec2(w, 0.0f));
     ImGui::PopStyleVar();
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip(mask ? "Unmute every voice muted on the host output."
-                               : "Nothing is muted. Click a voice's speaker icon, or right-click\n"
-                                 "its scope trace, to mute it on the host output.");
+    ImGui::SetItemTooltip(mask ? "Unmute every voice muted from this panel.\n"
+                                 "A debug client's mutes stay until its session ends."
+                               : "Nothing is muted from this panel. Click a voice's speaker icon,\n"
+                                 "or right-click its scope trace, to mute it on the host output.");
     return clicked && mask != 0;
+}
+
+// How many voices debug clients are muting. ALWAYS DRAWN, at one width, beside
+// the "Unmute all" button, for the same reason that button is.
+static inline void
+dbgui_client_mute_note(unsigned client_mask)
+{
+    int n = 0;
+    for (unsigned m = client_mask; m; m &= m - 1) {
+        ++n;
+    }
+    ImGui::SameLine();
+    if (n > 0) {
+        ImGui::TextColored(ImColor(DBGUI_CLIENT_MUTE_COLOR), "Muted by a client: %2d", n);
+    } else {
+        ImGui::TextDisabled("Muted by a client: %2d", n);
+    }
+    ImGui::SetItemTooltip("Voices muted over DAP or MCP, shown in amber. They do not change your\n"
+                          "own selection and end when that client's session does.");
 }
 
 #endif // DEBUG_UI_SCOPE_H

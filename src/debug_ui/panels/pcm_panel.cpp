@@ -18,35 +18,22 @@
 #include "debug_ui_bridge.h"
 #include "debug_ui_scope.h"
 #include "debug_ui_widgets.h"
+#include "audio_decode.h"
 
 #include <stdint.h>
 #include <stdio.h>
 
 namespace {
 
-constexpr double PCM_AUDIO_CLOCK = 25000000.0 / 512.0;
 constexpr int    MAX_FIFO_BYTES  = PCM_FIFO_SIZE;
 constexpr int    MAX_FIFO_FRAMES = PCM_FIFO_SIZE;
 
-const uint8_t VOLUME_LUT[16] = {0, 1, 2, 3, 4, 5, 6, 8, 11, 14, 18, 23, 30, 38, 49, 64};
-
-struct PcmFormat {
-    const char *name;
-    int         bytes_per_frame;
-    bool        stereo;
-    bool        bits16;
-};
+using PcmFormat = audio_pcm_format;
 
 PcmFormat
 pcm_format(uint8_t ctrl)
 {
-    static const PcmFormat formats[4] = {
-        {"mono 8-bit", 1, false, false},
-        {"stereo 8-bit", 2, true, false},
-        {"mono 16-bit", 2, false, true},
-        {"stereo 16-bit", 4, true, true},
-    };
-    return formats[(ctrl >> 4) & 3];
+    return audio_pcm_format_decode(ctrl);
 }
 
 int16_t
@@ -82,18 +69,16 @@ sample_level(int16_t v)
     return (float)mag / 32768.0f;
 }
 
-// The rate accumulator is 8 bits and a sample fires when its bit 7 flips, so
-// rate r and 256 - r fire equally often. 128 is the fastest.
 unsigned
 effective_rate_step(uint8_t rate)
 {
-    return (rate > 128) ? 256u - rate : rate;
+    return audio_pcm_rate_step(rate);
 }
 
 double
 effective_rate_hz(uint8_t rate)
 {
-    return PCM_AUDIO_CLOCK * (double)effective_rate_step(rate) / 128.0;
+    return audio_pcm_rate_hz(rate);
 }
 
 void
@@ -122,8 +107,8 @@ draw_status_tab()
     text_ctrl_value(s.ctrl);
     ImGui::Text("Format: %s  (%d byte%s/frame)", fmt.name, fmt.bytes_per_frame,
                 fmt.bytes_per_frame == 1 ? "" : "s");
-    ImGui::Text("Volume: %d  LUT=%u/64  linear %.4f", volume, (unsigned)VOLUME_LUT[volume],
-                (double)VOLUME_LUT[volume] / 64.0);
+    ImGui::Text("Volume: %d  LUT=%u/64  linear %.4f", volume, (unsigned)audio_pcm_volume_lut(s.ctrl),
+                (double)audio_pcm_volume_lut(s.ctrl) / 64.0);
     ImGui::Separator();
 
     ImGui::Text("AUDIO_RATE: %u  (effective step %u)", (unsigned)s.rate, effective_rate_step(s.rate));
