@@ -37,10 +37,10 @@ def case(name, ok, detail=""):
 
 
 class Mcp:
-    def __init__(self, extra=(), warp=True):
+    def __init__(self, extra=(), warp=True, cwd=None):
         self.dir = tempfile.TemporaryDirectory()
         cmd = [EXE, "-rom", ROM, "-mcp", "-hidden", "-zeroram"] + (["-warp"] if warp else []) + list(extra)
-        self.p = subprocess.Popen(cmd, cwd=self.dir.name, stdin=subprocess.PIPE,
+        self.p = subprocess.Popen(cmd, cwd=cwd or self.dir.name, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.lines = queue.Queue()
         self.noise = []
@@ -191,7 +191,8 @@ def test_tools():
         names = {t["name"] for t in listed}
         reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                    "wait_for_stop", "perf_stats", "get_screen", "screenshot",
-                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack"}
+                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
+                   "list_sources", "read_source", "source_location"}
         losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                   "dump_memory", "load_prg"}
         moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
@@ -2335,6 +2336,252 @@ def test_call_stack():
             dap.close()
 
 
+def source_dbg(forged, bankb_size=4):
+    files = ["solo.s", "a/main.s", "b/main.s", forged, "caf\xe9.s", "bytes.s", "pipe.s",
+             "linked.s", "big.s", "missing.s"]
+    spans = [(0, 0, 2), (0, 2, 3), (1, 0, 4), (2, 0, 4), (0, 5, 1), (0, 6, 1)]
+    lines = [(0, 2, 0), (0, 3, 1), (0, 7, 2), (0, 7, 3), (1, 1, 4), (2, 1, 5)]
+    for i in range(3, len(files)):
+        lines.append((i, 1, len(spans)))
+        spans.append((0, 4 + i, 1))
+    syms = ['sym\tid=0,name="_hello",addrsize=absolute,size=3,scope=0,def=0,val=0x000A02,type=lab\n']
+    text = ('version\tmajor=2,minor=0\n'
+            f'info\tcsym=0,file={len(files)},lib=0,line={len(lines)},mod=1,scope=1,seg=3,'
+            f'span={len(spans)},sym={len(syms)},type=0\n')
+    for i, name in enumerate(files):
+        text += f'file\tid={i},name="{name}",size=10,mtime=0x00000000,mod=0\n'
+    text += ('seg\tid=0,name="CODE",start=0x000A00,size=0x0010,addrsize=absolute,type=ro,oname="src.prg"\n'
+             'seg\tid=1,name="BANKA",start=0x00A000,size=0x0004,addrsize=absolute,type=ro,oname="src.prg"\n'
+             f'seg\tid=2,name="BANKB",start=0x00A000,size=0x{bankb_size:04X},addrsize=absolute,type=ro,'
+             'oname="src.prg"\n')
+    for i, (seg, start, size) in enumerate(spans):
+        text += f'span\tid={i},seg={seg},start={start},size={size},type=0\n'
+    for i, (file, line, span) in enumerate(lines):
+        text += f'line\tid={i},file={file},line={line},span={span}\n'
+    return (text + "".join(syms) + 'mod\tid=0,name="src.o",file=0\n').encode("latin-1")
+
+
+def test_sources():
+    print("source lookup")
+
+    def put(path, content):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(content.encode() if isinstance(content, str) else content)
+        return path
+
+    def said(result):
+        return result.get("content", [{}])[0].get("text", "")
+
+    prg_bytes = struct.pack("<H", 0x0A00) + bytes.fromhex("EAEA4C020A") + b"\xEA" * 11
+
+    with tempfile.TemporaryDirectory() as base:
+        root = os.path.join(base, "root")
+        secret = put(os.path.join(base, "outside", "secret.s"), "secret\n")
+        forged = secret.replace("\\", "/")
+        program = put(os.path.join(root, "src.prg"), prg_bytes)
+        put(os.path.join(root, "src.dbg"), source_dbg(forged))
+        put(os.path.join(root, "solo.s"), b"one\r\ntwo\r\nthree\nfour")
+        put(os.path.join(root, "a", "main.s"), "in a\n")
+        put(os.path.join(root, "b", "main.s"), "in b\n")
+        put(os.path.join(root, "bytes.s"), b"ok\xff\n\x00z\n")
+        put(os.path.join(root, "big.s"), b"x" * (4 * 1024 * 1024 + 1))
+        has_fifo = hasattr(os, "mkfifo")
+        if has_fifo:
+            os.mkfifo(os.path.join(root, "pipe.s"))
+        try:
+            os.symlink(secret, os.path.join(root, "linked.s"))
+            has_link = True
+        except (OSError, NotImplementedError):
+            has_link = False
+
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            case("no debug info, no sources", data(m.call("list_sources")).get("sources") == [])
+            case("the program loads", data(m.call("load_prg", path=program)).get("length") == 16)
+
+            paths = {s.get("path") for s in data(m.call("list_sources")).get("sources", [])}
+            case("list_sources names the files", {"solo.s", "a/main.s", "b/main.s", forged} <= paths,
+                 str(paths))
+            case("a name that is not UTF-8 stays valid JSON", "caf\ufffd.s" in paths, str(paths))
+
+            d = data(m.call("read_source", file="solo.s"))
+            case("reads lines, with CRLF and no final newline",
+                 d.get("lines") == ["one", "two", "three", "four"] and d.get("totalLines") == 4 and
+                 d.get("startLine") == 1, str(d)[:200])
+            d = data(m.call("read_source", file="solo.s", startLine=2, lineCount=2))
+            case("reads a range", d.get("lines") == ["two", "three"] and d.get("totalLines") == 4, str(d)[:200])
+            d = data(m.call("read_source", file="solo.s", startLine=9))
+            case("past the end is empty", d.get("lines") == [] and d.get("totalLines") == 4, str(d)[:200])
+            case("a folder picks a file",
+                 data(m.call("read_source", file="b/main.s")).get("lines") == ["in b"])
+            res = m.call("read_source", file="main.s")
+            case("an ambiguous name is refused and lists both",
+                 is_error(res) and "a/main.s" in said(res) and "b/main.s" in said(res), str(res)[:200])
+            case("a file outside the debug info is refused", is_error(m.call("read_source", file="nope.s")))
+            d = data(m.call("read_source", file="bytes.s"))
+            case("invalid bytes and NUL become U+FFFD", d.get("lines") == ["ok\ufffd", "\ufffdz"], str(d)[:200])
+            case("a file over the limit is refused", "4 MiB" in said(m.call("read_source", file="big.s")))
+            for label, args in (("line 0", {"file": "solo.s", "startLine": 0}),
+                                ("too many lines", {"file": "solo.s", "lineCount": 2001}),
+                                ("no file", {})):
+                case(f"read_source refuses {label}", is_error(m.call("read_source", **args)))
+
+            missing = m.call("read_source", file="missing.s")
+            refused = m.call("read_source", file=forged)
+            case("a name outside the roots is refused", is_error(refused), str(refused)[:200])
+            case("refused and missing read the same", said(refused) == said(missing), said(refused))
+            case("the refusal names no location",
+                 "outside" not in said(refused) and base not in said(refused), said(refused))
+            if has_link:
+                case("a link out reads as missing",
+                     said(m.call("read_source", file="linked.s")) == said(missing))
+            if has_fifo:
+                case("a pipe reads as missing and does not block",
+                     said(m.call("read_source", file="pipe.s")) == said(missing))
+
+            at = data(m.call("source_location", address=0x0A03)).get("locations", [])
+            case("an address gives its line",
+                 [(x.get("file"), x.get("line"), x.get("bankKnown")) for x in at] == [("solo.s", 3, True)], str(at))
+            at = data(m.call("source_location", address="_hello")).get("locations", [])
+            case("a symbol gives its line", [x.get("line") for x in at] == [3], str(at))
+            case("an address with no code is empty",
+                 data(m.call("source_location", address=0x0400)).get("locations") == [])
+            at = data(m.call("source_location", file="solo.s", line=3)).get("locations", [])
+            case("a line gives its address",
+                 [(x.get("address"), x.get("bank"), x.get("segment")) for x in at] == [(0x0A02, None, "CODE")],
+                 str(at))
+            case("a line with no code is empty",
+                 data(m.call("source_location", file="solo.s", line=4)).get("locations") == [])
+            case("an unknown file is empty",
+                 data(m.call("source_location", file="nope.s", line=1)).get("locations") == [])
+            at = data(m.call("source_location", file="solo.s", line=7)).get("locations", [])
+            case("segments at one address are both listed",
+                 sorted((x.get("address"), x.get("bank"), x.get("segment")) for x in at) ==
+                 [(0xA000, None, "BANKA"), (0xA000, None, "BANKB")], str(at))
+            case("source_location refuses an ambiguous file",
+                 is_error(m.call("source_location", file="main.s", line=1)))
+            for label, args in (("nothing", {}), ("both forms", {"address": 0x0A00, "file": "solo.s", "line": 3}),
+                                ("a file alone", {"file": "solo.s"}), ("a line alone", {"line": 3}),
+                                ("line 0", {"file": "solo.s", "line": 0}),
+                                ("a VRAM address", {"address": "vram:100"}),
+                                ("a far address", {"address": 0x10000})):
+                case(f"source_location refuses {label}", is_error(m.call("source_location", **args)))
+
+            res = m.call("set_breakpoint", file="solo.s", line=7)
+            case("a line in two places is refused, naming them",
+                 is_error(res) and "BANKA" in said(res) and "BANKB" in said(res), said(res))
+            case("nothing was armed", data(m.call("list_breakpoints")).get("breakpoints") == [],
+                 str(data(m.call("list_breakpoints")))[:200])
+            d = data(m.call("set_breakpoint", file="solo.s", line=7, bank=4))
+            same = data(m.call("set_breakpoint", address=0xA000, bank=4))
+            case("a bank picks one", d.get("address") == same.get("address") and d.get("file") == "solo.s" and
+                 d.get("line") == 7, str(d))
+            d = data(m.call("remove_breakpoint", file="solo.s", line=7, bank=4))
+            case("removed by its line", d.get("stillArmed") is False, str(d))
+            for label, args in (("an address too", {"address": 0x0A00, "file": "solo.s", "line": 3}),
+                                ("a file alone", {"file": "solo.s"}), ("a line alone", {"line": 3}),
+                                ("a watch", {"file": "solo.s", "line": 3, "kind": "write"}),
+                                ("VRAM", {"file": "solo.s", "line": 3, "space": "vram"}),
+                                ("no code", {"file": "solo.s", "line": 4}),
+                                ("an ambiguous file", {"file": "main.s", "line": 1}),
+                                ("nothing", {})):
+                case(f"set_breakpoint refuses {label}", is_error(m.call("set_breakpoint", **args)))
+            case("remove_breakpoint refuses no target", is_error(m.call("remove_breakpoint")))
+
+            d = data(m.call("set_breakpoint", file="solo.s", line=3))
+            case("a line sets a breakpoint", d.get("kind") == "exec" and d.get("line") == 3, str(d))
+            status = data(m.call("get_registers"))["cpu"]["status"]
+            m.call("set_registers", pc=0x0A00, sp=0x01FF, status=status | 0x04)
+            since = data(m.call("get_status"))["stopId"]
+            m.call("continue")
+            m.call("wait_for_stop", sinceStopId=since)
+            case("it stops there", data(m.call("get_registers"))["cpu"]["pc"] == 0x0A02)
+            m.call("remove_breakpoint", file="solo.s", line=3)
+
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": False,
+                                       "columnsStartAt1": True, "pathFormat": "uri"})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            at = data(m.call("source_location", file="solo.s", line=3)).get("locations", [])
+            case("MCP stays 1-based with a 0-based editor attached",
+                 [(x.get("file"), x.get("line")) for x in at] == [("solo.s", 3)], str(at))
+            d = data(m.call("list_sources"))
+            case("MCP keeps native paths with a URI editor attached",
+                 forged in {s.get("path") for s in d.get("sources", [])}, str(d)[:300])
+            at = dap.request("x16/sourceLocation", {"file": "solo.s", "line": 2})["body"]["locations"]
+            case("DAP uses its own line base", [(x["address"], x["line"]) for x in at] == [(0x0A02, 2)], str(at))
+            at = dap.request("x16/sourceLocation", {"address": "0x0A07"})["body"]["locations"]
+            case("DAP gets a URI", at and at[0]["file"].startswith("file://"), str(at))
+            back = dap.request("x16/sourceLocation", {"file": at[0]["file"], "line": 0})["body"]["locations"]
+            case("and a URI is accepted", [x["address"] for x in back] == [0x0A07], str(back))
+            refused = dap.request("mcp/readSource", {"file": "solo.s"})
+            case("read_source is not a DAP request", refused.get("success") is False, str(refused)[:200])
+            dap.close()
+
+        put(os.path.join(root, "banka.dbg"), source_dbg(forged, bankb_size=6))
+        banka = put(os.path.join(root, "banka.prg"), struct.pack("<H", 0xA000) + b"\xEA" * 4)
+        with Mcp(["-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            m.call("write_memory", address=0, hex="05")
+            m.call("load_prg", path=banka)
+            at = data(m.call("source_location", file="solo.s", line=7)).get("locations", [])
+            case("a known bank is reported",
+                 sorted((x.get("segment"), x.get("bank")) for x in at) == [("BANKA", 5), ("BANKB", None)], str(at))
+            at = data(m.call("source_location", file="solo.s", line=7, bank=5)).get("locations", [])
+            case("a bank selects its segment", [x.get("segment") for x in at] == ["BANKA"], str(at))
+            at = data(m.call("source_location", file="solo.s", line=7, bank=6)).get("locations", [])
+            case("otherwise the one with no known bank", [x.get("segment") for x in at] == ["BANKB"], str(at))
+
+        generated = ('version\tmajor=2,minor=0\n'
+                     'info\tcsym=0,file=2,lib=0,line=2,mod=1,scope=1,seg=1,span=2,sym=0,type=0\n'
+                     'file\tid=0,name="gen.c",size=10,mtime=0x00000000,mod=0\n'
+                     'file\tid=1,name="gen.s",size=10,mtime=0x00000000,mod=0\n'
+                     'seg\tid=0,name="CODE",start=0x000A00,size=0x0010,addrsize=absolute,type=ro,oname="gen.prg"\n'
+                     'span\tid=0,seg=0,start=0,size=8,type=0\n'
+                     'span\tid=1,seg=0,start=0,size=2,type=0\n'
+                     'line\tid=0,file=0,line=1,type=1,count=1,span=0\n'
+                     'line\tid=1,file=1,line=1,span=1\n'
+                     'mod\tid=0,name="gen.o",file=0\n')
+        put(os.path.join(root, "gen.dbg"), generated)
+        gen_prg = put(os.path.join(root, "gen.prg"), prg_bytes)
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            m.call("load_prg", path=gen_prg)
+            listed = {s.get("path") for s in data(m.call("list_sources")).get("sources", [])}
+            case("MCP lists a generated file whether or not it is on disk", listed == {"gen.c", "gen.s"}, str(listed))
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": True, "columnsStartAt1": True})
+            dap.request("attach", {})
+            dap.request("configurationDone")
+            shown = {s["path"] for s in dap.request("loadedSources")["body"]["sources"]}
+            case("DAP still leaves it out", shown == {"gen.c"}, str(shown))
+            dap.close()
+
+        work = os.path.join(base, "work")
+        put(os.path.join(work, "app.prg"), prg_bytes)
+        put(os.path.join(work, "app.dbg"), K_PRG_DBG.replace("prog.s", "app.s").replace("prog.prg", "app.prg"))
+        put(os.path.join(work, "app.s"), "from the program's folder\n")
+        put(os.path.join(root, "app.s"), "a different file in the root\n")
+        with Mcp(["-fsroot", root, "-prg", "app.prg"], cwd=work) as m:
+            m.init()
+            deadline = time.time() + 10
+            while time.time() < deadline and not data(m.call("list_sources")).get("sources"):
+                time.sleep(0.1)
+            d = data(m.call("read_source", file="app.s"))
+            case("a relative debug name is from the working folder",
+                 d.get("lines") == ["from the program's folder"], str(d)[:200])
+
+
 def test_read_paths():
     print("where MCP may read")
     label_text = "al 000820 .inside\n"
@@ -2436,7 +2683,7 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_call_stack, test_read_paths):
+                 test_client_format, test_call_stack, test_sources, test_read_paths):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

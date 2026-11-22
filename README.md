@@ -1044,7 +1044,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `evaluate`, `readMemory`, `writeMemory`, `disassemble`, `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1459,6 +1459,7 @@ debugging it.
 | State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `list_breakpoints` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
+| Source | `list_sources`, `read_source`, `source_location` |
 | Input | `type_text`, `send_key`, `joystick`, `mouse` |
 | Screen | `get_screen`, `screenshot` |
 | VERA | `get_vera_state` |
@@ -1473,9 +1474,15 @@ program or update BASIC's pointers.
 recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's
 `address` is where it returns to, and its symbol, file and line are those of the `JSR` (`callSite`).
 
-`load_symbols` and `load_prg` read only inside `-fsroot` (the working folder when there is none),
-the dump folder, or the folder of the `-prg` the emulator started with. Links are followed and
-judged by where they lead. DAP clients are not restricted.
+`load_symbols`, `load_prg` and `read_source` read only inside `-fsroot` (the working folder when
+there is none), the dump folder, or the folder of the `-prg` the emulator started with. Links are
+followed and judged by where they lead. A file is held to this even when the debug info names it,
+because a client can write a `.dbg`. DAP clients are not restricted.
+
+`source_location` maps an address to its file and line, and a file and line to every segment with
+code for it. `set_breakpoint` and `remove_breakpoint` take `file` and `line` in place of `address`.
+A line with code in several places is refused and the places are listed, so that a breakpoint
+never lands in a bank nobody chose.
 
 Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
 moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` answer when the

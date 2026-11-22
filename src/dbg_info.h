@@ -55,6 +55,34 @@ bool dbg_info_source_to_addr(const char *file_path, int line_num, dbg_addr_t *ad
 bool dbg_info_source_to_addr_bank(const char *file_path, int line_num, dbg_addr_t *addr,
                                   int *ram_bank);
 
+// Every file the debug info names, including the generated ones that
+// dbg_info_file_at() leaves out. That choice depends on what is on disk, so a
+// client confined to some folders must get this list instead.
+int  dbg_info_all_file_count(void);
+bool dbg_info_all_file_at(int index, const char **name);
+
+// The names in the debug info that `query` means, spelled as stored. An exact
+// name wins. Otherwise whole path components are compared from the end, without
+// regard to case or slash direction, and the longest agreement wins, so
+// "a/main.s" and "b/main.s" can be told apart. Returns how many distinct names
+// match and writes up to `max`.
+int dbg_info_find_source(const char *query, const char **out, int max);
+
+// Where a line generated code: one entry per segment, at its lowest address.
+// `ram_bank` is -1 when the address is outside $A000-$BFFF or no LOAD has shown
+// the bank. `segment`, `file` are internal storage.
+typedef struct {
+	dbg_addr_t  addr;
+	int         ram_bank;
+	const char *segment;
+	const char *file;
+	int         line;
+} dbg_line_hit_t;
+
+// `file` is a name as stored, from dbg_info_find_source(). Returns how many
+// segments hold the line and writes up to `max`, lowest address first.
+int dbg_info_line_addrs(const char *file, int line, dbg_line_hit_t *out, int max);
+
 // Check if debug info is loaded
 bool dbg_info_is_loaded(void);
 

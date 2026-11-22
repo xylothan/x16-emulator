@@ -1854,6 +1854,52 @@ main(void)
 		check(dbg_info_symbol_count() == 0 && dbg_info_label_file_count() == 0, "free clears everything");
 	}
 
+	// File names to lines to addresses.
+	{
+		static const char *k_dbg_lines =
+			"version\tmajor=2,minor=0\n"
+			"file\tid=0,name=\"a/main.s\",size=1,mtime=0x00000000,mod=0\n"
+			"file\tid=1,name=\"b/main.s\",size=1,mtime=0x00000000,mod=0\n"
+			"file\tid=2,name=\"solo.s\",size=1,mtime=0x00000000,mod=0\n"
+			"seg\tid=0,name=\"CODE\",start=0x000801,size=0x0010,addrsize=absolute,type=ro\n"
+			"seg\tid=1,name=\"BANKA\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"seg\tid=2,name=\"BANKB\",start=0x00a000,size=0x0010,addrsize=absolute,type=ro\n"
+			"span\tid=0,seg=0,start=0,size=2,type=0\n"
+			"span\tid=1,seg=0,start=2,size=2,type=0\n"
+			"span\tid=2,seg=0,start=4,size=1,type=0\n"
+			"span\tid=3,seg=1,start=0,size=4,type=0\n"
+			"span\tid=4,seg=2,start=0,size=4,type=0\n"
+			"span\tid=5,seg=0,start=8,size=1,type=0\n"
+			"line\tid=0,file=0,line=1,span=0\n"
+			"line\tid=1,file=1,line=1,span=1\n"
+			"line\tid=2,file=2,line=5,span=5+2\n"
+			"line\tid=3,file=2,line=9,span=3\n"
+			"line\tid=4,file=2,line=9,span=4\n"
+			"mod\tid=0,name=\"lines.o\",file=0\n";
+		const char    *names[4];
+		dbg_line_hit_t hits[4];
+		char          *lp = write_temp(k_dbg_lines, "x16_dbg_info_lines.dbg");
+		check(lp && dbg_info_load(lp) == 0, "line lookup fixture loads");
+		check(dbg_info_all_file_count() == 3, "every file is counted");
+		check(dbg_info_find_source("main.s", names, 4) == 2, "a bare name fits both folders");
+		check(dbg_info_find_source("a/main.s", names, 4) == 1 && !strcmp(names[0], "a/main.s"),
+		      "a folder picks one");
+		check(dbg_info_find_source("C:\\proj\\B\\MAIN.S", names, 4) == 1 && !strcmp(names[0], "b/main.s"),
+		      "an absolute path matches in any case and slash");
+		check(dbg_info_find_source("c/main.s", names, 4) == 0, "another folder does not match");
+		check(dbg_info_find_source("ain.s", names, 4) == 0, "only whole components match");
+		check(dbg_info_line_addrs("solo.s", 5, hits, 4) == 1 && hits[0].addr == 0x0805,
+		      "lowest address in a segment");
+		check(dbg_info_line_addrs("solo.s", 9, hits, 4) == 2 && hits[0].addr == 0xA000 &&
+		          hits[1].addr == 0xA000 && hits[0].ram_bank == -1 && hits[1].ram_bank == -1 &&
+		          strcmp(hits[0].segment, hits[1].segment) != 0,
+		      "segments at one address stay apart");
+		check(dbg_info_line_addrs("solo.s", 4, hits, 4) == 0, "a line with no code");
+		if (lp)
+			remove(lp);
+		dbg_info_free();
+	}
+
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");
 	return g_fails ? 1 : 0;
