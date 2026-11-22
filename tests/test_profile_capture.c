@@ -147,5 +147,22 @@ main(void)
 		check_eq(disarms, 1, "and whatever did arm is released");
 	}
 
+	// ── Telling one capture from the next ───────────────────────────────────
+	{
+		reset();
+		cap_config_t c = {0};
+		c.on_marker = true;
+		const uint32_t before = cap_serial();
+		cap_start(&c);
+		const uint32_t first = cap_serial();
+		check(first != before, "a start takes a new serial");
+		check(!cap_start(&c), "a second start is refused");
+		check_eq(cap_serial(), first, "and takes none");
+		cap_stop();
+		cap_start(&c);
+		check(cap_serial() != first, "the next capture has its own");
+		cap_stop();
+	}
+
 	return x16_test_summary("profile_capture");
 }

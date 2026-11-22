@@ -109,6 +109,10 @@ double      cap_elapsed_s(void);  // host time it has run / ran
 uint32_t    cap_recorders(void);  // what the current/last capture recorded
 const cap_config_t *cap_config(void);
 
+// Counts the captures begun, armed ones included, so that whoever started one
+// can tell it from a later one.
+uint32_t    cap_serial(void);
+
 // True while recording: the debugger should stay quiet.
 static inline bool
 cap_running(void)
