@@ -335,6 +335,147 @@ def test_evaluate_contexts():
         case("a missing context is the console", bool(r and r["success"]) and "removed" in r["body"]["result"])
 
 
+def test_expressions():
+    print("expressions")
+    with Emu() as e:
+        d = e.d
+        d.pause()
+        init = next(m for m in d.msgs if m.get("command") == "initialize")
+        case("setExpression is advertised", init["body"].get("supportsSetExpression") is True)
+        case("completions are advertised", init["body"].get("supportsCompletionsRequest") is True)
+
+        def ev(expr, **extra):
+            return d.req("evaluate", dict({"expression": expr}, **extra))
+
+        def result(expr):
+            r = ev(expr)
+            return r["body"]["result"] if r and r["success"] else None
+
+        def put(expr, value):
+            return d.req("setExpression", {"expression": expr, "value": value})
+
+        case("arithmetic", result("2+3*4") == "$0E (14)", str(result("2+3*4")))
+        case("width", result("$FFFFFFFF+1") == "$00 (0)", str(result("$FFFFFFFF+1")))
+        for bad in ("1/0", "1%0", "(1", "1+", "nosuchname", "beef", "A=5", "x" * 300):
+            r = ev(bad)
+            case(f"{bad[:12]!r} is an error", bool(r) and not r["success"], str(r)[:120])
+
+        put("byte[$0400]", "$5A")
+        case("$addr alone is still a peek", result("$0400") == "$5A (90)", str(result("$0400")))
+        case("0addr alone is still a peek", result("0400") == "$5A (90)", str(result("0400")))
+        case("in an expression $addr is a number", result("$0400+0") == "$0400 (1024)",
+             str(result("$0400+0")))
+        case("byte[] reads memory", result("byte[$0400]+1") == "$5B (91)", str(result("byte[$0400]+1")))
+        case("A alone keeps its form", (result("A") or "").startswith("$"), str(result("A")))
+
+        for reg, at in (("$9F20", 0x00), ("$9F21", 0x10), ("$9F22", 0x10)):
+            d.req("writeMemory", {"memoryReference": reg.replace("$", "0x"),
+                                  "data": base64.b64encode(bytes([at])).decode()})
+        cycles = d.status().get("cycles")
+        for ctx in ("hover", "watch", "repl"):
+            ev("byte[$9F23]+byte[$9F23]", context=ctx)
+        case("reading the data port does not advance it",
+             result("byte[$9F20]") == "$00 (0)" and result("byte[$9F21]") == "$10 (16)",
+             f"{result('byte[$9F20]')} {result('byte[$9F21]')}")
+        case("evaluating runs nothing", d.status().get("cycles") == cycles)
+
+        r = put("A", "$12")
+        case("a register is set", bool(r and r["success"]) and (d.var("A") or "").startswith("$12"), str(r))
+        case("reports what it holds", r["body"]["value"] == d.var("A"), f"{r['body']} {d.var('A')}")
+        r = put("a", "$1FF")
+        case("a wide value is cut to fit", bool(r and r["success"]) and (d.var("A") or "").startswith("$FF"), str(r))
+        r = put("A", "$34 (52)")
+        case("takes the form the view displays", bool(r and r["success"]) and (d.var("A") or "").startswith("$34"), str(r))
+        r = put("X", "A+1")
+        case("the value is an expression", bool(r and r["success"]) and (d.var("X") or "").startswith("$35"), str(r))
+
+        r = put("byte[$0410+1]", "$AB")
+        case("a byte is set", bool(r and r["success"]) and result("byte[$0411]") == "$AB (171)", str(r))
+        r = put("word[$0500]", "$1234")
+        case("a word is set, low byte first",
+             bool(r and r["success"]) and result("byte[$0500]") == "$34 (52)"
+             and result("byte[$0501]") == "$12 (18)", str(r))
+        r = put("vbyte[$01000]", "$77")
+        case("a VRAM byte is set", bool(r and r["success"]) and result("vbyte[$1000]") == "$77 (119)", str(r))
+        r = put("R3", "$BEEF")
+        case("R3 is set where it lives", bool(r and r["success"]) and result("word[$08]") == "$BEEF (48879)", str(r))
+        r = put("PC", "$0810")
+        case("PC is set", bool(r and r["success"]) and (d.var("PC") or "").startswith("$0810"), str(r))
+
+        put("rambank", "3")
+        put("byte[$A000]", "$11")
+        put("rambank", "5")
+        put("byte[$A000]", "$55")
+        case("rambank is set", result("rambank") == "$05 (5)", str(result("rambank")))
+        case("a named bank is read without switching",
+             result("byte[3:$A000]") == "$11 (17)" and result("rambank") == "$05 (5)",
+             str(result("byte[3:$A000]")))
+        r = put("byte[3:$A000]", "$22")
+        case("a write to an unmapped bank is refused", bool(r) and not r["success"], str(r))
+        case("and stores nothing", result("byte[3:$A000]") == "$11 (17)" and result("byte[5:$A000]") == "$55 (85)")
+        r = put("byte[5:$A000]", "$66")
+        case("a write to the mapped bank works", bool(r and r["success"]) and result("byte[5:$A000]") == "$66 (102)", str(r))
+
+        before = result("byte[$0400]")
+        cycles = d.status().get("cycles")
+        for target, value in (("1+1", "1"), ("A+1", "1"), ("!byte[$0400]", "1"), ("reset", "1"),
+                              ("bp_clear", "1"), ("byte[$1000000]", "1"), ("byte[$0400]", "1/0"),
+                              ("byte[$0400]", "nosuch"), ("byte[$0400]", "010")):
+            r = put(target, value)
+            case(f"setExpression {target} = {value} is refused", bool(r) and not r["success"], str(r)[:120])
+        case("a refused set stores nothing", result("byte[$0400]") == before)
+        case("and runs nothing", d.status().get("cycles") == cycles)
+        for args in ({}, {"expression": "A"}, {"value": "1"}, {"expression": 1, "value": "1"}):
+            r = d.req("setExpression", args)
+            case(f"setExpression {args} is refused", bool(r) and not r["success"], str(r)[:120])
+
+        with tempfile.TemporaryDirectory() as t:
+            path = os.path.join(t, "prog.lbl")
+            with open(path, "w") as f:
+                f.write("al 000600 .start_here\nal 000610 .START_HERE\nal 000620 .rambuf\nal 000630 .other\n")
+            r = d.req("x16/loadSymbols", {"path": path})
+            case("labels load", bool(r and r["success"]), str(r))
+
+        def complete(text, column, **extra):
+            r = d.req("completions", dict({"text": text, "column": column}, **extra))
+            return r["body"]["targets"] if r and r["success"] else None
+
+        t = complete("ra", 3)
+        case("completes a register and a symbol",
+             sorted(i["label"] for i in t or []) == ["rambank", "rambuf"], str(t))
+        case("replaces the fragment", all(i["start"] == 1 and i["length"] == 2 for i in t or []), str(t))
+        t = complete("byte[STA", 9)
+        case("matches case-insensitively, once each",
+             [i["label"].lower() for i in t or []] == ["start_here"], str(t))
+        case("starts after the bracket", bool(t) and t[0]["start"] == 6 and t[0]["length"] == 3, str(t))
+        t = complete("r1", 3)
+        case("registers come by prefix", {"R1", "R10", "R15"} <= {i["label"] for i in t or []}, str(t))
+        t = complete("rambuf+other", 3)
+        case("uses the text before the cursor",
+             sorted(i["label"] for i in t or []) == ["rambank", "rambuf"], str(t))
+        t = complete("x\nra", 3, line=2)
+        case("line selects the line", sorted(i["label"] for i in t or []) == ["rambank", "rambuf"], str(t))
+        case("start counts within the whole text", bool(t) and t[0]["start"] == 3, str(t))
+        t = complete("\U0001F600ra", 5)
+        case("columns are UTF-16", sorted(i["label"] for i in t or []) == ["rambank", "rambuf"], str(t))
+        case("and so is start", bool(t) and t[0]["start"] == 3, str(t))
+        for text, col in (("$ra", 4), ("12", 3), ("0xra", 5)):
+            case(f"{text!r} is a number and has none", complete(text, col) == [], str(complete(text, col)))
+        case("past the last line has none", complete("ra", 3, line=9) == [])
+        case("a column past the end is clamped", bool(complete("ra", 99)))
+        for args in ({}, {"text": "a"}, {"column": 1}, {"text": 1, "column": 1}):
+            r = d.req("completions", args)
+            case(f"completions {args} is refused", bool(r) and not r["success"], str(r)[:120])
+
+    with session({"linesStartAt1": False, "columnsStartAt1": False}, {}) as e:
+        d = e.d
+        d.pause()
+        r = d.req("completions", {"text": "x\nram", "column": 3, "line": 1})
+        t = r["body"]["targets"] if r and r["success"] else []
+        case("zero-based column and line", [i["label"] for i in t] == ["rambank"], str(r))
+        case("zero-based start", bool(t) and t[0]["start"] == 2 and t[0]["length"] == 3, str(t))
+
+
 def test_disconnect():
     print("disconnect")
     for kind, args, ends in (("attach", {}, False),
@@ -959,7 +1100,7 @@ def main():
     else:
         print("SKIP schema validation: run python tests/fetch_dap_schema.py to enable it")
 
-    for test in (test_evaluate_contexts, test_disconnect, test_terminate, test_dropped_socket,
+    for test in (test_evaluate_contexts, test_expressions, test_disconnect, test_terminate, test_dropped_socket,
                  test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
                  test_source_breakpoints, test_function_breakpoints, test_instruction_stop,
                  test_data_breakpoints, test_stack_frames, test_line_base, test_uri_paths,

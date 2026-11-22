@@ -8,6 +8,7 @@
 #include "debug_server_call.h"
 #include "mcp_server.h"
 #include "dbg_info.h"
+#include "dbg_expr.h"
 #include "call_stack.h"
 #include "debugger.h"
 #include "disasm.h"
@@ -888,7 +889,8 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsEvaluateForHovers", true);
     cJSON_AddBoolToObject(caps, "supportsSteppingGranularity", true);
     cJSON_AddBoolToObject(caps, "supportsGotoTargetsRequest", true);
-    cJSON_AddBoolToObject(caps, "supportsSetExpression", false);
+    cJSON_AddBoolToObject(caps, "supportsSetExpression", true);
+    cJSON_AddBoolToObject(caps, "supportsCompletionsRequest", true);
     cJSON_AddBoolToObject(caps, "supportsFunctionBreakpoints", true);
     // Newly implemented in this build:
     cJSON_AddBoolToObject(caps, "supportsDataBreakpoints", true);
@@ -2197,6 +2199,84 @@ static bool dap_eval_vera_line(const char *arg, char *out, size_t size) {
     return true;
 }
 
+// ─── Expressions ─────────────────────────────────────────────────────
+
+static uint8_t expr_read_cpu(void *user, uint32_t addr, int x16_bank) {
+    (void)user;
+    return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16),
+                          x16_bank >= 0 ? x16_bank : USE_CURRENT_X16_BANK);
+}
+
+static uint8_t expr_read_vram(void *user, uint32_t addr) {
+    (void)user;
+    return video_space_read(addr);
+}
+
+// Each register at the width the variables view and setVariable use for it.
+static uint32_t expr_read_reg(void *user, dbg_expr_reg_t reg) {
+    (void)user;
+    const bool native = regs.is65c816 && !regs.e;
+    if (reg >= DBG_EXPR_REG_R0 && reg <= DBG_EXPR_REG_R15) {
+        const uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * (reg - DBG_EXPR_REG_R0)));
+        return (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
+               ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
+    }
+    switch (reg) {
+        case DBG_EXPR_REG_A:
+            return native && !(regs.status & FLAG_MEMORY_WIDTH) ? regs.c : regs.a;
+        case DBG_EXPR_REG_X:
+            return native && !(regs.status & FLAG_INDEX_WIDTH) ? regs.x : (uint8_t)regs.x;
+        case DBG_EXPR_REG_Y:
+            return native && !(regs.status & FLAG_INDEX_WIDTH) ? regs.y : (uint8_t)regs.y;
+        case DBG_EXPR_REG_SP:
+            return native ? regs.sp : (uint8_t)regs.sp;
+        case DBG_EXPR_REG_P:
+            return regs.status;
+        case DBG_EXPR_REG_PC:
+            return (is_gen2 || regs.is65c816) ? ((uint32_t)regs.k << 16) | regs.pc : regs.pc;
+        case DBG_EXPR_REG_RAMBANK:
+            return memory_get_ram_bank();
+        case DBG_EXPR_REG_ROMBANK:
+            return memory_get_rom_bank();
+        default:
+            return 0;
+    }
+}
+
+static bool expr_symbol(void *user, const char *name, uint32_t *value, int *bank,
+                        char *err, size_t errn) {
+    (void)user;
+    dbg_resolved_t r;
+    if (!dbg_info_resolve(name, &r, err, errn)) return false;
+    *value = r.addr;
+    // A label file's bank applies from $A000 up. Below that, banks select nothing.
+    *bank  = r.addr >= 0xA000 && r.addr <= 0xFFFF ? r.bank : DBG_EXPR_NO_BANK;
+    return true;
+}
+
+static const dbg_expr_env_t expr_env = {
+    NULL, expr_read_cpu, expr_read_vram, expr_read_reg, expr_symbol
+};
+
+static void dap_fmt_expr_value(char *out, size_t n, const dbg_expr_value_t *v) {
+    const unsigned u = v->value;
+    if (v->bank >= 0)
+        snprintf(out, n, "$%02X:%04X (%u)", (unsigned)v->bank, u, u);
+    else
+        snprintf(out, n, "$%0*X (%u)", u <= 0xFF ? 2 : u <= 0xFFFF ? 4 : u <= 0xFFFFFF ? 6 : 8, u, u);
+}
+
+// On failure `out` holds the reason.
+static bool dap_eval_expression(const char *text, char *out, size_t n) {
+    dbg_expr_t       expr;
+    dbg_expr_value_t value;
+    if (!dbg_expr_compile(text, &expr_env, &expr, out, n) ||
+        !dbg_expr_eval(&expr, &expr_env, &value, out, n))
+        return false;
+    dap_fmt_expr_value(out, n, &value);
+    return true;
+}
+
 static int handle_dap_evaluate(int seq, cJSON *args) {
     if (!args) {
         send_dap_error_response(seq, "evaluate", "missing arguments");
@@ -2422,8 +2502,9 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
             snprintf(result, sizeof(result), "$%04X (label)", (unsigned)sym_val);
     } else if (dbg_info_equate_to_value(expr, &sym_val)) {
         snprintf(result, sizeof(result), "$%04X (%u, equate)", (unsigned)sym_val, (unsigned)sym_val);
-    } else {
-        send_dap_error_response(seq, "evaluate", "unknown expression");
+    } else if (!dap_eval_expression(expr, result, sizeof(result))) {
+        // Last, so that every command and form above keeps its meaning.
+        send_dap_error_response(seq, "evaluate", result);
         return 0;
     }
 
@@ -5042,6 +5123,49 @@ static bool dap_parse_value(const char *s, uint32_t *out) {
     return true;
 }
 
+// Stores to a register by its name in the variables view. Reports what it holds
+// afterwards, since a value wider than the register is cut down to fit.
+static bool dap_set_register(const char *name, uint32_t v, uint32_t *stored, int *digits) {
+    const bool a16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_MEMORY_WIDTH);
+    const bool x16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_INDEX_WIDTH);
+    *digits = 2;
+    if      (!strcmp(name, "PC")) { regs.pc = (uint16_t)v; *stored = regs.pc; *digits = 4; }
+    else if (!strcmp(name, "A"))  {
+        if (a16) { regs.c = (uint16_t)v; *stored = regs.c; *digits = 4; }
+        else     { regs.a = (uint8_t)v;  *stored = regs.a; }
+    }
+    else if (!strcmp(name, "X"))  {
+        if (x16) { regs.x = (uint16_t)v; *stored = regs.x; *digits = 4; }
+        else     { regs.xl = (uint8_t)v; *stored = regs.xl; }
+    }
+    else if (!strcmp(name, "Y"))  {
+        if (x16) { regs.y = (uint16_t)v; *stored = regs.y; *digits = 4; }
+        else     { regs.yl = (uint8_t)v; *stored = regs.yl; }
+    }
+    else if (!strcmp(name, "SP")) {
+        regs.sp = regs.is65c816 ? (uint16_t)v : (uint16_t)((regs.sp & 0xFF00) | (v & 0xFF));
+        if (regs.is65c816 && !regs.e) { *stored = regs.sp; *digits = 4; }
+        else                            *stored = (uint8_t)regs.sp;
+    }
+    else if (!strcmp(name, "D"))   { regs.dp = (uint16_t)v; *stored = regs.dp; *digits = 4; }
+    else if (!strcmp(name, "DBR")) { regs.db = (uint8_t)v; *stored = regs.db; }
+    else if (!strcmp(name, "PBR")) { regs.k = (uint8_t)v; *stored = regs.k; }
+    else if (name[0] == 'P')       { regs.status = (uint8_t)v; *stored = regs.status; } // "P (Status)"
+    else if (!strcmp(name, "RAM Bank")) { memory_set_ram_bank((uint8_t)v); *stored = memory_get_ram_bank(); }
+    else if (!strcmp(name, "ROM Bank")) { memory_set_rom_bank((uint8_t)v); *stored = memory_get_rom_bank(); }
+    else return false;
+    return true;
+}
+
+// Stores virtual register Rn and returns what it now holds.
+static uint32_t dap_set_vreg(int n, uint32_t v) {
+    const uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * n));
+    debug_write6502(a, 0, (uint8_t)(v & 0xFF));
+    debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
+    return (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
+           ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
+}
+
 static int handle_dap_set_variable(int seq, cJSON *args) {
     if (!args) { send_dap_error_response(seq, "setVariable", "missing arguments"); return 0; }
     cJSON *ref_i  = cJSON_GetObjectItemCaseSensitive(args, "variablesReference");
@@ -5056,39 +5180,13 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
         return 0;
     }
     bool ok = true;
-    bool a16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_MEMORY_WIDTH);
-    bool x16 = regs.is65c816 && !regs.e && !(regs.status & FLAG_INDEX_WIDTH);
     // What the target actually holds afterwards, which is what gets reported: a
     // value wider than the register is cut down to fit.
     uint32_t stored = 0;
     int digits = 2;
 
     if (ref == VARREF_REGISTERS) {
-        if      (!strcmp(name, "PC")) { regs.pc = (uint16_t)v; stored = regs.pc; digits = 4; }
-        else if (!strcmp(name, "A"))  {
-            if (a16) { regs.c = (uint16_t)v; stored = regs.c; digits = 4; }
-            else     { regs.a = (uint8_t)v;  stored = regs.a; }
-        }
-        else if (!strcmp(name, "X"))  {
-            if (x16) { regs.x = (uint16_t)v; stored = regs.x; digits = 4; }
-            else     { regs.xl = (uint8_t)v; stored = regs.xl; }
-        }
-        else if (!strcmp(name, "Y"))  {
-            if (x16) { regs.y = (uint16_t)v; stored = regs.y; digits = 4; }
-            else     { regs.yl = (uint8_t)v; stored = regs.yl; }
-        }
-        else if (!strcmp(name, "SP")) {
-            regs.sp = regs.is65c816 ? (uint16_t)v : (uint16_t)((regs.sp & 0xFF00) | (v & 0xFF));
-            if (regs.is65c816 && !regs.e) { stored = regs.sp; digits = 4; }
-            else                            stored = (uint8_t)regs.sp;
-        }
-        else if (!strcmp(name, "D"))   { regs.dp = (uint16_t)v; stored = regs.dp; digits = 4; }
-        else if (!strcmp(name, "DBR")) { regs.db = (uint8_t)v; stored = regs.db; }
-        else if (!strcmp(name, "PBR")) { regs.k = (uint8_t)v; stored = regs.k; }
-        else if (name[0] == 'P')       { regs.status = (uint8_t)v; stored = regs.status; } // "P (Status)"
-        else if (!strcmp(name, "RAM Bank")) { memory_set_ram_bank((uint8_t)v); stored = memory_get_ram_bank(); }
-        else if (!strcmp(name, "ROM Bank")) { memory_set_rom_bank((uint8_t)v); stored = memory_get_rom_bank(); }
-        else ok = false;
+        ok = dap_set_register(name, v, &stored, &digits);
     } else if (ref == VARREF_STACK) {
         const uint16_t a = (uint16_t)dap_parse_num(name); // name is "$XXXX"
         debug_write6502(a, 0, (uint8_t)v);
@@ -5098,11 +5196,7 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
         if ((name[0] == 'R' || name[0] == 'r') && name[1]) {
             int n = atoi(name + 1);
             if (n >= 0 && n <= 15) {
-                uint16_t a = dap_dp_add((uint16_t)(0x02 + 2 * n));
-                debug_write6502(a, 0, (uint8_t)(v & 0xFF));
-                debug_write6502((uint16_t)(a + 1), 0, (uint8_t)((v >> 8) & 0xFF));
-                stored = (uint32_t)debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
-                         ((uint32_t)debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8);
+                stored = dap_set_vreg(n, v);
                 digits = 4;
             } else ok = false;
         } else ok = false;
@@ -5117,6 +5211,264 @@ static int handle_dap_set_variable(int seq, cJSON *args) {
     cJSON_AddStringToObject(body, "value", result);
     cJSON_AddNumberToObject(body, "variablesReference", 0);
     send_dap_response(seq, "setVariable", true, body);
+    return 0;
+}
+
+// ─── setExpression ───────────────────────────────────────────────────
+
+// The next address of a word, as a word read takes it: within the 16-bit bank.
+static uint32_t dap_expr_next(uint32_t addr) {
+    return (addr & 0xFF0000) | ((addr + 1) & 0xFFFF);
+}
+
+// A CPU write has no way to name a bank, so a target in one that is not mapped
+// would land in whichever is.
+static bool dap_expr_bank_mapped(uint32_t addr, int bank, char *err, size_t errn) {
+    if (bank < 0 || addr > 0xFFFF) return true;
+    const int now = debug_current_x16_bank((int)addr, 0);
+    if (now == DEBUG_BANK_ANY || now == bank) return true;
+    snprintf(err, errn, "bank %d is not mapped at $%04X (bank %d is); select it first",
+             bank, (unsigned)addr, now);
+    return false;
+}
+
+static void dap_expr_poke(uint32_t addr, uint8_t value) {
+    debug_write6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), value);
+}
+
+static uint8_t dap_expr_peek(uint32_t addr) {
+    return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), USE_CURRENT_X16_BANK);
+}
+
+static bool dap_expr_store(const dbg_expr_target_t *t, uint32_t v, uint32_t *stored, int *digits,
+                           char *err, size_t errn) {
+    *digits = 2;
+    switch (t->kind) {
+        case DBG_EXPR_TARGET_REG:
+            if (t->reg >= DBG_EXPR_REG_R0 && t->reg <= DBG_EXPR_REG_R15) {
+                *stored = dap_set_vreg((int)(t->reg - DBG_EXPR_REG_R0), v);
+                *digits = 4;
+                return true;
+            }
+            {
+                const char *name = t->reg == DBG_EXPR_REG_P       ? "P (Status)"
+                                 : t->reg == DBG_EXPR_REG_RAMBANK ? "RAM Bank"
+                                 : t->reg == DBG_EXPR_REG_ROMBANK ? "ROM Bank"
+                                 : dbg_expr_reg_name(t->reg);
+                if (dap_set_register(name, v, stored, digits)) return true;
+            }
+            snprintf(err, errn, "cannot set this register");
+            return false;
+        case DBG_EXPR_TARGET_BYTE:
+            if (!dap_expr_bank_mapped(t->addr, t->bank, err, errn)) return false;
+            dap_expr_poke(t->addr, (uint8_t)v);
+            *stored = dap_expr_peek(t->addr);
+            return true;
+        case DBG_EXPR_TARGET_WORD: {
+            const uint32_t next = dap_expr_next(t->addr);
+            if (!dap_expr_bank_mapped(t->addr, t->bank, err, errn) ||
+                !dap_expr_bank_mapped(next, t->bank, err, errn))
+                return false;
+            dap_expr_poke(t->addr, (uint8_t)(v & 0xFF));
+            dap_expr_poke(next, (uint8_t)((v >> 8) & 0xFF));
+            *stored = (uint32_t)dap_expr_peek(t->addr) | ((uint32_t)dap_expr_peek(next) << 8);
+            *digits = 4;
+            return true;
+        }
+        case DBG_EXPR_TARGET_VBYTE:
+            video_space_write(t->addr, (uint8_t)v);
+            *stored = video_space_read(t->addr);
+            return true;
+    }
+    snprintf(err, errn, "cannot set this");
+    return false;
+}
+
+static int handle_dap_set_expression(int seq, cJSON *args) {
+    static const char cmd[] = "setExpression";
+    cJSON *ex = args ? cJSON_GetObjectItemCaseSensitive(args, "expression") : NULL;
+    cJSON *vi = args ? cJSON_GetObjectItemCaseSensitive(args, "value") : NULL;
+    if (!ex || !cJSON_IsString(ex) || !vi || !cJSON_IsString(vi)) {
+        send_dap_error_response(seq, cmd, "'expression' and 'value' are required");
+        return 0;
+    }
+
+    char err[220];
+    dbg_expr_t        target_expr, value_expr;
+    dbg_expr_target_t target;
+    if (!dbg_expr_compile(ex->valuestring, &expr_env, &target_expr, err, sizeof err) ||
+        !dbg_expr_target(&target_expr, &expr_env, &target, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+
+    // An expression, or a value as this server displays it, which is the text an
+    // editor offers for editing: "$12 (18)" or "$35 [nv-BdIzC]".
+    uint32_t v = 0;
+    dbg_expr_value_t value;
+    if (dbg_expr_compile(vi->valuestring, &expr_env, &value_expr, err, sizeof err) &&
+        dbg_expr_eval(&value_expr, &expr_env, &value, err, sizeof err)) {
+        v = value.value;
+    } else if (!strpbrk(vi->valuestring, "([") || !dap_parse_value(vi->valuestring, &v)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+
+    uint32_t stored = 0;
+    int digits = 2;
+    if (!dap_expr_store(&target, v, &stored, &digits, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    char result[40];
+    snprintf(result, sizeof result, "$%0*X (%u)", digits, stored, stored);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "value", result);
+    cJSON_AddNumberToObject(body, "variablesReference", 0);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// ─── completions ─────────────────────────────────────────────────────
+
+#define DAP_COMPLETIONS_MAX 100
+
+static bool dap_is_name_char(char c) {
+    return isalnum((unsigned char)c) || c == '_' || c == '.' || c == '@';
+}
+
+// UTF-16 code units in one UTF-8 sequence, given its first byte.
+static int dap_utf16_units(unsigned char lead) {
+    return lead >= 0xF0 ? 2 : 1;
+}
+
+static const char *dap_utf8_next(const char *s) {
+    s++;
+    while (((unsigned char)*s & 0xC0) == 0x80) s++;
+    return s;
+}
+
+static int dap_utf16_len(const char *s, const char *end) {
+    int units = 0;
+    while (s < end) {
+        units += dap_utf16_units((unsigned char)*s);
+        s = dap_utf8_next(s);
+    }
+    return units;
+}
+
+static void dap_add_completion(cJSON *targets, const char *label, const char *type,
+                               int start, int length) {
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "label", label);
+    cJSON_AddNumberToObject(item, "start", start);
+    cJSON_AddNumberToObject(item, "length", length);
+    cJSON_AddStringToObject(item, "type", type);
+    cJSON_AddItemToArray(targets, item);
+}
+
+static bool dap_completion_listed(cJSON *targets, const char *label) {
+    cJSON *t;
+    cJSON_ArrayForEach(t, targets) {
+        if (!SDL_strcasecmp(cJSON_GetObjectItemCaseSensitive(t, "label")->valuestring, label))
+            return true;
+    }
+    return false;
+}
+
+static int handle_dap_completions(int seq, cJSON *args) {
+    static const char cmd[] = "completions";
+    cJSON *ti = args ? cJSON_GetObjectItemCaseSensitive(args, "text") : NULL;
+    cJSON *ci = args ? cJSON_GetObjectItemCaseSensitive(args, "column") : NULL;
+    cJSON *li = args ? cJSON_GetObjectItemCaseSensitive(args, "line") : NULL;
+    if (!ti || !cJSON_IsString(ti) || !ci || !cJSON_IsNumber(ci)) {
+        send_dap_error_response(seq, cmd, "'text' and 'column' are required");
+        return 0;
+    }
+    const char *text = ti->valuestring;
+    cJSON *targets = cJSON_CreateArray();
+
+    // The line asked for, or none if the text is shorter than that.
+    const char *line = text;
+    if (li && cJSON_IsNumber(li)) {
+        const double index = li->valuedouble - dap_line_base;
+        if (index < 0) line = NULL;
+        for (double n = index; line && n > 0; n--) {
+            const char *nl = strchr(line, '\n');
+            line = nl ? nl + 1 : NULL;
+        }
+    }
+
+    if (line) {
+        const char *end = line + strcspn(line, "\r\n");
+        const char *cursor = line;
+        for (double left = ci->valuedouble - dap_col_base; left > 0 && cursor < end; ) {
+            left -= dap_utf16_units((unsigned char)*cursor);
+            cursor = dap_utf8_next(cursor);
+        }
+        const char *word = cursor;
+        while (word > line && dap_is_name_char(word[-1])) word--;
+        const size_t n = (size_t)(cursor - word);
+        const bool number = isdigit((unsigned char)*word) && n > 0;
+        const bool hex    = word > line && word[-1] == '$';
+
+        if (!number && !hex && n <= DBG_EXPR_MAX_NAME) {
+            char prefix[DBG_EXPR_MAX_NAME + 1];
+            for (size_t i = 0; i < n; i++) prefix[i] = (char)tolower((unsigned char)word[i]);
+            prefix[n] = '\0';
+            const int start  = dap_col_base + dap_utf16_len(text, word);
+            const int length = (int)n;
+
+            int listed = 0;
+            for (int r = 0; r < DBG_EXPR_REG_COUNT; r++) {
+                const char *name = dbg_expr_reg_name((dbg_expr_reg_t)r);
+                if (dap_ci_prefix(name, prefix)) {
+                    dap_add_completion(targets, name, "property", start, length);
+                    listed++;
+                }
+            }
+            const int symbols = dbg_info_symbol_count();
+            for (int i = 0; i < symbols && listed < DAP_COMPLETIONS_MAX; i++) {
+                const char *name = NULL;
+                dbg_addr_t  addr;
+                if (!dbg_info_symbol_at(i, &name, &addr) || !name ||
+                    !dap_ci_prefix(name, prefix) || dap_completion_listed(targets, name))
+                    continue;
+                dap_add_completion(targets, name, "reference", start, length);
+                listed++;
+            }
+        }
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddItemToObject(body, "targets", targets);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// The MCP evaluate tool. Only the engine: the console commands in evaluate can
+// clear every client's breakpoints or reset the machine.
+static int handle_mcp_evaluate(int seq, cJSON *args) {
+    static const char cmd[] = "mcp/evaluate";
+    cJSON *ex = cJSON_GetObjectItemCaseSensitive(args, "expression");
+    if (!ex || !cJSON_IsString(ex)) {
+        send_dap_error_response(seq, cmd, "'expression' is required");
+        return 0;
+    }
+    char err[220], text[40];
+    dbg_expr_t       expr;
+    dbg_expr_value_t value;
+    if (!dbg_expr_compile(ex->valuestring, &expr_env, &expr, err, sizeof err) ||
+        !dbg_expr_eval(&expr, &expr_env, &value, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    dap_fmt_expr_value(text, sizeof text, &value);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "value", value.value);
+    cJSON_AddStringToObject(body, "text", text);
+    if (value.bank >= 0) cJSON_AddNumberToObject(body, "bank", value.bank);
+    send_dap_response(seq, cmd, true, body);
     return 0;
 }
 
@@ -7173,6 +7525,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
 
     else if (!strcmp(cmd, "disassemble"))   result = handle_dap_disassemble(seq, args);
     else if (!strcmp(cmd, "setVariable"))   result = handle_dap_set_variable(seq, args);
+    else if (!strcmp(cmd, "setExpression")) result = handle_dap_set_expression(seq, args);
+    else if (!strcmp(cmd, "completions"))   result = handle_dap_completions(seq, args);
     else if (!strcmp(cmd, "terminate"))     result = handle_dap_terminate(seq, args);
     else if (!strcmp(cmd, "attach"))        result = handle_dap_attach(seq, args);
     else if (!strcmp(cmd, "setInstructionBreakpoints")) result = handle_dap_set_instruction_breakpoints(seq, args);
@@ -7197,6 +7551,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
         result = handle_mcp_enable_breakpoint(seq, args);
     else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/readSource"))
         result = handle_mcp_read_source(seq, args);
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/evaluate"))
+        result = handle_mcp_evaluate(seq, args);
     else {
         fprintf(stderr, "[dap] Unhandled command: %s\n", cmd);
         send_dap_error_response(seq, cmd, "command not supported");
@@ -7250,7 +7606,7 @@ static const char *const callable_commands[] = {
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
-    "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint",
+    "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
