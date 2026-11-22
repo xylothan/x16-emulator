@@ -18,6 +18,7 @@
 #include "debug_ui_bridge.h"
 #include "debug_ui_widgets.h"
 #include "debug_ui_scope.h"
+#include "audio_decode.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -26,8 +27,8 @@
 
 namespace {
 
-constexpr double YM_CLOCK_HZ = 3579545.0;
-constexpr double YM_SAMPLE_HZ = YM_CLOCK_HZ / 64.0;
+constexpr double YM_CLOCK_HZ = AUDIO_YM_CLOCK_HZ;
+constexpr double YM_SAMPLE_HZ = AUDIO_YM_SAMPLE_HZ;
 constexpr int    OP_COUNT = 4;
 
 static int s_selected_ch = 0;
@@ -91,11 +92,7 @@ inline uint8_t ch_reg(int base, int ch) { return ym_reg(base + ch); }
 inline uint8_t op_reg(int base, int slot, int ch) { return ym_reg(base + slot * 8 + ch); }
 inline int op_index(int slot, int ch) { return slot * 8 + ch; }
 
-struct NoteInfo {
-    bool valid;
-    char text[48];
-    double hz;
-};
+using NoteInfo = audio_ym_note;
 
 float clamp01(float v)
 {
@@ -163,20 +160,7 @@ ImU32 eg_color(uint8_t state)
 
 void note_from_kc_kf(uint8_t kc, uint8_t kf, NoteInfo *out)
 {
-    static const char *names[12] = { "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B", "C" };
-    const int oct = kc >> 4;
-    const int low = kc & 0x0f;
-    const int semi = (kc & 3) + 3 * ((kc >> 2) & 3);
-    out->valid = (low != 3 && low != 7 && low != 11 && low != 15);
-    if (!out->valid) {
-        out->hz = 0.0;
-        snprintf(out->text, sizeof(out->text), "invalid KC %02X", kc);
-        return;
-    }
-    const double fine_semi = (double)(kf >> 2) / 64.0;
-    const double midi = 12.0 * (double)(oct + 1) + 1.0 + (double)semi + fine_semi;
-    out->hz = 440.0 * pow(2.0, (midi - 69.0) / 12.0);
-    snprintf(out->text, sizeof(out->text), "%s%d %+d c  %.2f Hz", names[semi], oct, (int)(fine_semi * 100.0 + 0.5), out->hz);
+    audio_ym_note_decode(kc, kf, out);
 }
 
 void draw_key_mask(uint8_t mask)
@@ -301,9 +285,11 @@ void draw_channels_tab()
     ImGui::TextDisabled("Operators: M1/M2 = Modulator 1/2, C1/C2 = Carrier 1/2 (hover for more).");
     ImGui::SetItemTooltip("%s", s_slot_legend);
     const uint8_t mute = YM_debug_get_mute_mask();
+    const uint8_t client_mute = YM_debug_get_client_mute_mask();
     if (dbgui_unmute_all_button(mute)) {
         YM_debug_set_mute_mask(0);
     }
+    dbgui_client_mute_note(client_mute);
     // Every column is fixed at the width of the widest thing it can ever hold
     // (and at least its header), so nothing is squeezed or clipped: stretch
     // columns used to share whatever was left and cut the note text short.
@@ -387,7 +373,8 @@ void draw_channels_tab()
 
             ImGui::TableNextRow();
             const bool muted = (mute >> ch) & 1;
-            const int mute_cols = dbgui_mute_row_begin(muted);
+            const bool client_muted = (client_mute >> ch) & 1;
+            const int mute_cols = dbgui_mute_row_begin(muted, client_muted);
             if (silent) ImGui::BeginDisabled();
             // The selectable spans the whole row, so it must allow overlap for
             // the mute button (drawn last, in column 0) to get its clicks.
@@ -424,7 +411,7 @@ void draw_channels_tab()
             // Outside the disabled span: muting a channel before it plays is a
             // normal thing to want.
             ImGui::TableSetColumnIndex(0);
-            if (dbgui_mute_button(ch, muted)) {
+            if (dbgui_mute_button(ch, muted, client_muted)) {
                 YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
@@ -972,19 +959,19 @@ void draw_global_tab()
     const uint8_t r0f = ym_reg(0x0f);
     const uint8_t r14 = ym_reg(0x14);
     const uint8_t r18 = ym_reg(0x18);
-    const uint8_t r19 = ym_reg(0x19);
-    const uint8_t r1a = ym_reg(0x1a);
     const uint8_t r1b = ym_reg(0x1b);
+    uint8_t lfo_am = 0, lfo_pm = 0;
+    YM_debug_get_lfo_depths(&lfo_am, &lfo_pm);
     const uint16_t ta = (uint16_t)((ym_reg(0x10) << 2) | (ym_reg(0x11) & 3));
     const uint8_t tb = ym_reg(0x12);
-    const double ta_ms = (1024.0 - (double)ta) / YM_SAMPLE_HZ * 1000.0;
-    const double tb_ms = (256.0 - (double)tb) * 16.0 / YM_SAMPLE_HZ * 1000.0;
+    const double ta_ms = audio_ym_timer_a_ms(ta);
+    const double tb_ms = audio_ym_timer_b_ms(tb);
     const uint8_t status = YM_debug_get_status();
 
     ImGui::Text("Clock: %.0f Hz   ymfm sample rate: %.3f Hz", YM_CLOCK_HZ, YM_SAMPLE_HZ);
     ImGui::Separator();
-    ImGui::Text("LFO: rate $%02X, waveform %s, AM depth %u, PM depth %u", r18, s_lfo_waves[r1b & 3], (unsigned)(r19 & 0x7f), (unsigned)(r1a & 0x7f));
-    ImGui::TextDisabled("$19 writes select AM (bit7=0) or PM (bit7=1); PM is shown from the shadowed internal $1A.");
+    ImGui::Text("LFO: rate $%02X, waveform %s, AM depth %u, PM depth %u", r18, s_lfo_waves[r1b & 3], (unsigned)lfo_am, (unsigned)lfo_pm);
+    ImGui::TextDisabled("$19 writes select AM (bit7=0) or PM (bit7=1); both depths are read from the chip.");
     ImGui::Text("Noise: %s, frequency %u", (r0f & 0x80) ? "enabled" : "disabled", (unsigned)(r0f & 0x1f));
     ImGui::Text("CT pins: CT1=%u CT2=%u", (unsigned)((r1b >> 6) & 1), (unsigned)((r1b >> 7) & 1));
     ImGui::Separator();
@@ -1134,6 +1121,7 @@ void draw_scope_tab()
     if (dbgui_unmute_all_button(YM_debug_get_mute_mask())) {
         YM_debug_set_mute_mask(0);
     }
+    dbgui_client_mute_note(YM_debug_get_client_mute_mask());
     if (ImGui::BeginTable("ym_scope_grid", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg)) {
         for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
             if ((ch % 2) == 0) ImGui::TableNextRow();
@@ -1146,7 +1134,8 @@ void draw_scope_tab()
             snprintf(id, sizeof(id), "mini%d", ch);
             dbgui_scope(id, samples[ch], (int)counts[ch], ImVec2(0.0f, 58.0f), IM_COL32(90, 190, 245, 255), ctl.window, ctl.gain, ctl.trigger, overlay);
             if (ImGui::IsItemClicked()) s_selected_ch = ch;
-            if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> ch) & 1)) {
+            if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> ch) & 1,
+                                        (YM_debug_get_client_mute_mask() >> ch) & 1)) {
                 YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << ch)));
             }
         }
@@ -1158,7 +1147,8 @@ void draw_scope_tab()
     note_from_kc_kf(ch_reg(0x28, s_selected_ch) & 0x7f, ch_reg(0x30, s_selected_ch) & 0xfc, &note);
     snprintf(overlay, sizeof(overlay), "Selected Ch %d ALG %u %s", s_selected_ch, (unsigned)alg_for_ch(s_selected_ch), note.text);
     dbgui_scope("selected", samples[s_selected_ch], (int)counts[s_selected_ch], ImVec2(0.0f, 120.0f), IM_COL32(105, 225, 140, 255), ctl.window, ctl.gain, ctl.trigger, overlay);
-    if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> s_selected_ch) & 1)) {
+    if (dbgui_scope_mute_toggle((YM_debug_get_mute_mask() >> s_selected_ch) & 1,
+                                (YM_debug_get_client_mute_mask() >> s_selected_ch) & 1)) {
         YM_debug_set_mute_mask((uint8_t)(YM_debug_get_mute_mask() ^ (1u << s_selected_ch)));
     }
     ImGui::TextUnformatted("Summed YM output");

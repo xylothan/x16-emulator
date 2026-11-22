@@ -108,7 +108,7 @@ def ym_write(reg, val_mode, val, wait):
             ("lda", val_mode, val), ("sta", "abs", 0x9F41)]
 
 YM_SETUP = bytes([
-    0x20, 0xC7, 0x28, 0x4A, 0x30, 0x00,                 # ch0: L+R, algorithm 7; note
+    0x20, 0xEF, 0x28, 0x4A, 0x30, 0x00,                 # ch0: L+R, feedback 5, algorithm 7; note
     0x40, 0x01, 0x48, 0x02, 0x50, 0x03, 0x58, 0x01,     # DT1/MUL
     0x60, 0x10, 0x68, 0x18, 0x70, 0x20, 0x78, 0x10,     # TL
     0x80, 0x1F, 0x88, 0x1F, 0x90, 0x1F, 0x98, 0x1F,     # attack
@@ -462,6 +462,27 @@ print("    (x16/loadState round trip: %.2f ms average over %d; first was %.2f ms
 case("a load round trip takes under 10 ms (%.2f ms)" % per, per < 10.0)
 
 close(proc, d)
+
+# ─── Host-output mute ────────────────────────────────────────────────────────
+#
+# Every PSG and YM voice muted for the whole of A. The machine must not notice:
+# same hash each frame as the reference. The recording must.
+M_WAV = os.path.join(WORK, "muted.wav")
+proc, d = launch(PORT + 6, wav=M_WAV)
+mp = d.req("x16/setVoiceMute", {"chip": "psg", "muted": True})
+my = d.req("x16/setVoiceMute", {"chip": "ym", "muted": True})
+case("every PSG and YM voice muted",
+     mp.get("body", {}).get("effective") == 0xFFFF and my.get("body", {}).get("effective") == 0xFF)
+hm = d.run(A_FRAMES, joys_a)
+case("muting changes no state hash (%s)" % first_difference(h0, hm), h0 == hm and None not in hm)
+hs = d.req("x16/status", {"hash": True}).get("body", {}).get("hash")
+au = d.req("x16/audio")
+case("reading the audio state changes no state hash",
+     au.get("success") and hs is not None and d.req("x16/status", {"hash": True}).get("body", {}).get("hash") == hs)
+close(proc, d)
+n = 72000 * 4
+case("and the muted voices did leave the recording",
+     len(wav_tail(M_WAV, n)) == n and wav_tail(M_WAV, n) != wav_tail(REF_WAV, n))
 
 # ─── Across processes ────────────────────────────────────────────────────────
 #

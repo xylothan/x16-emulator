@@ -6,11 +6,14 @@ extern "C" {
 #endif
 	#include <stdint.h>
 	#include <stdbool.h>
+	#include "voice_mute.h"
 
 	uint8_t YM_read_status(void);
 	void YM_Create(int clock);
 	void YM_init(int sample_rate, int frame_rate);
-	void YM_stream_update(uint16_t* output, uint32_t numsamples);
+	// `output` receives the machine's mix of every channel, `host_output` the
+	// same without the muted ones.
+	void YM_stream_update(uint16_t* output, uint16_t* host_output, uint32_t numsamples);
 	// Returns false if the chip was busy and the write was dropped, as the
 	// real YM2151 does. The caller reports it, since it knows who wrote.
 	bool YM_write_reg(uint8_t reg, uint8_t val);
@@ -61,13 +64,25 @@ extern "C" {
 	uint8_t YM_debug_get_status(void);
 	bool    YM_debug_is_busy(void);
 
+	// The LFO's AM and PM depths as the chip holds them. Both are written
+	// through $19, so the register shadow keeps only the later of the two.
+	void    YM_debug_get_lfo_depths(uint8_t *am, uint8_t *pm);
+
 	// Host-output mute, one bit per channel (bit n = channel n). The chip runs
-	// every channel exactly as it would otherwise; muted ones are only left out
-	// of the mix sent to the host (and so out of the scope's mix streams and any
-	// WAV recording). Per-channel scope traces still show them. A debugger
-	// setting, not machine state: save states neither store nor restore it.
+	// every channel exactly as it would otherwise and they all stay in the mix
+	// the machine holds; muted ones are only left out of the mix sent to the
+	// host (and so out of the scope's mix streams and any WAV recording).
+	// Per-channel scope traces still show them. A debugger setting, not machine
+	// state: save states neither store nor restore it.
+	//
+	// set/get_mute_mask are the debugger UI's own selection. Each debug client
+	// has a separate mask; what is muted is the OR of them all.
 	void    YM_debug_set_mute_mask(uint8_t mask);
 	uint8_t YM_debug_get_mute_mask(void);
+	void    YM_debug_set_owner_mute_mask(voice_mute_owner_t owner, uint8_t mask);
+	uint8_t YM_debug_get_owner_mute_mask(voice_mute_owner_t owner);
+	uint8_t YM_debug_get_client_mute_mask(void);    // every client's, ORed
+	uint8_t YM_debug_get_effective_mute_mask(void); // UI and clients, ORed
 
 	// ─── Scope capture ──────────────────────────────────────────────────────
 	// Self-arming per-channel capture, same contract as the PSG's (see

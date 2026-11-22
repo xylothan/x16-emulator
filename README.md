@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1513,7 +1513,7 @@ debugging it.
 | Tools | |
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `run_to`, `wait_for_stop`, `reset` |
-| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `search_memory`, `disassemble`, `get_stack`, `evaluate` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `search_memory`, `disassemble`, `get_stack`, `evaluate`, `get_audio_state`, `set_voice_mute` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `set_stop_on`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
@@ -1554,6 +1554,21 @@ the same rule as `load_symbols`. DAP clients are not restricted.
 `reindex`, which can discard per-file counts and would build an index the I/O panel has turned off.
 `sprite_mux_stats` and `sprite_mux_config` `enabled` are that client's own claim on recording, which
 ends with its session. `burstGap` is one global value, shared with the panel and not put back.
+
+`get_audio_state` (`x16/audio`) reads the PSG, YM2151 and PCM without changing them: it does not
+reset a level meter, clear a YM flag or consume the FIFO. Each voice gives its raw registers as
+`regs` (PSG: its four bytes; YM channel: `$20`, `$28`, `$30`, `$38`; YM operator: `$40` to `$E0` in
+steps of `$20`) beside the decoded fields, named as in the panels. Pitch is in Hz and timer periods
+in ms. `chip` limits the reply to `psg`, `ym` or `pcm`. The chips are clocked lazily, so phases,
+samples and the FIFO are as of their last catch-up with the CPU and can trail it by a few
+milliseconds.
+
+`set_voice_mute` (`x16/setVoiceMute`) takes `chip` (`psg` or `ym`), `muted`, and a `voice`, or none
+for the whole chip. Each client has its own mask, ORed with the panels' selection. It never changes
+that selection, and it ends with the client's session or MCP lease, so a client that goes cannot
+leave a voice silent. A muted voice is left out of the host output and any WAV recording only: the
+chip, the mix it holds and every state hash are the same as if nothing were muted. The PSG and YM
+panels show a client's mute in amber.
 
 `search_memory` (`x16/searchMemory`) finds `hex` or ASCII `text` of up to 64 bytes through the
 debugger's read path, so it moves no VERA data port and clears no device flag. `space` is `cpu` (the
