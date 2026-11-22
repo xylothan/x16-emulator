@@ -14,9 +14,7 @@
 // All emulator state is reached through debug_ui_bridge.h (never core headers).
 #include <stddef.h>
 #include <stdint.h>
-#include <cctype>
 #include <cstring>
-#include <vector>
 
 #include "imgui.h"
 #include "debug_ui_panels.h"
@@ -24,6 +22,7 @@
 #include "debug_ui_widgets.h"    // dbgui_value_lines
 #include "debug_ui_settings.h"   // user preferences (highlight toggle + fade)
 #include "imgui_memory_editor.h" // imgui_club MemoryEditor
+#include "mem_search.h"
 
 // ---------------------------------------------------------------------------
 // debug_ui_write6502 — declared (extern "C") in debug_ui_bridge.h. Defined here
@@ -396,55 +395,37 @@ ImU8 cpu_read_at(uint32_t a)  {
 }
 ImU8 vram_read_at(uint32_t a) { return video_space_read(a); }
 
-// Parse "A9 00 8D" / "A9008D" into bytes (whitespace ignored, nibbles paired).
-bool
-parse_hex_pattern(const char *s, std::vector<uint8_t> &out)
-{
-    out.clear();
-    int hi = -1;
-    for (const char *p = s; *p; ++p) {
-        unsigned char c = (unsigned char)*p;
-        if (isspace(c)) continue;
-        if (!isxdigit(c)) return false;
-        int v = (c <= '9') ? (c - '0') : (tolower(c) - 'a' + 10);
-        if (hi < 0) {
-            hi = v;
-        } else {
-            out.push_back((uint8_t)((hi << 4) | v));
-            hi = -1;
-        }
-    }
-    if (hi >= 0) out.push_back((uint8_t)hi); // trailing single nibble → low byte
-    return !out.empty();
-}
+struct SearchPattern {
+    uint8_t bytes[MEM_SEARCH_MAX_PATTERN];
+    size_t  len = 0;
+};
+
+// The search box holds fewer characters than the matcher's longest pattern.
+static_assert(sizeof(SearchState::buf) <= MEM_SEARCH_MAX_PATTERN + 1, "search box too long");
 
 bool
-parse_ascii_pattern(const char *s, std::vector<uint8_t> &out)
+parse_pattern(const SearchState &st, SearchPattern &pat)
 {
-    out.clear();
-    for (const char *p = s; *p; ++p) out.push_back((uint8_t)*p);
-    return !out.empty();
+    return st.hex ? mem_search_parse_hex(st.buf, false, pat.bytes, &pat.len)
+                  : mem_search_parse_text(st.buf, pat.bytes, &pat.len);
 }
 
-// Scan for `pat` starting at candidate position `from`, wrapping over the whole
-// space. dir >= 0 searches forward, dir < 0 backward. Returns the match start or
-// -1. Only called on a button press, so a linear scan is fine.
+struct SearchReader {
+    ImU8 (*fn)(uint32_t);
+};
+
+uint8_t
+search_read(uint32_t offset, void *ctx)
+{
+    return static_cast<SearchReader *>(ctx)->fn(offset);
+}
+
+// Only called on a button press, so a linear scan is fine.
 long
-mem_find(ImU8 (*readfn)(uint32_t), size_t size, const std::vector<uint8_t> &pat, long from, int dir)
+mem_find(ImU8 (*readfn)(uint32_t), size_t size, const SearchPattern &pat, long from, int dir)
 {
-    size_t m = pat.size();
-    if (m == 0 || size < m) return -1;
-    long span = (long)(size - m) + 1;   // candidate start positions [0, size-m]
-    from = ((from % span) + span) % span;
-    for (long k = 0; k < span; k++) {
-        long i = (dir >= 0) ? ((from + k) % span) : (((from - k) % span + span) % span);
-        bool ok = true;
-        for (size_t j = 0; j < m; j++) {
-            if (readfn((uint32_t)i + (uint32_t)j) != pat[j]) { ok = false; break; }
-        }
-        if (ok) return i;
-    }
-    return -1;
+    SearchReader reader{readfn};
+    return mem_search_find(search_read, &reader, size, pat.bytes, pat.len, from, dir);
 }
 
 // Search UI row for one tab. Highlights the match in `ed` on success.
@@ -462,15 +443,15 @@ render_search(MemoryEditor &ed, SearchState &st, ImU8 (*readfn)(uint32_t), size_
     bool prev = ImGui::Button("Find Prev");
 
     if (next || prev) {
-        std::vector<uint8_t> pat;
-        bool ok = st.hex ? parse_hex_pattern(st.buf, pat) : parse_ascii_pattern(st.buf, pat);
+        SearchPattern pat;
+        bool ok = parse_pattern(st, pat);
         st.notfound = false;
         if (ok) {
             long from = (st.last < 0) ? (next ? 0 : (long)size) : (next ? st.last + 1 : st.last - 1);
             long m = mem_find(readfn, size, pat, from, next ? +1 : -1);
             if (m >= 0) {
                 st.last = m;
-                ed.GotoAddrAndHighlight((size_t)m, (size_t)m + pat.size());
+                ed.GotoAddrAndHighlight((size_t)m, (size_t)m + pat.len);
             } else {
                 st.notfound = true;
             }
@@ -978,8 +959,8 @@ render_bank_search(MemoryEditor &ed, uint16_t base, size_t win, int nbanks)
     bool prev = ImGui::Button("Find Prev");
 
     if (next || prev) {
-        std::vector<uint8_t> pat;
-        bool ok = st.hex ? parse_hex_pattern(st.buf, pat) : parse_ascii_pattern(st.buf, pat);
+        SearchPattern pat;
+        bool ok = parse_pattern(st, pat);
         st.notfound = false;
         if (!ok) {
             st.notfound = true;
@@ -992,7 +973,7 @@ render_bank_search(MemoryEditor &ed, uint16_t base, size_t win, int nbanks)
                 st.last    = m;
                 g_bank_sel = (int)((size_t)m / win);
                 long off   = (long)((size_t)m % win);
-                ed.GotoAddrAndHighlight((size_t)off, (size_t)off + pat.size());
+                ed.GotoAddrAndHighlight((size_t)off, (size_t)off + pat.len);
             } else {
                 st.notfound = true;
             }
@@ -1002,7 +983,7 @@ render_bank_search(MemoryEditor &ed, uint16_t base, size_t win, int nbanks)
             long m = mem_find(bank_read_at, win, pat, from, next ? +1 : -1);
             if (m >= 0) {
                 st.last = m;
-                ed.GotoAddrAndHighlight((size_t)m, (size_t)m + pat.size());
+                ed.GotoAddrAndHighlight((size_t)m, (size_t)m + pat.len);
             } else {
                 st.notfound = true;
             }

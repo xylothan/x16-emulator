@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1513,7 +1513,7 @@ debugging it.
 | Tools | |
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `run_to`, `wait_for_stop`, `reset` |
-| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `disassemble`, `get_stack`, `evaluate` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `search_memory`, `disassemble`, `get_stack`, `evaluate` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `set_stop_on`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
@@ -1554,6 +1554,16 @@ the same rule as `load_symbols`. DAP clients are not restricted.
 `reindex`, which can discard per-file counts and would build an index the I/O panel has turned off.
 `sprite_mux_stats` and `sprite_mux_config` `enabled` are that client's own claim on recording, which
 ends with its session. `burstGap` is one global value, shared with the panel and not put back.
+
+`search_memory` (`x16/searchMemory`) finds `hex` or ASCII `text` of up to 64 bytes through the
+debugger's read path, so it moves no VERA data port and clears no device flag. `space` is `cpu` (the
+64K map as now banked, with the I/O page), `ram` or `rom` (one `bank`, or all of them without it) or
+`vram`. `start` and `end` narrow it, except that all banks always run to the last one. Every start
+position counts, so matches can overlap, and nothing wraps. Each match has its `address` and `bank`
+(`null` where no bank applies). A match can cross `$BFFF`/`$C000` in the CPU map, or from one bank
+into the next across all banks, and is then marked `crossesBank`. With one `bank` it stays inside
+that bank. A call returns at most `limit` matches and reads at most 256K. With `more: true`, pass
+the fields of `next` back to continue. A call can return `more: true` with no matches.
 
 `get_stack` guesses callers from the hardware stack, because the CPU keeps no frame pointer. It
 recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's

@@ -351,6 +351,7 @@ set(X16_SOURCES
     src/code_map.c
     src/debug_core.c
     src/call_stack.c
+    src/mem_search.c
     src/cpu/irq_ctx.c
     src/javascript_interface.c
     src/joystick.c
@@ -764,6 +765,10 @@ x16_add_test(dbg_log
 # The unwinder reads memory through a callback, so it links alone too.
 x16_add_test(call_stack
     SOURCES tests/test_call_stack.c src/call_stack.c)
+
+# The search reads memory through a callback, so it links alone too.
+x16_add_test(mem_search
+    SOURCES tests/test_mem_search.c src/mem_search.c)
 
 # dbg_load.c reports loads to dbg_info and source_view, so the test links those
 # two alongside it. dbg_info.c has no dependency on the emulator core either.
