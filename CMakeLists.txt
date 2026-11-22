@@ -710,6 +710,8 @@ function(x16_add_test name)
 
     add_executable(${name}_test ${T_SOURCES})
     target_include_directories(${name}_test PRIVATE src)
+    # Tests define their own main(void); SDL's Windows header would rename it.
+    target_compile_definitions(${name}_test PRIVATE SDL_MAIN_HANDLED)
     if(T_NEEDS_SDL)
         target_include_directories(${name}_test PRIVATE ${SDL2_INCLUDE_DIRS})
     endif()
