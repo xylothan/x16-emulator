@@ -20,7 +20,7 @@ typedef struct {
     char  message[256];  // why it failed
 } dbg_reply_t;
 
-// What the server needs to know from the other front end. Either may be NULL.
+// What the server needs to know from the other front end. Any may be NULL.
 typedef struct {
     // True while it is using the machine. A DAP session ending then leaves the
     // run state alone, and an editor's Stop does not quit the emulator unless
@@ -28,6 +28,9 @@ typedef struct {
     bool (*holds_run_state)(void);
     // A deferred x16/step finished. Takes ownership of `body`.
     void (*step_done)(cJSON *body);
+    // False if it cannot set a stopped machine going, so that a stop is not left
+    // to it. NULL means it can.
+    bool (*can_resume)(void);
 } dbg_frontend_t;
 
 void debug_server_set_frontend(const dbg_frontend_t *frontend);

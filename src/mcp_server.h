@@ -22,6 +22,8 @@ static inline bool mcp_server_is_enabled(void) { return false; }
 static inline void mcp_server_shutdown(void) { }
 static inline void mcp_server_note_stopped(void) { }
 static inline void mcp_server_note_resumed(void) { }
+static inline void mcp_server_set_readonly(bool on) { (void)on; }
+static inline bool mcp_server_is_readonly(void) { return false; }
 
 #else
 
@@ -48,6 +50,10 @@ void mcp_server_shutdown(void);
 // a resume can both land between two polls and each stop has to be counted.
 void mcp_server_note_stopped(void);
 void mcp_server_note_resumed(void);
+
+// Offer and accept only the tools that change nothing. Set before the first poll.
+void mcp_server_set_readonly(bool on);
+bool mcp_server_is_readonly(void);
 
 #endif // HAS_DAP
 

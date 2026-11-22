@@ -100,6 +100,7 @@ typedef struct out_msg {
 } out_msg;
 
 static bool       enabled = false;
+static bool       read_only = false;
 static bool       quit_sent = false;
 static int        out_fd = -1;
 
@@ -806,6 +807,10 @@ static bool mcp_holds_run_state(void) {
     return enabled && (!http_mode || lease_live);
 }
 
+static bool mcp_can_resume(void) {
+    return !read_only;
+}
+
 static void lease_renew(void) {
     if (!http_mode) return;
     lease_live = true;
@@ -820,7 +825,8 @@ static void lease_poll(void) {
     }
     if (!SDL_TICKS_PASSED(SDL_GetTicks(), lease_end)) return;
     lease_live = false;
-    debug_server_release_frontend();
+    // A read-only client armed nothing, and its going must not resume anything.
+    if (!read_only) debug_server_release_frontend();
 }
 
 // ─── Run control ────────────────────────────────────────────────────
@@ -1228,6 +1234,33 @@ static bool source_line_ref(cJSON *args, bool vram, char *ref, size_t ref_n, int
     return true;
 }
 
+// A dump breakpoint's file and regions as mcp/setBreakpoint takes them. NULL,
+// with err set, if refused.
+static cJSON *dump_args(cJSON *dump, char *err, size_t errn) {
+    static const char *const keys[] = { "file", "regions", NULL };
+    if (!only_keys(dump, keys, "dump", err, errn)) return NULL;
+    cJSON *file = cJSON_GetObjectItemCaseSensitive(dump, "file");
+    cJSON *regs = cJSON_GetObjectItemCaseSensitive(dump, "regions");
+    if (!file || !cJSON_IsString(file) || !file->valuestring[0] || !cJSON_IsArray(regs) ||
+        cJSON_GetArraySize(regs) < 1 || cJSON_GetArraySize(regs) > 16) {
+        snprintf(err, errn, "'dump' needs a 'file' and 1 to 16 'regions'");
+        return NULL;
+    }
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddStringToObject(out, "file", file->valuestring);
+    cJSON *list = cJSON_AddArrayToObject(out, "regions");
+    cJSON *rd;
+    cJSON_ArrayForEach(rd, regs) {
+        cJSON *one = read_args(rd, err, errn);
+        if (!one) {
+            cJSON_Delete(out);
+            return NULL;
+        }
+        cJSON_AddItemToArray(list, one);
+    }
+    return out;
+}
+
 static cJSON *breakpoint_call(const char *command, cJSON *args) {
     char err[512], ref[48], where[512] = "";
     bool vram = false;
@@ -1273,6 +1306,9 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     cJSON *hi = args ? cJSON_GetObjectItemCaseSensitive(args, "hitCondition") : NULL;
     if ((co && !cJSON_IsString(co)) || (hi && !cJSON_IsString(hi)))
         return tool_fail("'condition' and 'hitCondition' must be strings");
+    cJSON *dp = args ? cJSON_GetObjectItemCaseSensitive(args, "dump") : NULL;
+    if (dp && ki && strcmp(ki->valuestring, "exec"))
+        return tool_fail("'dump' applies to an exec breakpoint");
 
     cJSON *call = cJSON_CreateObject();
     cJSON_AddStringToObject(call, "address", ref);
@@ -1282,6 +1318,16 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     if (xf) cJSON_AddBoolToObject(call, "excludeFetch", cJSON_IsTrue(xf));
     if (co) cJSON_AddStringToObject(call, "condition", co->valuestring);
     if (hi) cJSON_AddStringToObject(call, "hitCondition", hi->valuestring);
+    cJSON *en = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
+    if (en) cJSON_AddBoolToObject(call, "enabled", cJSON_IsTrue(en));
+    if (dp) {
+        cJSON *converted = dump_args(dp, err, sizeof err);
+        if (!converted) {
+            cJSON_Delete(call);
+            return tool_fail(err);
+        }
+        cJSON_AddItemToObject(call, "dump", converted);
+    }
     dbg_reply_t r;
     debug_server_call(command, call, &r);
     cJSON_Delete(call);
@@ -1303,6 +1349,12 @@ static cJSON *tool_set_breakpoint(cJSON *args) {
 
 static cJSON *tool_remove_breakpoint(cJSON *args) {
     return breakpoint_call("mcp/removeBreakpoint", args);
+}
+
+static cJSON *tool_enable_breakpoint(cJSON *args) {
+    cJSON *en = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
+    if (!en || !cJSON_IsBool(en)) return tool_fail("'enabled' is required: true or false");
+    return breakpoint_call("mcp/enableBreakpoint", args);
 }
 
 // ─── Input, save states, statistics ─────────────────────────────────
@@ -1750,7 +1802,7 @@ static cJSON *tool_screenshot(cJSON *args) {
 }
 
 typedef enum {
-    TOOL_READ,         // changes nothing in the machine
+    TOOL_READ,         // changes nothing in the machine, writes no file, arms nothing
     TOOL_CONTROL,      // moves or feeds it, and nothing is lost
     TOOL_DESTRUCTIVE,  // overwrites state that cannot be got back
 } tool_effect_t;
@@ -1888,7 +1940,12 @@ static const mcp_tool_t tools[] = {
       "stops from the Nth hit on. For a watch, 'condition' filters the byte moved, e.g. "
       "\"== $05\". With kind \"write\", space \"vram\" watches VERA video memory: it stops "
       "when the program's store lands there through a data port, including FX writes. "
-      "A condition is refused where another client's breakpoint differs.",
+      "A condition is refused where another client's breakpoint differs. "
+      "'dump' makes an exec breakpoint write memory to a new host file on each hit instead of "
+      "stopping: a 4-byte hit index, then each region. The file must not exist and must be "
+      "inside -fsroot, or the dump folder when there is no -fsroot; it stops growing at 256 MiB. "
+      "Another client's plain breakpoint at the same address still stops the machine, and "
+      "alsoStops says so. list_breakpoints reports the writes.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
@@ -1899,7 +1956,16 @@ static const mcp_tool_t tools[] = {
       "\"condition\":{\"type\":\"string\"},"
       "\"hitCondition\":{\"type\":\"string\"},"
       "\"file\":{\"type\":\"string\"},"
-      "\"line\":{\"type\":\"integer\",\"minimum\":1}"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1},"
+      "\"dump\":{\"type\":\"object\",\"properties\":{"
+      "\"file\":{\"type\":\"string\"},"
+      "\"regions\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":16,\"items\":{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"length\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":16},"
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+      "},\"required\":[\"address\"],\"additionalProperties\":false}}"
+      "},\"required\":[\"file\",\"regions\"],\"additionalProperties\":false}"
       "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_set_breakpoint },
     { "remove_breakpoint",
@@ -1915,6 +1981,20 @@ static const mcp_tool_t tools[] = {
       "\"line\":{\"type\":\"integer\",\"minimum\":1}"
       "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_remove_breakpoint },
+    { "enable_breakpoint",
+      "Turn a breakpoint or watch this client set on or off, by 'address' or by 'file' and "
+      "'line', keeping its condition and hit count. The flag is shared per address, so this is "
+      "refused where another client or the command line also holds it.",
+      "{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"enabled\":{\"type\":\"boolean\"},"
+      "\"space\":{\"type\":\"string\",\"enum\":[\"cpu\",\"vram\"],\"default\":\"cpu\"},"
+      "\"kind\":{\"type\":\"string\",\"enum\":[\"exec\",\"write\",\"read\",\"access\"],\"default\":\"exec\"},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      "\"file\":{\"type\":\"string\"},"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1}"
+      "},\"required\":[\"enabled\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_enable_breakpoint },
     { "list_breakpoints",
       "Every breakpoint and watchpoint armed in the machine, and who asked for each.",
       NO_ARGS, TOOL_READ, tool_list_breakpoints },
@@ -2058,7 +2138,7 @@ static const mcp_tool_t tools[] = {
       "\"windows\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},"
       "\"description\":\"window lengths in seconds; 0 means since start\"}"
       "},\"additionalProperties\":false}",
-      TOOL_READ, tool_perf_stats },
+      TOOL_CONTROL, tool_perf_stats },
     { "perf_config",
       "Configure the CPU budget and VERA bandwidth statistics. With no arguments, reports the "
       "settings. 'enabled' is this client's own claim: statistics keep running while any other "
@@ -2153,7 +2233,7 @@ static const mcp_tool_t tools[] = {
       "during it, and lines that ran out of render time. The first call turns recording on "
       "(about 600 KB) as this client's claim, which ends with the session. 'lastFrame' appears "
       "once a frame completes, so keep the machine running. Its 'peakLine' is a scanline.",
-      NO_ARGS, TOOL_READ, tool_sprite_mux_stats },
+      NO_ARGS, TOOL_CONTROL, tool_sprite_mux_stats },
     { "sprite_mux_config",
       "Configure sprite multiplex recording. With no arguments, reports the settings. 'enabled' "
       "is this client's own claim: recording keeps running while any other client or panel wants "
@@ -2218,12 +2298,24 @@ static void handle_initialize(const cJSON *id, cJSON *params) {
         "separate address space from the CPU map. step, run_frames and wait_for_stop answer "
         "when the machine stops, or with completed: false at timeoutMs while it keeps going; "
         "continue with wait_for_stop, passing the last stopId.");
+    if (read_only) {
+        cJSON *note = cJSON_GetObjectItemCaseSensitive(result, "instructions");
+        size_t n = strlen(note->valuestring) + 128;
+        char *text = (char *)malloc(n);
+        if (text) {
+            snprintf(text, n, "%s This server is read-only: only tools that change nothing are "
+                              "offered.", note->valuestring);
+            cJSON_ReplaceItemInObjectCaseSensitive(result, "instructions", cJSON_CreateString(text));
+            free(text);
+        }
+    }
     rpc_result(id, result);
 }
 
 static void handle_tools_list(const cJSON *id) {
     cJSON *list = cJSON_CreateArray();
     for (int i = 0; i < NUM_TOOLS; i++) {
+        if (read_only && tools[i].effect != TOOL_READ) continue;
         cJSON *t = cJSON_CreateObject();
         cJSON_AddStringToObject(t, "name", tools[i].name);
         cJSON_AddStringToObject(t, "description", tools[i].description);
@@ -2278,6 +2370,13 @@ static void handle_tools_call(const cJSON *id, cJSON *params) {
         char msg[128];
         snprintf(msg, sizeof msg, "Unknown tool: %.80s", name->valuestring);
         rpc_error(id, RPC_INVALID_PARAMS, msg);
+        return;
+    }
+    if (read_only && tool->effect != TOOL_READ) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "%s is not available: this server is read-only (-mcp-readonly)",
+                 tool->name);
+        rpc_result(id, tool_fail(msg));
         return;
     }
     const char *bad = unknown_argument(tool, args);
@@ -2603,7 +2702,7 @@ static Uint32 env_ms(const char *name, Uint32 fallback) {
     return ms > 0 ? (Uint32)ms : fallback;
 }
 
-static const dbg_frontend_t mcp_frontend = { mcp_holds_run_state, on_frames_done };
+static const dbg_frontend_t mcp_frontend = { mcp_holds_run_state, on_frames_done, mcp_can_resume };
 
 // Why the last socket call failed, for a message a person can act on.
 static const char *mcp_sock_error(void) {
@@ -2718,6 +2817,14 @@ int mcp_server_init_stdio(void) {
 
 bool mcp_server_is_enabled(void) {
     return enabled;
+}
+
+void mcp_server_set_readonly(bool on) {
+    read_only = on;
+}
+
+bool mcp_server_is_readonly(void) {
+    return read_only;
 }
 
 void mcp_server_note_stopped(void) {

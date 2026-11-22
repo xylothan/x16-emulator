@@ -95,10 +95,14 @@ static int      server_port = 0;
 static dbg_caller_t   current_caller = DBG_CALLER_DAP;
 static dbg_reply_t   *reply_sink = NULL;
 static bool           reply_answered = false;
-static dbg_frontend_t frontend = { NULL, NULL };
+static dbg_frontend_t frontend = { NULL, NULL, NULL };
 
 static bool frontend_holds_run_state(void) {
     return frontend.holds_run_state && frontend.holds_run_state();
+}
+
+static bool frontend_can_resume(void) {
+    return !frontend.can_resume || frontend.can_resume();
 }
 
 // DAP sequence counter (for events we send)
@@ -264,7 +268,7 @@ dap_other_owner_of_run_state(void)
 {
 	return (debug_window_enabled && debugger_enabled)
 	       || (imgui_debugger_enabled && video_debug_ui_available())
-	       || frontend_holds_run_state();
+	       || (frontend_holds_run_state() && frontend_can_resume());
 }
 
 // A handler's reply can drop a DAP client, and then there is nobody left to act
@@ -4553,6 +4557,16 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
         cJSON_AddNumberToObject(o, "ignoreCount", ignore);
         cJSON_AddNumberToObject(o, "hits", debug_bp_get_hits(bp->pc, bp->bank, bp->x16Bank));
 
+        debug_owner_t dump_owner = DEBUG_OWNER_UI;
+        uint32_t dump_writes = 0;
+        bool dump_full = false;
+        if (debug_bp_dump_info(bp->pc, bp->bank, bp->x16Bank, &dump_owner, &dump_writes, &dump_full)) {
+            cJSON *d = cJSON_AddObjectToObject(o, "dump");
+            cJSON_AddItemToObject(d, "owner", owners_bitmask_to_json((uint16_t)(1u << dump_owner)));
+            cJSON_AddNumberToObject(d, "writes", dump_writes);
+            cJSON_AddBoolToObject(d, "full", dump_full);
+        }
+
         // DAP-visible identity, when this address was set through
         // setBreakpoints. Owner-gated first to disambiguate an address another
         // owner also happens to hold; first match wins, since a live entry
@@ -5368,19 +5382,16 @@ static uint8_t dap_dump_read(uint32_t addr, int x16Bank) {
     return debug_read6502((uint16_t)(addr & 0xFFFF), (uint8_t)(addr >> 16), x16Bank);
 }
 
-static bool dap_apply_dump(const struct breakpoint *bp, cJSON *dump) {
-    cJSON *file = cJSON_GetObjectItemCaseSensitive(dump, "file");
-    cJSON *regs = cJSON_GetObjectItemCaseSensitive(dump, "regions");
-    if (!file || !cJSON_IsString(file) || !regs || !cJSON_IsArray(regs))
-        return false;
-    uint32_t addr[16], len[16];
-    int      bank[16], n = 0;
-    cJSON   *r;
+#define DAP_DUMP_REGIONS 16
+
+static bool dap_dump_regions(cJSON *regs, uint32_t *addr, uint32_t *len, int *bank, int *count) {
+    int    n = 0;
+    cJSON *r;
     cJSON_ArrayForEach(r, regs) {
         cJSON *a = cJSON_GetObjectItemCaseSensitive(r, "addr");
         cJSON *l = cJSON_GetObjectItemCaseSensitive(r, "len");
         cJSON *b = cJSON_GetObjectItemCaseSensitive(r, "bank");
-        if (n >= 16 || !a || !l || !cJSON_IsNumber(l))
+        if (n >= DAP_DUMP_REGIONS || !a || !l || !cJSON_IsNumber(l))
             return false;
         bool is_vram = false;
         if (cJSON_IsNumber(a))
@@ -5394,28 +5405,37 @@ static bool dap_apply_dump(const struct breakpoint *bp, cJSON *dump) {
                 : (b && cJSON_IsNumber(b)) ? (int)b->valuedouble : USE_CURRENT_X16_BANK;
         n++;
     }
+    *count = n;
+    return true;
+}
+
+static bool dap_apply_dump(const struct breakpoint *bp, cJSON *dump) {
+    cJSON *file = cJSON_GetObjectItemCaseSensitive(dump, "file");
+    cJSON *regs = cJSON_GetObjectItemCaseSensitive(dump, "regions");
+    if (!file || !cJSON_IsString(file) || !regs || !cJSON_IsArray(regs))
+        return false;
+    uint32_t addr[DAP_DUMP_REGIONS], len[DAP_DUMP_REGIONS];
+    int      bank[DAP_DUMP_REGIONS], n = 0;
+    if (!dap_dump_regions(regs, addr, len, bank, &n))
+        return false;
     debug_bp_dump_read = dap_dump_read;
-    return debug_bp_set_dump(bp->pc, bp->bank, bp->x16Bank, file->valuestring, n, addr, len, bank);
+    return debug_bp_set_dump(bp->pc, bp->bank, bp->x16Bank, DEBUG_OWNER_DAP_INSTRUCTION,
+                             file->valuestring, n, addr, len, bank);
 }
 
 static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
-    // The request REPLACES the set.  Close the previous set's dump files first:
-    // clearing an owner leaves condition records behind, and a dump left on a
-    // record would ride along on the next plain breakpoint at that address.
-    // Remember the keys too, so the conditions of the ones not asked for again
-    // can be dropped below rather than left for a later breakpoint there.
+    // The request REPLACES the set, and clearing the owner closes its dumps.
+    // Remember the keys, so the conditions of the ones not asked for again can
+    // be dropped below rather than left for a later breakpoint there.
     struct { int pc; uint8_t bank; int x16Bank; } old[128];
     int n_old = 0;
     for (int i = 0; i < debug_bp_count(); i++) {
         const struct breakpoint *b = debug_bp_at(i);
-        if (b->owners & (1u << DEBUG_OWNER_DAP_INSTRUCTION)) {
-            debug_bp_clear_dump(b->pc, b->bank, b->x16Bank);
-            if (n_old < 128) {
-                old[n_old].pc = b->pc;
-                old[n_old].bank = b->bank;
-                old[n_old].x16Bank = b->x16Bank;
-                n_old++;
-            }
+        if ((b->owners & (1u << DEBUG_OWNER_DAP_INSTRUCTION)) && n_old < 128) {
+            old[n_old].pc = b->pc;
+            old[n_old].bank = b->bank;
+            old[n_old].x16Bank = b->x16Bank;
+            n_old++;
         }
     }
     debug_bp_clear_owner(DEBUG_OWNER_DAP_INSTRUCTION);
@@ -5515,7 +5535,10 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
                 cJSON *dump = cJSON_GetObjectItemCaseSensitive(ib, "x16Dump");
                 if (dump) {
                     instr_bp_ids[idx] = 0;   // writes to a file and never stops
-                    if (dap_apply_dump(&bp, dump))
+                    debug_owner_t holder = DEBUG_OWNER_DAP_INSTRUCTION;
+                    debug_bp_dump_info(bp.pc, bp.bank, bp.x16Bank, &holder, NULL, NULL);
+                    const bool taken = holder != DEBUG_OWNER_DAP_INSTRUCTION;
+                    if (!taken && dap_apply_dump(&bp, dump))
                         cJSON_AddBoolToObject(rb, "x16Dump", true);
                     else {
                         debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_DAP_INSTRUCTION);
@@ -5523,13 +5546,16 @@ static int handle_dap_set_instruction_breakpoints(int seq, cJSON *args) {
                             debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
                         num_instr_bps--;
                         verified = false;
-                        snprintf(why, sizeof why,
-                                 "x16Dump needs {file, regions: [{addr, len, bank?}]} (addr a number "
-                                 "or a reference like \"vram:1B000\", no bank on VRAM), at most 16 "
-                                 "regions, and a file that can be opened");
+                        if (taken)
+                            snprintf(why, sizeof why, "another client has a dump breakpoint at this address");
+                        else
+                            snprintf(why, sizeof why,
+                                     "x16Dump needs {file, regions: [{addr, len, bank?}]} (addr a number "
+                                     "or a reference like \"vram:1B000\", no bank on VRAM), at most 16 "
+                                     "regions, and a file that can be opened");
                     }
                 } else {
-                    debug_bp_clear_dump(bp.pc, bp.bank, bp.x16Bank);
+                    debug_bp_clear_dump_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_DAP_INSTRUCTION);
                 }
             } else {
                 snprintf(why, sizeof why, "out of memory; breakpoint not armed");
@@ -6130,16 +6156,55 @@ static uint8_t mcp_watch_access(cJSON *args) {
     return 0;
 }
 
+static const char *client_write_root(char *err, size_t errn);
+
+#define MCP_DUMP_REGION_MAX 4096u
+#define MCP_DUMP_FILE_MAX   (256ull * 1024 * 1024)
+
+// What a client's dump asks for, and the new file it may write. Nothing is
+// created here.
+static bool mcp_dump_request(cJSON *dump, uint32_t *addr, uint32_t *len, int *bank, int *n,
+                             char *target, size_t target_n, char *why, size_t whyn) {
+    cJSON *file = cJSON_GetObjectItemCaseSensitive(dump, "file");
+    cJSON *regs = cJSON_GetObjectItemCaseSensitive(dump, "regions");
+    if (!file || !cJSON_IsString(file) || !file->valuestring[0] || !regs || !cJSON_IsArray(regs) ||
+        !dap_dump_regions(regs, addr, len, bank, n) || *n < 1) {
+        snprintf(why, whyn, "'dump' needs a file and 1 to %d regions", DAP_DUMP_REGIONS);
+        return false;
+    }
+    for (int i = 0; i < *n; i++) {
+        if (len[i] < 1 || len[i] > MCP_DUMP_REGION_MAX) {
+            snprintf(why, whyn, "a dump region is 1 to %u bytes", MCP_DUMP_REGION_MAX);
+            return false;
+        }
+    }
+    const char *folder = client_write_root(why, whyn);
+    if (!folder) return false;
+    bool exists = false;
+    if (!host_write_path(folder, file->valuestring, target, target_n, &exists, why, whyn))
+        return false;
+    if (exists) {
+        snprintf(why, whyn, "that file exists; a dump breakpoint writes a new file");
+        return false;
+    }
+    return true;
+}
+
 static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
     static const char cmd[] = "mcp/setBreakpoint";
     cJSON *ci = cJSON_GetObjectItemCaseSensitive(args, "condition");
     cJSON *hi = cJSON_GetObjectItemCaseSensitive(args, "hitCondition");
+    cJSON *dump = cJSON_GetObjectItemCaseSensitive(args, "dump");
     const char *cond = (ci && cJSON_IsString(ci)) ? ci->valuestring : "";
     const char *hit  = (hi && cJSON_IsString(hi)) ? hi->valuestring : "";
-    char why[200], where[24];
+    char why[420], where[24];
     cJSON *body;
 
     const uint8_t access = mcp_watch_access(args);
+    if (access && dump) {
+        send_dap_error_response(seq, cmd, "'dump' applies to an exec breakpoint");
+        return 0;
+    }
     if (access) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
@@ -6165,9 +6230,16 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         // Set again with the same values is fine; a different range or filter
         // would change what an earlier claim, even this client's, is watching.
         cJSON *xf = cJSON_GetObjectItemCaseSensitive(args, "excludeFetch");
+        // Setting a watch this client alone holds and has disabled arms it again,
+        // as it does for an exec breakpoint.
+        const int held = debug_wp_find(space, addr, DEBUG_BANK_ANY);
+        const bool rearm = held >= 0 && !debug_wp_at(held)->active &&
+                           debug_wp_at(held)->owners == (uint16_t)(1u << DEBUG_OWNER_MCP);
+        if (rearm) debug_wp_set_active_at(held, true);
         const char *refused = dap_arm_watch(space, access, !(xf && cJSON_IsFalse(xf)), addr, len,
                                             has_value, op, (uint8_t)val, DEBUG_OWNER_MCP);
         if (refused) {
+            if (rearm) debug_wp_set_active_at(held, false);
             send_dap_error_response(seq, cmd, refused);
             return 0;
         }
@@ -6192,33 +6264,128 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         return 0;
     }
     const dbg_addr_t a24 = ((dbg_addr_t)bp.bank << 16) | (dbg_addr_t)bp.pc;
-    // Setting it again may change this client's own condition, so its claim is
-    // set aside for the comparison: what is left belongs to someone else.
-    const bool had = debug_bp_has_owner(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
-    if (had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
-    if (dap_bp_cond_conflicts(a24, bp.x16Bank, cond, hit)) {
-        if (had) debug_bp_add_for(bp, DEBUG_OWNER_MCP);
+    const uint16_t mine = (uint16_t)(1u << DEBUG_OWNER_MCP);
+    const int at = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
+    const uint16_t owners = at >= 0 ? debug_bp_at(at)->owners : 0;
+    const bool had = (owners & mine) != 0;
+    const bool others = (owners & (uint16_t)~mine) != 0;
+    const bool was_enabled = at >= 0 && debug_bp_at(at)->enabled;
+    // This client's own condition may change, so only someone else's can conflict.
+    if (others && dap_bp_cond_conflicts(a24, bp.x16Bank, cond, hit)) {
         snprintf(why, sizeof why, "another breakpoint at $%04X has a different condition or hit count",
                  (unsigned)bp.pc);
         send_dap_error_response(seq, cmd, why);
         return 0;
     }
-    dap_apply_bp_condition(a24, cond, hit, bp.x16Bank);
-    const debug_add_result_t added = debug_bp_add_for(bp, DEBUG_OWNER_MCP);
-    if (added == DEBUG_ADD_FULL) {
-        if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
-            debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
+
+    uint32_t dump_addr[DAP_DUMP_REGIONS], dump_len[DAP_DUMP_REGIONS];
+    int      dump_bank[DAP_DUMP_REGIONS], dump_n = 0;
+    char     target[4200];
+    if (dump) {
+        debug_owner_t holder = DEBUG_OWNER_MCP;
+        if (debug_bp_dump_info(bp.pc, bp.bank, bp.x16Bank, &holder, NULL, NULL)) {
+            send_dap_error_response(seq, cmd, holder == DEBUG_OWNER_MCP
+                ? "this client already has a dump breakpoint here; remove it first"
+                : "another client has a dump breakpoint at this address");
+            return 0;
+        }
+        if (!mcp_dump_request(dump, dump_addr, dump_len, dump_bank, &dump_n, target, sizeof target,
+                              why, sizeof why)) {
+            send_dap_error_response(seq, cmd, why);
+            return 0;
+        }
+    }
+
+    if (debug_bp_add_for(bp, DEBUG_OWNER_MCP) == DEBUG_ADD_FULL) {
         send_dap_error_response(seq, cmd, "the breakpoint table is full");
         return 0;
     }
-    // A new entry must not inherit a dump left on the record. One someone else
-    // already holds keeps whatever it does.
-    if (added == DEBUG_ADD_CREATED) debug_bp_clear_dump(bp.pc, bp.bank, bp.x16Bank);
+    if (dump) {
+        FILE *f = host_create_new(target);
+        if (!f || !debug_bp_set_dump_file(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP, f,
+                                          MCP_DUMP_FILE_MAX, dump_n, dump_addr, dump_len, dump_bank)) {
+            if (f) fclose(f);
+            if (!had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+            if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
+                debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
+            else if (!was_enabled)
+                debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, false);
+            send_dap_error_response(seq, cmd, "cannot create that file");
+            return 0;
+        }
+        debug_bp_dump_read = dap_dump_read;
+    } else {
+        debug_bp_clear_dump_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
+    }
+    dap_apply_bp_condition(a24, cond, hit, bp.x16Bank);
 
     dap_fmt_bp(where, sizeof where, bp.pc, bp.bank, bp.x16Bank);
     body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "kind", "exec");
     cJSON_AddStringToObject(body, "address", where);
+    if (dump) {
+        cJSON_AddStringToObject(body, "dumpFile", target);
+        cJSON_AddBoolToObject(body, "alsoStops", others);
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// Enabled is one flag on an entry, so it is refused where anyone else holds it.
+static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
+    static const char cmd[] = "mcp/enableBreakpoint";
+    static const char shared[] =
+        "another client holds a breakpoint at this address, and enabling applies to all of them";
+    cJSON *en = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+    if (!en || !cJSON_IsBool(en)) {
+        send_dap_error_response(seq, cmd, "'enabled' must be true or false");
+        return 0;
+    }
+    const bool on = cJSON_IsTrue(en);
+    const uint16_t mine = (uint16_t)(1u << DEBUG_OWNER_MCP);
+    char why[200], where[24];
+    cJSON *body = cJSON_CreateObject();
+
+    const uint8_t access = mcp_watch_access(args);
+    if (access) {
+        uint8_t  space = DEBUG_WP_SPACE_CPU;
+        uint32_t addr = 0, len = 1;
+        const char *refused = NULL;
+        if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) refused = why;
+        const int idx = refused ? -1 : debug_wp_find(space, addr, DEBUG_BANK_ANY);
+        const struct watchpoint *w = idx >= 0 ? debug_wp_at(idx) : NULL;
+        if (!refused && (!w || !(w->owners & mine))) refused = "MCP has no watch at this address";
+        if (!refused && w->access != access) refused = "the watch at this address is of a different kind";
+        if (!refused && (w->owners & (uint16_t)~mine)) refused = shared;
+        if (refused) {
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, refused);
+            return 0;
+        }
+        debug_wp_set_active_at(idx, on);
+        const bool vram = space == DEBUG_WP_SPACE_VRAM;
+        snprintf(where, sizeof where, vram ? "$%05X" : "$%04X", (unsigned)addr);
+        cJSON_AddStringToObject(body, "kind", cJSON_GetObjectItemCaseSensitive(args, "kind")->valuestring);
+        cJSON_AddStringToObject(body, "space", vram ? "vram" : "cpu");
+    } else {
+        struct breakpoint bp;
+        const char *refused = NULL;
+        if (!mcp_bp_key(args, "", &bp, why, sizeof why)) refused = why;
+        const int idx = refused ? -1 : debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
+        const uint16_t owners = idx >= 0 ? debug_bp_at(idx)->owners : 0;
+        if (!refused && !(owners & mine)) refused = "MCP has no breakpoint at this address";
+        if (!refused && (owners & (uint16_t)~mine)) refused = shared;
+        if (refused) {
+            cJSON_Delete(body);
+            send_dap_error_response(seq, cmd, refused);
+            return 0;
+        }
+        debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, on);
+        dap_fmt_bp(where, sizeof where, bp.pc, bp.bank, bp.x16Bank);
+        cJSON_AddStringToObject(body, "kind", "exec");
+    }
+    cJSON_AddStringToObject(body, "address", where);
+    cJSON_AddBoolToObject(body, "enabled", on);
     send_dap_response(seq, cmd, true, body);
     return 0;
 }
@@ -7026,6 +7193,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
         result = handle_mcp_set_breakpoint(seq, args);
     else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/removeBreakpoint"))
         result = handle_mcp_remove_breakpoint(seq, args);
+    else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/enableBreakpoint"))
+        result = handle_mcp_enable_breakpoint(seq, args);
     else if (current_caller == DBG_CALLER_MCP && args && !strcmp(cmd, "mcp/readSource"))
         result = handle_mcp_read_source(seq, args);
     else {
@@ -7070,6 +7239,7 @@ static int dispatch_dap(const char *json_body) {
 void debug_server_set_frontend(const dbg_frontend_t *f) {
     frontend.holds_run_state = f ? f->holds_run_state : NULL;
     frontend.step_done       = f ? f->step_done : NULL;
+    frontend.can_resume      = f ? f->can_resume : NULL;
 }
 
 // Named one by one. Session, configuration and breakpoint-table requests would
@@ -7080,7 +7250,7 @@ static const char *const callable_commands[] = {
     "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
     "x16/step", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
-    "mcp/setBreakpoint", "mcp/removeBreakpoint",
+    "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",

@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 // `path` as the process would open it: a relative one joined to the working
 // folder, since host_read_path() would otherwise take it from its first root.
@@ -20,6 +21,11 @@ bool host_path_from_cwd(const char *path, char *out, size_t n);
 // On failure, `err` says why and nothing has been touched.
 bool host_write_path(const char *root, const char *request, char *out, size_t out_size,
                      bool *exists, char *err, size_t errn);
+
+// Create the file host_write_path() resolved, for writing in binary. Fails if
+// anything is at that path by now, a link included, so that nothing can be put
+// there between the check and the open. NULL on failure.
+FILE *host_create_new(const char *path);
 
 // Resolve `request`, relative to the first usable root unless absolute, into
 // `out`: an existing regular file that, with every link followed, lies inside

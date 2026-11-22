@@ -182,6 +182,19 @@ def test_protocol():
         case("stdout carried nothing but the protocol", not m.noise, str(m.noise[:2]))
 
 
+READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
+                 "wait_for_stop", "get_screen", "screenshot",
+                 "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
+                 "list_sources", "read_source", "source_location", "host_perf",
+                 "get_sdcard"}
+LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
+                "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
+                "sprite_mux_config"}
+MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
+                "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
+                "set_warp", "perf_stats", "sprite_mux_stats"}
+
+
 def test_tools():
     print("tools")
     with Mcp() as m:
@@ -189,16 +202,7 @@ def test_tools():
         r = m.rpc("tools/list")
         listed = (r or {}).get("result", {}).get("tools", [])
         names = {t["name"] for t in listed}
-        reading = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
-                   "wait_for_stop", "perf_stats", "get_screen", "screenshot",
-                   "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
-                   "list_sources", "read_source", "source_location", "host_perf",
-                   "get_sdcard", "sprite_mux_stats"}
-        losing = {"reset", "set_registers", "write_memory", "save_state", "load_state",
-                  "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
-                  "sprite_mux_config"}
-        moving = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
-                  "type_text", "send_key", "joystick", "load_symbols", "mouse", "set_warp"}
+        reading, losing, moving = READING_TOOLS, LOSING_TOOLS, MOVING_TOOLS
         case("every tool is listed", names == reading | losing | moving, str(names))
         for t in listed:
             s = t.get("inputSchema", {})
@@ -3164,6 +3168,323 @@ def test_device_stats():
         dap.close()
 
 
+def bp_entry(m, pc):
+    for b in data(m.call("list_breakpoints")).get("breakpoints", []):
+        if b.get("pc") == pc:
+            return b
+    return {}
+
+
+def watch_entry(m, address):
+    for w in data(m.call("list_breakpoints")).get("watchpoints", []):
+        if w.get("addr") == address:
+            return w
+    return {}
+
+
+def runs_on(m):
+    m.call("continue")
+    time.sleep(0.25)
+    return data(m.call("get_status")).get("paused") is False
+
+
+def stops_at(m, pc=None, reason="breakpoint"):
+    since = data(m.call("continue")).get("stopId")
+    d = data(m.call("wait_for_stop", sinceStopId=since))
+    return d.get("completed") is True and d.get("stopReason") == reason and (pc is None or d.get("pc") == pc)
+
+
+def test_enable_breakpoint():
+    print("enable_breakpoint")
+    with Mcp() as m:
+        m.init()
+        time.sleep(0.5)
+        plant_loop(m)
+        at = LOOP + 4
+        m.call("set_breakpoint", address=at, condition="A == $05")
+        d = data(m.call("enable_breakpoint", address=at, enabled=False))
+        case("disable reports it", d.get("kind") == "exec" and d.get("enabled") is False, str(d))
+        e = bp_entry(m, at)
+        case("disabled in the list", e.get("enabled") is False, str(e))
+        case("the condition is kept", e.get("condition") is not None, str(e))
+        case("a disabled breakpoint does not stop", runs_on(m))
+        m.call("pause")
+        m.call("set_registers", pc=LOOP)
+        d = data(m.call("enable_breakpoint", address=at, enabled=True))
+        case("enable reports it", d.get("enabled") is True, str(d))
+        case("it stops again", stops_at(m, at))
+        m.call("enable_breakpoint", address=at, enabled=False)
+        m.call("set_breakpoint", address=at, condition="A == $05")
+        case("setting it again enables it", bp_entry(m, at).get("enabled") is True)
+        m.call("remove_breakpoint", address=at)
+
+        m.call("set_registers", pc=LOOP)
+        m.call("set_breakpoint", address=0x0910, kind="write")
+        d = data(m.call("enable_breakpoint", address=0x0910, kind="write", enabled=False))
+        case("a watch can be disabled", d.get("kind") == "write" and d.get("enabled") is False, str(d))
+        case("disabled in the list", watch_entry(m, 0x0910).get("active") is False)
+        case("a disabled watch does not stop", runs_on(m))
+        m.call("pause")
+        m.call("set_registers", pc=LOOP)
+        m.call("enable_breakpoint", address=0x0910, kind="write", enabled=True)
+        case("it fires again", stops_at(m, reason="data breakpoint"))
+        m.call("enable_breakpoint", address=0x0910, kind="write", enabled=False)
+        d = data(m.call("set_breakpoint", address=0x0910, kind="write"))
+        case("setting a watch again arms it", d.get("kind") == "write" and
+             watch_entry(m, 0x0910).get("active") is True, str(d))
+        r = m.call("enable_breakpoint", address=0x0910, kind="read", enabled=False)
+        case("the wrong access kind is refused", is_error(r), str(r)[:160])
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+
+        for label, args in (("no enabled", {"address": LOOP}),
+                            ("a text enabled", {"address": LOOP, "enabled": "no"}),
+                            ("a number enabled", {"address": LOOP, "enabled": 0}),
+                            ("no address", {"enabled": True}),
+                            ("nothing there", {"address": 0x0BAD, "enabled": False}),
+                            ("no watch there", {"address": 0x0BAD, "kind": "write", "enabled": False}),
+                            ("an unknown argument", {"address": LOOP, "enabled": True, "banana": 1})):
+            case(f"enable_breakpoint refuses {label}", is_error(m.call("enable_breakpoint", **args)))
+
+    port = free_port()
+    with Mcp(["-bp", "0950", "-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.3)
+        m.call("pause")
+        r = m.call("enable_breakpoint", address=0x0950, enabled=False)
+        case("another owner's breakpoint is refused", is_error(r), str(r)[:160])
+        m.call("set_breakpoint", address=0x0950)
+        r = m.call("enable_breakpoint", address=0x0950, enabled=False)
+        case("a shared breakpoint is refused", is_error(r), str(r)[:160])
+        case("and stays enabled", bp_entry(m, 0x0950).get("enabled") is True)
+
+        dap = Dap(port)
+        dap.session()
+        info = dap.request("dataBreakpointInfo", {"name": "$0A40"})["body"]
+        rows = dap.request("setDataBreakpoints", {"breakpoints": [{"dataId": info["dataId"],
+                                                                   "accessType": "write"}]})["body"]["breakpoints"]
+        case("DAP holds a watch", rows and rows[0].get("verified") is True, str(rows))
+        r = m.call("enable_breakpoint", address=0x0A40, kind="write", enabled=False)
+        case("another owner's watch is refused", is_error(r), str(r)[:160])
+        m.call("set_breakpoint", address=0x0A40, kind="write")
+        r = m.call("enable_breakpoint", address=0x0A40, kind="write", enabled=False)
+        case("a shared watch is refused", is_error(r), str(r)[:160])
+        case("and stays active", watch_entry(m, 0x0A40).get("active") is True)
+        dap.close()
+
+
+DUMP_REGIONS = [{"address": "$0A00", "length": 2}, {"address": "1000", "length": 3, "space": "vram"}]
+
+
+def plant_dump_data(m):
+    m.call("write_memory", address=0x0A00, hex="CAFE")
+    m.call("write_memory", address="1000", hex="010203", space="vram")
+
+
+def records_ok(raw, count):
+    if len(raw) != count * 9:
+        return False
+    return all(raw[i * 9:i * 9 + 4] == struct.pack("<I", i) and
+               raw[i * 9 + 4:i * 9 + 9] == bytes.fromhex("CAFE010203") for i in range(count))
+
+
+def test_dump_breakpoint():
+    print("dump breakpoints")
+    lease = {"X16_MCP_LEASE_MS": "700"}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = os.path.realpath(tmp)
+        root = os.path.join(tmp, "root")
+        outside = root + "2"            # shares the prefix on purpose
+        os.mkdir(root)
+        os.mkdir(outside)
+        os.mkdir(os.path.join(root, "sub"))
+        at = LOOP + 2
+
+        with Mcp(["-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            plant_dump_data(m)
+            target = os.path.join(root, "d.bin")
+            d = data(m.call("set_breakpoint", address=at, dump={"file": "d.bin", "regions": DUMP_REGIONS}))
+            case("the reply names the file", os.path.normcase(d.get("dumpFile", "").replace("/", os.sep)) ==
+                 os.path.normcase(target), str(d))
+            case("nothing else stops there", d.get("alsoStops") is False, str(d))
+            case("it runs on", runs_on(m))
+            m.call("pause")
+            e = bp_entry(m, at).get("dump", {})
+            writes = e.get("writes", 0)
+            case("the list counts its writes", writes > 0 and e.get("full") is False, str(e))
+            case("and names its owner", e.get("owner") == ["mcp"], str(e))
+            r = m.call("set_breakpoint", address=at, dump={"file": "again.bin", "regions": DUMP_REGIONS})
+            case("a second dump is refused", is_error(r) and not os.path.exists(os.path.join(root, "again.bin")),
+                 str(r)[:160])
+            m.call("remove_breakpoint", address=at)
+            with open(target, "rb") as f:
+                case("each record is an index and the regions", records_ok(f.read(), writes))
+
+            m.call("set_registers", pc=LOOP)
+            m.call("set_breakpoint", address=at, dump={"file": "plain.bin", "regions": DUMP_REGIONS})
+            m.call("set_breakpoint", address=at)
+            case("setting it plain drops the dump", "dump" not in bp_entry(m, at))
+            case("and it stops", stops_at(m, at))
+            m.call("remove_breakpoint", address=at)
+
+            kept = os.path.join(root, "kept.bin")
+            with open(kept, "wb") as f:
+                f.write(b"keep")
+            bad_files = (("..", os.path.join("..", "esc.bin")),
+                         ("a nested ..", os.path.join("sub", "..", "..", "esc.bin")),
+                         ("an absolute path outside", os.path.join(tmp, "esc.bin")),
+                         ("a folder sharing the prefix", os.path.join(outside, "esc.bin")),
+                         ("a missing folder", os.path.join("nope", "x.bin")),
+                         ("the root itself", "."),
+                         ("an existing file", "kept.bin"))
+            for label, bad in bad_files:
+                r = m.call("set_breakpoint", address=at, dump={"file": bad, "regions": DUMP_REGIONS})
+                case(f"dump refuses {label}", is_error(r), str(r)[:160])
+                case("and arms nothing", bp_entry(m, at) == {})
+            case("nothing escaped", not os.path.exists(os.path.join(tmp, "esc.bin")) and not os.listdir(outside))
+            with open(kept, "rb") as f:
+                case("the existing file is intact", f.read() == b"keep")
+
+            up = os.path.join(root, "up")
+            if folder_link(outside, up):
+                r = m.call("set_breakpoint", address=at,
+                           dump={"file": os.path.join("up", "esc.bin"), "regions": DUMP_REGIONS})
+                case("dump refuses a folder link out", is_error(r) and not os.listdir(outside), str(r)[:160])
+            link = os.path.join(root, "link.bin")
+            dangling = os.path.join(outside, "dangling.bin")
+            try:
+                os.symlink(dangling, link)
+                has_link = True
+            except (OSError, NotImplementedError):
+                has_link = False
+            if has_link:
+                r = m.call("set_breakpoint", address=at, dump={"file": "link.bin", "regions": DUMP_REGIONS})
+                case("dump refuses a file link, even dangling", is_error(r) and not os.path.exists(dangling),
+                     str(r)[:160])
+            if os.name == "nt":
+                for bad in ("NUL", "con.txt", "d2.bin:hidden"):
+                    r = m.call("set_breakpoint", address=at, dump={"file": bad, "regions": DUMP_REGIONS})
+                    case(f"dump refuses {bad}", is_error(r), str(r)[:160])
+
+            region = {"address": 0x0A00, "length": 1}
+            for label, args in (("a watch", {"kind": "write", "dump": {"file": "w.bin", "regions": [region]}}),
+                                ("no file", {"dump": {"regions": [region]}}),
+                                ("no regions", {"dump": {"file": "w.bin"}}),
+                                ("empty regions", {"dump": {"file": "w.bin", "regions": []}}),
+                                ("too many regions", {"dump": {"file": "w.bin", "regions": [region] * 17}}),
+                                ("a long region", {"dump": {"file": "w.bin", "regions": [
+                                    {"address": 0x0A00, "length": 4097}]}}),
+                                ("an unknown dump key", {"dump": {"file": "w.bin", "regions": [region], "x": 1}}),
+                                ("an unknown region key", {"dump": {"file": "w.bin", "regions": [
+                                    {"address": 0x0A00, "bnak": 1}]}})):
+                r = m.call("set_breakpoint", address=at, **args)
+                case(f"dump refuses {label}", is_error(r) and not os.path.exists(os.path.join(root, "w.bin")),
+                     str(r)[:160])
+
+            m.call("set_breakpoint", address=at)
+            m.call("enable_breakpoint", address=at, enabled=False)
+            m.call("set_breakpoint", address=at, dump={"file": "kept.bin", "regions": DUMP_REGIONS})
+            e = bp_entry(m, at)
+            case("a refused dump leaves a held breakpoint as it was",
+                 e.get("enabled") is False and "dump" not in e, str(e))
+
+        with Mcp(["-fsroot", root, "-bp", "0902"]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+            plant_dump_data(m)
+            d = data(m.call("set_breakpoint", address=at, dump={"file": "both.bin", "regions": DUMP_REGIONS}))
+            case("the reply says another owner stops here", d.get("alsoStops") is True, str(d))
+            case("another owner's plain breakpoint stops", stops_at(m, at))
+            case("and the dump records that hit", bp_entry(m, at).get("dump", {}).get("writes") == 1)
+            m.call("remove_breakpoint", address=at)
+            e = bp_entry(m, at)
+            case("removing it leaves the other owner", e.get("owners") and "mcp" not in e["owners"] and
+                 "dump" not in e, str(e))
+            with open(os.path.join(root, "both.bin"), "rb") as f:
+                case("one record", records_ok(f.read(), 1))
+
+        port = free_port()
+        with HttpMcp(["-fsroot", root, "-debugport", str(port), "-bp", "0902"], env=lease) as m:
+            m.init()
+            time.sleep(0.4)
+            plant_loop(m)
+            released = os.path.join(root, "lease.bin")
+            m.call("set_breakpoint", address=at, dump={"file": "lease.bin", "regions": DUMP_REGIONS})
+            m.call("set_breakpoint", address=0x0960)
+            time.sleep(1.5)
+            dap = Dap(port)
+            rows = (dap.request("x16/listBreakpoints") or {}).get("body", {}).get("breakpoints", [])
+            case("a lease ending releases its breakpoints",
+                 not [b for b in rows if "mcp" in b.get("owners", [])], str(rows)[:200])
+            kept_bp = [b for b in rows if b.get("pc") == at]
+            case("and its dump, leaving the other owner", kept_bp and "dump" not in kept_bp[0], str(kept_bp))
+            if os.name == "nt":
+                try:
+                    os.remove(released)
+                    closed = True
+                except OSError:
+                    closed = False
+                case("the file is closed", closed)
+            dap.close()
+
+
+def check_readonly_surface(m):
+    names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
+    case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
+    for name in sorted(LOSING_TOOLS | MOVING_TOOLS):
+        r = m.call(name)
+        text = (r.get("content") or [{}])[0].get("text", "")
+        case(f"{name} is refused", is_error(r) and "read-only" in text, str(r)[:160])
+    case("the machine kept running", data(m.call("get_status")).get("paused") is False)
+    case("reads still work", data(m.call("read_memory", address=0, length=2)).get("length") == 2)
+    case("nothing was armed", not data(m.call("list_breakpoints")).get("breakpoints"))
+
+
+def test_readonly():
+    print("-mcp-readonly")
+    port = free_port()
+    with Mcp(["-mcp-readonly", "-debugport", str(port)]) as m:
+        r = m.init()
+        case("initialize says so", "read-only" in (r or {}).get("result", {}).get("instructions", ""), str(r)[:200])
+        time.sleep(0.4)
+        check_readonly_surface(m)
+        dap = Dap(port)
+        dap.session()
+        dap.request("pause", {"threadId": 1})
+        dap.event("stopped")
+        case("DAP stopped it", data(m.call("get_status")).get("paused") is True)
+        d = data(m.call("wait_for_stop", timeoutMs=300))
+        case("wait_for_stop reports the stop", d.get("completed") is True, str(d)[:160])
+        case("and does not resume it", data(m.call("get_status")).get("paused") is True)
+        dap.close()
+        time.sleep(0.6)
+        case("a DAP session ending is not left stopped for it",
+             data(m.call("get_status")).get("paused") is False)
+
+    port = free_port()
+    with HttpMcp(["-mcp-readonly", "-debugport", str(port)], env={"X16_MCP_LEASE_MS": "700"}) as m:
+        m.init()
+        time.sleep(0.4)
+        check_readonly_surface(m)
+        dap = Dap(port)
+        dap.session()
+        dap.request("pause", {"threadId": 1})
+        dap.event("stopped")
+        m.call("get_status")
+        time.sleep(1.5)
+        r = dap.request("x16/status")
+        case("its lease ending does not resume DAP's stop", (r or {}).get("body", {}).get("paused") is True, str(r)[:160])
+        dap.request("continue", {"threadId": 1})
+        dap.close()
+
+    p = subprocess.run([EXE, "-rom", ROM, "-hidden", "-mcp-readonly"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    case("-mcp-readonly without -mcp is refused", p.returncode != 0, str(p.returncode))
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -3176,7 +3497,8 @@ def main():
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
-                 test_perf_tools, test_device_stats):
+                 test_perf_tools, test_device_stats, test_enable_breakpoint,
+                 test_dump_breakpoint, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
