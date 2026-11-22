@@ -162,13 +162,14 @@ static Uint32     lease_ms = MCP_LEASE_MS;
 // The one call that answers later: a step, a run of frames, or a wait for a
 // stop. Other requests are still served while it waits, on the machine it is
 // waiting for, so a client can pause what it started.
-typedef enum { WAIT_NONE, WAIT_STOP, WAIT_FRAMES } wait_kind_t;
+typedef enum { WAIT_NONE, WAIT_STOP, WAIT_FRAMES, WAIT_RUN_TO } wait_kind_t;
 
 static struct {
     wait_kind_t kind;
     cJSON      *id;
     Uint32      deadline;
-    uint32_t    since;       // WAIT_STOP: answered once stop_id has passed this
+    uint32_t    since;       // WAIT_STOP, WAIT_RUN_TO: answered once stop_id has passed this
+    dbg_run_target_t target; // WAIT_RUN_TO: where it was sent
     http_conn  *conn;        // HTTP: the connection owed the answer
 } waiter;
 
@@ -771,11 +772,19 @@ static void waiter_answer(cJSON *result) {
 static void waiter_poll(void) {
     if (waiter.kind == WAIT_NONE) return;
     track_stops();
-    if (waiter.kind == WAIT_STOP && (int32_t)(stop_id - waiter.since) > 0) {
+    const bool stopped = (int32_t)(stop_id - waiter.since) > 0;
+    if (waiter.kind == WAIT_STOP && stopped) {
         waiter_answer(wait_result(true, NULL));
+    } else if (waiter.kind == WAIT_RUN_TO && stopped) {
+        waiter_answer(tool_ok(debug_server_run_to_outcome(&waiter.target, true, NULL), NULL));
+    } else if (waiter.kind == WAIT_RUN_TO && DEBUGStepOwner() != DEBUG_OWNER_MCP) {
+        // Another client took over, and nothing will stop it at the target now.
+        waiter_answer(tool_ok(debug_server_run_to_outcome(&waiter.target, false, "cancelled"), NULL));
     } else if (SDL_TICKS_PASSED(SDL_GetTicks(), waiter.deadline)) {
         // The machine keeps going. wait_for_stop picks it up from here.
-        waiter_answer(wait_result(false, "timeout"));
+        waiter_answer(waiter.kind == WAIT_RUN_TO
+                          ? tool_ok(debug_server_run_to_outcome(&waiter.target, false, "timeout"), NULL)
+                          : wait_result(false, "timeout"));
     }
 }
 
@@ -1006,6 +1015,57 @@ static cJSON *tool_run_frames(cJSON *args) {
     }
     cJSON_Delete(r.body);
     return wait_begin(WAIT_FRAMES, timeout, 0);
+}
+
+static cJSON *tool_run_to(cJSON *args) {
+    char err[320];
+    int timeout, bank;
+    if (!arg_int(args, "timeoutMs", MCP_WAIT_DEFAULT, 0, MCP_WAIT_LIMIT, &timeout, err, sizeof err) ||
+        !arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err))
+        return tool_fail(err);
+    if (waiter.kind != WAIT_NONE) return tool_fail(busy_message);
+
+    cJSON *call = cJSON_CreateObject();
+    if (cJSON_HasObjectItem(args, "address")) {
+        // A bare word is a symbol here, and hex in the request.
+        char ref[48];
+        int sym_bank;
+        if (!arg_address_bank(args, false, ref, sizeof ref, &sym_bank, err, sizeof err)) {
+            cJSON_Delete(call);
+            return tool_fail(err);
+        }
+        if (sym_bank >= 0 && bank >= 0 && sym_bank != bank) {
+            cJSON_Delete(call);
+            snprintf(err, sizeof err, "that symbol is in bank %d, not %d", sym_bank, bank);
+            return tool_fail(err);
+        }
+        if (bank < 0) bank = sym_bank;
+        cJSON_AddStringToObject(call, "address", ref);
+    }
+    static const char *const place[] = { "file", "line" };
+    for (int i = 0; i < 2; i++) {
+        cJSON *v = args ? cJSON_GetObjectItemCaseSensitive(args, place[i]) : NULL;
+        if (v) cJSON_AddItemToObject(call, place[i], cJSON_Duplicate(v, 1));
+    }
+    if (bank >= 0) cJSON_AddNumberToObject(call, "bank", bank);
+
+    track_stops();
+    const uint32_t since = stop_id;
+    dbg_reply_t r;
+    debug_server_call("x16/runTo", call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON *pc  = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "pc") : NULL;
+    cJSON *pbr = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "pbr") : NULL;
+    cJSON *x16 = r.body ? cJSON_GetObjectItemCaseSensitive(r.body, "x16Bank") : NULL;
+    waiter.target.pc      = pc ? (uint16_t)pc->valuedouble : 0;
+    waiter.target.bank    = pbr ? (uint8_t)pbr->valuedouble : 0;
+    waiter.target.x16Bank = x16 ? (int)x16->valuedouble : DEBUG_BANK_ANY;
+    cJSON_Delete(r.body);
+    return wait_begin(WAIT_RUN_TO, timeout, since);
 }
 
 static cJSON *tool_wait_for_stop(cJSON *args) {
@@ -1891,6 +1951,20 @@ static const mcp_tool_t tools[] = {
       TIMEOUT_ARG
       "},\"additionalProperties\":false}",
       TOOL_CONTROL, tool_run_frames },
+    { "run_to",
+      "Run a paused machine to an address, a symbol, or a source file and line, and answer "
+      "when it stops. arrived says it got there; any other stop ends the run and reason says "
+      "which. bank pins a banked address. A line with code in several places is refused. If "
+      "it has not stopped by timeoutMs the result has completed: false and the machine keeps "
+      "going: follow up with wait_for_stop.",
+      "{\"type\":\"object\",\"properties\":{"
+      ADDRESS_ARG ","
+      "\"file\":{\"type\":\"string\"},"
+      "\"line\":{\"type\":\"integer\",\"minimum\":1},"
+      "\"bank\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
+      TIMEOUT_ARG
+      "},\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_run_to },
     { "wait_for_stop",
       "Wait for the machine to stop. Pass the stopId from an earlier result as sinceStopId "
       "and a stop that landed in between is not missed. With no sinceStopId, a machine "
@@ -2361,7 +2435,7 @@ static void handle_initialize(const cJSON *id, cJSON *params) {
     cJSON_AddStringToObject(result, "instructions",
         "A Commander X16 emulator. The machine keeps running between calls unless it is "
         "paused, and every result reports paused, frame, stopId and stopReason. VRAM is a "
-        "separate address space from the CPU map. step, run_frames and wait_for_stop answer "
+        "separate address space from the CPU map. step, run_frames, run_to and wait_for_stop answer "
         "when the machine stops, or with completed: false at timeoutMs while it keeps going; "
         "continue with wait_for_stop, passing the last stopId.");
     if (read_only) {

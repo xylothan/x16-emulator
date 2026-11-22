@@ -190,7 +190,7 @@ READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "l
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                 "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
                 "sprite_mux_config"}
-MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "set_breakpoint", "remove_breakpoint",
+MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "run_to", "set_breakpoint", "remove_breakpoint",
                 "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
                 "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on"}
 
@@ -3767,6 +3767,260 @@ def test_stop_on():
         case("a DAP session ending releases its own", d.get("armed") == [], str(d))
 
 
+GATE = 0x0920     # LDA $0940, BEQ GATE, then a NOP at GATE_END, JMP GATE_END
+GATE_END = 0x0925
+GATE_CODE = "AD4009F0FBEA4C2509"
+GATE_FLAG = 0x0940
+
+
+def plant_gate(m):
+    """Pause, spinning at GATE until GATE_FLAG is set."""
+    m.call("pause")
+    m.call("write_memory", address=GATE, hex=GATE_CODE)
+    m.call("write_memory", address=GATE_FLAG, hex="00")
+    status = data(m.call("get_registers"))["cpu"]["status"]
+    m.call("set_registers", pc=GATE, status=status | 0x04)
+
+
+def dap_run_to_ok(m, dap):
+    """The run-to slot is free: another owner can arm one and get there."""
+    m.call("pause")
+    m.call("write_memory", address=LOOP, hex=LOOP_CODE)
+    m.call("set_registers", pc=LOOP)
+    r = dap.request("x16/runTo", {"address": "$0901", "timeoutMs": 3000})
+    return bool(r) and r.get("success") is True and r["body"].get("arrived") is True
+
+
+def test_run_to():
+    print("run_to")
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        stop_on_wait_booted(m)
+        dap = Dap(port)
+        dap.session()
+
+        plant_loop(m)
+        d = data(m.call("run_to", address=LOOP + 4))
+        case("arrives", d.get("completed") is True and d.get("arrived") is True and
+             d.get("reason") == "target", str(d))
+        case("stops there", d.get("paused") is True and d.get("pc") == LOOP + 4 and
+             d.get("stopReason") == "step", str(d))
+
+        for label, args in (("nothing", {}), ("both forms", {"address": LOOP, "file": "a.s", "line": 1}),
+                            ("a file alone", {"file": "a.s"}), ("a line alone", {"line": 1}),
+                            ("line 0", {"file": "a.s", "line": 0}),
+                            ("an unknown symbol", {"address": "no_such_label"}),
+                            ("a VRAM prefix", {"address": "vram:100"}),
+                            ("a bank on low RAM", {"address": LOOP, "bank": 1}),
+                            ("a bank that disagrees", {"address": "04:A000", "bank": 5}),
+                            ("a bank out of range", {"address": 0xA000, "bank": 256}),
+                            ("a bad timeout", {"address": LOOP, "timeoutMs": 30001}),
+                            ("an unknown argument", {"address": LOOP, "frames": 1})):
+            case(f"run_to refuses {label}", is_error(m.call("run_to", **args)))
+        case("a refusal leaves it paused", data(m.call("get_status")).get("paused") is True)
+
+        m.call("write_memory", address=0x0910, hex="00")
+        d = data(m.call("run_to", address=LOOP + 4))
+        case("from the target, it goes round again", d.get("arrived") is True and
+             data(m.call("read_memory", address=0x0910, length=1)).get("hex") == "05", str(d))
+
+        m.call("continue")
+        case("a running machine is refused", is_error(m.call("run_to", address=LOOP)))
+
+        plant_loop(m)
+        for bank in (4, 5):
+            m.call("set_registers", ramBank=bank)
+            m.call("write_memory", address="$A000", hex="EA4C00A0")
+        m.call("set_registers", ramBank=5, pc=0xA001)
+        d = data(m.call("run_to", address="04:A000", timeoutMs=200))
+        case("another bank at the same address is not the target",
+             d.get("completed") is False and d.get("reason") == "timeout" and d.get("paused") is False, str(d))
+        m.call("pause")
+        m.call("set_registers", ramBank=4, pc=0xA001)
+        d = data(m.call("run_to", address="04:A000"))
+        case("a bank in the address", d.get("arrived") is True and d.get("bank") == 4, str(d))
+        m.call("set_registers", pc=0xA001)
+        d = data(m.call("run_to", address=0xA000, bank=4))
+        case("a bank as an argument", d.get("arrived") is True and d.get("bank") == 4, str(d))
+        m.call("set_registers", ramBank=5, pc=0xA001)
+        d = data(m.call("run_to", address=0xA000))
+        case("no bank means whichever is mapped", d.get("arrived") is True and d.get("bank") is None, str(d))
+
+        plant_loop(m)
+        m.call("set_breakpoint", address=LOOP + 2)
+        d = data(m.call("run_to", address=LOOP + 7))
+        case("a breakpoint ends it", d.get("completed") is True and d.get("arrived") is False and
+             d.get("reason") == "breakpoint" and d.get("pc") == LOOP + 2, str(d))
+        m.call("remove_breakpoint", address=LOOP + 2)
+        case("and clears its slot", dap_run_to_ok(m, dap))
+
+        plant_loop(m)
+        m.call("set_breakpoint", address=0x0910, kind="write")
+        d = data(m.call("run_to", address=LOOP))
+        case("a watch ends it", d.get("arrived") is False and d.get("reason") == "watchpoint" and
+             d.get("stopReason") == "data breakpoint", str(d))
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+        case("and clears its slot", dap_run_to_ok(m, dap))
+
+        m.call("pause")
+        m.call("write_memory", address=0x0A00, hex="DBEA4C010A")
+        m.call("set_registers", pc=0x0A00)
+        m.call("set_stop_on", filters=["stp"])
+        d = data(m.call("run_to", address=0x0A03))
+        case("an exception filter ends it", d.get("arrived") is False and d.get("reason") == "exception", str(d))
+        m.call("set_stop_on", filters=[])
+        case("and clears its slot", dap_run_to_ok(m, dap))
+
+        plant_gate(m)
+        rid = m.start("run_to", address=GATE_END, timeoutMs=20000)
+        time.sleep(0.15)
+        dap.request("pause", {"threadId": 1})
+        d = data(m.result(rid))
+        case("a pause ends it", d.get("completed") is True and d.get("arrived") is False and
+             d.get("reason") == "pause", str(d))
+        case("and clears its slot", dap_run_to_ok(m, dap))
+
+        plant_gate(m)
+        d = data(m.call("run_to", address=GATE_END, timeoutMs=100))
+        case("a timeout answers", d.get("completed") is False and d.get("arrived") is False and
+             d.get("reason") == "timeout", str(d))
+        case("and leaves it going", d.get("paused") is False, str(d))
+        r = dap.request("x16/runTo", {"address": "$0925"})
+        case("another owner is refused while it is armed",
+             bool(r) and r.get("success") is False and "another" in r.get("message", ""), str(r))
+        case("as is another MCP call on a running machine", is_error(m.call("run_to", address=GATE_END)))
+        last = d.get("stopId")
+        m.call("write_memory", address=GATE_FLAG, hex="01")
+        d = data(m.call("wait_for_stop", sinceStopId=last, timeoutMs=3000))
+        case("it still arrives afterwards", d.get("completed") is True and d.get("pc") == GATE_END and
+             d.get("stopReason") == "step", str(d))
+
+        plant_gate(m)
+        seq = dap.send("x16/runTo", {"address": "$0925", "timeoutMs": 20000})
+        time.sleep(0.15)
+        r = m.call("run_to", address=GATE_END)
+        case("MCP is refused while DAP's is armed", is_error(r) and "another" in r["content"][0]["text"], str(r)[:160])
+        m.call("continue")
+        r = dap.answer(seq)
+        case("an MCP continue ends a DAP run-to", bool(r) and r["body"].get("completed") is False and
+             r["body"].get("reason") == "cancelled", str(r))
+
+        plant_gate(m)
+        r = dap.request("x16/runTo", {"address": "$0925", "timeoutMs": 100})
+        case("a DAP timeout answers", bool(r) and r["body"].get("completed") is False and
+             r["body"].get("reason") == "timeout", str(r))
+        st = dap.request("x16/status")
+        case("and leaves it going", bool(st) and st["body"].get("paused") is False, str(st))
+        dap.events.clear()
+        m.call("write_memory", address=GATE_FLAG, hex="01")
+        ev = dap.event("stopped", 3)
+        case("and a DAP target still stops it", bool(ev) and ev["body"].get("reason") == "step", str(ev))
+
+        plant_gate(m)
+        m.call("write_memory", address=GATE_FLAG, hex="01")
+        r = dap.request("x16/runTo", {"address": "$0925"})
+        case("DAP arrives", bool(r) and r["body"].get("arrived") is True and r["body"].get("reason") == "target" and
+             r["body"].get("pc") == GATE_END, str(r))
+
+        plant_gate(m)
+        rid = m.start("run_to", address=GATE_END, timeoutMs=20000)
+        time.sleep(0.15)
+        m.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                            "params": {"requestId": rid}}))
+        time.sleep(0.15)
+        m.call("pause")
+        m.call("write_memory", address=GATE_FLAG, hex="01")
+        d = data(m.call("run_to", address=GATE_END))
+        case("a cancelled call blocks nothing", d.get("arrived") is True, str(d))
+
+        plant_gate(m)
+        rid = m.start("run_to", address=GATE_END, timeoutMs=20000)
+        time.sleep(0.15)
+        dap.request("restart", {})
+        d = data(m.result(rid))
+        case("a reset ends it", d.get("completed") is False and d.get("reason") == "cancelled", str(d))
+
+        stop_on_wait_booted(m)
+        plant_gate(m)
+        dap.send("x16/runTo", {"address": "$0925", "timeoutMs": 20000})
+        time.sleep(0.15)
+        dap.close()
+        time.sleep(0.3)
+        m.call("write_memory", address=GATE_FLAG, hex="01")
+        time.sleep(0.3)
+        d = data(m.call("get_status"))
+        case("a DAP disconnect releases it", d.get("paused") is False, str(d))
+        m.call("pause")
+        case("and frees the slot", is_error(m.call("run_to")) is True and
+             data(m.call("run_to", address=GATE_END, timeoutMs=500)).get("completed") is not None)
+
+    port = free_port()
+    with HttpMcp(["-debugport", str(port)], env={"X16_MCP_LEASE_MS": "500"}) as m:
+        m.init()
+        m.call("get_status")
+        dap = Dap(port)
+        dap.session()
+        plant_gate(m)
+        d = data(m.call("run_to", address=GATE_END, timeoutMs=50))
+        case("over HTTP, a timeout answers", d.get("completed") is False, str(d))
+        time.sleep(1.2)
+        dap.request("writeMemory", {"memoryReference": hex(GATE_FLAG), "data": "AQ=="})
+        time.sleep(0.4)
+        st = dap.request("x16/status")
+        case("a lease expiring releases it", bool(st) and st["body"].get("paused") is False, str(st))
+        dap.close()
+
+    prg = struct.pack("<H", 0x0A00) + bytes.fromhex("EAEA4C020A") + b"\xEA" * 11
+    with tempfile.TemporaryDirectory() as root:
+        program = os.path.join(root, "src.prg")
+        with open(program, "wb") as f:
+            f.write(prg)
+        with open(os.path.join(root, "src.dbg"), "wb") as f:
+            f.write(source_dbg("forged.s"))
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", root]) as m:
+            m.init()
+            stop_on_wait_booted(m)
+            dap = Dap(port)
+            dap.session()
+            m.call("pause")
+            m.call("load_prg", path=program)
+            status = data(m.call("get_registers"))["cpu"]["status"]
+            m.call("set_registers", pc=0x0A00, status=status | 0x04)
+
+            d = data(m.call("run_to", address="_hello"))
+            case("a symbol", d.get("arrived") is True and d.get("pc") == 0x0A02, str(d))
+            m.call("set_registers", pc=0x0A00)
+            d = data(m.call("run_to", file="solo.s", line=3))
+            case("a source line", d.get("arrived") is True and d.get("pc") == 0x0A02, str(d))
+            m.call("set_registers", pc=0x0A00)
+            r = dap.request("x16/runTo", {"file": "solo.s", "line": 3})
+            case("a source line over DAP", bool(r) and r["body"].get("pc") == 0x0A02, str(r))
+            m.call("set_registers", pc=0x0A00)
+            r = dap.request("x16/runTo", {"address": "sym:_hello"})
+            case("a symbol over DAP", bool(r) and r["body"].get("pc") == 0x0A02, str(r))
+
+            res = m.call("run_to", file="solo.s", line=7)
+            text = res.get("content", [{}])[0].get("text", "")
+            case("a line in two places is refused, naming them",
+                 is_error(res) and "BANKA" in text and "BANKB" in text, text)
+            case("and it stayed paused", data(m.call("get_status")).get("paused") is True)
+            for label, args in (("no code", {"file": "solo.s", "line": 4}),
+                                ("an ambiguous file", {"file": "main.s", "line": 1}),
+                                ("an unknown file", {"file": "nope.s", "line": 1}),
+                                ("a bank on an unbanked line", {"file": "solo.s", "line": 3, "bank": 1})):
+                case(f"run_to refuses {label}", is_error(m.call("run_to", **args)))
+
+            m.call("set_registers", ramBank=4)
+            m.call("write_memory", address="$A000", hex="EA4C00A0")
+            m.call("set_registers", pc=0xA001)
+            d = data(m.call("run_to", file="solo.s", line=7, bank=4))
+            case("a bank picks one of them", d.get("arrived") is True and d.get("pc") == 0xA000 and
+                 d.get("bank") == 4, str(d))
+            dap.close()
+
+
 def check_readonly_surface(m):
     names = {t["name"] for t in (m.rpc("tools/list") or {}).get("result", {}).get("tools", [])}
     case("only reading tools are listed", names == READING_TOOLS, str(names ^ READING_TOOLS))
@@ -3835,7 +4089,7 @@ def main():
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
-                 test_stop_on, test_readonly):
+                 test_stop_on, test_run_to, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

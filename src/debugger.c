@@ -282,6 +282,10 @@ void
 DEBUGAnnounceStop(const char *reason)
 {
 	DEBUGSetStopReason(reason);
+	// A stop ends any step or run-to under way. Left armed, its target would
+	// stop the machine later for a request that has already been answered.
+	srcStepActive = false;
+	DEBUGClearStepBreakPoint();
 	debug_server_notify_stopped(lastStopReason);
 }
 
@@ -987,6 +991,11 @@ debug_owner_t DEBUGStepOwner(void) {
 	return stepBreakPoint.pc < 0 ? DEBUG_OWNER_COUNT : stepOwner;
 }
 
+bool DEBUGStepHeldByOther(debug_owner_t owner) {
+	const debug_owner_t held = DEBUGStepOwner();
+	return (held != DEBUG_OWNER_COUNT && held != owner) || (srcStepActive && srcStepOwner != owner);
+}
+
 // Retract a step only if `owner` is the one that started it.
 //
 // A session tearing down has to take back a step it asked for -- left armed, it
@@ -1156,10 +1165,14 @@ void DEBUGPause(void) {
 }
 
 void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner) {
+	DEBUGRunToBank(pc, bank, getCurrentBank(pc, bank), owner);
+}
+
+void DEBUGRunToBank(uint16_t pc, uint8_t bank, int x16Bank, debug_owner_t owner) {
 	srcStepActive = false;   // an explicit destination ends any step-by-line
 	stepBreakPoint.pc = pc;
 	stepBreakPoint.bank = bank;
-	stepBreakPoint.x16Bank = getCurrentBank(pc, bank);
+	stepBreakPoint.x16Bank = x16Bank;
 	stepOwner = owner;
 	DEBUGArmResumeSkip();
 	currentMode = DMODE_RUN;

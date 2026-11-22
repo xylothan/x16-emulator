@@ -78,9 +78,13 @@ void DEBUGCancelStep(void);
 // the retract-only-if-mine form that a session teardown wants.
 debug_owner_t DEBUGStepOwner(void);
 bool          DEBUGCancelStepFor(debug_owner_t owner);
+// Is a step, by instruction or by line, running for anyone other than `owner`?
+bool          DEBUGStepHeldByOther(debug_owner_t owner);
 
 void DEBUGPause(void);                      // halt now
 void DEBUGRunTo(uint16_t pc, uint8_t bank, debug_owner_t owner); // run until (pc,bank)
+// The same, with the RAM/ROM bank selector spelled out (see DEBUG_BANK_ANY).
+void DEBUGRunToBank(uint16_t pc, uint8_t bank, int x16Bank, debug_owner_t owner);
 bool DEBUGIsRunning(void);
 bool DEBUGIsPaused(void);
 

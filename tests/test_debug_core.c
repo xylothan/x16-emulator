@@ -807,6 +807,52 @@ main(void)
 		check(debug_wp_armed_cpu_write == 0, "clearing the table resets the counts");
 	}
 
+	// ── A watch's ignore count ──────────────────────────────────────────────
+	{
+		reset_all();
+		debug_wp_spec_t spec = { DEBUG_WP_SPACE_CPU, 0x0700, 2, DEBUG_BANK_ANY, false, 0, 0,
+		                         DEBUG_WP_ACCESS_BOTH, false, 2 };
+		check(debug_wp_add_ex(&spec, DEBUG_OWNER_DAP_SOURCE) == DEBUG_ADD_CREATED, "ignore: adds");
+		const int at = debug_wp_find(DEBUG_WP_SPACE_CPU, 0x0700, DEBUG_BANK_ANY);
+		check(!debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0x0700,
+		                            DEBUG_BANK_ANY, 0x0700, 0),
+		      "ignore: not named before its count is reached");
+		check(!debug_wp_check_write(0x0700, 1), "ignore: hit 1 is counted, not fired");
+		check(!debug_wp_check_read(0x0701, 1, false), "ignore: hit 2 is counted, not fired");
+		check(debug_wp_at(at)->hits == 2, "ignore: both were counted");
+		check(debug_wp_check_write(0x0701, 1), "ignore: hit 3 fires");
+		check(debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0x0700,
+		                           DEBUG_BANK_ANY, 0x0701, 1),
+		      "ignore: named once past its count");
+		check(debug_wp_check_read(0x0700, 1, false), "ignore: and every hit after it");
+
+		debug_wp_spec_t other = spec;
+		other.ignore = 3;
+		check(debug_wp_add_ex(&other, DEBUG_OWNER_MCP) == DEBUG_ADD_CONFLICT,
+		      "ignore: a different count is refused");
+		check(debug_wp_add_ex(&spec, DEBUG_OWNER_MCP) == DEBUG_ADD_EXISTED,
+		      "ignore: the same count shares it");
+		check(debug_wp_add_for(0x0700, 2, DEBUG_BANK_ANY, DEBUG_OWNER_UI) == DEBUG_ADD_CONFLICT,
+		      "ignore: an owner that would miss hits is refused");
+
+		reset_all();
+		const debug_wp_spec_t filtered = { DEBUG_WP_SPACE_CPU, 0x0710, 1, DEBUG_BANK_ANY, true,
+		                                   BPCMP_EQ, 7, DEBUG_WP_ACCESS_WRITE, false, 1 };
+		debug_wp_add_ex(&filtered, DEBUG_OWNER_DAP_SOURCE);
+		check(!debug_wp_check_write(0x0710, 1) && debug_wp_at(0)->hits == 0,
+		      "ignore: a filtered value is not counted");
+		check(!debug_wp_check_write(0x0710, 7), "ignore: first match is counted");
+		check(debug_wp_check_write(0x0710, 7), "ignore: second match fires");
+
+		reset_all();
+		const debug_wp_spec_t vr = { DEBUG_WP_SPACE_VRAM, 0x0400, 1, DEBUG_BANK_ANY, false, 0, 0,
+		                             DEBUG_WP_ACCESS_WRITE, false, 1 };
+		debug_wp_add_ex(&vr, DEBUG_OWNER_MCP);
+		check(!debug_wp_check_vram(0x0400, 0, 0) && debug_wp_check_vram(0x0400, 0, 0),
+		      "ignore: applies to VRAM");
+		debug_wp_clear_all();
+	}
+
 	// ── Read watches, and what counts as a read ─────────────────────────────
 	{
 		reset_all();

@@ -1150,7 +1150,11 @@ def test_data_breakpoints():
 
         for label, bp in (("an unknown access type", {"dataId": "4096", "accessType": "execute"}),
                           ("read access on VRAM", {"dataId": "vram:04000", "accessType": "read"}),
-                          ("a hitCondition", {"dataId": "4096", "hitCondition": "3"}),
+                          ("an unreadable hitCondition", {"dataId": "4096", "hitCondition": "% 2"}),
+                          ("a zero hitCondition", {"dataId": "4096", "hitCondition": "0"}),
+                          ("a numeric hitCondition", {"dataId": "4096", "hitCondition": 3}),
+                          ("a range past 16 bits", {"dataId": "65535:2"}),
+                          ("a length that wraps", {"dataId": "4096:4294963200"}),
                           ("an unreadable condition", {"dataId": "4096", "condition": "== banana"}),
                           ("a condition past a byte", {"dataId": "4096", "condition": "== 300"}),
                           ("a value test on two bytes", {"dataId": "2:2", "condition": "== 1"}),
@@ -1183,6 +1187,155 @@ def test_data_breakpoints():
         r = data(dataId="4096", condition="== 9")
         case("refused: would change another owner's watch", refused(r), str(r and r.get("body")))
         case("the other watch is unchanged", d.breakpoints() == before)
+        d.req("evaluate", {"expression": "watch_remove 1000"})
+        d.req("setDataBreakpoints", {"breakpoints": []})
+
+        plant(d, pc="$0810")
+        r = data(dataId="4096", hitCondition="3")
+        b = r["body"]["breakpoints"][0]
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: verified", b.get("verified") is True, str(b))
+        case("hitCondition: listed", len(wps) == 1 and wps[0].get("ignoreCount") == 2, str(wps))
+        ev = go(d)
+        case("hitCondition: stops on the third write", bool(ev) and get_byte(d, 0x1000) == 3,
+             str(get_byte(d, 0x1000)))
+        case("hitCondition: the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [b.get("id")], str(ev))
+        ev = go(d)
+        case("hitCondition: every later hit stops", bool(ev) and get_byte(d, 0x1000) == 4,
+             str(get_byte(d, 0x1000)))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        plant(d, pc="$0810")
+        data(dataId="4096", hitCondition=">= 2")
+        ev = go(d)
+        case("hitCondition: >= N", bool(ev) and get_byte(d, 0x1000) == 2, str(get_byte(d, 0x1000)))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        plant(d, pc="$0810")
+        data(dataId="4096", hitCondition="3")
+        go(d)
+        data(dataId="4096", hitCondition="3")
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: an unchanged re-send keeps the count", len(wps) == 1 and wps[0]["hits"] == 3, str(wps))
+        ev = go(d)
+        case("hitCondition: so the next hit stops", bool(ev) and get_byte(d, 0x1000) == 4,
+             str(get_byte(d, 0x1000)))
+        data(dataId="4096", hitCondition="3", condition="== 9")
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: a changed filter restarts it", len(wps) == 1 and wps[0]["hits"] == 0, str(wps))
+        data(dataId="4096", hitCondition="3")
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        data(dataId="4096", hitCondition="3")
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: removing it restarts it", len(wps) == 1 and wps[0]["hits"] == 0, str(wps))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        plant(d, pc="$0810")
+        data(dataId="4096", hitCondition="2", condition="== 5")
+        ev = go(d, 5)
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: counts only what the condition passes",
+             bool(ev) and get_byte(d, 0x1000) == 5 and len(wps) == 1 and wps[0]["hits"] == 2, str(wps))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        plant(d, pc="$0810")
+        r = d.req("setDataBreakpoints", {"breakpoints": [{"dataId": "4096", "hitCondition": "2"},
+                                                         {"dataId": "4095:2"}]})
+        counted, plain = [x.get("id") for x in r["body"]["breakpoints"]]
+        ev = go(d)
+        case("hitCondition: an overlapping watch inside its count is not named",
+             bool(ev) and ev["body"].get("hitBreakpointIds") == [plain], str(ev))
+        ev = go(d)
+        case("hitCondition: named once past it",
+             bool(ev) and sorted(ev["body"].get("hitBreakpointIds", [])) == sorted([counted, plain]), str(ev))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        d.req("evaluate", {"expression": "watch_add 1000"})
+        before = d.breakpoints()
+        r = data(dataId="4096", hitCondition="2")
+        case("hitCondition: refused on another owner's watch", refused(r), str(r and r.get("body")))
+        case("hitCondition: that watch is unchanged", d.breakpoints() == before)
+        d.req("evaluate", {"expression": "watch_remove 1000"})
+        data(dataId="4096", hitCondition="2")
+        d.req("evaluate", {"expression": "watch_add 1000"})
+        wps = d.breakpoints().get("watchpoints", [])
+        case("hitCondition: another owner cannot join a counted watch",
+             len(wps) == 1 and wps[0]["owners"] == ["dapSource"], str(wps))
+        d.req("setDataBreakpoints", {"breakpoints": []})
+
+
+def test_data_breakpoint_bytes():
+    print("data breakpoints by address")
+    with Emu(kind=None, handshake=False) as e:
+        d = e.d
+        init = d.req("initialize", {"adapterID": "conformance", "linesStartAt1": True,
+                                    "columnsStartAt1": True, "pathFormat": "path"})
+        caps = (init or {}).get("body") or {}
+        case("the capability is advertised", caps.get("supportsDataBreakpointBytes") is True, str(caps)[:200])
+        d.req("attach", {})
+        d.req("configurationDone")
+        plant(d, pc="$0810")
+
+        def info(name, **args):
+            r = d.req("dataBreakpointInfo", dict(args, name=name))
+            return r["body"].get("dataId") if r and r["success"] else "failed"
+
+        for label, name, args, want in (
+                ("hex", "0x1000", {"asAddress": True}, "4096"),
+                ("decimal", "4096", {"asAddress": True}, "4096"),
+                ("a leading zero is still decimal", "0100", {"asAddress": True}, "100"),
+                ("a range", "0x1000", {"asAddress": True, "bytes": 4}, "4096:4"),
+                ("one byte", "0x1000", {"asAddress": True, "bytes": 1}, "4096"),
+                ("up to the last byte", "0xFFFF", {"asAddress": True, "bytes": 1}, "65535"),
+                ("all of it", "0", {"asAddress": True, "bytes": 65536}, "0:65536"),
+                ("across $A000", "0x9FFF", {"asAddress": True, "bytes": 2}, "40959:2"),
+                ("across $C000", "0xBFFF", {"asAddress": True, "bytes": 2}, "49151:2"),
+                ("VRAM", "vram:0x1B000", {"asAddress": True, "bytes": 16}, "vram:1B000:16"),
+                ("the last of VRAM", "vram:1FFFF", {"asAddress": True, "bytes": 1}, "vram:1FFFF"),
+                ("bytes on an expression", "$1000", {"bytes": 3}, "4096:3"),
+                ("bytes on a variable", "R0", {"variablesReference": 4, "bytes": 4}, "2:4")):
+            got = info(name, **args)
+            case(f"bytes: {label}", got == want, str(got))
+            r = d.req("setDataBreakpoints", {"breakpoints": [{"dataId": got}]})
+            case(f"bytes: {label} arms", bool(r) and r["body"]["breakpoints"][0].get("verified") is True, str(r))
+            d.req("setDataBreakpoints", {"breakpoints": []})
+
+        for label, name, args in (
+                ("past the end", "0xFFFF", {"asAddress": True, "bytes": 2}),
+                ("past 16 bits", "0x10000", {"asAddress": True}),
+                ("a 24-bit address", "0x01C000", {"asAddress": True, "bytes": 1}),
+                ("a name", "banana", {"asAddress": True}),
+                ("a register name", "R0", {"asAddress": True}),
+                ("no digits", "0x", {"asAddress": True}),
+                ("zero bytes", "0x1000", {"asAddress": True, "bytes": 0}),
+                ("negative bytes", "0x1000", {"asAddress": True, "bytes": -1}),
+                ("fractional bytes", "0x1000", {"asAddress": True, "bytes": 1.5}),
+                ("bytes as text", "0x1000", {"asAddress": True, "bytes": "4"}),
+                ("too many bytes", "0", {"asAddress": True, "bytes": 0x20001}),
+                ("past the end of VRAM", "vram:1FFFF", {"asAddress": True, "bytes": 2}),
+                ("past the end, by expression", "$FFFF", {"bytes": 2})):
+            case(f"no dataId: {label}", info(name, **args) is None, str(info(name, **args)))
+
+        r = d.req("dataBreakpointInfo", {"name": "0x9FFF", "asAddress": True, "bytes": 2})
+        case("a range into a banked window says so", "any bank" in r["body"].get("description", ""), str(r["body"]))
+        case("it offers every access type",
+             set(r["body"].get("accessTypes", [])) == {"read", "write", "readWrite"}, str(r["body"]))
+
+        # INC $9FFF, INC $A000, JMP back.
+        put_mem(d, 0x0820, [0xEE, 0xFF, 0x9F, 0xEE, 0x00, 0xA0, 0x4C, 0x20, 0x08])
+        set_reg(d, "PC", "$0820")
+        r = d.req("setDataBreakpoints", {"breakpoints": [{"dataId": "40959:2", "accessType": "write"}]})
+        ident = r["body"]["breakpoints"][0].get("id")
+        ev = go(d)
+        case("a range across $A000 fires below it",
+             bool(ev) and ev["body"].get("hitBreakpointIds") == [ident] and
+             d.req("x16/registers")["body"]["cpu"]["pc"] == 0x0823, str(ev))
+        set_reg(d, "RAM Bank", "$05")
+        ev = go(d)
+        case("and above it, in whichever bank is mapped",
+             bool(ev) and ev["body"].get("hitBreakpointIds") == [ident] and
+             d.req("x16/registers")["body"]["cpu"]["pc"] == 0x0826, str(ev))
+        d.req("setDataBreakpoints", {"breakpoints": []})
 
 
 # --- views and wire format --------------------------------------------------
@@ -1399,7 +1552,7 @@ def main():
                  test_events_wait_for_initialize, test_pause_order, test_goto, test_set_variable,
                  test_source_breakpoints, test_logpoints, test_function_breakpoints, test_instruction_stop,
                  test_exception_stops, test_saved_interrupt_setting,
-                 test_data_breakpoints, test_stack_frames, test_line_base, test_uri_paths,
+                 test_data_breakpoints, test_data_breakpoint_bytes, test_stack_frames, test_line_base, test_uri_paths,
                  test_no_debug, test_disassemble, test_read_memory, test_wire_format,
                  test_step_granularity):
         try:
