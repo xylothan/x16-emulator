@@ -893,7 +893,7 @@ draw_registers_tab()
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextDisabled("--");
                 ImGui::TableSetColumnIndex(3);
-                ImGui::TextDisabled("(write-only)");
+                ImGui::TextDisabled("(write-only: see FX below)");
             } else {
                 uint8_t v = video_read((uint8_t)r, true);
                 ImGui::TableSetColumnIndex(2);
@@ -947,6 +947,38 @@ draw_registers_tab()
                         (uint32_t)mapb << 9, (uint32_t)(tileb & 0xFC) << 9, 8 << (tileb & 1),
                         8 << ((tileb >> 1) & 1));
         }
+    }
+
+    struct video_state v;
+    video_get_state(&v);
+
+    if (ImGui::CollapsingHeader("Data ports", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (int i = 0; i < 2; i++) {
+            const struct video_port_state *p = &v.port[i];
+            ImGui::Text("Port %d%s  $%05X  step %+d (code %d)  prefetch $%02X  nibble %d%s", i,
+                        i == addrsel ? "*" : " ", (unsigned)p->address, p->increment, p->increment_code,
+                        p->prefetch, p->nibble ? 1 : 0, p->nibble_increment ? "  nibble-step" : "");
+        }
+        ImGui::Text("IEN $%X  ISR $%X  IRQ line %d  IRQ out %d  scanline %d%s", v.ien, v.isr, v.irq_line,
+                    v.irq_out ? 1 : 0, v.scanline, v.ntsc ? "  (NTSC)" : "");
+    }
+
+    if (ImGui::CollapsingHeader("FX (internal)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("Emulator state, whatever DCSEL is. The CPU cannot read most of this back.");
+        ImGui::Text("Addr1 mode %d  4-bit %d  16-bit hop %d (align %d)  transparent %d", v.fx_addr1_mode,
+                    v.fx_4bit_mode, v.fx_16bit_hop, v.fx_16bit_hop_align, v.fx_trans_writes);
+        ImGui::Text("Cache $%02X $%02X $%02X $%02X  byte %d  nibble %d  write %d  fill %d  cycle %d  inc %d",
+                    v.fx_cache[0], v.fx_cache[1], v.fx_cache[2], v.fx_cache[3], v.fx_cache_byte_index,
+                    v.fx_cache_nibble_index, v.fx_cache_write, v.fx_cache_fill, v.fx_cache_byte_cycling,
+                    v.fx_cache_increment_mode);
+        ImGui::Text("X pos $%08X  incr $%08X   (16.16)", (unsigned)v.fx_x_position, (unsigned)v.fx_x_increment);
+        ImGui::Text("Y pos $%08X  incr $%08X   (16.16)", (unsigned)v.fx_y_position, (unsigned)v.fx_y_increment);
+        ImGui::Text("Poly fill %d  2-bit poly %d  2-bit poke %d", v.fx_poly_fill_length, v.fx_2bit_poly,
+                    v.fx_2bit_poking);
+        ImGui::Text("Affine tiles $%05X  map $%05X  size %d  clip %d", (unsigned)v.fx_affine_tile_base,
+                    (unsigned)v.fx_affine_map_base, v.fx_affine_map_size, v.fx_affine_clip);
+        ImGui::Text("Multiplier %d  subtract %d  accumulator %d", v.fx_multiplier, v.fx_subtract,
+                    (int)v.fx_accumulator);
     }
 }
 

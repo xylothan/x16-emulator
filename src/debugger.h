@@ -103,6 +103,26 @@ void        DEBUGSetStopReason(const char *reason);
 void        DEBUGAnnounceStop(const char *reason);
 const char *DEBUGGetStopReason(void);
 
+// How the last stop came about, for every front end. Only a watch firing has an
+// access to describe; the other fields mean nothing unless has_access is set.
+enum { DEBUG_STOP_SPACE_CPU, DEBUG_STOP_SPACE_VRAM };
+enum { DEBUG_STOP_ACCESS_WRITE, DEBUG_STOP_ACCESS_READ };
+
+typedef struct {
+	const char *reason;          // as DEBUGGetStopReason()
+	bool        has_access;
+	uint8_t     space;           // DEBUG_STOP_SPACE_*
+	uint8_t     access;          // DEBUG_STOP_ACCESS_*
+	uint32_t    address;
+	int         x16Bank;         // bank selected at that address, -1 where none applies
+	uint8_t     value;
+	int8_t      data_port;       // 0 or 1, or -1 when not through a VERA data port
+	uint16_t    accessing_pc;    // the instruction that made the access
+	int         accessing_bank;  // bank selected at that PC, -1 where none applies
+} debug_stop_info_t;
+
+void DEBUGGetStopInfo(debug_stop_info_t *out);
+
 #define DBG_WIDTH 		(60)									// Char cells across
 #define DBG_HEIGHT 		(60)
 

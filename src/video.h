@@ -129,6 +129,43 @@ uint64_t video_screen_hash(void);
 // only a whole frame at a frame boundary.
 uint8_t *video_screenshot_png(size_t *out_len, int *out_w, int *out_h);
 
+// Everything VERA holds that its registers do not read back, for a debugger.
+// Copies; nothing in the machine changes. The FX position and increment fields
+// are the emulator's 16.16 fixed point, wider than the hardware's own precision.
+struct video_port_state {
+	uint32_t address;
+	uint8_t  increment_code;    // the five bits in ADDRx_H
+	int      increment;         // the step that code selects
+	uint8_t  prefetch;          // what the next read of the data port returns
+	bool     nibble;
+	bool     nibble_increment;
+};
+
+struct video_state {
+	struct video_port_state port[2];
+	uint8_t  addrsel, dcsel;
+	uint8_t  ien, isr;
+	uint16_t irq_line;
+	bool     irq_out;
+	bool     ntsc;
+	uint16_t scanline;
+
+	uint8_t  fx_addr1_mode;
+	bool     fx_4bit_mode, fx_16bit_hop, fx_cache_byte_cycling, fx_cache_fill, fx_cache_write;
+	bool     fx_trans_writes, fx_2bit_poly, fx_2bit_poking, fx_cache_increment_mode;
+	bool     fx_cache_nibble_index, fx_multiplier, fx_subtract, fx_affine_clip;
+	uint8_t  fx_cache_byte_index, fx_16bit_hop_align;
+	int32_t  fx_x_increment, fx_y_increment;
+	uint32_t fx_x_position, fx_y_position;
+	uint16_t fx_poly_fill_length;
+	uint32_t fx_affine_tile_base, fx_affine_map_base;
+	uint8_t  fx_affine_map_size;
+	uint8_t  fx_cache[4];
+	int32_t  fx_accumulator;
+};
+
+void video_get_state(struct video_state *out);
+
 // How a layer is laid out, for reading its text back. layer is 0 or 1.
 void video_get_text_layout(int layer, screen_text_layout_t *out);
 
