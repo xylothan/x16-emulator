@@ -184,7 +184,7 @@ def test_protocol():
 
 READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                  "wait_for_stop", "get_screen", "screenshot",
-                 "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "get_stack",
+                 "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack",
                  "list_sources", "read_source", "source_location", "host_perf",
                  "get_sdcard", "evaluate", "read_log"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
@@ -1926,6 +1926,161 @@ def test_hash_memory():
         case("a length is required", is_error(m.call("hash_memory", address=0x0A00)))
         case("past the end is refused", is_error(m.call("hash_memory", address="1FFF0", length=32, space="vram")))
         case("too long is refused", is_error(m.call("hash_memory", address=0, length=0x100001)))
+
+
+def search_all(m, **args):
+    """Every match of a search, following `next`, and how many calls it took."""
+    found, calls = [], 0
+    while True:
+        d = data(m.call("search_memory", **args))
+        calls += 1
+        if "matches" not in d:
+            return None, calls
+        found += [(x["address"], x["bank"]) for x in d["matches"]]
+        if not d.get("more"):
+            return found, calls
+        args = {**args, **d["next"]}
+
+
+def test_search_memory():
+    print("search_memory")
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        dap = Dap(port)
+        dap.session()
+        plant_loop(m)
+
+        m.call("write_memory", address=0x0A00, hex="DE AD BE EF".replace(" ", ""))
+        d = data(m.call("search_memory", hex="DE AD BE EF", start="$0A00", end="$0AFF"))
+        case("a CPU match", [(x["address"], x["bank"]) for x in d.get("matches", [])] == [("0x0A00", None)], str(d))
+        case("it is complete", d.get("more") is False and "next" not in d and d.get("count") == 1, str(d))
+        d = data(m.call("search_memory", text="READY", space="rom", bank=4, limit=1))
+        hit = (d.get("matches") or [{}])[0]
+        at = int(hit.get("address", "0"), 16)
+        case("a text match in one ROM bank", hit.get("bank") == 4 and
+             mem_bytes(m, address=at, length=5, bank=4) == b"READY", str(d))
+
+        m.call("write_memory", address=0x0B00, hex="77777777")
+        d = data(m.call("search_memory", hex="7777", start=0x0B00, end=0x0B03))
+        case("overlapping matches are all reported",
+             [x["address"] for x in d.get("matches", [])] == ["0x0B00", "0x0B01", "0x0B02"], str(d))
+        d = data(m.call("search_memory", hex="7777", start=0x0B00, end=0x0B03, limit=2))
+        case("the limit says there is more", d.get("more") is True and d.get("stoppedBy") == "limit" and
+             d.get("next") == {"start": "0x0B02"}, str(d))
+        d = data(m.call("search_memory", hex="7777", start=d["next"]["start"], end=0x0B03, limit=2))
+        case("and continuing keeps the overlap",
+             [x["address"] for x in d.get("matches", [])] == ["0x0B02"] and d.get("more") is False, str(d))
+        d = data(m.call("search_memory", hex="77777777", start=0x0B00, end=0x0B02))
+        case("a match must fit inside the range", d.get("matches") == [], str(d))
+
+        # $BFFF/$C000 in the CPU map, as now banked.
+        regs = data(m.call("get_registers"))["cpu"]
+        ram_bank, rom_bank = regs["ramBank"], regs["romBank"]
+        last = mem_bytes(m, address=0xC000, length=2, bank=rom_bank)
+        m.call("write_memory", address=0xBFFE, hex="5AA5")
+        pat = "5AA5" + last.hex()
+        d = data(m.call("search_memory", hex=pat, start=0xBF00, end=0xC0FF))
+        hit = (d.get("matches") or [{}])[0]
+        case("a match across $BFFF/$C000", hit.get("address") == "0xBFFE" and hit.get("bank") == ram_bank and
+             hit.get("crossesBank") is True, str(d))
+        d = data(m.call("search_memory", hex="5AA5", start=0xBF00, end=0xBFFF))
+        hit = (d.get("matches") or [{}])[0]
+        case("one inside the bank is not marked", hit.get("address") == "0xBFFE" and
+             hit.get("crossesBank") is False, str(d))
+
+        # From the end of one RAM bank into the next.
+        other = (ram_bank + 1) % 8 or 1
+        m.call("set_registers", ramBank=other)
+        m.call("write_memory", address=0xBFFE, hex="C3D2")
+        m.call("set_registers", ramBank=other + 1)
+        m.call("write_memory", address=0xA000, hex="E1F0")
+        m.call("set_registers", ramBank=ram_bank)
+        found, calls = search_all(m, hex="C3D2E1F0", space="ram")
+        case("a match across two banks, in all banks", found == [("0xBFFE", other)], str(found))
+        case("all banks takes more than one call", calls > 1, str(calls))
+        d = data(m.call("search_memory", hex="C3D2E1F0", space="ram", bank=other))
+        case("one bank does not run into the next", d.get("matches") == [] and d.get("more") is False, str(d))
+        d = data(m.call("search_memory", hex="C3D2", space="ram", bank=other))
+        case("one bank finds its own bytes", [(x["address"], x["bank"]) for x in d.get("matches", [])] ==
+             [("0xBFFE", other)], str(d))
+        d = data(m.call("search_memory", hex="C3D2E1F0", space="ram", start="$BFFE", startBank=other, limit=1))
+        hit = (d.get("matches") or [{}])[0]
+        case("continuing from a bank", hit.get("bank") == other and hit.get("crossesBank") is True, str(d))
+
+        # The budget, on a search that matches nothing.
+        d = data(m.call("search_memory", hex="FE ED FA CE 01", space="ram"))
+        case("the budget stops a long search", d.get("more") is True and d.get("stoppedBy") == "budget" and
+             d.get("matches") == [] and "startBank" in d.get("next", {}), str(d))
+        found, calls = search_all(m, hex="FE ED FA CE 01", space="ram")
+        case("and it runs to the end", found == [] and calls >= 2, f"{found} in {calls}")
+
+        m.call("write_memory", address="1F000", hex="0102030405", space="vram")
+        d = data(m.call("search_memory", hex="0102030405", space="vram", start="0x1EFFF"))
+        hit = (d.get("matches") or [{}])[0]
+        case("a VRAM match", hit.get("address") == "0x1F000" and hit.get("bank") is None, str(d))
+
+        # No side effects, with the I/O page in the range.
+        set_vera(m, 0x00, 0x00, 0x00, 0x10)
+        hash_of = lambda: dap.request("x16/status", {"hash": True})["body"]["hash"]
+        first = hash_of()
+        case("the machine hash is stable", first == hash_of())
+        vera = data(m.call("get_vera_state"))
+        stop = data(m.call("get_status")).get("stopId")
+        m.call("set_breakpoint", address=0x9F23, kind="read")
+        for args in ({"hex": "FE ED FA CE 01"},
+                     {"hex": "00", "limit": 1024},
+                     {"hex": "FE ED FA CE 01", "start": 0x9F00, "end": 0x9FFF},
+                     {"text": "READY", "space": "rom"},
+                     {"hex": "FE ED FA CE 01", "space": "vram"}):
+            search_all(m, **args)
+        found, _ = search_all(m, hex="FE ED FA CE 01", space="ram")
+        m.call("remove_breakpoint", address=0x9F23, kind="read")
+        case("searching changes no machine state", hash_of() == first)
+        case("nor VERA's data port", data(m.call("get_vera_state")) == vera)
+        case("and fires no read watch", data(m.call("get_status")).get("stopId") == stop)
+
+        for label, args in (("no pattern", {}),
+                            ("both patterns", {"hex": "00", "text": "A"}),
+                            ("an empty hex", {"hex": ""}),
+                            ("blank hex", {"hex": "  "}),
+                            ("an empty text", {"text": ""}),
+                            ("bad hex", {"hex": "XY"}),
+                            ("an odd digit", {"hex": "ABC"}),
+                            ("a space inside a byte", {"hex": "A B"}),
+                            ("too long a pattern", {"hex": "00" * 65}),
+                            ("non-ASCII text", {"text": "caf\u00e9"}),
+                            ("a bad space", {"hex": "00", "space": "disk"}),
+                            ("a bank on the CPU map", {"hex": "00", "bank": 1}),
+                            ("a bank on VRAM", {"hex": "00", "space": "vram", "bank": 1}),
+                            ("a RAM bank not fitted", {"hex": "00", "space": "ram", "bank": 64}),
+                            ("a ROM bank past the last", {"hex": "00", "space": "rom", "bank": 32}),
+                            ("a start bank not fitted", {"hex": "00", "space": "ram", "startBank": 64}),
+                            ("a start bank with one bank", {"hex": "00", "space": "ram", "bank": 1, "startBank": 1}),
+                            ("an end across all banks", {"hex": "00", "space": "ram", "end": 0xA100}),
+                            ("a start outside the window", {"hex": "00", "space": "ram", "bank": 1, "start": 0x9FFF}),
+                            ("an end outside the window", {"hex": "00", "space": "rom", "bank": 1, "end": 0xBFFF}),
+                            ("a CPU address past 64K", {"hex": "00", "start": 0x10000}),
+                            ("a VRAM address past the end", {"hex": "00", "space": "vram", "end": 0x20000}),
+                            ("start after end", {"hex": "00", "start": 0x2000, "end": 0x1000}),
+                            ("a bare address", {"hex": "00", "start": "C000"}),
+                            ("a negative address", {"hex": "00", "start": -1}),
+                            ("a limit of zero", {"hex": "00", "limit": 0}),
+                            ("too high a limit", {"hex": "00", "limit": 1025}),
+                            ("an unknown argument", {"hex": "00", "banana": 1})):
+            case(f"search_memory refuses {label}", is_error(m.call("search_memory", **args)))
+        r = dap.request("x16/searchMemory", {"hex": "DEADBEEF", "start": 0x0A00, "end": 0x0A10})
+        case("the DAP request answers too", (r or {}).get("body", {}).get("count") == 1, str(r)[:160])
+        r = dap.request("x16/searchMemory", {"hex": "ZZ"})
+        case("and refuses the same way", (r or {}).get("success") is False, str(r)[:160])
+        dap.close()
+
+    with Mcp(["-mcp-readonly"]) as m:
+        m.init()
+        time.sleep(0.4)
+        d = data(m.call("search_memory", hex="00", start=0, end=15, limit=1))
+        case("it works under -mcp-readonly", d.get("count") == 1, str(d)[:160])
 
 
 def test_dump_memory():
@@ -4085,7 +4240,7 @@ def main():
                  test_run_control, test_state_tools, test_breakpoints, test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
-                 test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
+                 test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,

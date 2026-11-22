@@ -51,6 +51,7 @@
 #include "host_write_path.h"
 #include "i2c.h"
 #include "mem_hash.h"
+#include "mem_search.h"
 #include "audio_events.h"
 
 extern bool headless;   // main.c
@@ -7819,6 +7820,281 @@ static int handle_x16_dump_memory(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/searchMemory ────────────────────────────────────────────────
+//
+// Offsets are flat: an address in the CPU map or VRAM, an offset into the window
+// for one bank, and bank * window + offset across all banks. So a match in the
+// CPU map can straddle $BFFF/$C000 as the CPU sees it, and one across all banks
+// can run from a bank's end into the next, as a load that spans banks does. One
+// bank stops at its window. Nothing wraps.
+
+#define SEARCH_LIMIT_DEFAULT 64
+#define SEARCH_LIMIT_MAX     1024
+
+typedef struct {
+    bool     vram;
+    uint16_t base;  // CPU address of offset 0
+    int      bank;  // the X16 bank read, unless `win` is set
+    uint32_t win;   // all banks: the size of one bank's window
+} search_view_t;
+
+typedef struct {
+    uint8_t       pat[MEM_SEARCH_MAX_PATTERN];
+    size_t        m;
+    const char   *space;
+    search_view_t view;
+    uint32_t      from, size;
+    int           limit;
+} search_request_t;
+
+// Debug reads only: the I/O page must not see a device read.
+static uint8_t search_read(uint32_t offset, void *ctx) {
+    const search_view_t *v = (const search_view_t *)ctx;
+    if (v->vram) return video_space_read(offset);
+    if (v->win)
+        return debug_read6502((uint16_t)(v->base + offset % v->win), 0, (int16_t)(offset / v->win));
+    return debug_read6502((uint16_t)(v->base + offset), 0, (int16_t)v->bank);
+}
+
+// A number, or a string spelled "$C000" or "0xC000".
+static bool search_arg_address(cJSON *v, uint32_t *out) {
+    if (cJSON_IsNumber(v)) {
+        if (v->valuedouble < 0 || v->valuedouble > 0xFFFFFF ||
+            v->valuedouble != (double)(int)v->valuedouble)
+            return false;
+        *out = (uint32_t)v->valuedouble;
+        return true;
+    }
+    if (!cJSON_IsString(v)) return false;
+    const char *s = v->valuestring;
+    if (s[0] == '$') s += 1;
+    else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    else return false;
+    if (!isxdigit((unsigned char)*s)) return false;
+    char *end = NULL;
+    const unsigned long n = strtoul(s, &end, 16);
+    if (*end || n > 0xFFFFFF) return false;
+    *out = (uint32_t)n;
+    return true;
+}
+
+static bool search_arg_int(cJSON *v, int lo, int hi, int *out) {
+    if (!cJSON_IsNumber(v) || v->valuedouble < lo || v->valuedouble > hi ||
+        v->valuedouble != (double)(int)v->valuedouble)
+        return false;
+    *out = (int)v->valuedouble;
+    return true;
+}
+
+static bool search_arg_pattern(cJSON *args, search_request_t *q, char *err, size_t errn) {
+    cJSON *hex  = args ? cJSON_GetObjectItemCaseSensitive(args, "hex") : NULL;
+    cJSON *text = args ? cJSON_GetObjectItemCaseSensitive(args, "text") : NULL;
+    if (!hex == !text) {
+        snprintf(err, errn, "give exactly one of 'hex' or 'text'");
+        return false;
+    }
+    if (hex) {
+        if (!cJSON_IsString(hex) || !mem_search_parse_hex(hex->valuestring, true, q->pat, &q->m)) {
+            snprintf(err, errn, "'hex' must be 1 to %d bytes as pairs of hex digits, e.g. \"A9 00\"",
+                     MEM_SEARCH_MAX_PATTERN);
+            return false;
+        }
+        return true;
+    }
+    if (!cJSON_IsString(text) || !mem_search_parse_text(text->valuestring, q->pat, &q->m)) {
+        snprintf(err, errn, "'text' must be 1 to %d characters", MEM_SEARCH_MAX_PATTERN);
+        return false;
+    }
+    for (size_t i = 0; i < q->m; i++) {
+        if (q->pat[i] >= 0x80) {
+            snprintf(err, errn, "'text' must be ASCII: give other bytes as 'hex'");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool search_arg_where(cJSON *args, search_request_t *q, char *err, size_t errn) {
+    cJSON *sp  = args ? cJSON_GetObjectItemCaseSensitive(args, "space") : NULL;
+    cJSON *bi  = args ? cJSON_GetObjectItemCaseSensitive(args, "bank") : NULL;
+    cJSON *sbi = args ? cJSON_GetObjectItemCaseSensitive(args, "startBank") : NULL;
+    cJSON *si  = args ? cJSON_GetObjectItemCaseSensitive(args, "start") : NULL;
+    cJSON *ei  = args ? cJSON_GetObjectItemCaseSensitive(args, "end") : NULL;
+
+    q->space = "cpu";
+    if (sp) {
+        if (!cJSON_IsString(sp) ||
+            (strcmp(sp->valuestring, "cpu") && strcmp(sp->valuestring, "ram") &&
+             strcmp(sp->valuestring, "rom") && strcmp(sp->valuestring, "vram"))) {
+            snprintf(err, errn, "'space' must be \"cpu\", \"ram\", \"rom\" or \"vram\"");
+            return false;
+        }
+        q->space = sp->valuestring;
+    }
+    const bool is_ram = !strcmp(q->space, "ram"), is_rom = !strcmp(q->space, "rom");
+    const bool banked = is_ram || is_rom;
+    const int  nbanks = is_ram ? (int)num_ram_banks : NUM_ROM_BANKS;
+    uint32_t   lo = 0, hi = 0xFFFF;
+    if (is_ram) lo = 0xA000, hi = 0xBFFF;
+    if (is_rom) lo = 0xC000, hi = 0xFFFF;
+    if (!strcmp(q->space, "vram")) hi = 0x1FFFF;
+
+    memset(&q->view, 0, sizeof q->view);
+    q->view.vram = !strcmp(q->space, "vram");
+    q->view.base = (uint16_t)lo;
+    q->view.bank = USE_CURRENT_X16_BANK;
+
+    int bank = -1;
+    if (bi) {
+        if (!banked) {
+            snprintf(err, errn, "'bank' applies to space \"ram\" or \"rom\"");
+            return false;
+        }
+        if (!search_arg_int(bi, 0, nbanks - 1, &bank)) {
+            snprintf(err, errn, "that %s bank does not exist: this machine has banks 0 to %d",
+                     is_ram ? "RAM" : "ROM", nbanks - 1);
+            return false;
+        }
+        q->view.bank = bank;
+    }
+    const bool all_banks = banked && bank < 0;
+    int start_bank = 0;
+    if (sbi) {
+        if (!all_banks) {
+            snprintf(err, errn, "'startBank' applies only when searching all banks");
+            return false;
+        }
+        if (!search_arg_int(sbi, 0, nbanks - 1, &start_bank)) {
+            snprintf(err, errn, "that %s bank does not exist: this machine has banks 0 to %d",
+                     is_ram ? "RAM" : "ROM", nbanks - 1);
+            return false;
+        }
+    }
+    if (all_banks && ei) {
+        snprintf(err, errn, "'end' needs a single 'bank': all banks always run to the last one");
+        return false;
+    }
+
+    uint32_t start = lo, end = hi;
+    if (si && !search_arg_address(si, &start)) {
+        snprintf(err, errn, "'start' must be a number or a string like \"$C000\" or \"0xC000\"");
+        return false;
+    }
+    if (ei && !search_arg_address(ei, &end)) {
+        snprintf(err, errn, "'end' must be a number or a string like \"$C000\" or \"0xC000\"");
+        return false;
+    }
+    if (start < lo || start > hi || end < lo || end > hi) {
+        snprintf(err, errn, "that range is outside %s, which is $%04X-$%04X", q->space,
+                 (unsigned)lo, (unsigned)hi);
+        return false;
+    }
+    if (start > end) {
+        snprintf(err, errn, "'start' is past 'end'");
+        return false;
+    }
+
+    if (all_banks) {
+        q->view.win = hi - lo + 1;
+        q->from     = (uint32_t)start_bank * q->view.win + (start - lo);
+        q->size     = (uint32_t)nbanks * q->view.win;
+    } else {
+        q->from = start - lo;
+        q->size = end - lo + 1;
+    }
+    return true;
+}
+
+static void search_format_address(char *s, size_t n, uint32_t addr, bool vram) {
+    if (vram) snprintf(s, n, "0x%05X", (unsigned)addr);
+    else      snprintf(s, n, "0x%04X", (unsigned)addr);
+}
+
+// Which of the CPU map's differently banked parts an address is in.
+static int search_cpu_region(uint32_t addr) {
+    return addr < 0xA000 ? 0 : addr < 0xC000 ? 1 : 2;
+}
+
+static cJSON *search_match(const search_request_t *q, uint32_t offset) {
+    const search_view_t *v    = &q->view;
+    const uint32_t       last = offset + (uint32_t)q->m - 1;
+    cJSON *o = cJSON_CreateObject();
+    char   s[16];
+    if (v->vram) {
+        search_format_address(s, sizeof s, offset, true);
+        cJSON_AddStringToObject(o, "address", s);
+        cJSON_AddNullToObject(o, "bank");
+        cJSON_AddBoolToObject(o, "crossesBank", false);
+    } else if (v->win) {
+        search_format_address(s, sizeof s, v->base + offset % v->win, false);
+        cJSON_AddStringToObject(o, "address", s);
+        cJSON_AddNumberToObject(o, "bank", offset / v->win);
+        cJSON_AddBoolToObject(o, "crossesBank", last / v->win != offset / v->win);
+    } else if (v->bank >= 0) {
+        search_format_address(s, sizeof s, v->base + offset, false);
+        cJSON_AddStringToObject(o, "address", s);
+        cJSON_AddNumberToObject(o, "bank", v->bank);
+        cJSON_AddBoolToObject(o, "crossesBank", false);
+    } else {
+        search_format_address(s, sizeof s, offset, false);
+        cJSON_AddStringToObject(o, "address", s);
+        const int mapped = debug_current_x16_bank((int)offset, 0);
+        if (mapped >= 0) cJSON_AddNumberToObject(o, "bank", mapped);
+        else             cJSON_AddNullToObject(o, "bank");
+        cJSON_AddBoolToObject(o, "crossesBank", search_cpu_region(offset) != search_cpu_region(last));
+    }
+    return o;
+}
+
+static int handle_x16_search_memory(int seq, cJSON *args) {
+    static const char cmd[] = "x16/searchMemory";
+    search_request_t q;
+    char err[160];
+    if (!search_arg_pattern(args, &q, err, sizeof err) ||
+        !search_arg_where(args, &q, err, sizeof err)) {
+        send_dap_error_response(seq, cmd, err);
+        return 0;
+    }
+    cJSON *li = args ? cJSON_GetObjectItemCaseSensitive(args, "limit") : NULL;
+    q.limit = SEARCH_LIMIT_DEFAULT;
+    if (li && !search_arg_int(li, 1, SEARCH_LIMIT_MAX, &q.limit)) {
+        send_dap_error_response(seq, cmd, "'limit' must be 1 to 1024");
+        return 0;
+    }
+
+    uint32_t found[SEARCH_LIMIT_MAX];
+    size_t   n = 0;
+    uint32_t next = 0;
+    const mem_search_stop_t stop =
+        mem_search_scan(search_read, &q.view, q.size, q.pat, q.m, q.from, MEM_SEARCH_BUDGET,
+                        found, (size_t)q.limit, &n, &next);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "space", q.space);
+    cJSON_AddNumberToObject(body, "length", (double)q.m);
+    cJSON *list = cJSON_CreateArray();
+    for (size_t i = 0; i < n; i++) cJSON_AddItemToArray(list, search_match(&q, found[i]));
+    cJSON_AddItemToObject(body, "matches", list);
+    cJSON_AddNumberToObject(body, "count", (double)n);
+    cJSON_AddBoolToObject(body, "more", stop != MEM_SEARCH_DONE);
+    if (stop != MEM_SEARCH_DONE) {
+        cJSON_AddStringToObject(body, "stoppedBy", stop == MEM_SEARCH_LIMIT ? "limit" : "budget");
+        cJSON *where = cJSON_CreateObject();
+        char   s[16];
+        if (q.view.win) {
+            search_format_address(s, sizeof s, q.view.base + next % q.view.win, false);
+            cJSON_AddStringToObject(where, "start", s);
+            cJSON_AddNumberToObject(where, "startBank", next / q.view.win);
+        } else {
+            search_format_address(s, sizeof s, q.view.base + next, q.view.vram);
+            cJSON_AddStringToObject(where, "start", s);
+        }
+        cJSON_AddItemToObject(body, "next", where);
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // ─── x16/setWarp, x16/mouse ──────────────────────────────────────────
 
 // An explicit state rather than a toggle, so that a retry cannot undo it.
@@ -8073,6 +8349,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/listSymbols")) result = handle_x16_list_symbols(seq, args);
     else if (!strcmp(cmd, "x16/hashMemory")) result = handle_x16_hash_memory(seq, args);
     else if (!strcmp(cmd, "x16/dumpMemory")) result = handle_x16_dump_memory(seq, args);
+    else if (!strcmp(cmd, "x16/searchMemory")) result = handle_x16_search_memory(seq, args);
     else if (!strcmp(cmd, "x16/setWarp")) result = handle_x16_set_warp(seq, args);
     else if (!strcmp(cmd, "x16/mouse")) result = handle_x16_mouse(seq, args);
     else if (!strcmp(cmd, "x16/loadPrg")) result = handle_x16_load_prg(seq, args);
@@ -8167,7 +8444,7 @@ static const char *const callable_commands[] = {
     "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
-    "x16/hashMemory", "x16/dumpMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
+    "x16/hashMemory", "x16/dumpMemory", "x16/searchMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
     "mcp/setStopOn",
