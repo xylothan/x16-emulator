@@ -1,4 +1,4 @@
-// Commander X16 Emulator — where a debugger client may write a host file.
+// Commander X16 Emulator — where a debugger client may read or write a host file.
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700 // realpath, lstat under -std=c11
 #endif
@@ -137,12 +137,10 @@ is_link(const char *p, bool *exists)
 #endif
 }
 
-bool
-host_write_path(const char *root, const char *request, char *out, size_t out_size, bool *exists,
-                char *err, size_t errn)
+// Refuse the spellings that are not simply a file in a folder.
+static bool
+request_is_plain(const char *request, char *err, size_t errn)
 {
-	char real_root[NARROW_PATH_MAX], full[NARROW_PATH_MAX], real_parent[NARROW_PATH_MAX];
-
 	if (!request || !request[0]) {
 		snprintf(err, errn, "no file name given");
 		return false;
@@ -162,6 +160,51 @@ host_write_path(const char *root, const char *request, char *out, size_t out_siz
 		return false;
 	}
 #endif
+	return true;
+}
+
+static bool
+file_name_ok(const char *file, char *err, size_t errn)
+{
+	if (!file[0] || !strcmp(file, ".") || !strcmp(file, "..")) {
+		snprintf(err, errn, "that does not name a file");
+		return false;
+	}
+#ifdef _WIN32
+	const char last = file[strlen(file) - 1];
+	if (last == '.' || last == ' ' || is_device_name(file)) {
+		snprintf(err, errn, "that is not a usable file name on this system");
+		return false;
+	}
+#endif
+	return true;
+}
+
+// A file, rather than a folder, a device or a pipe that would block the reader.
+static bool
+is_regular_file(const char *p)
+{
+#ifdef _WIN32
+	wchar_t wide[WIDE_PATH_MAX];
+	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, WIDE_PATH_MAX))
+		return false;
+	const DWORD attrs = GetFileAttributesW(wide);
+	return attrs != INVALID_FILE_ATTRIBUTES &&
+	       !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE));
+#else
+	struct stat st;
+	return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+bool
+host_write_path(const char *root, const char *request, char *out, size_t out_size, bool *exists,
+                char *err, size_t errn)
+{
+	char real_root[NARROW_PATH_MAX], full[NARROW_PATH_MAX], real_parent[NARROW_PATH_MAX];
+
+	if (!request_is_plain(request, err, errn))
+		return false;
 
 	if (!root || !canonical(root, real_root, sizeof real_root)) {
 		snprintf(err, errn, "the folder for written files does not exist");
@@ -185,17 +228,8 @@ host_write_path(const char *root, const char *request, char *out, size_t out_siz
 	while (sep > 0 && !is_sep(full[sep - 1]))
 		sep--;
 	const char *file = full + sep;
-	if (!file[0] || !strcmp(file, ".") || !strcmp(file, "..")) {
-		snprintf(err, errn, "that does not name a file");
+	if (!file_name_ok(file, err, errn))
 		return false;
-	}
-#ifdef _WIN32
-	const char last = file[strlen(file) - 1];
-	if (last == '.' || last == ' ' || is_device_name(file)) {
-		snprintf(err, errn, "that is not a usable file name on this system");
-		return false;
-	}
-#endif
 
 	char parent[NARROW_PATH_MAX];
 	size_t parent_len = sep ? sep - 1 : 0;
@@ -227,4 +261,59 @@ host_write_path(const char *root, const char *request, char *out, size_t out_siz
 		return false;
 	}
 	return true;
+}
+
+bool
+host_read_path(const char *const *roots, int root_count, const char *request, char *out,
+               size_t out_size, char *err, size_t errn)
+{
+	char base[NARROW_PATH_MAX], real_root[NARROW_PATH_MAX];
+	char full[NARROW_PATH_MAX], found[NARROW_PATH_MAX];
+
+	if (!request_is_plain(request, err, errn))
+		return false;
+
+	bool have_base = false;
+	for (int i = 0; i < root_count && !have_base; i++)
+		have_base = roots[i] && canonical(roots[i], base, sizeof base) && !is_drive_root(base);
+	if (!have_base) {
+		snprintf(err, errn, "no folder is open for reading; start with -fsroot <folder>");
+		return false;
+	}
+
+	const int made = is_absolute(request) ? snprintf(full, sizeof full, "%s", request)
+	                                      : snprintf(full, sizeof full, "%s/%s", base, request);
+	if (made < 0 || (size_t)made >= sizeof full) {
+		snprintf(err, errn, "that path is too long");
+		return false;
+	}
+	size_t sep = strlen(full);
+	while (sep > 0 && !is_sep(full[sep - 1]))
+		sep--;
+	if (!file_name_ok(full + sep, err, errn))
+		return false;
+
+	if (canonical(full, found, sizeof found) && is_regular_file(found)) {
+		for (int i = 0; i < root_count; i++) {
+			if (!roots[i] || !canonical(roots[i], real_root, sizeof real_root) ||
+			    is_drive_root(real_root) || !is_inside(real_root, found))
+				continue;
+			const int copied = snprintf(out, out_size, "%s", found);
+			if (copied < 0 || (size_t)copied >= out_size) {
+				snprintf(err, errn, "that path is too long");
+				return false;
+			}
+			return true;
+		}
+	}
+	snprintf(err, errn, "no such file in the folders a client may read (%s)", base);
+	return false;
+}
+
+bool
+host_path_present(const char *path)
+{
+	bool exists = false;
+	(void)is_link(path, &exists);
+	return exists;
 }

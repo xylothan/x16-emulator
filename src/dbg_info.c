@@ -2667,6 +2667,11 @@ bool dbg_info_peek_file_range(const char *loaded_path, dbg_addr_t *out_start, db
 	return scan_dbg_seg_range(dbg_path, out_start, out_end);
 }
 
+bool dbg_info_dbg_path_for(const char *loaded_path, char *out, size_t out_size)
+{
+	return loaded_path && build_dbg_path(loaded_path, out, out_size);
+}
+
 int dbg_info_load_for_file(const char *loaded_path, dbg_addr_t load_addr)
 {
 	if (!loaded_path) return -1;

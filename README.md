@@ -1469,6 +1469,10 @@ debugging it.
 refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
 program or update BASIC's pointers.
 
+`load_symbols` and `load_prg` read only inside `-fsroot` (the working folder when there is none),
+the dump folder, or the folder of the `-prg` the emulator started with. Links are followed and
+judged by where they lead. DAP clients are not restricted.
+
 Every result reports `paused`, `frame`, `stopId` and `stopReason`, because another client may have
 moved the machine between two calls. `step`, `run_frames` and `wait_for_stop` answer when the
 machine stops. At `timeoutMs` they answer `completed: false` and the machine keeps going, so a

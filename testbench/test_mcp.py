@@ -1748,7 +1748,7 @@ def test_symbols():
             f.write("nothing useful here\n")
 
         port = free_port()
-        with Mcp(["-debugport", str(port)]) as m:
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
             m.init()
             time.sleep(0.5)
             plant_loop(m)
@@ -2062,7 +2062,7 @@ def test_load_prg():
             f.write(K_PRG_DBG)
         plain = prg("plain.prg", 0x0B00, b"\x11\x22\x33")
 
-        with Mcp() as m:
+        with Mcp(["-fsroot", tmp]) as m:
             m.init()
             time.sleep(0.5)
             case("refused while running", is_error(m.call("load_prg", path=path)))
@@ -2137,7 +2137,7 @@ def test_client_format():
                     row.get("line"), (row.get("location") or {}).get("path"))
 
         port = free_port()
-        with Mcp(["-debugport", str(port)]) as m:
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
             m.init()
             time.sleep(0.5)
             plant_loop(m)
@@ -2172,7 +2172,7 @@ def test_client_format():
         # A load made through MCP can verify the editor's breakpoint. That event is the
         # editor's, even though an MCP request is what caused it.
         port = free_port()
-        with Mcp(["-debugport", str(port)]) as m:
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
             m.init()
             time.sleep(0.5)
             plant_loop(m)
@@ -2187,6 +2187,96 @@ def test_client_format():
             dap.close()
 
 
+def test_read_paths():
+    print("where MCP may read")
+    label_text = "al 000820 .inside\n"
+    prg_bytes = struct.pack("<H", 0x0A00) + b"\xEA\xEA"
+
+    def put(path, content):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(content.encode() if isinstance(content, str) else content)
+        return path
+
+    def link(target, name):
+        try:
+            os.symlink(target, name)
+            return True
+        except (OSError, NotImplementedError):
+            return False    # creating links needs a privilege on Windows
+
+    with tempfile.TemporaryDirectory() as base:
+        root = os.path.join(base, "root")
+        outside = os.path.join(base, "outside")
+        sibling = os.path.join(base, "root2")
+        inner = put(os.path.join(root, "sub", "in.lbl"), label_text)
+        program = put(os.path.join(root, "prog.prg"), prg_bytes)
+        secret = put(os.path.join(outside, "secret.lbl"), label_text)
+        secret_prg = put(os.path.join(outside, "secret.prg"), prg_bytes)
+        near = put(os.path.join(sibling, "near.lbl"), label_text)
+        linked = os.path.join(root, "linked.lbl")
+        has_links = link(secret, linked)
+        dbg_program = put(os.path.join(root, "guarded", "prog.prg"), prg_bytes)
+        has_dbg_link = link(put(os.path.join(outside, "x.dbg"), K_PRG_DBG),
+                            os.path.join(root, "guarded", "prog.dbg"))
+
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", root]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+
+            case("an absolute path inside loads",
+                 data(m.call("load_symbols", path=inner)).get("labels") == 1)
+            case("a relative path is from the root",
+                 data(m.call("load_symbols", path=os.path.join("sub", "in.lbl"))).get("labels") == 1)
+            case("a program inside loads", data(m.call("load_prg", path=program)).get("length") == 2)
+
+            bad = (("an absolute path outside", secret),
+                   ("..", os.path.join("..", "outside", "secret.lbl")),
+                   ("a nested ..", os.path.join("sub", "..", "..", "outside", "secret.lbl")),
+                   ("a folder that only starts the same", near),
+                   ("a folder", os.path.join(root, "sub")))
+            for label, p in bad:
+                case(f"load_symbols refuses {label}", is_error(m.call("load_symbols", path=p)))
+            case("load_prg refuses a file outside", is_error(m.call("load_prg", path=secret_prg)))
+            r = m.call("load_symbols", path=secret)
+            missing = m.call("load_symbols", path=os.path.join(outside, "absent.lbl"))
+            case("outside and missing read the same",
+                 r.get("content") == missing.get("content"), f"{r} != {missing}")
+            if has_links:
+                case("a link leading outside is refused", is_error(m.call("load_symbols", path=linked)))
+            if has_dbg_link:
+                case("a .dbg link leading outside refuses the load",
+                     is_error(m.call("load_prg", path=dbg_program)))
+            if os.name == "nt":
+                for name in ("CON", "NUL", "COM1.lbl", "in.lbl:stream", "\\\\server\\share\\a.lbl"):
+                    case(f"{name} is refused", is_error(m.call("load_symbols", path=name)))
+
+            dap = Dap(port)
+            dap.session()
+            r = dap.request("x16/loadSymbols", {"path": secret})
+            case("a DAP client is not restricted", (r or {}).get("success") is True, str(r))
+            dap.close()
+
+        # No -fsroot: the working folder is what the machine itself can see.
+        with Mcp() as m:
+            m.init()
+            time.sleep(0.5)
+            put(os.path.join(m.dir.name, "here.lbl"), label_text)
+            case("without -fsroot the working folder is readable",
+                 data(m.call("load_symbols", path="here.lbl")).get("labels") == 1)
+            case("and a folder elsewhere is not", is_error(m.call("load_symbols", path=secret)))
+
+        # The folder of the program the user launched with.
+        with Mcp(["-prg", secret_prg]) as m:
+            m.init()
+            time.sleep(0.5)
+            case("the -prg folder is readable",
+                 data(m.call("load_symbols", path=secret)).get("labels") == 1)
+            case("but not the folder next to it", is_error(m.call("load_symbols", path=near)))
+
+
 def main():
     global EXE, ROM
     if len(sys.argv) != 3:
@@ -2198,7 +2288,7 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format):
+                 test_client_format, test_read_paths):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others
