@@ -169,8 +169,9 @@ apply_capture_settings()
     }
     mask |= IO_TRACE_BIT(IO_DEV_SERIAL);
 
-    io_trace_device_mask = mask;
-    io_trace_enabled     = s.io_trace_capture;
+    // This panel's share only: a debug client's capture is its own and survives
+    // the Capture box being off.
+    io_trace_set_owner_mask(IO_TRACE_OWNER_UI, s.io_trace_capture ? mask : 0);
 
     // The index is built by sdcard_attach(), which is C and cannot see the
     // settings struct; this flag is how the preference reaches it.
@@ -507,7 +508,7 @@ draw_capture_controls()
 
     if (!s.io_trace_capture) {
         ImGui::TextColored(COL_DIM, "Capture is off. Tick Capture, then pick at least one device.");
-    } else if (io_trace_device_mask == IO_TRACE_BIT(IO_DEV_SERIAL)) {
+    } else if (io_trace_owner_mask(IO_TRACE_OWNER_UI) == IO_TRACE_BIT(IO_DEV_SERIAL)) {
         ImGui::TextColored(COL_DIM, "No devices selected, so nothing is being recorded.");
     } else {
         ImGui::TextColored(COL_DIM, "%d/%d events", io_trace_count(), io_trace_capacity());
@@ -518,6 +519,26 @@ draw_capture_controls()
             tip("The ring wrapped and older events were discarded. Raise the capacity in "
                 "System > Settings > I/O trace > Capture, or capture fewer devices.");
         }
+    }
+
+    const uint32_t client = io_trace_owner_mask(IO_TRACE_OWNER_DAP) |
+                            io_trace_owner_mask(IO_TRACE_OWNER_MCP);
+    if (client != 0) {
+        char names[160] = "";
+        size_t used = 0;
+        for (int d = 0; d < IO_DEV_COUNT && used < sizeof(names); d++) {
+            if (client & IO_TRACE_BIT(d)) {
+                const int n = snprintf(names + used, sizeof(names) - used, "%s%s", used ? ", " : "",
+                                       io_trace_device_name((io_device_t)d));
+                if (n < 0) {
+                    break;
+                }
+                used += (size_t)n;
+            }
+        }
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "A debug client is capturing: %s", names);
+        tip("Recorded into this log whatever the boxes above say. It ends with the client's "
+            "session and does not change your selection.");
     }
 }
 

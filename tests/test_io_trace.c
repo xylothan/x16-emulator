@@ -251,6 +251,103 @@ test_device_names(void)
 	      "and an unknown one is named rather than left dangling");
 }
 
+static void
+release_all_owners(void)
+{
+	for (int o = 0; o < IO_TRACE_OWNER_COUNT; o++) {
+		io_trace_set_owner_mask((io_trace_owner_t)o, 0);
+	}
+}
+
+static void
+test_owner_masks(void)
+{
+	release_all_owners();
+	check(!io_trace_enabled, "no owner, no capture");
+	check_eq(io_trace_device_mask, 0, "and an empty effective mask");
+
+	io_trace_set_owner_mask(IO_TRACE_OWNER_UI, IO_TRACE_BIT(IO_DEV_VIA1));
+	io_trace_set_owner_mask(IO_TRACE_OWNER_MCP, IO_TRACE_BIT(IO_DEV_VERA));
+	io_trace_set_owner_mask(IO_TRACE_OWNER_DAP, IO_TRACE_BIT(IO_DEV_VERA));
+	check(io_trace_enabled, "any owner turns capture on");
+	check_eq(io_trace_device_mask, IO_TRACE_BIT(IO_DEV_VIA1) | IO_TRACE_BIT(IO_DEV_VERA),
+	         "the effective mask is the OR");
+
+	io_trace_set_owner_mask(IO_TRACE_OWNER_MCP, 0);
+	check(io_trace_wants(IO_DEV_VERA), "another owner's bit survives a release");
+	check_eq(io_trace_owner_mask(IO_TRACE_OWNER_UI), IO_TRACE_BIT(IO_DEV_VIA1),
+	         "and a client's release leaves the UI's");
+
+	io_trace_set_owner_mask(IO_TRACE_OWNER_DAP, 0);
+	check(!io_trace_wants(IO_DEV_VERA), "the last holder's release clears the bit");
+	check(io_trace_wants(IO_DEV_VIA1), "the UI's stays");
+
+	io_trace_set_owner_mask(IO_TRACE_OWNER_UI, 0);
+	check(!io_trace_enabled, "the last release turns capture off");
+
+	io_trace_set_owner_mask(IO_TRACE_OWNER_DAP, 0xffffffffu);
+	check_eq(io_trace_owner_mask(IO_TRACE_OWNER_DAP), IO_TRACE_MASK_ALL, "bits past the devices are dropped");
+	io_trace_set_owner_mask(IO_TRACE_OWNER_COUNT, IO_TRACE_BIT(IO_DEV_VIA1));
+	check_eq(io_trace_owner_mask(IO_TRACE_OWNER_COUNT), 0, "an unknown owner holds nothing");
+	check_eq(io_trace_device_mask, IO_TRACE_MASK_ALL, "and changes nothing");
+	release_all_owners();
+
+	check((IO_TRACE_MASK_DEFAULT & IO_TRACE_BIT(IO_DEV_VERA)) == 0, "the default leaves VERA out");
+	check((IO_TRACE_MASK_DEFAULT & IO_TRACE_BIT(IO_DEV_OPENBUS)) == 0, "and open bus");
+	check((IO_TRACE_MASK_DEFAULT & ~IO_TRACE_MASK_ALL) == 0, "and names only real devices");
+}
+
+static void
+test_positions(void)
+{
+	check(io_trace_init(64), "a ring for the position checks");
+	io_trace_clear();
+	capture_everything();
+
+	const uint64_t start = io_trace_next_seq();
+	check(io_trace_oldest_seq() == start, "an empty ring's oldest is its next");
+	check(io_trace_at_seq(start) == NULL, "and nothing is held there");
+
+	for (int i = 0; i < 100; i++) {
+		io_trace_access(IO_DEV_VIA1, 0x9f00, (uint8_t)i, false);
+	}
+	check(io_trace_next_seq() == start + 100, "next counts every event");
+	check(io_trace_oldest_seq() == start + 36, "oldest is next minus what is held");
+	check(io_trace_at_seq(start + 35) == NULL, "an overwritten event is gone");
+	check(io_trace_at_seq(start + 100) == NULL, "and a future one is not there");
+	const io_event_t *ev = io_trace_at_seq(start + 36);
+	check(ev != NULL && ev->value == 36, "the oldest held is the right event");
+	ev = io_trace_at_seq(start + 99);
+	check(ev != NULL && ev->value == 99, "and so is the newest");
+
+	io_trace_clear();
+	check(io_trace_next_seq() == start + 100, "a clear keeps the position");
+	check(io_trace_oldest_seq() == start + 100, "and holds nothing");
+	io_trace_access(IO_DEV_VIA1, 0x9f00, 0xAB, false);
+	ev = io_trace_at_seq(start + 100);
+	check(ev != NULL && ev->value == 0xAB, "recording resumes at that position");
+
+	check(io_trace_init(128), "the ring can be resized");
+	check(io_trace_next_seq() == start + 101, "a resize keeps the position");
+	check(io_trace_oldest_seq() == start + 101, "and holds nothing");
+}
+
+static void
+test_device_ids(void)
+{
+	for (int d = 0; d < IO_DEV_COUNT; d++) {
+		const char *id = io_trace_device_id((io_device_t)d);
+		check(id != NULL && id[0] != '\0', "every device has an id");
+		check(io_trace_device_from_id(id) == (io_device_t)d, "which maps back to it");
+		for (const char *c = id; c != NULL && *c; c++) {
+			check((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9'), "ids are lowercase");
+		}
+	}
+	check(io_trace_device_id(IO_DEV_COUNT) == NULL, "an unknown device has no id");
+	check(io_trace_device_from_id("nope") == IO_DEV_COUNT, "an unknown id has no device");
+	check(io_trace_device_from_id(NULL) == IO_DEV_COUNT, "nor has NULL");
+}
+
 int
 main(void)
 {
@@ -263,6 +360,9 @@ main(void)
 	test_clear_keeps_the_ring_usable();
 	test_survives_use_before_init();
 	test_device_names();
+	test_owner_masks();
+	test_positions();
+	test_device_ids();
 
 	io_trace_shutdown();
 	return x16_test_summary("io_trace");

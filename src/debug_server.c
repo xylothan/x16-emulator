@@ -50,6 +50,11 @@
 #include "export_paths.h"
 #include "host_write_path.h"
 #include "i2c.h"
+#include "io_trace.h"
+#include "midi.h"
+#include "rtc.h"
+#include "smc.h"
+#include "via.h"
 #include "mem_hash.h"
 #include "mem_search.h"
 #include "audio_events.h"
@@ -8387,6 +8392,346 @@ static int handle_x16_set_voice_mute(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/io, x16/ioTrace, x16/ioCapture, x16/interrupt ──────────────
+
+static cJSON *io_device_names(uint32_t mask) {
+    cJSON *names = cJSON_CreateArray();
+    for (int d = 0; d < IO_DEV_COUNT; d++) {
+        if (mask & IO_TRACE_BIT(d))
+            cJSON_AddItemToArray(names, cJSON_CreateString(io_trace_device_id((io_device_t)d)));
+    }
+    return names;
+}
+
+static void io_add_capture(cJSON *body) {
+    cJSON *o = cJSON_AddObjectToObject(body, "capture");
+    cJSON_AddBoolToObject(o, "enabled", io_trace_enabled);
+    cJSON_AddItemToObject(o, "ui", io_device_names(io_trace_owner_mask(IO_TRACE_OWNER_UI)));
+    cJSON_AddItemToObject(o, "dap", io_device_names(io_trace_owner_mask(IO_TRACE_OWNER_DAP)));
+    cJSON_AddItemToObject(o, "mcp", io_device_names(io_trace_owner_mask(IO_TRACE_OWNER_MCP)));
+    cJSON_AddItemToObject(o, "effective", io_device_names(io_trace_enabled ? io_trace_device_mask : 0));
+}
+
+static cJSON *io_byte_array(const uint8_t *b, int n) {
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(b[i]));
+    return arr;
+}
+
+// The level main.c tests after each instruction, by source. Reading it clears
+// nothing: every one of these is a comparison of flags the device holds.
+static cJSON *io_irq_sources(void) {
+    cJSON *src = cJSON_CreateArray();
+    if (video_get_irq_out()) cJSON_AddItemToArray(src, cJSON_CreateString("vera"));
+    if (via1_irq()) cJSON_AddItemToArray(src, cJSON_CreateString("via1"));
+    if (has_via2 && via2_irq()) cJSON_AddItemToArray(src, cJSON_CreateString("via2"));
+    if (ym2151_irq_support && YM_irq()) cJSON_AddItemToArray(src, cJSON_CreateString("ym"));
+    if (has_midi_card && midi_serial_irq()) cJSON_AddItemToArray(src, cJSON_CreateString("midi"));
+    return src;
+}
+
+static void io_add_irq(cJSON *body) {
+    cJSON *o = cJSON_AddObjectToObject(body, "irq");
+    cJSON *src = io_irq_sources();
+    cJSON_AddBoolToObject(o, "line", cJSON_GetArraySize(src) > 0);
+    cJSON_AddItemToObject(o, "sources", src);
+    cJSON_AddBoolToObject(o, "iFlag", (regs.status & FLAG_INTERRUPT) != 0);
+    cJSON_AddBoolToObject(o, "inWai", waiting != 0);
+}
+
+static cJSON *via_flag_names(uint8_t bits) {
+    static const char *const names[7] = { "ca2", "ca1", "sr", "cb2", "cb1", "t2", "t1" };
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < 7; i++) {
+        if (bits & (1u << i)) cJSON_AddItemToArray(arr, cJSON_CreateString(names[i]));
+    }
+    return arr;
+}
+
+static void io_add_via(cJSON *body, const char *key, int which, bool fitted) {
+    cJSON *o = cJSON_AddObjectToObject(body, key);
+    cJSON_AddBoolToObject(o, "fitted", fitted);
+    if (!fitted) return;
+
+    via_debug_state_t v;
+    via_debug_get_state(which, &v);
+    // What the CPU would read at each address, through the debug path: it does
+    // not step the I2C bus or clear a flag.
+    uint8_t seen[16];
+    for (uint8_t r = 0; r < 16; r++) seen[r] = which ? via2_read(r, true) : via1_read(r, true);
+
+    cJSON_AddItemToObject(o, "regs", io_byte_array(seen, 16));
+    cJSON_AddNumberToObject(o, "orb", v.regs[0]);
+    cJSON_AddNumberToObject(o, "ora", v.regs[1]);
+    cJSON_AddNumberToObject(o, "ddrb", v.regs[2]);
+    cJSON_AddNumberToObject(o, "ddra", v.regs[3]);
+    cJSON_AddNumberToObject(o, "sr", v.regs[10]);
+    cJSON_AddNumberToObject(o, "acr", v.regs[11]);
+    cJSON_AddNumberToObject(o, "pcr", v.regs[12]);
+    cJSON_AddNumberToObject(o, "ifr", seen[13]);
+    cJSON_AddNumberToObject(o, "ier", seen[14]);
+    cJSON_AddItemToObject(o, "flags", via_flag_names(v.regs[13]));
+    cJSON_AddItemToObject(o, "enabled", via_flag_names(v.regs[14]));
+    cJSON_AddBoolToObject(o, "irq", (v.regs[13] & v.regs[14]) != 0);
+    cJSON *t1 = cJSON_AddObjectToObject(o, "t1");
+    cJSON_AddNumberToObject(t1, "count", v.timer_count[0]);
+    cJSON_AddNumberToObject(t1, "latch", v.timer_latch[0]);
+    cJSON_AddBoolToObject(t1, "running", v.timer_running[0]);
+    cJSON_AddBoolToObject(t1, "reloading", v.timer1_m1);
+    cJSON *t2 = cJSON_AddObjectToObject(o, "t2");
+    cJSON_AddNumberToObject(t2, "count", v.timer_count[1]);
+    cJSON_AddNumberToObject(t2, "latchLow", v.timer_latch[1]);
+    cJSON_AddBoolToObject(t2, "running", v.timer_running[1]);
+    cJSON_AddBoolToObject(o, "pb7", v.pb7_output);
+}
+
+static void io_add_i2c(cJSON *body) {
+    i2c_debug_state_t s;
+    i2c_debug_get_state(&s);
+    cJSON *o = cJSON_AddObjectToObject(body, "i2c");
+    cJSON_AddNumberToObject(o, "state", s.state);
+    cJSON_AddBoolToObject(o, "readMode", s.read_mode);
+    cJSON_AddNumberToObject(o, "value", s.value);
+    cJSON_AddNumberToObject(o, "count", s.count);
+    cJSON_AddNumberToObject(o, "device", s.device);
+    cJSON_AddStringToObject(o, "deviceName", s.device_name);
+    cJSON_AddNumberToObject(o, "clkIn", s.clk_in);
+    cJSON_AddNumberToObject(o, "dataIn", s.data_in);
+    cJSON_AddNumberToObject(o, "dataOut", s.data_out);
+    cJSON_AddNumberToObject(o, "transactionsStarted", s.transactions_started);
+    cJSON_AddNumberToObject(o, "transactionsCompleted", s.transactions_completed);
+    cJSON_AddNumberToObject(o, "bytesRead", s.bytes_read);
+    cJSON_AddNumberToObject(o, "bytesWritten", s.bytes_written);
+    cJSON_AddNumberToObject(o, "kbdFill", s.kbd_fill);
+    cJSON_AddNumberToObject(o, "mseFill", s.mse_fill);
+}
+
+static void io_add_smc(cJSON *body) {
+    smc_debug_state_t s;
+    smc_debug_get_state(&s);
+    cJSON *o = cJSON_AddObjectToObject(body, "smc");
+    cJSON_AddNumberToObject(o, "defaultReadOp", s.default_read_op);
+    cJSON_AddNumberToObject(o, "activityLed", s.activity_led);
+    cJSON_AddItemToObject(o, "i2cData", io_byte_array(s.i2c_data, SMC_I2C_DATA_LEN));
+    cJSON_AddNumberToObject(o, "i2cDataPos", s.i2c_data_pos);
+    cJSON_AddNumberToObject(o, "mseCount", s.mse_count);
+    cJSON_AddBoolToObject(o, "requestedReset", s.requested_reset);
+    cJSON_AddNumberToObject(o, "kbdFill", s.kbd_fill);
+    cJSON_AddNumberToObject(o, "mseFill", s.mse_fill);
+}
+
+static void io_add_rtc(cJSON *body) {
+    rtc_debug_state_t s;
+    rtc_debug_get_state(&s);
+    cJSON *o = cJSON_AddObjectToObject(body, "rtc");
+    cJSON_AddBoolToObject(o, "running", s.running);
+    cJSON_AddBoolToObject(o, "h24", s.h24);
+    cJSON_AddNumberToObject(o, "seconds", s.seconds);
+    cJSON_AddNumberToObject(o, "minutes", s.minutes);
+    cJSON_AddNumberToObject(o, "hours", s.hours);
+    cJSON_AddNumberToObject(o, "dayOfWeek", s.day_of_week);
+    cJSON_AddNumberToObject(o, "day", s.day);
+    cJSON_AddNumberToObject(o, "month", s.month);
+    cJSON_AddNumberToObject(o, "year", s.year);
+    cJSON_AddNumberToObject(o, "i2cDataPos", s.i2c_data_pos);
+    char hex[sizeof s.nvram * 2 + 1];
+    for (size_t i = 0; i < sizeof s.nvram; i++) snprintf(hex + i * 2, 3, "%02X", s.nvram[i]);
+    cJSON_AddStringToObject(o, "nvram", hex);
+    cJSON_AddBoolToObject(o, "nvramDirty", s.nvram_dirty);
+}
+
+static void io_add_joystick(cJSON *body) {
+    joystick_debug_state_t js;
+    joystick_debug_get_state(&js);
+    cJSON *o = cJSON_AddObjectToObject(body, "joystick");
+    cJSON_AddBoolToObject(o, "latch", js.latch);
+    cJSON_AddNumberToObject(o, "data", js.data);
+    cJSON *ports = cJSON_AddArrayToObject(o, "ports");
+    for (int i = 0; i < NUM_JOYSTICKS; i++) {
+        const joystick_slot_debug_t *s = &js.slots[i];
+        cJSON *p = cJSON_CreateObject();
+        cJSON_AddNumberToObject(p, "port", i + 1);
+        // An undriven port reads high forever, which is how the KERNAL tells an
+        // empty socket from a pad; shift says the same.
+        cJSON_AddBoolToObject(p, "driven", s->virtual_active || s->controller_bound);
+        cJSON_AddStringToObject(p, "source", s->virtual_active ? "virtual"
+                                             : s->controller_bound ? "controller" : "none");
+        cJSON_AddBoolToObject(p, "slotEnabled", s->enabled);
+        cJSON_AddNumberToObject(p, "mask", s->button_mask);
+        cJSON_AddItemToObject(p, "buttons", dap_joy_buttons_array(s->button_mask));
+        cJSON_AddNumberToObject(p, "shift", s->shift_mask);
+        cJSON_AddItemToArray(ports, p);
+    }
+}
+
+static int handle_x16_io(int seq, cJSON *args) {
+    static const char cmd[] = "x16/io";
+    static const char *const devices[] = { "via1", "via2", "i2c", "smc", "rtc", "joystick" };
+    cJSON *d = args ? cJSON_GetObjectItemCaseSensitive(args, "device") : NULL;
+    int only = -1;
+    if (d) {
+        for (int i = 0; i < (int)(sizeof devices / sizeof devices[0]); i++) {
+            if (cJSON_IsString(d) && !strcmp(d->valuestring, devices[i])) only = i;
+        }
+        if (only < 0) {
+            send_dap_error_response(seq, cmd, "'device' must be via1, via2, i2c, smc, rtc or joystick");
+            return 0;
+        }
+    }
+    cJSON *body = cJSON_CreateObject();
+    io_add_irq(body);
+    if (only < 0 || only == 0) io_add_via(body, "via1", 0, true);
+    if (only < 0 || only == 1) io_add_via(body, "via2", 1, has_via2);
+    if (only < 0 || only == 2) io_add_i2c(body);
+    if (only < 0 || only == 3) io_add_smc(body);
+    if (only < 0 || only == 4) io_add_rtc(body);
+    if (only < 0 || only == 5) io_add_joystick(body);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// Reads only. Turning capture on is x16/ioCapture, so that a read-only client
+// has no argument that reaches it.
+static int handle_x16_io_trace(int seq, cJSON *args) {
+    static const char cmd[] = "x16/ioTrace";
+    const uint64_t next = io_trace_next_seq(), oldest = io_trace_oldest_seq();
+    uint64_t cursor = oldest;
+    int limit = 100;
+
+    cJSON *c = args ? cJSON_GetObjectItemCaseSensitive(args, "cursor") : NULL;
+    if (c) {
+        if (!cJSON_IsNumber(c) || c->valuedouble < 0 || c->valuedouble > 9007199254740992.0 ||
+            c->valuedouble != (double)(uint64_t)c->valuedouble) {
+            send_dap_error_response(seq, cmd, "'cursor' must be a whole number from an earlier result");
+            return 0;
+        }
+        cursor = (uint64_t)c->valuedouble;
+        if (cursor > next) {
+            send_dap_error_response(seq, cmd, "'cursor' is past the newest event");
+            return 0;
+        }
+        if (cursor < 1) cursor = 1;   // events count from 1
+    }
+    cJSON *l = args ? cJSON_GetObjectItemCaseSensitive(args, "limit") : NULL;
+    if (l) {
+        if (!cJSON_IsNumber(l) || l->valuedouble < 1 || l->valuedouble > 1024 ||
+            l->valuedouble != (int)l->valuedouble) {
+            send_dap_error_response(seq, cmd, "'limit' must be a whole number from 1 to 1024");
+            return 0;
+        }
+        limit = (int)l->valuedouble;
+    }
+
+    const uint64_t lost = cursor < oldest ? oldest - cursor : 0;
+    uint64_t at = cursor < oldest ? oldest : cursor;
+    cJSON *body = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(body, "entries");
+    for (int n = 0; n < limit && at < next; n++, at++) {
+        const io_event_t *e = io_trace_at_seq(at);
+        if (!e) break;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "seq", (double)at);
+        cJSON_AddNumberToObject(o, "cycles", e->cycles);
+        cJSON_AddNumberToObject(o, "pc", e->pc);
+        cJSON_AddNumberToObject(o, "programBank", e->pc_bank);
+        cJSON_AddStringToObject(o, "device", io_trace_device_id((io_device_t)e->device));
+        cJSON_AddStringToObject(o, "kind", e->kind == IO_EVENT_ACCESS ? "access" : "decoded");
+        if (e->has_addr) {
+            cJSON_AddNumberToObject(o, "address", e->addr);
+            cJSON_AddStringToObject(o, "op", e->is_write ? "write" : "read");
+        }
+        if (e->kind == IO_EVENT_ACCESS) cJSON_AddNumberToObject(o, "value", e->value);
+        else                            cJSON_AddStringToObject(o, "text", e->text);
+        cJSON_AddItemToArray(list, o);
+    }
+    cJSON_AddNumberToObject(body, "cursor", (double)at);
+    cJSON_AddNumberToObject(body, "lost", (double)lost);
+    cJSON_AddBoolToObject(body, "more", at < next);
+    cJSON_AddNumberToObject(body, "capacity", io_trace_capacity());
+    io_add_capture(body);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// The caller's whole set, so that a retry cannot change it. [] lets go. Without
+// a list, the default: everything but VERA, whose data ports flood the ring, and
+// open bus.
+static int handle_x16_io_capture(int seq, cJSON *args) {
+    static const char cmd[] = "x16/ioCapture";
+    cJSON *list = args ? cJSON_GetObjectItemCaseSensitive(args, "devices") : NULL;
+    uint32_t mask = IO_TRACE_MASK_DEFAULT;
+    if (list) {
+        if (!cJSON_IsArray(list)) {
+            send_dap_error_response(seq, cmd, "'devices' must be an array of device names");
+            return 0;
+        }
+        mask = 0;
+        cJSON *item;
+        cJSON_ArrayForEach(item, list) {
+            const io_device_t dev = cJSON_IsString(item) ? io_trace_device_from_id(item->valuestring)
+                                                         : IO_DEV_COUNT;
+            if (dev == IO_DEV_COUNT) {
+                send_dap_error_response(seq, cmd, "unknown device: use via1, via2, vera, spi, ym, emu, "
+                                                  "midi, openbus, sdcard, files, i2c, joystick or serial");
+                return 0;
+            }
+            mask |= IO_TRACE_BIT(dev);
+        }
+    }
+    io_trace_set_owner_mask(current_caller == DBG_CALLER_MCP ? IO_TRACE_OWNER_MCP : IO_TRACE_OWNER_DAP,
+                            mask);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "cursor", (double)io_trace_next_seq());
+    io_add_capture(body);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// A pulse through the CPU's own entry points, between two instructions. The IRQ
+// line is not a stored level: main.c ORs the devices' flags after every
+// instruction. So this asserts nothing that could stay up, and clears no flag
+// that a device is holding.
+static int handle_x16_interrupt(int seq, cJSON *args) {
+    static const char cmd[] = "x16/interrupt";
+    cJSON *k = args ? cJSON_GetObjectItemCaseSensitive(args, "kind") : NULL;
+    if (!k || !cJSON_IsString(k) || (strcmp(k->valuestring, "irq") && strcmp(k->valuestring, "nmi"))) {
+        send_dap_error_response(seq, cmd, "'kind' is required: irq or nmi");
+        return 0;
+    }
+    const bool is_nmi = !strcmp(k->valuestring, "nmi");
+    const bool i_flag = (regs.status & FLAG_INTERRUPT) != 0;
+    const bool taken = is_nmi || !i_flag;
+    const bool was_waiting = waiting != 0;
+    const bool paused = currentMode == DMODE_STOP;
+    const uint16_t vector = (uint16_t)((regs.e ? 0xFFF0 : 0xFFE0) + (is_nmi ? 0x0A : 0x0E));
+
+    if (is_nmi) machine_nmi();
+    else        irq6502();
+
+    // Already halted on the handler, so the entry is not a new reason to stop:
+    // left pending, a stop filter would fire on it after the next resume.
+    if (paused && taken) (void)cpu_irq_take_entered_kinds();
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "kind", k->valuestring);
+    cJSON_AddBoolToObject(body, "taken", taken);
+    cJSON_AddBoolToObject(body, "held", !taken);
+    cJSON_AddBoolToObject(body, "iFlagWasSet", i_flag);
+    cJSON_AddBoolToObject(body, "wokeFromWai", was_waiting);
+    cJSON_AddNumberToObject(body, "vector", vector);
+    cJSON_AddNumberToObject(body, "pc", regs.pc);
+    cJSON_AddNumberToObject(body, "programBank", regs.k);
+    cJSON_AddNumberToObject(body, "sp", regs.sp);
+    cJSON_AddItemToObject(body, "deviceLines", io_irq_sources());
+    if (!taken) {
+        cJSON_AddStringToObject(body, "note", "the I flag is set, so the IRQ was not taken. The CPU keeps "
+                                              "no record of a pulse: it will not fire when I clears.");
+    }
+    send_dap_response(seq, cmd, true, body);
+    if (paused && taken) debug_server_notify_stopped("interrupt");
+    return 0;
+}
+
 // ─── x16/setWarp, x16/mouse ──────────────────────────────────────────
 
 // An explicit state rather than a toggle, so that a retry cannot undo it.
@@ -8644,6 +8989,10 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/searchMemory")) result = handle_x16_search_memory(seq, args);
     else if (!strcmp(cmd, "x16/audio")) result = handle_x16_audio(seq, args);
     else if (!strcmp(cmd, "x16/setVoiceMute")) result = handle_x16_set_voice_mute(seq, args);
+    else if (!strcmp(cmd, "x16/io")) result = handle_x16_io(seq, args);
+    else if (!strcmp(cmd, "x16/ioTrace")) result = handle_x16_io_trace(seq, args);
+    else if (!strcmp(cmd, "x16/ioCapture")) result = handle_x16_io_capture(seq, args);
+    else if (!strcmp(cmd, "x16/interrupt")) result = handle_x16_interrupt(seq, args);
     else if (!strcmp(cmd, "x16/setWarp")) result = handle_x16_set_warp(seq, args);
     else if (!strcmp(cmd, "x16/mouse")) result = handle_x16_mouse(seq, args);
     else if (!strcmp(cmd, "x16/loadPrg")) result = handle_x16_load_prg(seq, args);
@@ -8742,6 +9091,7 @@ static const char *const callable_commands[] = {
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
     "mcp/setStopOn", "x16/audio", "x16/setVoiceMute",
+    "x16/io", "x16/ioTrace", "x16/ioCapture", "x16/interrupt",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
@@ -8797,6 +9147,7 @@ void debug_server_release_frontend(void) {
     sprite_trace_arm(SPRITE_TRACE_OWNER_MCP, false);
     psg_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
     YM_debug_set_owner_mute_mask(VOICE_MUTE_MCP, 0);
+    io_trace_set_owner_mask(IO_TRACE_OWNER_MCP, 0);
     if (capture_is_live() && cap_serial() == mcp_capture_serial) cap_stop();
 
     // A headless machine is never left halted with nobody able to restart it.
@@ -8883,6 +9234,7 @@ static void dap_release_session_state(void) {
     sprite_trace_arm(SPRITE_TRACE_OWNER_DAP, false);
     psg_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0);
     YM_debug_set_owner_mute_mask(VOICE_MUTE_DAP, 0);
+    io_trace_set_owner_mask(IO_TRACE_OWNER_DAP, 0);
 }
 
 static void disconnect_client(void) {

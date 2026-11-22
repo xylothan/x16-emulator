@@ -1046,7 +1046,7 @@ Standard requests: `initialize`, `launch`, `attach`, `configurationDone`, `threa
 `loadedSources`, `source`, `restart`,
 `disconnect` and `terminate`.
 
-Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1522,7 +1522,7 @@ debugging it.
 | VERA | `get_vera_state` |
 | Files and speed | `hash_memory`, `dump_memory`, `load_prg`, `set_warp` |
 | Performance | `perf_stats`, `perf_config`, `perf_history`, `host_perf`, `profile_capture` |
-| Devices | `get_sdcard`, `sprite_mux_stats`, `sprite_mux_config` |
+| Devices | `get_io_state`, `read_io_trace`, `set_io_capture`, `trigger_interrupt`, `get_sdcard`, `sprite_mux_stats`, `sprite_mux_config` |
 | Other | `save_state`, `load_state` |
 
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
@@ -1569,6 +1569,24 @@ that selection, and it ends with the client's session or MCP lease, so a client 
 leave a voice silent. A muted voice is left out of the host output and any WAV recording only: the
 chip, the mix it holds and every state hash are the same as if nothing were muted. The PSG and YM
 panels show a client's mute in amber.
+
+`get_io_state` (`x16/io`) reads the VIAs, I2C bus, SMC, RTC and controller ports without changing
+them: no VIA flag clears and the bus does not step. `device` limits it to one. `irq` is always
+present, with the level the devices assert now, by source, and the I flag. A controller port nothing
+drives reports `driven: false`.
+
+`read_io_trace` (`x16/ioTrace`) reads the I/O panel's event ring with a cursor, as `read_log` does,
+and reports `lost` events. It only reads. `set_io_capture` (`x16/ioCapture`) chooses what a client
+records: `devices` is its whole set, `[]` stops, and without it everything but `vera`, whose data
+ports would flood the ring, and `openbus`. Each client's set is ORed with the panel's selection,
+never changes that selection or its saved setting, and ends with the client's session or MCP lease.
+Recording does not change the machine or any state hash.
+
+`trigger_interrupt` (`x16/interrupt`) pulses `irq` or `nmi` once through the CPU's own entry points.
+No device flag changes, so it cannot leave the shared IRQ line stuck or clear another device's
+interrupt. An IRQ with the I flag set is not taken: the reply says `held: true`, it wakes `WAI`, and
+it is not remembered for when I clears. An NMI is always taken. On a paused machine the interrupt is
+taken at once and the machine stays paused on the handler's first instruction.
 
 `search_memory` (`x16/searchMemory`) finds `hex` or ASCII `text` of up to 64 bytes through the
 debugger's read path, so it moves no VERA data port and clears no device flag. `space` is `cpu` (the
