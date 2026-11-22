@@ -6,10 +6,12 @@
 #define _VIDEO_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <SDL.h>
 #include "glue.h"
+#include "screen_text.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,6 +123,14 @@ uint16_t video_get_scanline_count(void);
 uint32_t video_frame_dot_clocks(void);
 uint16_t video_frame_scanlines(void);
 uint64_t video_screen_hash(void);
+
+// The picture as it stands, as a PNG in memory for the caller to free. NULL if
+// it could not be encoded. The picture is drawn a scanline at a time, so it is
+// only a whole frame at a frame boundary.
+uint8_t *video_screenshot_png(size_t *out_len, int *out_w, int *out_h);
+
+// How a layer is laid out, for reading its text back. layer is 0 or 1.
+void video_get_text_layout(int layer, screen_text_layout_t *out);
 
 // Size in layer pixels of the image the composer is actually displaying: the
 // active window (DC_HSTART/HSTOP, DC_VSTART/VSTOP) scaled by DC_HSCALE/VSCALE.

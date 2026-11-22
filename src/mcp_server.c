@@ -1234,6 +1234,57 @@ static cJSON *tool_perf_stats(cJSON *args) {
     return tool_forward("x16/perfStats", args);
 }
 
+// The lines are the answer, so they are the text a client reads first.
+static cJSON *tool_get_screen(cJSON *args) {
+    dbg_reply_t r;
+    debug_server_call("x16/screen", args, &r);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    size_t size = 1;
+    cJSON *lines = cJSON_GetObjectItemCaseSensitive(r.body, "lines");
+    cJSON *line;
+    cJSON_ArrayForEach(line, lines) size += strlen(line->valuestring) + 1;
+    char *text = (char *)malloc(size);
+    if (!text) {
+        cJSON_Delete(r.body);
+        return tool_fail("out of memory");
+    }
+    char *p = text;
+    cJSON_ArrayForEach(line, lines) {
+        const size_t n = strlen(line->valuestring);
+        memcpy(p, line->valuestring, n);
+        p += n;
+        *p++ = '\n';
+    }
+    *p = '\0';
+    cJSON *result = tool_ok(r.body, text);
+    free(text);
+    return result;
+}
+
+// The image goes in the content, and only there: a copy in structuredContent
+// would send a megabyte of base64 twice.
+static cJSON *tool_screenshot(cJSON *args) {
+    (void)args;
+    dbg_reply_t r;
+    debug_server_call("x16/screenshot", NULL, &r);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    cJSON *image = cJSON_DetachItemFromObjectCaseSensitive(r.body, "data");
+    cJSON *mime  = cJSON_DetachItemFromObjectCaseSensitive(r.body, "mimeType");
+    cJSON *result = tool_ok(r.body, NULL);
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "type", "image");
+    cJSON_AddItemToObject(item, "data", image);
+    cJSON_AddItemToObject(item, "mimeType", mime);
+    cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(result, "content"), item);
+    return result;
+}
+
 typedef enum {
     TOOL_READ,         // changes nothing in the machine
     TOOL_CONTROL,      // moves or feeds it, and nothing is lost
@@ -1416,6 +1467,23 @@ static const mcp_tool_t tools[] = {
       "\"description\":\"window lengths in seconds; 0 means since start\"}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_perf_stats },
+    { "get_screen",
+      "The text on screen, one string per row, read from VRAM. With no 'layer' it uses the "
+      "first of layers 1 and 0 that is showing text, and is an error if neither is. VERA "
+      "does not record the character set, so pass 'charset' if the program has changed it: "
+      "a code with no text equivalent, such as a PETSCII graphic, comes back as U+FFFD.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"layer\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1},"
+      "\"charset\":{\"type\":\"string\",\"enum\":[\"petscii-upper\",\"petscii-lower\",\"iso\"],"
+      "\"default\":\"petscii-upper\"}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_screen },
+    { "screenshot",
+      "The picture as a PNG, with atFrameBoundary and warp. VERA draws a scanline at a "
+      "time, so unless atFrameBoundary is true the image can be torn: pause and run_frames "
+      "with frames 1 gets a whole one. Under warp most frames are not drawn, and the image "
+      "can be up to 63 frames old.",
+      NO_ARGS, TOOL_READ, tool_screenshot },
 };
 
 #define NUM_TOOLS ((int)(sizeof tools / sizeof tools[0]))
