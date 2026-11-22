@@ -60,6 +60,7 @@
 #include "ymglue.h"
 #include "audio.h"
 #include "version.h"
+#include "mcp_server.h"
 #include "wav_recorder.h"
 #include "testbench.h"
 #include "cartridge.h"
@@ -821,6 +822,10 @@ usage()
 	       DEBUG_SERVER_DEFAULT_PORT);
 	printf("\teditor can set breakpoints and step through source. The emulator\n");
 	printf("\tkeeps running until a client sets a breakpoint that hits.\n");
+	printf("-mcp\n");
+	printf("\tServe the Model Context Protocol on stdin and stdout, so an agent can\n");
+	printf("\tlaunch the emulator and inspect it. The emulator's own output moves\n");
+	printf("\tto stderr, and it exits when the client closes stdin.\n");
 	printf("-randram\n");
 	printf("\t(deprecated, no effect)\n");
 	printf("-seed <n>\n");
@@ -968,6 +973,19 @@ main(int argc, char **argv)
 	bool hostfs_set = false;
 
 	const char *audio_dev_name = NULL;
+
+	// Before anything can print: under -mcp, stdout carries the protocol.
+#ifdef HAS_DAP
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "-mcp")) {
+			if (mcp_server_init_stdio() != 0) {
+				fprintf(stderr, "Failed to start the MCP server\n");
+				return 1;
+			}
+			break;
+		}
+	}
+#endif
 
 	run_after_load = false;
 
@@ -1481,6 +1499,18 @@ main(int argc, char **argv)
 #else
 			(void)port;
 			fprintf(stderr, "-debugport requires a build with the DAP server "
+			                "(cJSON was not available at configure time)\n");
+			return 1;
+#endif
+		} else if (!strcmp(argv[0], "-mcp")) {
+			argc--;
+			argv++;
+#ifdef HAS_DAP
+			// Started above. As with -debugport, this is the breakpoint machinery
+			// and deliberately not a local debugger UI.
+			debugger_enabled = true;
+#else
+			fprintf(stderr, "-mcp requires a build with the DAP server "
 			                "(cJSON was not available at configure time)\n");
 			return 1;
 #endif

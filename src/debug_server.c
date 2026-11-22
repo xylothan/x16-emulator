@@ -5,6 +5,7 @@
 #include <SDL.h>
 #include "debug_server.h"
 #include "debug_server_call.h"
+#include "mcp_server.h"
 #include "dbg_info.h"
 #include "debugger.h"
 #include "disasm.h"
@@ -2338,6 +2339,18 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
     const int count = asked <= 0 ? 0 : asked >= (double)room ? (int)room : (int)asked;
     const double unreadable = asked > (double)count ? asked - (double)count : 0;
 
+    // Optional: read banked RAM or ROM from a bank other than the current one.
+    int x16_bank = USE_CURRENT_X16_BANK;
+    cJSON *bank_item = cJSON_GetObjectItemCaseSensitive(args, "x16Bank");
+    if (bank_item) {
+        if (is_vram || !cJSON_IsNumber(bank_item) ||
+            bank_item->valuedouble < 0 || bank_item->valuedouble > 255) {
+            send_dap_error_response(seq, "readMemory", "'x16Bank' must be 0-255, and VRAM has no banks");
+            return 0;
+        }
+        x16_bank = (int)bank_item->valuedouble;
+    }
+
     // Build base64 data (DAP readMemory uses base64)
     static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     unsigned char *raw = (unsigned char *)malloc((size_t)count + 1);
@@ -2355,7 +2368,7 @@ static int handle_dap_read_memory(int seq, cJSON *args) {
     for (int i = 0; i < count; i++) {
         uint32_t cur = (addr + (uint32_t)i) & addr_mask;
         raw[i] = is_vram ? video_space_read(cur)
-                         : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), USE_CURRENT_X16_BANK);
+                         : debug_read6502((uint16_t)(cur & 0xFFFF), (uint8_t)(cur >> 16), x16_bank);
     }
 
     // Base64 encode
@@ -5848,14 +5861,24 @@ static void send_dap_event_thread_started(void) {
 }
 
 int debug_server_poll(void) {
-    if (!server_enabled) return 0;
+    if (!server_enabled && !mcp_server_is_enabled()) return 0;
 
     // Keep the 64-bit cycle count current even under -headless, which has no
     // frames to do it.
     emulated_cycles();
 
+    // Either front end can be running without the other.
+    int mode_changed = mcp_server_poll();
+    if (!server_enabled) {
+        step_poll();
+        return mode_changed;
+    }
+
     try_accept();
-    if (client_sock == SOCKET_INVALID) return 0;
+    if (client_sock == SOCKET_INVALID) {
+        step_poll();
+        return mode_changed;
+    }
 
     step_poll();
 
@@ -5868,7 +5891,7 @@ int debug_server_poll(void) {
     if (space <= 0) {
         fprintf(stderr, "[dap] Receive buffer overflow, disconnecting\n");
         disconnect_client();
-        return 0;
+        return mode_changed;
     }
 
     int n = recv(client_sock, recv_buf + recv_buf_len, space, 0);
@@ -5877,16 +5900,15 @@ int debug_server_poll(void) {
         recv_buf[recv_buf_len] = '\0';
     } else if (n == 0) {
         disconnect_client();
-        return 0;
+        return mode_changed;
     } else {
         if (!WOULD_BLOCK) {
             disconnect_client();
-            return 0;
+            return mode_changed;
         }
     }
 
     // Process all complete DAP messages in the buffer
-    int mode_changed = 0;
     for (;;) {
         static char body[RECV_BUF_SIZE];
         int consumed = 0;
@@ -6027,7 +6049,7 @@ bool debug_server_has_client(void) {
 }
 
 bool debug_server_is_enabled(void) {
-    return server_enabled;
+    return server_enabled || mcp_server_is_enabled();
 }
 
 bool debug_server_step_pending(void) {
@@ -6082,6 +6104,7 @@ bool debug_server_wait(uint32_t timeout_ms) {
 }
 
 void debug_server_shutdown(void) {
+    mcp_server_shutdown();
     if (client_sock != SOCKET_INVALID) {
         // Signal the debuggee exited, then that the session terminated.
         cJSON *eb = cJSON_CreateObject();
