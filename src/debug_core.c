@@ -1054,6 +1054,31 @@ debug_wp_find(uint8_t space, uint32_t addr, int x16Bank)
 	return -1;
 }
 
+int
+debug_wp_find_len(uint8_t space, uint32_t addr, int x16Bank, uint32_t len)
+{
+	x16Bank = wp_key_bank(space, addr, x16Bank);
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (watchPoints[i].space == space && watchPoints[i].addr == addr &&
+		    watchPoints[i].x16Bank == x16Bank && watchPoints[i].len == len)
+			return i;
+	}
+	return -1;
+}
+
+int
+debug_wp_find_owned(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner)
+{
+	const uint16_t bit = owner_bit(owner);
+	x16Bank = wp_key_bank(space, addr, x16Bank);
+	for (int i = 0; i < numWatchpoints; i++) {
+		if (watchPoints[i].space == space && watchPoints[i].addr == addr &&
+		    watchPoints[i].x16Bank == x16Bank && (watchPoints[i].owners & bit))
+			return i;
+	}
+	return -1;
+}
+
 static int
 wp_find(uint16_t addr, int x16Bank)
 {
@@ -1190,7 +1215,11 @@ debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
 	                            ? DEBUG_WP_ACCESS_WRITE : spec->access;
 	const bool     exclude_fetch = (access & DEBUG_WP_ACCESS_READ) && spec->exclude_fetch;
 
-	int idx = debug_wp_find(spec->space, spec->addr, spec->x16Bank);
+	// Clients track a watch by start and bank, so only the UI can add a second
+	// length from the same start.
+	int idx = debug_wp_find_len(spec->space, spec->addr, spec->x16Bank, len);
+	if (idx < 0 && owner != DEBUG_OWNER_UI)
+		idx = debug_wp_find(spec->space, spec->addr, spec->x16Bank);
 	if (idx >= 0) {
 		struct watchpoint *w = &watchPoints[idx];
 		if (w->len != len || !w->active || w->access != access || w->ignore != spec->ignore ||
@@ -1231,8 +1260,8 @@ debug_wp_remove_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owne
 {
 	const uint16_t bit = owner_bit(owner);
 
-	int idx = debug_wp_find(space, addr, x16Bank);
-	if (idx < 0 || !(watchPoints[idx].owners & bit))
+	int idx = debug_wp_find_owned(space, addr, x16Bank, owner);
+	if (idx < 0)
 		return false;
 
 	watchPoints[idx].owners &= (uint16_t)~bit;
@@ -1250,8 +1279,7 @@ debug_wp_remove_for(uint16_t addr, int x16Bank, debug_owner_t owner)
 bool
 debug_wp_has_owner_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner)
 {
-	int idx = debug_wp_find(space, addr, x16Bank);
-	return idx >= 0 && (watchPoints[idx].owners & owner_bit(owner)) != 0;
+	return debug_wp_find_owned(space, addr, x16Bank, owner) >= 0;
 }
 
 bool
@@ -1295,6 +1323,55 @@ debug_wp_set_expr_at(int index, void *cond)
 	watchPoints[index].has_value = false;
 	watchPoints[index].expr      = cond;
 	return true;
+}
+
+bool
+debug_wp_editable_at(int index)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	const uint16_t free_to_edit = (uint16_t)(owner_bit(DEBUG_OWNER_CLI) | owner_bit(DEBUG_OWNER_UI));
+	return (watchPoints[index].owners & (uint16_t)~free_to_edit) == 0;
+}
+
+debug_wp_edit_t
+debug_wp_edit_at(int index, uint32_t addr, uint32_t len, int x16Bank, uint8_t access,
+                 bool exclude_fetch)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return DEBUG_WP_EDIT_INVALID;
+	if (!debug_wp_editable_at(index))
+		return DEBUG_WP_EDIT_HELD;
+
+	struct watchpoint *w = &watchPoints[index];
+	const bool     vram = w->space == DEBUG_WP_SPACE_VRAM;
+	const uint32_t top  = vram ? 0x20000u : 0x10000u;
+	if (addr >= top || len == 0 || len > top - addr)
+		return DEBUG_WP_EDIT_INVALID;
+	if (access == 0 || access > DEBUG_WP_ACCESS_BOTH || (vram && access != DEBUG_WP_ACCESS_WRITE))
+		return DEBUG_WP_EDIT_INVALID;
+	if (x16Bank != DEBUG_BANK_ANY) {
+		if (vram || x16Bank < 0 || x16Bank > 0xFF || addr < 0xA000 ||
+		    (addr < 0xC000) != (addr + len - 1 < 0xC000))
+			return DEBUG_WP_EDIT_INVALID;
+	}
+	const int other = debug_wp_find_len(w->space, addr, x16Bank, len);
+	if (other >= 0 && other != index)
+		return DEBUG_WP_EDIT_TAKEN;
+
+	const int  bank  = wp_key_bank(w->space, addr, x16Bank);
+	const bool moved = w->addr != addr || w->len != len || w->x16Bank != bank;
+	w->addr          = addr;
+	w->len           = len;
+	w->x16Bank       = bank;
+	w->access        = access;
+	w->exclude_fetch = (access & DEBUG_WP_ACCESS_READ) && exclude_fetch;
+	if (moved)
+		w->hits = 0;
+	w->fired   = 0;
+	w->at_stop = false;
+	wp_table_changed();
+	return DEBUG_WP_EDIT_OK;
 }
 
 bool
@@ -1626,10 +1703,16 @@ bool
 debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr, int x16Bank,
                      uint32_t addr, uint8_t value)
 {
-	const int idx = debug_wp_find(space, wp_addr, x16Bank);
-	if (idx < 0)
+	return debug_wp_fires_on_at(debug_wp_find(space, wp_addr, x16Bank), access, fetch, addr, value);
+}
+
+bool
+debug_wp_fires_on_at(int index, uint8_t access, bool fetch, uint32_t addr, uint8_t value)
+{
+	if (index < 0 || index >= numWatchpoints)
 		return false;
-	const struct watchpoint *w = &watchPoints[idx];
+	const struct watchpoint *w = &watchPoints[index];
+	const uint8_t space = w->space;
 	if (!(w->access & access) || (fetch && w->exclude_fetch))
 		return false;
 	// Still inside its count, so this access did not fire it.
