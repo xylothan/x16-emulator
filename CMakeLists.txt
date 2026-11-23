@@ -355,6 +355,8 @@ set(X16_SOURCES
     src/code_map.c
     src/debug_core.c
     src/call_stack.c
+    src/c_frames.c
+    src/c_frames_host.c
     src/mem_search.c
     src/cpu/irq_ctx.c
     src/javascript_interface.c
@@ -772,6 +774,10 @@ x16_add_test(dbg_log
 # The unwinder reads memory through a callback, so it links alone too.
 x16_add_test(call_stack
     SOURCES tests/test_call_stack.c src/call_stack.c)
+
+# Reads the machine through callbacks, so it links alone.
+x16_add_test(c_frames
+    SOURCES tests/test_c_frames.c src/c_frames.c)
 
 # The search reads memory through a callback, so it links alone too.
 x16_add_test(mem_search

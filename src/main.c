@@ -24,6 +24,8 @@
 #include "disasm.h"
 #include "files.h"
 #include "memory.h"
+#include "c_frames.h"
+#include "c_frames_host.h"
 #include "video.h"
 #include "via.h"
 #include "serial.h"
@@ -414,6 +416,7 @@ machine_reset()
 	midi_serial_init();
 	code_map_reset();  // discard stale disassembly anchors so post-reset code re-aligns
 	dbg_load_reset();  // and any load that was mid-flight
+	c_frames_clear();  // the calls it recorded are gone
 }
 
 void
@@ -2141,6 +2144,9 @@ main(int argc, char **argv)
 
 	memory_init();
 
+	// Here because video_init() can retire the graphical debugger.
+	c_frames_host_start(debugger_enabled || imgui_debugger_enabled);
+
 	joystick_init();
 
 	rtc_init(set_system_time);
@@ -3331,6 +3337,7 @@ void
 main_state_loaded(void)
 {
 	host_prof_last_cycles = clockticks6502;
+	c_frames_clear();
 	if (pasting_bas) {
 		pasting_bas = false;
 		if (warp_pastes) machine_set_warp(warp_held);
