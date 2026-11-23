@@ -563,7 +563,9 @@ test_access_operands(void)
 		snprintf(what, sizeof what, "%s is not an operand without access", names[i].name);
 		check(!dbg_expr_compile(names[i].name, &env, &e, err, sizeof err), what);
 	}
-	check((int)DBG_EXPR_ACCESS_VAL == (int)DBG_EXPR_REG_COUNT, "access operands follow the registers");
+	const int first_access = DBG_EXPR_ACCESS_VAL;
+	const int reg_count    = DBG_EXPR_REG_COUNT;
+	check(first_access == reg_count, "access operands follow the registers");
 	check(dbg_expr_reg_name((dbg_expr_reg_t)(DBG_EXPR_REG_COUNT - 1))[0] != '\0', "last register named");
 	check(dbg_expr_reg_name(DBG_EXPR_REG_COUNT)[0] == '\0', "the register list ends at COUNT");
 }
