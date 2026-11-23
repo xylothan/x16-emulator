@@ -25,6 +25,7 @@
 #include "debugger.h"
 #include "debug_server.h"
 #include "host_prof.h"
+#include "input_log.h"
 #include "dbg_info.h"
 #include "rendertext.h"
 
@@ -1240,6 +1241,7 @@ static void DEBUGHandleKeyEvent(SDL_Keycode key, int isShift) {
 			break;
 
 		case DBGKEY_RESET:                              // F2 reset the 6502
+			input_log_end("CPU reset");
 			reset6502(regs.is65c816);
 			currentPC = regs.pc;
 			currentPCBank = regs.k;

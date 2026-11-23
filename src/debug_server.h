@@ -29,6 +29,7 @@ static inline void debug_server_note_resumed(void) { }
 static inline void debug_server_shutdown(void) { }
 static inline bool debug_server_wait(uint32_t timeout_ms) { (void)timeout_ms; return false; }
 static inline void debug_server_frame_end(void) { }
+static inline bool debug_server_machine_hash(uint64_t *out) { (void)out; return false; }
 static inline bool debug_server_step_pending(void) { return false; }
 static inline void debug_server_set_no_wait(bool on) { (void)on; }
 static inline void debug_server_note_memory_changed(bool vram, uint32_t addr, uint32_t count) { (void)vram; (void)addr; (void)count; }
@@ -106,6 +107,9 @@ bool debug_server_wait(uint32_t timeout_ms);
 // Called once per completed emulated frame, at the same point as the -input
 // script's frame tick, so frame numbers agree with input scripts.
 void debug_server_frame_end(void);
+
+// A hash of the whole machine, as x16/status reports it.
+bool debug_server_machine_hash(uint64_t *out);
 
 // Something other than the DAP client changed the machine. Each only records it,
 // so each is safe inside the CPU loop; the next poll sends one coalesced event to

@@ -7,12 +7,14 @@
 #include <string.h>
 #include "glue.h"
 #include "audio.h"
+#include "input_log.h"
 
 char javascript_text_data[65536];
 
 void
 j2c_reset()
 {
+	input_log_end("machine reset");
 	machine_reset();
 }
 
