@@ -562,9 +562,11 @@ mem_context_addr(const MemoryEditor &ed, const MemSelection &sel, uint16_t fallb
 // Right-click menu over a memory view. Kept generic so every tab can offer the
 // same actions against its own address space and bank. `base` is added to
 // editor offsets to form real addresses (0 for the CPU view, the window base
-// for the banked view).
+// for the banked view). `break_bank` is the bank a "Break on" item pins its
+// watch to, or DEBUG_BANK_ANY where the view is not of one particular bank.
 void
-mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr, uint16_t base)
+mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr, uint16_t base,
+                 int break_bank)
 {
     // The editor draws into a child window, so open the popup against the
     // hovered child rather than the panel window.
@@ -623,7 +625,7 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
     //
     // All three stay listed, and the one in force is ticked: choosing it again
     // takes the watch off, and choosing another changes it to that.
-    const int     wp_at = debug_wp_find_len(DEBUG_WP_SPACE_CPU, start, DEBUG_BANK_ANY, len);
+    const int     wp_at = debug_wp_find_len(DEBUG_WP_SPACE_CPU, start, break_bank, len);
     const uint8_t held  = wp_at >= 0 ? debug_wp_at(wp_at)->access : 0;
     static const struct { const char *label; uint8_t access; const char *verb; } kinds[] = {
         { "Break on write",  DEBUG_WP_ACCESS_WRITE, "writes to" },
@@ -636,15 +638,21 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
             if (wp_at >= 0)
                 debug_wp_delete_at(wp_at);
             if (!on)
-                DEBUGAddCpuWatch(start, len, DEBUG_BANK_ANY, k.access, true);
+                DEBUGAddCpuWatch(start, len, break_bank, k.access, true);
             break;
         }
         if (ImGui::IsItemHovered()) {
+            char where[40];
+            if (break_bank == DEBUG_BANK_ANY)
+                snprintf(where, sizeof where, "%s", n > 1 ? "this range" : "this address");
+            else
+                snprintf(where, sizeof where, "%s in bank %d", n > 1 ? "this range" : "this address",
+                         break_bank);
             ImGui::SetTooltip("Halt the machine as soon as the program %s %s.\n"
                               "A write fires even if it stores the same value back.\n"
                               "A read ignores bytes fetched as instructions.\n"
                               "(%d of %d in use.)",
-                              k.verb, n > 1 ? "this range" : "this address", debug_wp_count(), MAX_WP);
+                              k.verb, where, debug_wp_count(), MAX_WP);
         }
     }
 
@@ -913,7 +921,7 @@ render_cpu_tab()
     mem_hover_tooltip(ed, cpu_read_at, CPU_SIZE, is_gen2 ? 6 : 4, addr_base);
     {
         const uint16_t at = mem_context_addr(ed, sel, g_cpu_goto);
-        mem_context_menu("cpu_ctx", sel, cpu_bank_for(at), at, 0);
+        mem_context_menu("cpu_ctx", sel, cpu_bank_for(at), at, 0, DEBUG_BANK_ANY);
     }
     if (sel.count() > 1) {
         ImGui::TextDisabled("Selected $%04X-$%04X (%d bytes) - right-click for actions.",
@@ -1105,7 +1113,7 @@ render_bank_tab()
     {
         const uint16_t at =
             (uint16_t)(base + mem_context_addr(ed, bsel, (uint16_t)(g_bank_goto - base)));
-        mem_context_menu("bank_ctx", bsel, (int16_t)g_bank_sel, at, base);
+        mem_context_menu("bank_ctx", bsel, (int16_t)g_bank_sel, at, base, g_bank_sel);
     }
     if (bsel.count() > 1) {
         ImGui::TextDisabled("Selected $%04X-$%04X (%d bytes) - right-click for actions.",
