@@ -4979,8 +4979,9 @@ def test_graphics_palette(m):
 
 
 def test_graphics_renderer_copy(m):
-    # src/video.c: fx_vram_cache_write stores to VRAM only.
+    # addr_data.v:691-697: outside main VRAM, a cache write is a plain byte write.
     before = data(m.call("get_palette", start=9, count=1))["entries"][0]["rgb"]
+    high = read_byte(m, 0x1FA11, "vram")
     set_vera(m, 5, 2 << 1)
     set_vera(m, 9, 0x40)
     set_vera(m, 5, 6 << 1)
@@ -4993,8 +4994,8 @@ def test_graphics_renderer_copy(m):
     set_vera(m, 5, 0)
     raw = data(m.call("read_memory", address=0x1FA10, length=2, space="vram")).get("hex")
     now = data(m.call("get_palette", start=8, count=1))["entries"][0]
-    case("an FX cache write moved VRAM only", raw == "5A0C", str(raw))
-    case("the palette reports the renderer's copy", now.get("rgb") != 0xC5A, str(now))
+    case("an FX cache write to the palette stores one byte", raw == f"00{high:02X}", str(raw))
+    case("the palette receives that byte", now.get("rgb") == (high & 0x0F) << 8, str(now))
     case("and other entries did not move",
          data(m.call("get_palette", start=9, count=1))["entries"][0]["rgb"] == before)
 

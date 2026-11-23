@@ -4574,7 +4574,12 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 			} else {
 				note_port_traffic(true, 1);
 				note_vram_write(address, wrdata_to_use, false);
-				if (special) video_space_write(address, value); else fx_video_space_write(address, nibble, wrdata_to_use);
+				if (special) {
+					video_space_write(address, value);
+					note_vram_watch(address, value);
+				} else {
+					fx_video_space_write(address, nibble, wrdata_to_use);
+				}
 			}
 
 			if (reg == 4 && fx_addr1_mode == 3) fx_affine_prefetch();
