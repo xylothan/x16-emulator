@@ -80,6 +80,6 @@ symbol(void *user, const char *name, uint32_t *value, int *bank, char *err, size
 const dbg_expr_env_t *
 dbg_machine_env(void)
 {
-	static const dbg_expr_env_t env = {NULL, read_cpu, read_vram, read_reg, symbol};
+	static const dbg_expr_env_t env = {NULL, read_cpu, read_vram, read_reg, symbol, false};
 	return &env;
 }

@@ -391,7 +391,7 @@ static void add_machine_state(cJSON *data) {
     const char *why = paused ? DEBUGGetStopReason() : NULL;
     if (why && *why) cJSON_AddStringToObject(data, "stopReason", why);
     else             cJSON_AddNullToObject(data, "stopReason");
-    if (!cJSON_HasObjectItem(data, "stop")) debug_server_add_stop_info(data);
+    debug_server_add_stop_info(data);
 }
 
 static cJSON *text_content(const char *text) {
@@ -2088,9 +2088,13 @@ static const mcp_tool_t tools[] = {
       "several places is refused until 'bank' picks one. "
       "A read watch ignores "
       "bytes fetched as instructions unless excludeFetch is false. For exec, 'bank' pins a RAM or ROM bank, "
-      "'condition' is e.g. \"A == $05\" or \"byte[$1234] != 0\", and hitCondition \"N\" "
-      "stops from the Nth hit on. For a watch, 'condition' filters the byte moved, e.g. "
-      "\"== $05\". With kind \"write\", space \"vram\" watches VERA video memory: it stops "
+      "'condition' is an expression in the language of evaluate, e.g. "
+      "\"A == 1 && byte[$1234] != 0\" or \"rambank == 2 && X > 3\", and hitCondition \"N\" "
+      "stops from the Nth hit on. For a watch, 'condition' is \"== $05\" on one byte, or an "
+      "expression that can also use val, addr, is_read and is_write, where PC is the "
+      "instruction making the access. A condition that fails to evaluate stops the machine "
+      "and the result carries conditionError. "
+      "With kind \"write\", space \"vram\" watches VERA video memory: it stops "
       "when the program's store lands there through a data port, including FX writes. "
       "A condition is refused where another client's breakpoint differs. "
       "'dump' makes an exec breakpoint write memory to a new host file on each hit instead of "

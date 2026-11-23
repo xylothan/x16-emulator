@@ -292,6 +292,24 @@ void     debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand,
 void     debug_bp_clear_condition(int pc, uint8_t bank, int x16Bank);
 void     debug_bp_forget(int pc, uint8_t bank, int x16Bank);
 
+// Expression conditions, on breakpoints and watches. Opaque here and judged
+// through these hooks, since this file links without the expression engine in
+// the memory.c test targets; see dbg_cond.h. `access` is NULL for a breakpoint.
+// The core owns a condition once it is stored, and releases it with the entry.
+// A breakpoint or watch has an expression or a simple test, never both.
+typedef struct {
+	uint8_t  space;     // DEBUG_WP_SPACE_*
+	uint8_t  access;    // DEBUG_WP_ACCESS_READ or _WRITE
+	bool     fetch;
+	uint32_t addr;
+	uint8_t  value;
+} debug_cond_access_t;
+extern bool (*debug_cond_test)(void *cond, const debug_cond_access_t *access);
+extern bool (*debug_cond_same)(const void *a, const void *b);
+extern void (*debug_cond_free)(void *cond);
+void     debug_bp_set_expr(int pc, uint8_t bank, int x16Bank, void *cond);
+void    *debug_bp_expr(int pc, uint8_t bank, int x16Bank);
+
 // DUMP breakpoints (x16Dump over DAP, `dump` over MCP): a firing appends memory
 // to a file. The machine runs on unless another owner holds the same entry, since
 // that owner asked for a stop. An entry has at most one dump, which belongs to
@@ -392,6 +410,9 @@ struct watchpoint {
 	int      op;        // BPCMP_* comparison code
 	uint16_t owners;    // bitmask of debug_owner_t; maintained by the core
 	uint32_t ignore;    // accesses to count before it fires, as for a breakpoint
+	void    *expr;      // an expression condition, or NULL; see debug_cond_test
+	uint32_t fired;     // the check that last fired it
+	bool     at_stop;   // it fired on the access the stop reports
 };
 
 // Watch `len` bytes from `addr` in bank `x16Bank` (see DEBUG_BANK_ANY).
@@ -435,6 +456,7 @@ typedef struct {
 	uint8_t  access;        // DEBUG_WP_ACCESS_*; 0 means write
 	bool     exclude_fetch; // only meaningful with read access
 	uint32_t ignore;        // accesses to count before it fires
+	void    *expr;          // taken only when the answer is DEBUG_ADD_CREATED
 } debug_wp_spec_t;
 debug_add_result_t debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner);
 
@@ -448,6 +470,8 @@ bool debug_wp_has_owner_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owne
 bool debug_wp_set_active_at(int index, bool active);
 bool debug_wp_set_value_at(int index, int op, uint8_t value);
 bool debug_wp_clear_value_at(int index);
+// Replaces any value filter or earlier expression. Takes `cond` on success.
+bool debug_wp_set_expr_at(int index, void *cond);
 bool debug_wp_delete_at(int index);
 // Put back a count, for a client re-sending a watch it already had.
 bool debug_wp_set_hits_at(int index, uint32_t hits);
@@ -507,6 +531,9 @@ bool debug_wp_check_write(uint16_t addr, uint8_t value);
 bool debug_wp_last_hit(uint16_t *addr, uint8_t *value);
 // Would the watchpoint at (wp_addr, x16Bank) fire on this write? Changes nothing.
 bool debug_wp_fires_on(uint16_t wp_addr, int x16Bank, uint16_t addr, uint8_t value);
+// Fixes which watches the stop names, for an expression cannot be asked again
+// once the machine has moved on. Later accesses in the instruction do not count.
+void debug_wp_latch_stop(void);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -210,6 +210,19 @@ find_register(const char *name, size_t n)
 	return -1;
 }
 
+static int
+find_access(const char *name, size_t n)
+{
+	static const char *const names[DBG_EXPR_ACCESS_END - DBG_EXPR_ACCESS_VAL] = {
+		"val", "addr", "is_read", "is_write",
+	};
+	for (int i = 0; i < DBG_EXPR_ACCESS_END - DBG_EXPR_ACCESS_VAL; i++) {
+		if (same_word(name, n, names[i]))
+			return DBG_EXPR_ACCESS_VAL + i;
+	}
+	return -1;
+}
+
 // After byte, word or vbyte, at the [. `pinned` is the op for the b:a form.
 static bool
 parse_memory(parser_t *p, int plain, int pinned)
@@ -264,6 +277,11 @@ parse_name(parser_t *p)
 	const int reg = find_register(start, n);
 	if (reg >= 0)
 		return emit(p, OP_REG, (uint32_t)reg, DBG_EXPR_NO_BANK, 1);
+	if (p->env->access) {
+		const int acc = find_access(start, n);
+		if (acc >= 0)
+			return emit(p, OP_REG, (uint32_t)acc, DBG_EXPR_NO_BANK, 1);
+	}
 
 	if (n > DBG_EXPR_MAX_NAME)
 		return fail(p, "that name is too long");

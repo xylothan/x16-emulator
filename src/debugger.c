@@ -785,6 +785,7 @@ void DEBUGBreakOnWatchpoint(void) {
 	if (currentMode != DMODE_STOP) {
 		currentMode          = DMODE_STOP;
 		watchpointStopPending = true;
+		debug_wp_latch_stop();
 
 		uint8_t  space   = DEBUG_WP_SPACE_CPU;
 		uint32_t address = 0;

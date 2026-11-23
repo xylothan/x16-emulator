@@ -537,6 +537,112 @@ def test_breakpoints():
         d = data(m.call("remove_breakpoint", address=0x0910, kind="write"))
         case("the watch comes off", d.get("removed") is True and d.get("stillArmed") is False, str(d))
 
+        def run_to_stop():
+            since = data(m.call("continue")).get("stopId")
+            return data(m.call("wait_for_stop", sinceStopId=since))
+
+        def bp_entry(pc):
+            for b in data(m.call("list_breakpoints")).get("breakpoints", []):
+                if b.get("pc") == pc:
+                    return b
+            return {}
+
+        def wp_entry(addr):
+            for w in data(m.call("list_breakpoints")).get("watchpoints", []):
+                if w.get("addr") == addr:
+                    return w
+            return {}
+
+        m.call("set_registers", pc=LOOP, a=0, x=2)
+        m.call("set_breakpoint", address=LOOP + 4, condition="A == $05 && X == 2")
+        d = run_to_stop()
+        case("a compound condition holds", d.get("pc") == LOOP + 4, str(d))
+        cond = bp_entry(LOOP + 4).get("condition") or {}
+        case("it is listed as written", cond.get("expression") == "A == $05 && X == 2", str(cond))
+        m.call("remove_breakpoint", address=LOOP + 4)
+
+        m.call("set_registers", pc=LOOP, a=0, x=2)
+        m.call("set_breakpoint", address=LOOP + 4, condition="A == $05 && X == 3")
+        m.call("set_breakpoint", address=LOOP + 7)
+        d = run_to_stop()
+        case("a false compound condition runs past", d.get("pc") == LOOP + 7, str(d))
+        m.call("remove_breakpoint", address=LOOP + 4)
+        m.call("remove_breakpoint", address=LOOP + 7)
+
+        m.call("set_registers", pc=LOOP, a=0, x=2)
+        m.call("set_breakpoint", address=LOOP + 4, condition="(A + X) * 2 == 14 && rambank < 256")
+        d = run_to_stop()
+        case("arithmetic and rambank", d.get("pc") == LOOP + 4, str(d))
+        m.call("remove_breakpoint", address=LOOP + 4)
+
+        m.call("set_registers", pc=LOOP, a=0)
+        m.call("set_breakpoint", address=0x0910, kind="write", length=4,
+               condition="val == 5 && addr == $0910 && is_write && !is_read")
+        d = run_to_stop()
+        case("a watch expression on a range", d.get("stopReason") == "data breakpoint", str(d))
+        w = wp_entry(0x0910)
+        case("it is listed", w.get("expression", "").startswith("val == 5") and w.get("valueFilter") is None, str(w))
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+
+        m.call("set_registers", pc=LOOP)
+        m.call("set_breakpoint", address=0x0910, kind="write", condition="PC == $0904")
+        d = run_to_stop()
+        case("PC is the accessing instruction", d.get("stopReason") == "data breakpoint", str(d))
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+
+        m.call("set_registers", pc=LOOP)
+        m.call("set_breakpoint", address=0x0910, kind="write", condition="PC == $0907")
+        m.call("set_breakpoint", address=LOOP + 7)
+        d = run_to_stop()
+        case("a watch on another PC runs past", d.get("stopReason") == "breakpoint", str(d))
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+        m.call("remove_breakpoint", address=LOOP + 7)
+
+        vera_before = data(m.call("read_memory", address=0x9F20, length=3)).get("hex")
+        m.call("set_registers", pc=LOOP)
+        m.call("set_breakpoint", address=0x0910, kind="write", condition="byte[$9F23] == byte[$9F23]")
+        run_to_stop()
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+        vera_after = data(m.call("read_memory", address=0x9F20, length=3)).get("hex")
+        case("a condition's reads have no effect", vera_before == vera_after, f"{vera_before} {vera_after}")
+
+        m.call("set_registers", pc=LOOP, a=0)
+        m.call("set_breakpoint", address=LOOP + 4, condition="1 / (A - 5) == 0 && X < 256")
+        d = run_to_stop()
+        err = d.get("conditionError") or {}
+        case("a condition that fails stops", d.get("pc") == LOOP + 4, str(d))
+        case("and says why", "division" in err.get("message", "") and "A - 5" in err.get("condition", ""), str(d))
+        m.call("remove_breakpoint", address=LOOP + 4)
+        d = data(m.call("step"))
+        case("the error goes with the stop", "conditionError" not in d, str(d))
+
+        m.call("set_registers", pc=LOOP, a=0)
+        m.call("set_breakpoint", address=0x0910, kind="write", condition="1 / (val - 5) == 0")
+        d = run_to_stop()
+        err = d.get("conditionError") or {}
+        case("a watch condition that fails stops", d.get("stopReason") == "data breakpoint", str(d))
+        case("and says why at the stop", "division" in err.get("message", "") and
+             "val - 5" in err.get("condition", ""), str(d))
+        case("the stop still names the access", (d.get("stop") or {}).get("address") == 0x0910, str(d))
+        st = data(m.call("get_status"))
+        err = st.get("conditionError") or {}
+        case("get_status says so too", "division" in err.get("message", ""), str(st))
+        m.call("remove_breakpoint", address=0x0910, kind="write")
+
+        for label, args in (("an unknown name", {"address": 0x900, "condition": "A == 1 && nope"}),
+                            ("a bare address", {"address": 0x900, "condition": "$1234 == 5 && A == 1"}),
+                            ("two banks", {"address": 0xA000, "condition": "bank == 1 && bank == 2 && A"}),
+                            ("a bank in a watch", {"address": 0x900, "kind": "write", "condition": "bank == 1"}),
+                            ("val on exec", {"address": 0x900, "condition": "val == 1 && A"}),
+                            ("a bad watch name", {"address": 0x900, "kind": "write", "condition": "val == nope"})):
+            case(f"a condition refuses {label}", is_error(m.call("set_breakpoint", **args)))
+
+        d = data(m.call("set_breakpoint", address=0xA000, condition="bank == 3 && A == 1 && X == 2"))
+        case("a bank term still pins it", d.get("address") == "03:A000", str(d))
+        cond = bp_entry(0xA000).get("condition") or {}
+        case("and leaves the expression", cond.get("expression") == "A == 1 && X == 2", str(cond))
+        m.call("remove_breakpoint", address="03:A000")
+
         d = data(m.call("set_breakpoint", address=0xC000, bank=4))
         case("a banked breakpoint", d.get("address") == "04:C000", str(d))
         case("it is removed by the same key", data(m.call("remove_breakpoint", address="04:C000")).get("removed") is True)
@@ -561,10 +667,54 @@ def test_breakpoints():
              str(owners_at(m, 0x0950)))
         res = m.call("set_breakpoint", address=0x0950, condition="A == 1")
         case("a condition on a shared breakpoint is refused", is_error(res), str(res)[:160])
+        res = m.call("set_breakpoint", address=0x0950, condition="A == 1 && X == 2")
+        case("so is an expression", is_error(res), str(res)[:160])
         d = data(m.call("remove_breakpoint", address=0x0950))
         case("removing leaves a -bp armed", d.get("stillArmed") is True, str(d))
         owners = owners_at(m, 0x0950)
         case("and only MCP's claim went", owners and "mcp" not in owners, str(owners))
+
+
+def test_condition_symbols():
+    print("condition symbols")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "prog.lbl")
+
+        def labels(text):
+            with open(path, "w") as f:
+                f.write(text)
+
+        labels("al 000005 .wanted\n")
+        with Mcp(["-fsroot", tmp]) as m:
+            m.init()
+            time.sleep(0.5)
+            plant_loop(m)
+
+            def run_from_loop():
+                m.call("set_registers", pc=LOOP, a=0)
+                since = data(m.call("continue")).get("stopId")
+                return data(m.call("wait_for_stop", sinceStopId=since))
+
+            m.call("load_symbols", path=path)
+            m.call("set_breakpoint", address=LOOP + 4, condition="A == wanted && X < 256")
+            m.call("set_breakpoint", address=LOOP + 7)
+            d = run_from_loop()
+            case("a condition reads a symbol", d.get("pc") == LOOP + 4, str(d))
+
+            labels("al 000006 .wanted\n")
+            m.call("load_symbols", path=path)
+            d = run_from_loop()
+            case("and follows it when it moves", d.get("pc") == LOOP + 7, str(d))
+
+            labels("al 000007 .other\n")
+            m.call("load_symbols", path=path)
+            d = run_from_loop()
+            err = d.get("conditionError") or {}
+            case("a symbol that goes stops it", d.get("pc") == LOOP + 4, str(d))
+            case("and says which", "wanted" in err.get("condition", "") and err.get("message"), str(d))
+            cond = next(b for b in data(m.call("list_breakpoints"))["breakpoints"]
+                        if b.get("pc") == LOOP + 4).get("condition") or {}
+            case("the condition is kept", cond.get("expression") == "A == wanted && X < 256", str(cond))
 
 
 class Dap:
@@ -5188,7 +5338,8 @@ def main():
         return 2
     EXE, ROM = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     for test in (test_protocol, test_tools, test_lifetime, test_with_dap,
-                 test_run_control, test_state_tools, test_breakpoints, test_coexistence,
+                 test_run_control, test_state_tools, test_breakpoints, test_condition_symbols,
+                 test_coexistence,
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,

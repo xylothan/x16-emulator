@@ -1158,6 +1158,7 @@ def test_data_breakpoints():
                           ("an unreadable condition", {"dataId": "4096", "condition": "== banana"}),
                           ("a condition past a byte", {"dataId": "4096", "condition": "== 300"}),
                           ("a value test on two bytes", {"dataId": "2:2", "condition": "== 1"}),
+                          ("an unknown name in an expression", {"dataId": "4096", "condition": "val == banana"}),
                           ("an invalid dataId", {"dataId": "banana"}),
                           ("an address past 16 bits", {"dataId": "65536"})):
             r = data(**bp)
@@ -1180,6 +1181,29 @@ def test_data_breakpoints():
         ev = go(d)
         case("a value condition applies", bool(ev) and get_byte(d, 0x1000) == 5, str(get_byte(d, 0x1000)))
         case("a filtered stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [b.get("id")], str(ev))
+
+        d.req("setDataBreakpoints", {"breakpoints": []})
+        plant(d, pc="$0810")
+        first = "val == 3 && addr == $1000 && is_write"
+        r = data(dataId="4096", condition=first)
+        b = r["body"]["breakpoints"][0]
+        case("expression: verified", b.get("verified") is True, str(b))
+        ev = go(d)
+        case("expression: applies", bool(ev) and get_byte(d, 0x1000) == 3, str(get_byte(d, 0x1000)))
+        case("expression: the stop names it", bool(ev) and ev["body"].get("hitBreakpointIds") == [b.get("id")], str(ev))
+        wps = d.breakpoints().get("watchpoints", [])
+        case("expression: listed", len(wps) == 1 and wps[0].get("expression") == first and
+             wps[0].get("valueFilter") is None and wps[0]["hits"] == 1, str(wps))
+        data(dataId="4096", condition=first)
+        wps = d.breakpoints().get("watchpoints", [])
+        case("expression: an unchanged re-send keeps the count", len(wps) == 1 and wps[0]["hits"] == 1, str(wps))
+        data(dataId="4096", condition="val == 4 && is_write")
+        wps = d.breakpoints().get("watchpoints", [])
+        case("expression: a changed one restarts it", len(wps) == 1 and wps[0]["hits"] == 0, str(wps))
+        ev = go(d)
+        case("expression: the new one applies", bool(ev) and get_byte(d, 0x1000) == 4, str(get_byte(d, 0x1000)))
+        r = data(dataId="2:2", accessType="write", condition="val != 0 && addr >= 2")
+        case("expression: allowed on a range", r["body"]["breakpoints"][0].get("verified") is True, str(r))
 
         d.req("setDataBreakpoints", {"breakpoints": []})
         d.req("evaluate", {"expression": "watch_add 1000"})
