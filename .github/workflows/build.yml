@@ -1,7 +1,9 @@
 name: Build Binaries
 on:
   push:
-    branches: ['**']
+    # Other branches build through their pull request, so that a commit is not
+    # built once for the push and again for the PR.
+    branches: [main]
     # Releases are cut by pushing a tag; see the publish job at the end. ADD
     # tags are R<upstream release>.<ADD build>, e.g. R49.001. The lowercase
     # form is matched too, both for upstream's own r49-style tags and so a
@@ -9,6 +11,13 @@ on:
     tags: ['[rR]*']
   pull_request:
   workflow_dispatch:
+
+# A new commit replaces a PR's running build. main and tags are never cancelled
+# while running, because publish could be part-way through moving the dev
+# release; a newer run still replaces one that is only waiting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The ROM testbench/machine_golden.json was recorded with. The goldens depend
 # on it, so the jobs that check them use this one rather than whatever x16-rom
@@ -761,8 +770,7 @@ jobs:
   publish:
     if: >-
       github.ref_type == 'tag' ||
-      github.ref_name == github.event.repository.default_branch ||
-      github.event_name == 'workflow_dispatch'
+      github.ref_name == github.event.repository.default_branch
     needs:
       # Every build, not just the ones that produce assets: a red compile means
       # the tree is broken, and nothing broken should reach a release. The unit
