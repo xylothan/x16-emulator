@@ -7,6 +7,7 @@
 #include "glue.h"
 #include "memory.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -175,6 +176,53 @@ c_locals_host_bytes(const c_local_t *local, uint8_t *out, bool *truncated)
 	for (int i = 0; i < n; i++)
 		out[i] = host_read((uint16_t)(local->address + i));
 	return n;
+}
+
+void
+c_locals_host_text(const c_locals_frame_t *frame, const c_locals_row_t *row, char *out, size_t size)
+{
+	const c_local_t *l = &row->local;
+	switch (l->status) {
+	case C_LOCAL_OK: {
+		uint8_t   bytes[C_LOCALS_SHOW_MAX];
+		bool      truncated = false;
+		const int n         = c_locals_host_bytes(l, bytes, &truncated);
+		size_t    len       = 0;
+		out[0]              = '\0';
+		for (int i = 0; i < n && len + 4 < size; i++)
+			len += (size_t)snprintf(out + len, size - len, i ? " %02X" : "%02X", bytes[i]);
+		if (truncated && len + 5 < size)
+			len += (size_t)snprintf(out + len, size - len, " ...");
+		if (!l->size && len < size)
+			snprintf(out + len, size - len, " (size unknown)");
+		break;
+	}
+	case C_LOCAL_UNALLOCATED:
+		snprintf(out, size, "unallocated, at $%04X", l->address);
+		break;
+	case C_LOCAL_NOT_STORED:
+		snprintf(out, size, "not stored yet, still in A/X");
+		break;
+	case C_LOCAL_REFUSED_VARIADIC:
+		snprintf(out, size, "refused: fixed parameter of a variadic function");
+		break;
+	case C_LOCAL_REFUSED_REGISTER:
+		snprintf(out, size, "refused: register variable");
+		break;
+	case C_LOCAL_REFUSED_LOCATION:
+		snprintf(out, size, "refused: not in plain RAM");
+		break;
+	case C_LOCAL_UNKNOWN_FRAME:
+	default:
+		snprintf(out, size, "unknown: %s", c_frame_state_reason(frame->view.state));
+		break;
+	}
+}
+
+const char *
+c_locals_row_kind(const c_locals_row_t *row)
+{
+	return row->var.is_register ? "register" : row->local.is_param ? "parameter" : "local";
 }
 
 const char *

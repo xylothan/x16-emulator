@@ -2966,6 +2966,14 @@ def test_c_locals():
                         case(f"recursion depth {depth}: address", v.get("address") == addrs[depth], str(v))
                         case(f"recursion depth {depth}: value",
                              str(v.get("bytes", "")).startswith(f"{depth:02X}40"), str(v))
+                    frames = data(m.call("get_stack"))["stackFrames"]
+                    names = [f.get("symbol") for f in frames]
+                    case("get_stack names C frames", names.count("recurse") == 4 and "main" in names, str(names))
+                    dap_frames = dap.request("stackTrace", {"threadId": 1})["body"]["stackFrames"]
+                    case("DAP names C frames",
+                         sum(f["name"].startswith("recurse") for f in dap_frames) == 4 and
+                         any(f["name"].startswith("main") for f in dap_frames),
+                         str([f["name"] for f in dap_frames]))
                     continue
                 at = frame_of(name)
                 d = locals_at(at) if at >= 0 else {}

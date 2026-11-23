@@ -5,6 +5,8 @@
 
 #include "c_locals.h"
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,6 +37,13 @@ c_locals_row_t *c_locals_host_rows(const c_locals_frame_t *frame);
 
 // Bytes to show for a row with an address, at most C_LOCALS_SHOW_MAX.
 int c_locals_host_bytes(const c_local_t *local, uint8_t *out, bool *truncated);
+
+// What a row shows. Never starts with '$', which DAP value formatting rewrites.
+void c_locals_host_text(const c_locals_frame_t *frame, const c_locals_row_t *row, char *out,
+                        size_t size);
+
+// "parameter", "local" or "register".
+const char *c_locals_row_kind(const c_locals_row_t *row);
 
 // The variable of `frame`'s function that `expr` names, or NULL. Frame 0 when
 // there is no such frame.

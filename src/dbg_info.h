@@ -199,7 +199,7 @@ bool dbg_info_addr_to_label_nearest(dbg_addr_t addr, const char **name, dbg_addr
 // The label to name a call stack frame by: an exact one, or the one the address
 // falls inside when the debug info covers it. A label file has no coverage to
 // ask, so there the label must at least be close. `label_addr` equals `addr` for
-// an exact match.
+// an exact match. Code in a C function below $A000 is named after that function.
 bool dbg_info_frame_label(dbg_addr_t addr, int ram_bank, const char **name, dbg_addr_t *label_addr);
 
 // Address of a label by name (case-insensitive, exact match). Returns false if

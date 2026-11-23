@@ -1836,6 +1836,14 @@ bool dbg_info_frame_label(dbg_addr_t addr, int ram_bank, const char **name, dbg_
 {
 	const char *found = NULL;
 	dbg_addr_t at = addr;
+	if (addr < 0xA000) {
+		dbg_cfunc_t func;
+		if (dbg_info_cfunc_at(dbg_info_cfunc_containing(addr), &func) && func.entry <= addr) {
+			*name = func.name;
+			*label_addr = func.entry;
+			return true;
+		}
+	}
 	if (!dbg_info_addr_to_label(addr, &found) || !found) {
 		const bool covered = dbg_info_addr_to_source_banked(addr, ram_bank, NULL, NULL);
 		if (!covered && dbg_info_is_loaded())
