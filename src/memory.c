@@ -629,25 +629,25 @@ void memory_dump_usage_counts() {
 ///
 ///
 
-inline void
+void
 memory_set_ram_bank(uint8_t bank)
 {
 	ram_bank = bank;
 }
 
-inline uint8_t
+uint8_t
 memory_get_ram_bank()
 {
 	return ram_bank;
 }
 
-inline void
+void
 memory_set_rom_bank(uint8_t bank)
 {
 	rom_bank = bank;
 }
 
-inline uint8_t
+uint8_t
 memory_get_rom_bank()
 {
 	return rom_bank;

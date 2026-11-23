@@ -168,6 +168,33 @@ void push8(uint8_t pushval) {
     decsp();
 }
 
+// One bus access per statement: C leaves the order of a | b unspecified.
+static inline uint16_t read_pair(uint16_t lo, uint16_t hi, uint8_t bank) {
+    const uint8_t l = read6502(lo, bank);
+    const uint8_t h = read6502(hi, bank);
+    return (uint16_t)(l | (h << 8));
+}
+
+static inline uint32_t read_long(uint16_t lo, uint16_t mid, uint16_t hi, uint8_t bank) {
+    const uint8_t l = read6502(lo, bank);
+    const uint8_t m = read6502(mid, bank);
+    const uint8_t h = read6502(hi, bank);
+    return (uint32_t)l | ((uint32_t)m << 8) | ((uint32_t)h << 16);
+}
+
+static inline uint16_t fetch_word(uint16_t address, uint8_t bank) {
+    const uint8_t l = fetch6502(address, bank);
+    const uint8_t h = fetch6502((uint16_t)(address + 1), bank);
+    return (uint16_t)(l | (h << 8));
+}
+
+static inline uint32_t fetch_long(uint16_t address, uint8_t bank) {
+    const uint8_t l = fetch6502(address, bank);
+    const uint8_t m = fetch6502((uint16_t)(address + 1), bank);
+    const uint8_t h = fetch6502((uint16_t)(address + 2), bank);
+    return (uint32_t)l | ((uint32_t)m << 8) | ((uint32_t)h << 16);
+}
+
 uint16_t pull16() {
     incsp();
     uint16_t temp16 = read6502(regs.sp, 0);
@@ -224,7 +251,7 @@ cpu_pin_stack_page(void)
 
 void reset6502(bool c816) {
     cpu_irq_ctx_reset();   // any handler in flight is abandoned by a reset
-    regs.pc = (uint16_t)read6502(0xFFFC, 0) | ((uint16_t)read6502(0xFFFD, 0) << 8);
+    regs.pc = read_pair(0xFFFC, 0xFFFD, 0);
     regs.c = 0;
     regs.x = 0;
     regs.y = 0;
@@ -298,7 +325,7 @@ void interrupt6502(enum InterruptType vector) {
     vp6502();
 
     uint16_t vector_address = (regs.e ? 0xFFF0 : 0xFFE0) + (uint8_t) vector;
-    regs.pc = (uint16_t) read6502(vector_address, 0) | ((uint16_t) read6502(vector_address + 1, 0) << 8);
+    regs.pc = read_pair(vector_address, vector_address + 1, 0);
 
     if (!from_opcode) {
         clockticks6502 += 7; // consumed by CPU to process interrupt
