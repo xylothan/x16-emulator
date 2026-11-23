@@ -339,6 +339,7 @@ set(X16_SOURCES
     src/main.c
     src/export_paths.c
     src/host_write_path.c
+    src/host_regular_file.c
     src/mem_hash.c
     src/profile_run.c
     src/debugger.c
@@ -732,7 +733,7 @@ endfunction()
 
 # dbg_info.c has no dependency on the emulator core, so this links it on its own.
 x16_add_test(dbg_info
-    SOURCES tests/test_dbg_info.c src/dbg_info.c)
+    SOURCES tests/test_dbg_info.c src/dbg_info.c src/host_regular_file.c)
 
 # The save-state chunk writer and reader are header-only.
 x16_add_test(savestate
@@ -742,7 +743,7 @@ x16_add_test(savestate
 # supplies its own memory and register file rather than linking the emulator
 # core. disasm.c still includes SDL headers, and the generated cpu/mnemonics.h.
 x16_add_test(code_map NEEDS_SDL NEEDS_CPU_TABLES
-    SOURCES tests/test_code_map.c src/code_map.c src/disasm.c src/dbg_info.c)
+    SOURCES tests/test_code_map.c src/code_map.c src/disasm.c src/dbg_info.c src/host_regular_file.c)
 
 # debug_core.c reaches for only the register file, the bank registers and a debug
 # memory read, so the test supplies its own and links no emulator core.
@@ -777,11 +778,11 @@ x16_add_test(mem_search
 # dbg_load.c reports loads to dbg_info and source_view, so the test links those
 # two alongside it. dbg_info.c has no dependency on the emulator core either.
 x16_add_test(dbg_load
-    SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c)
+    SOURCES tests/test_dbg_load.c src/dbg_load.c src/dbg_info.c src/source_view.c src/host_regular_file.c)
 
 # Source folders: add, remove, forget cached misses, find a file in a tree.
 x16_add_test(source_view
-    SOURCES tests/test_source_view.c tests/support/harness.c src/source_view.c)
+    SOURCES tests/test_source_view.c tests/support/harness.c src/source_view.c src/host_regular_file.c)
 
 # vera_pcm.c includes only its own header and libc, so the test links it alone.
 x16_add_test(vera_pcm
