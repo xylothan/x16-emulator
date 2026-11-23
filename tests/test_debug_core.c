@@ -1492,6 +1492,60 @@ main(void)
 		reset_all();
 	}
 
+	// ── Enable state per owner ──────────────────────────────────────────────
+	{
+		reset_all();
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_MCP);
+		check(debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_MCP, false), "an owner turns off its claim");
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "the only claim off: the address is off");
+		check(!debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_UI, true), "a non-holder changes nothing");
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "and it stays off");
+
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_is_set(0x2000, 0), "a second owner's claim arms the address");
+		debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE);
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "removing it restores the first owner's off");
+
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "so does clearing that owner");
+
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		debug_bp_clear_owner(DEBUG_OWNER_MCP);
+		check(debug_bp_is_enabled(0x2000, 0, -1), "an off claim leaving does not disturb a live one");
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_MCP);
+		check(debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE, false) &&
+		      debug_bp_is_enabled(0x2000, 0, -1), "a returning owner's claim starts on");
+
+		debug_bp_set_enabled(0x2000, 0, -1, false);
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "the human's switch turns off every holder");
+		debug_bp_remove_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE);
+		check(!debug_bp_is_enabled(0x2000, 0, -1), "and the survivor stays off");
+		debug_bp_set_enabled(0x2000, 0, -1, true);
+		check(debug_bp_is_enabled(0x2000, 0, -1), "and turns every holder on");
+		reset_all();
+	}
+
+	// An off claim neither stops nor logs beside a live one.
+	{
+		reset_all();
+		debug_bp_log_fire = log_fire;
+		memset(g_log_fired, 0, sizeof g_log_fired);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_add_for(bp_at(0x2000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_set_log(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE, &g_log_token[0]), "a logger is set");
+		debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_MCP, false);
+		check(!debug_bp_on_arrival(0x2000, 0), "an off plain claim does not stop beside a live logger");
+		check(g_log_fired[0] == 1, "and the logger fires");
+
+		debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_MCP, true);
+		debug_bp_set_enabled_for(0x2000, 0, -1, DEBUG_OWNER_DAP_SOURCE, false);
+		check(debug_bp_on_arrival(0x2000, 0), "a live plain claim stops");
+		check(g_log_fired[0] == 1, "and an off logger stays quiet");
+		debug_bp_log_fire = NULL;
+		reset_all();
+	}
+
 	// ── Dump breakpoints and other owners ───────────────────────────────────
 	{
 		const uint32_t addr = 0x10, len = 2;

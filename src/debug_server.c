@@ -2179,6 +2179,7 @@ static int handle_dap_set_breakpoints(int seq, cJSON *args) {
             hw_bp.x16Bank = bank_pin;
             hw_bp.owners = 0;
             hw_bp.enabled = false;
+            hw_bp.disabled = 0;
             const debug_add_result_t added = debug_bp_add_for(hw_bp, DEBUG_OWNER_DAP_SOURCE);
 
             if (added == DEBUG_ADD_FULL) {
@@ -7383,7 +7384,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
     const uint16_t owners = at >= 0 ? debug_bp_at(at)->owners : 0;
     const bool had = (owners & mine) != 0;
     const bool others = (owners & (uint16_t)~mine) != 0;
-    const bool was_enabled = at >= 0 && debug_bp_at(at)->enabled;
+    const bool was_off = had && (debug_bp_at(at)->disabled & mine) != 0;
     // This client's own condition may change, so only someone else's can conflict.
     if (others && dap_bp_cond_conflicts(a24, bp.x16Bank, cond, hit)) {
         snprintf(why, sizeof why, "another breakpoint at $%04X has a different condition or hit count",
@@ -7422,8 +7423,8 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
             if (!had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
             if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
                 debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
-            else if (!was_enabled)
-                debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, false);
+            else if (was_off)
+                debug_bp_set_enabled_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP, false);
             send_dap_error_response(seq, cmd, "cannot create that file");
             return 0;
         }
@@ -7440,8 +7441,8 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         if (!had) debug_bp_remove_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP);
         if (debug_bp_find(bp.pc, bp.bank, bp.x16Bank) < 0)
             debug_bp_forget(bp.pc, bp.bank, bp.x16Bank);
-        else if (!was_enabled)
-            debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, false);
+        else if (was_off)
+            debug_bp_set_enabled_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP, false);
         send_dap_error_response(seq, cmd, why);
         return 0;
     }
@@ -7454,7 +7455,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
     if (log_text[0]) cJSON_AddStringToObject(body, "log", log_text);
     if (dump || log_text[0]) {
         const int now = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
-        const uint16_t held = now >= 0 ? debug_bp_at(now)->owners : 0;
+        const uint16_t held = now >= 0 ? (uint16_t)(debug_bp_at(now)->owners & ~debug_bp_at(now)->disabled) : 0;
         const uint16_t quiet = debug_bp_quiet_owners(bp.pc, bp.bank, bp.x16Bank);
         cJSON_AddBoolToObject(body, "alsoStops", (held & (uint16_t)~quiet) != 0);
     }
@@ -7462,11 +7463,12 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
     return 0;
 }
 
-// Enabled is one flag on an entry, so it is refused where anyone else holds it.
+// An exec breakpoint has one state per owner, so this changes only MCP's claim.
+// A watch has one flag per entry, so it is refused where anyone else holds it.
 static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
     static const char cmd[] = "mcp/enableBreakpoint";
     static const char shared[] =
-        "another client holds a breakpoint at this address, and enabling applies to all of them";
+        "another client holds a watch at this address, and enabling applies to all of them";
     cJSON *en = cJSON_GetObjectItemCaseSensitive(args, "enabled");
     if (!en || !cJSON_IsBool(en)) {
         send_dap_error_response(seq, cmd, "'enabled' must be true or false");
@@ -7505,15 +7507,15 @@ static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
         const int idx = refused ? -1 : debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
         const uint16_t owners = idx >= 0 ? debug_bp_at(idx)->owners : 0;
         if (!refused && !(owners & mine)) refused = "MCP has no breakpoint at this address";
-        if (!refused && (owners & (uint16_t)~mine)) refused = shared;
         if (refused) {
             cJSON_Delete(body);
             send_dap_error_response(seq, cmd, refused);
             return 0;
         }
-        debug_bp_set_enabled(bp.pc, bp.bank, bp.x16Bank, on);
+        debug_bp_set_enabled_for(bp.pc, bp.bank, bp.x16Bank, DEBUG_OWNER_MCP, on);
         dap_fmt_bp(where, sizeof where, bp.pc, bp.bank, bp.x16Bank);
         cJSON_AddStringToObject(body, "kind", "exec");
+        cJSON_AddBoolToObject(body, "stillArmed", debug_bp_is_enabled(bp.pc, bp.bank, bp.x16Bank));
     }
     cJSON_AddStringToObject(body, "address", where);
     cJSON_AddBoolToObject(body, "enabled", on);
