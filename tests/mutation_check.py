@@ -322,8 +322,8 @@ MUTATIONS = [
     {
         "name": "indirect addressing ignores the data bank",
         "file": "src/cpu/modes.h",
-        "find": "ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0)",
-        "into": "ea = ((uint16_t)read6502(direct_page_add(eahelp), 0)",
+        "find": "ea = addr_with_db(read_pair(direct_page_add(eahelp),",
+        "into": "ea = (read_pair(direct_page_add(eahelp),",
         "count": 2,  # ind0 and indx
         "requires": "tests/pt/816-emu.bin",
         "caught_by": ["processor_tests_816_emu"],
