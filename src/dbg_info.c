@@ -1151,10 +1151,11 @@ int dbg_info_load(const char *path)
 	FILE  *f;
 	char  *buf = NULL;
 	size_t cap = 0;
+	// Asked first: opening a FIFO would stop the emulator until something wrote to it.
 #ifdef _WIN32
-	if (fopen_s(&f, path, "r") != 0 || !f) {
+	if (!host_regular_file_readable(path) || fopen_s(&f, path, "r") != 0 || !f) {
 #else
-	f = fopen(path, "r");
+	f = host_regular_file_readable(path) ? fopen(path, "r") : NULL;
 	if (!f) {
 #endif
 		fprintf(stderr, "dbg_info: cannot open '%s'\n", path);
@@ -1633,7 +1634,7 @@ int dbg_info_load_labels_text(const char *path, const char *text, int bank)
 
 int dbg_info_load_labels(const char *path, int bank)
 {
-	if (!path)
+	if (!host_regular_file_readable(path))
 		return -1;
 	FILE *f;
 #ifdef _WIN32
@@ -2211,7 +2212,8 @@ int dbg_info_scan_dbg_files(const char *dir, char out[][DBG_INFO_PATH_MAX], int 
 		if (l < 5 || strcasecmp(nm + l - 4, ".dbg") != 0)
 			continue; // want "<something>.dbg"
 		int w = snprintf(out[n], DBG_INFO_PATH_MAX, "%s%s%s", dir, need_sep ? "/" : "", nm);
-		if (w > 0 && w < DBG_INFO_PATH_MAX)
+		// Only what could be loaded: a folder or FIFO can carry this name too.
+		if (w > 0 && w < DBG_INFO_PATH_MAX && host_regular_file_readable(out[n]))
 			n++;
 	}
 	closedir(dp);
@@ -2769,6 +2771,7 @@ static bool build_dbg_path(const char *loaded_path, char *dbg_path, size_t dbg_p
 
 // Helper: scan .dbg file for min/max segment addresses
 static bool scan_dbg_seg_range(const char *dbg_path, dbg_addr_t *out_min, dbg_addr_t *out_max) {
+	if (!host_regular_file_readable(dbg_path)) return false;
 	FILE *f;
 #ifdef _WIN32
 	if (fopen_s(&f, dbg_path, "r") != 0 || !f) return false;

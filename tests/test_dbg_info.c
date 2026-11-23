@@ -3,11 +3,20 @@
 //
 // Build: configure with -DBUILD_DBG_INFO_TEST=ON, then build target
 // dbg_info_test.
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700 // mkfifo, alarm under -std=c11
+#endif
+
 #include "dbg_info.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // ── Tiny check harness ──────────────────────────────────────────────────────
 static int g_fails = 0;
@@ -1899,6 +1908,42 @@ main(void)
 			remove(lp);
 		dbg_info_free();
 	}
+
+#ifndef _WIN32
+	// ── A FIFO named as debug info ──────────────────────────────────────────
+	{
+		static const char dir[] = "fifo_info_dir", real[] = "fifo_info_dir/real.dbg",
+		                  fifo[] = "fifo_info_dir/prog.dbg", prog[] = "fifo_info_dir/prog.prg";
+		remove(fifo);
+		remove(real);
+		rmdir(dir);
+		FILE *rf = NULL;
+		if (mkdir(dir, 0700) != 0 || mkfifo(fifo, 0600) != 0) {
+			printf("skip: no FIFOs on this filesystem\n");
+		} else if ((rf = fopen(real, "w")) != NULL) {
+			fputs(k_dbg, rf);
+			fclose(rf);
+			check(dbg_info_load(real) == 0, "fifo: a regular .dbg loads");
+
+			char       found[4][DBG_INFO_PATH_MAX];
+			dbg_addr_t lo = 0, hi = 0;
+			alarm(10); // a blocked open ends the test
+			check(dbg_info_load(fifo) != 0, "fifo: dbg_info_load refuses it");
+			check(dbg_info_load_labels(fifo, -1) < 0, "fifo: dbg_info_load_labels refuses it");
+			check(!dbg_info_peek_file_range(prog, &lo, &hi), "fifo: the range peek refuses it");
+			check(dbg_info_load_for_file(prog, 0x0801) != 0, "fifo: the load beside a program refuses it");
+			alarm(0);
+			check(dbg_info_loaded_count() == 1 && !strcmp(dbg_info_loaded_at(0), real),
+			      "fifo: what was loaded stays");
+			check(dbg_info_scan_dbg_files(dir, found, 4) == 1 && !strcmp(found[0], real),
+			      "fifo: a folder scan offers only the regular file");
+			dbg_info_free();
+		}
+		remove(fifo);
+		remove(real);
+		rmdir(dir);
+	}
+#endif
 
 	printf("\n%s (%d failure%s)\n", g_fails ? "FAILED" : "PASSED", g_fails,
 	       g_fails == 1 ? "" : "s");

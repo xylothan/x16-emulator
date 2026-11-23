@@ -2328,6 +2328,126 @@ def test_source_fifo():
                      str(shown))
 
 
+def fifo_reader_blocked(path):
+    """Whether something sits in open() on this FIFO. Releases it."""
+    blocked = False
+    for _ in range(5):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            return blocked
+        blocked = True
+        os.write(fd, b"\n")
+        os.close(fd)
+        time.sleep(0.1)
+    return blocked
+
+
+def test_dbg_fifo():
+    print("a FIFO where debug info belongs")
+    if not hasattr(os, "mkfifo"):
+        print("  skipped: no FIFOs on this platform")
+        return
+    body = b"\xEA" * 16
+
+    def guest_load(m):
+        stop_on_wait_booted(m)
+        m.call("type_text", text='LOAD"PROG.PRG",8,1\r')
+        end = time.time() + 8
+        while time.time() < end:
+            r = m.reply(m.start("read_memory", address=0x0A00, length=16), 3)
+            if r is None:
+                return False
+            if bytes.fromhex(data(r.get("result", {})).get("hex", "").replace(" ", "")) == body:
+                return True
+            time.sleep(0.1)
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        prg = os.path.join(tmp, "prog.prg")
+        dbg = os.path.join(tmp, "prog.dbg")
+        with open(prg, "wb") as f:
+            f.write(struct.pack("<H", 0x0A00) + body)
+        with open(dbg, "w") as f:
+            f.write(K_PRG_DBG)
+        with Mcp(["-fsroot", tmp]) as m:
+            m.init()
+            case("guest LOAD with a regular .dbg lands", guest_load(m))
+            r = data(m.call("lookup_symbol", name="_hello"))
+            case("and its debug info loads", (r.get("matches") or [{}])[0].get("address") == 0x0A00, str(r))
+
+        os.remove(dbg)
+        try:
+            os.mkfifo(dbg)
+        except OSError:
+            print("  skipped: this filesystem has no FIFOs")
+            return
+
+        with Mcp(["-fsroot", tmp]) as m:
+            m.init()
+            landed = guest_load(m)
+            case("guest LOAD never opens the FIFO", not fifo_reader_blocked(dbg))
+            case("and the program lands", landed)
+
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
+            m.init()
+            time.sleep(0.5)
+            m.call("pause")
+            r = m.call("load_prg", path=prg)
+            words = " ".join(c.get("text", "") for c in r.get("content", []))
+            case("load_prg refuses it", is_error(r), str(r))
+            case("without calling it outside the folders", "outside" not in words, words)
+
+            dap = Dap(port)
+            dap.request("initialize", {"adapterID": "test", "linesStartAt1": True, "columnsStartAt1": True})
+            for label, command, args, ok in (("x16/loadPrg", "x16/loadPrg", {"path": prg}, True),
+                                             ("x16/loadSymbols", "x16/loadSymbols", {"path": dbg}, False),
+                                             ("attach", "attach", {"dbgFile": dbg}, True),
+                                             ("launch", "launch", {"dbgFile": dbg}, True)):
+                answer = dap.request(command, args, timeout=3)
+                case(f"{label} never opens the FIFO", not fifo_reader_blocked(dbg))
+                case(f"{label} answers", (answer or {}).get("success") is ok, str(answer))
+            dap.close()
+
+
+class WinPipe:
+    """A named pipe server that records whether a client connected."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes as w
+
+        class Overlapped(ctypes.Structure):
+            _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                        ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("hEvent", w.HANDLE)]
+
+        k = self.k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateNamedPipeW.restype = k.CreateEventW.restype = w.HANDLE
+        k.CreateNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.DWORD, w.DWORD, w.DWORD, w.DWORD, w.LPVOID]
+        k.CreateEventW.argtypes = [w.LPVOID, w.BOOL, w.BOOL, w.LPCWSTR]
+        k.ConnectNamedPipe.argtypes = [w.HANDLE, ctypes.POINTER(Overlapped)]
+        k.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+        k.CloseHandle.argtypes = [w.HANDLE]
+        self.name = f"x16emu-test-{os.getpid()}-{time.monotonic_ns()}"
+        PIPE_ACCESS_DUPLEX_OVERLAPPED = 0x40000003
+        self.pipe = k.CreateNamedPipeW("\\\\.\\pipe\\" + self.name, PIPE_ACCESS_DUPLEX_OVERLAPPED,
+                                       0, 1, 4096, 4096, 0, None)
+        self.overlapped = Overlapped()
+        self.overlapped.hEvent = k.CreateEventW(None, True, False, None)
+        k.ConnectNamedPipe(self.pipe, ctypes.byref(self.overlapped))
+
+    def connected(self):
+        return self.k.WaitForSingleObject(self.overlapped.hEvent, 0) == 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.k.CloseHandle(self.overlapped.hEvent)
+        self.k.CloseHandle(self.pipe)
+
+
 def test_client_format():
     print("a DAP client's line and path format")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2869,6 +2989,16 @@ def test_read_paths():
             if os.name == "nt":
                 for name in ("CON", "NUL", "COM1.lbl", "in.lbl:stream", "\\\\server\\share\\a.lbl"):
                     case(f"{name} is refused", is_error(m.call("load_symbols", path=name)))
+                for tool, spelling, extra in (("load_symbols", "\\??\\pipe\\{}", {}),
+                                              ("load_prg", "\\??\\pipe\\{}", {}),
+                                              ("load_symbols", "\\??\\GLOBAL\\pipe\\{}", {}),
+                                              ("load_symbols", "\\??\\GLOBALROOT\\Device\\NamedPipe\\{}", {}),
+                                              ("dump_memory", "\\??\\pipe\\{}\\out.bin",
+                                               {"address": 0x0A00, "length": 1})):
+                    with WinPipe() as pipe:
+                        r = m.call(tool, path=spelling.format(pipe.name), **extra)
+                        case(f"{tool} refuses {spelling}", is_error(r), str(r))
+                        case(f"{tool} does not connect to {spelling}", not pipe.connected())
 
             dap = Dap(port)
             dap.session()
@@ -5003,7 +5133,8 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_call_stack, test_sources, test_source_fifo, test_read_paths,
+                 test_client_format, test_call_stack, test_sources, test_source_fifo, test_dbg_fifo,
+                 test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
                  test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,
