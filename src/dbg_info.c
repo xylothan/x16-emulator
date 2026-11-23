@@ -1,5 +1,6 @@
 #include "dbg_info.h"
 #include "al_labels.h"
+#include "host_regular_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -882,25 +883,17 @@ static int find_file_index(int id)
 	return -1;
 }
 
-/* True if `name` can be opened, either exactly as the .dbg recorded it or as a
- * basename under the .dbg's own directory. That mirrors how source_view.c
- * resolves a source file, without making this file depend on it -- dbg_info.c
- * links on its own in the tests. */
+/* True if `name` is a readable regular file, either exactly as the .dbg recorded
+ * it or as a basename under the .dbg's own directory. That mirrors how
+ * source_view.c resolves a source file, without making this file depend on it.
+ * The name is untrusted, so it must not reach an fopen() that a FIFO would block. */
 static bool source_file_on_disk(const char *name)
 {
 	if (!name || !name[0])
 		return false;
 
-	FILE *f = NULL;
-#ifdef _WIN32
-	if (fopen_s(&f, name, "rb") == 0 && f) {
-#else
-	f = fopen(name, "rb");
-	if (f) {
-#endif
-		fclose(f);
+	if (host_regular_file_readable(name))
 		return true;
-	}
 
 	if (!dbg_dir[0])
 		return false;
@@ -910,17 +903,7 @@ static bool source_file_on_disk(const char *name)
 	if (n <= 0 || n >= (int)sizeof path)
 		return false;
 
-	f = NULL;
-#ifdef _WIN32
-	if (fopen_s(&f, path, "rb") == 0 && f) {
-#else
-	f = fopen(path, "rb");
-	if (f) {
-#endif
-		fclose(f);
-		return true;
-	}
-	return false;
+	return host_regular_file_readable(path);
 }
 
 /* True if `base` ends in an extension cc65 compiles from, i.e. the sort of file
