@@ -183,6 +183,14 @@ load_csym(const char *leaf, int syms, const char *csym, const char *tail)
 	return result;
 }
 
+static int g_change_calls;
+
+static void
+count_change(void)
+{
+	g_change_calls++;
+}
+
 static const char *
 cfunc_name_at(dbg_addr_t addr)
 {
@@ -2261,6 +2269,27 @@ main(void)
 			free(text);
 			free(tail);
 		}
+	}
+
+	// ── Change hook ─────────────────────────────────────────────────────────
+	{
+		dbg_info_free();
+		dbg_info_set_change_hook(count_change);
+		check(load_csym("x16_hook.dbg", 4, CSYM_FC, k_csym_tail) == 0 && g_change_calls == 1, "hook: a load");
+		check(load_csym("x16_hook.dbg", 99, CSYM_FC, k_csym_tail) != 0 && g_change_calls == 1,
+		      "hook: a refused load changes nothing");
+		dbg_info_unload_range(0x0840, 0x084F);
+		check(g_change_calls == 2, "hook: an unload");
+		check(dbg_info_load_labels_text("hook.lbl", "al 000700 .x\n", -1) == 1 && g_change_calls == 3,
+		      "hook: a label file");
+		check(dbg_info_unload_labels("hook.lbl") && g_change_calls == 4, "hook: removing it");
+		dbg_info_free_keep_labels();
+		check(g_change_calls == 5, "hook: free keeping labels");
+		dbg_info_free();
+		check(g_change_calls == 6, "hook: free");
+		dbg_info_set_change_hook(NULL);
+		check(load_csym("x16_hook.dbg", 4, CSYM_FC, k_csym_tail) == 0 && g_change_calls == 6, "hook: removed");
+		dbg_info_free();
 	}
 
 #ifndef _WIN32

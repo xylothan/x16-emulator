@@ -537,6 +537,14 @@ static int file_alias_get(long incoming)
 /* Bumped by everything that changes what is loaded (dbg_info_changes()). */
 static unsigned changes;
 
+static void (*change_hook)(void);
+
+static void note_changed(void)
+{
+	if (change_hook)
+		change_hook();
+}
+
 static void parse_file_record(const char *p)
 {
 	long id = parse_int_key(p, "id");
@@ -1515,7 +1523,12 @@ unsigned dbg_info_changes(void)
 	return changes;
 }
 
-int dbg_info_load(const char *path)
+void dbg_info_set_change_hook(void (*fn)(void))
+{
+	change_hook = fn;
+}
+
+static int load_file(const char *path)
 {
 	changes++;
 	FILE  *f;
@@ -1710,6 +1723,15 @@ int dbg_info_load(const char *path)
 	        file_count, seg_count, span_count, line_count, addr_map_count, sym_count, equ_count);
 
 	return 0;
+}
+
+int dbg_info_load(const char *path)
+{
+	const int result = load_file(path);
+	/* A refused file leaves the functions as they were. */
+	if (result == 0)
+		note_changed();
+	return result;
 }
 
 /* ---- Symbol (label) lookups ------------------------------------------------ */
@@ -2007,6 +2029,7 @@ int dbg_info_load_labels_text(const char *path, const char *text, int bank)
 	qsort(syms, (size_t)sym_count, sizeof(dbg_sym_t), sym_cmp);
 	changes++;
 	label_files[file].revision = changes;
+	note_changed();
 	return label_files[file].labels;
 }
 
@@ -2060,6 +2083,7 @@ bool dbg_info_unload_labels(const char *path)
 			syms[i].label_file--;
 	}
 	changes++;
+	note_changed();
 	return true;
 }
 
@@ -3132,6 +3156,7 @@ void dbg_info_unload_range(dbg_addr_t start, dbg_addr_t end)
 	 * prunes and compacts in place rather than calling build_addr_map(), so it
 	 * has to refresh that derived state itself. */
 	refresh_line_type_state();
+	note_changed();
 }
 
 // Helper: build .dbg path from a loaded file path. Returns false if the result
@@ -3422,6 +3447,7 @@ static void free_records(bool keep_labels)
 	dbg_dir[0] = '\0';
 	loaded = false;
 	has_high_level_lines = false;
+	note_changed();
 }
 
 void dbg_info_free(void)

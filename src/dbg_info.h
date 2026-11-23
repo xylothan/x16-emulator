@@ -161,6 +161,10 @@ void dbg_info_free_keep_labels(void);
 // free -- so something built from the debug info can tell it is stale.
 unsigned dbg_info_changes(void);
 
+// Called after a load, unload or free has changed what is loaded. One listener;
+// NULL removes it. It may read the debug info but not change it.
+void dbg_info_set_change_hook(void (*fn)(void));
+
 // One record of the source file table, 0..dbg_info_all_file_count()-1, hidden
 // ones included. `revision` moves each time a .dbg naming the file is read.
 bool dbg_info_source_at(int index, const char **name, unsigned *revision, bool *hidden);

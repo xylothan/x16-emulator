@@ -19,6 +19,7 @@
 #include "profile_run.h"
 #include "dbg_load.h"
 #include "git_rev.h"
+#include "jmp_stub.h"
 
 #include <SDL.h>
 #include <stdlib.h>
@@ -216,32 +217,18 @@ static bool tree_consistent = true;
 // thousand; past this, new paths fold into [other] under their parent.
 #define TREE_NODES 65536
 
-static uint16_t
-peek16(uint16_t a)
+static uint8_t
+peek8(uint16_t a)
 {
-	return (uint16_t)(debug_read6502(a, 0, USE_CURRENT_X16_BANK) |
-	                  (debug_read6502((uint16_t)(a + 1), 0, USE_CURRENT_X16_BANK) << 8));
+	return debug_read6502(a, 0, USE_CURRENT_X16_BANK);
 }
 
-// A JSR whose target is a JMP stub -- a jump table entry, or the KERNAL's
-// jmpfr, through which every jsrfar from every ROM bank reaches its target --
-// is keyed by where the JMP goes, so the tree names the routine that runs
-// rather than the stub. Read now, which is exact: the JMP executes next, with
-// the same banks and the same pointer. A few hops at most, in case stubs
-// chain.
+// Keyed by where a JMP stub goes, so the tree names the routine that runs
+// rather than the stub.
 static uint16_t
 through_jmp_stubs(uint16_t target)
 {
-	for (int hop = 0; hop < 4; hop++) {
-		const uint8_t op = debug_read6502(target, 0, USE_CURRENT_X16_BANK);
-		if (op == 0x4C)      // JMP abs
-			target = peek16((uint16_t)(target + 1));
-		else if (op == 0x6C) // JMP (abs); the 65C02 has no page-wrap bug
-			target = peek16(peek16((uint16_t)(target + 1)));
-		else
-			break;
-	}
-	return target;
+	return jmp_stub_target(target, peek8);
 }
 
 static void
