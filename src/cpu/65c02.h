@@ -24,14 +24,14 @@
 
 static void ainx() { 		// absolute indexed branch
     uint16_t eahelp, eahelp2;
-    eahelp = (uint16_t)fetch6502(regs.pc, regs.k) | (uint16_t)((uint16_t)fetch6502(regs.pc+1, regs.k) << 8);
+    eahelp = fetch_word(regs.pc, regs.k);
     eahelp = (eahelp + regs.x) & 0xFFFF;
 #if 0
     eahelp2 = (eahelp & 0xFF00) | ((eahelp + 1) & 0x00FF); //replicate 6502 page-boundary wraparound bug
 #else
     eahelp2 = eahelp + 1; // the 65c02 doesn't have the bug
 #endif
-    ea = (uint16_t)read6502(eahelp, regs.k) | ((uint16_t)read6502(eahelp2, regs.k) << 8);
+    ea = read_pair(eahelp, eahelp2, regs.k);
     regs.pc += 2;
 }
 
