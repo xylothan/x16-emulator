@@ -154,6 +154,11 @@ request_is_plain(const char *request, char *err, size_t errn)
 		snprintf(err, errn, "network paths are not allowed");
 		return false;
 	}
+	// The NT namespace: opening one of these reaches a pipe, device or share.
+	if (is_sep(request[0]) && request[1] == '?' && request[2] == '?' && is_sep(request[3])) {
+		snprintf(err, errn, "device paths are not allowed");
+		return false;
+	}
 	const bool has_drive = isalpha((unsigned char)request[0]) && request[1] == ':';
 	if (has_drive && !is_sep(request[2])) {
 		snprintf(err, errn, "a drive letter needs a full path");

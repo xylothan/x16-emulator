@@ -3,6 +3,7 @@
 #include "dbg_load.h"
 #include "dbg_info.h"
 #include "debug_server.h"
+#include "host_regular_file.h"
 #include "source_view.h"
 
 #include <stdio.h>
@@ -467,12 +468,10 @@ dbg_load_replace(const char *path, char *msg, size_t msg_size)
 		return -1;
 	}
 	// A file that is not there must not cost what is loaded now.
-	FILE *f = fopen(path, "r");
-	if (!f) {
+	if (!host_regular_file_readable(path)) {
 		snprintf(msg, msg_size, "Cannot open %s; the debug info loaded now is unchanged.", path);
 		return -1;
 	}
-	fclose(f);
 
 	// What is loaded, to read again if the new file turns out to be bad.
 	const int nold = dbg_info_loaded_count();

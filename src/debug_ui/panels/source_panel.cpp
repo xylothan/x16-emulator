@@ -255,11 +255,16 @@ src_render_open_popup(void)
         ImGui::TextDisabled("  (none)");
 
     // Other .dbg modules on disk (in the .dbg directory and the fsroot).
-    static char paths[64][DBG_INFO_PATH_MAX];
-    int         np = 0;
-    np += dbg_info_scan_dbg_files(dbg_info_get_dbg_dir(), paths + np, 64 - np);
-    if (fsroot_path)
-        np += dbg_info_scan_dbg_files((const char *)fsroot_path, paths + np, 64 - np);
+    // Each file is checked on disk, so not every frame.
+    static char   paths[64][DBG_INFO_PATH_MAX];
+    static int    np         = 0;
+    static double scanned_at = 0;
+    if (ImGui::IsWindowAppearing() || ImGui::GetTime() - scanned_at >= 3.0) {
+        scanned_at = ImGui::GetTime();
+        np         = dbg_info_scan_dbg_files(dbg_info_get_dbg_dir(), paths, 64);
+        if (fsroot_path)
+            np += dbg_info_scan_dbg_files((const char *)fsroot_path, paths + np, 64 - np);
+    }
     if (np > 0) {
         ImGui::Separator();
         ImGui::TextDisabled("Load another .dbg module (for not-yet-loaded code):");

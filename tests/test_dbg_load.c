@@ -1,5 +1,9 @@
 // Checks for runtime debug-info loading (src/dbg_load.c).
 
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700 // mkfifo, alarm under -std=c11
+#endif
+
 #include "dbg_load.h"
 #include "dbg_info.h"
 
@@ -7,6 +11,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static int failures = 0;
 
@@ -735,6 +744,23 @@ main(void)
 		check(dbg_info_addr_to_source(0xA000, &src, &line) && src && strstr(src, "b.s"),
 		      "replace: and the files loaded before are read again");
 		check(strstr(msg, "read again") != NULL, "replace: and it says so");
+
+#ifndef _WIN32
+		{
+			const char *fifo_p = "replace_fifo.dbg";
+			remove(fifo_p);
+			if (mkfifo(fifo_p, 0600) != 0) {
+				printf("skip: no FIFOs on this filesystem\n");
+			} else {
+				alarm(10); // a blocked open ends the test
+				check(dbg_load_replace(fifo_p, msg, sizeof msg) != 0, "replace: a FIFO is refused");
+				alarm(0);
+				check(dbg_info_addr_to_source(0xA000, &src, &line) && src && strstr(src, "b.s"),
+				      "replace: and what was loaded is untouched");
+				remove(fifo_p);
+			}
+		}
+#endif
 
 		dbg_info_free();
 		remove(a_p);

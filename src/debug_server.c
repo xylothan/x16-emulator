@@ -9300,7 +9300,7 @@ static int handle_x16_load_prg(int seq, cJSON *args) {
         char beside[1024], resolved[4200];
         if (dbg_info_dbg_path_for(source, beside, sizeof beside) && host_path_present(beside) &&
             !caller_read_path(beside, resolved, sizeof resolved, err, sizeof err)) {
-            send_dap_error_response(seq, cmd, "the .dbg beside that file is outside the allowed folders");
+            send_dap_error_response(seq, cmd, "the .dbg beside that file is not a readable file in the allowed folders");
             return 0;
         }
     }
