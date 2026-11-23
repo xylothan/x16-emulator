@@ -623,7 +623,7 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
     //
     // All three stay listed, and the one in force is ticked: choosing it again
     // takes the watch off, and choosing another changes it to that.
-    const int     wp_at = debug_wp_find(DEBUG_WP_SPACE_CPU, start, DEBUG_BANK_ANY);
+    const int     wp_at = debug_wp_find_len(DEBUG_WP_SPACE_CPU, start, DEBUG_BANK_ANY, len);
     const uint8_t held  = wp_at >= 0 ? debug_wp_at(wp_at)->access : 0;
     static const struct { const char *label; uint8_t access; const char *verb; } kinds[] = {
         { "Break on write",  DEBUG_WP_ACCESS_WRITE, "writes to" },
@@ -712,7 +712,7 @@ vram_context_menu(const MemoryEditor &ed, MemSelection &sel)
 
     ImGui::Separator();
 
-    const int existing = debug_wp_find(DEBUG_WP_SPACE_VRAM, start, DEBUG_BANK_ANY);
+    const int existing = debug_wp_find_len(DEBUG_WP_SPACE_VRAM, start, DEBUG_BANK_ANY, len);
     if (ImGui::MenuItem(existing >= 0 ? "Stop breaking on write" : "Break on write")) {
         if (existing >= 0)
             debug_wp_delete_at(existing);

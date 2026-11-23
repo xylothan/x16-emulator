@@ -457,6 +457,139 @@ add_symbol_row(void)
 	}
 }
 
+// ---- Editing a row in place -------------------------------------------------
+float
+row_buttons_width()
+{
+	const ImGuiStyle &s = ImGui::GetStyle();
+	return ImGui::CalcTextSize("edit").x + ImGui::CalcTextSize("x").x + s.FramePadding.x * 4.0f +
+	       s.ItemSpacing.x;
+}
+
+struct BpEdit {
+	int  addr = 0;
+	int  bank = 0;
+	bool pin  = false;
+	char why[120] = "";
+};
+BpEdit s_bp_edit;
+
+struct BpMove {
+	int index = -1;
+	int pc = 0;
+	int x16Bank = DEBUG_BANK_ANY;
+};
+
+const char *
+bp_move_refusal(const TrackedBP &t, int pc, int x16Bank)
+{
+	const struct breakpoint *b = debug_bp_at(debug_bp_find(t.pc, t.bank, t.x16Bank));
+	if (!b)
+		return "This breakpoint no longer exists.";
+	const uint16_t free_to_edit = (uint16_t)((1u << DEBUG_OWNER_CLI) | (1u << DEBUG_OWNER_UI));
+	if (b->owners & (uint16_t)~free_to_edit)
+		return "A debug client holds this breakpoint. Change it there.";
+	if (debug_bp_dump_info(t.pc, t.bank, t.x16Bank, nullptr, nullptr, nullptr))
+		return "This breakpoint writes a dump file, so it cannot move.";
+	if (debug_bp_find(pc, t.bank, x16Bank) >= 0)
+		return "There is already a breakpoint there.";
+	return nullptr;
+}
+
+void
+move_breakpoint(const TrackedBP &t, int pc, int x16Bank)
+{
+	int      has = 0, operand = 0, op = 0;
+	uint16_t oaddr = 0;
+	uint32_t value = 0, ignore = 0;
+	DEBUGGetBreakpointCondition(t.pc, t.bank, t.x16Bank, &has, &operand, &oaddr, &op, &value, &ignore);
+	char expr[DBG_EXPR_MAX_TEXT + 1], log[DBG_LOG_MAX_MESSAGE + 1];
+	const dbg_cond_t *held = (const dbg_cond_t *)debug_bp_expr(t.pc, t.bank, t.x16Bank);
+	const char *message = logpoint_message(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI);
+	snprintf(expr, sizeof expr, "%s", held ? dbg_cond_text(held) : "");
+	snprintf(log, sizeof log, "%s", message ? message : "");
+	const bool enabled = t.enabled;
+	const uint8_t bank = t.bank;
+
+	if (log_refused_here(t))
+		s_log_refused.active = false;
+	DEBUGRemoveBreakPoint(t.pc, t.bank, t.x16Bank);
+	DEBUGForgetBreakpoint(t.pc, t.bank, t.x16Bank);
+	DEBUGForgetBreakpoint(pc, bank, x16Bank);
+
+	struct breakpoint bp = {};
+	bp.pc      = pc;
+	bp.bank    = bank;
+	bp.x16Bank = x16Bank;
+	if (!DEBUGAddBreakPoint(bp))
+		return;
+	if (expr[0])
+		debug_bp_set_expr(pc, bank, x16Bank, dbg_cond_new(expr, false));
+	else if (has)
+		DEBUGSetBreakpointCondition(pc, bank, x16Bank, operand, oaddr, op, value);
+	if (ignore)
+		DEBUGSetBreakpointIgnore(pc, bank, x16Bank, ignore);
+	if (log[0]) {
+		char why[120];
+		logpoint_set(pc, bank, x16Bank, DEBUG_OWNER_UI, log, why, sizeof why);
+	}
+	if (!enabled)
+		DEBUGSetBreakpointEnabled(pc, bank, x16Bank, false);
+}
+
+void
+bp_edit_popup(const TrackedBP &t, int index, BpMove *move)
+{
+	if (!ImGui::BeginPopup("bp_edit"))
+		return;
+	ImGui::Text("Breakpoint $%04X", (unsigned)(t.pc & 0xFFFF));
+	ImGui::Separator();
+	ImGui::TextUnformatted("Address $");
+	ImGui::SameLine(0.0f, 0.0f);
+	ImGui::SetNextItemWidth(dbgui_field_width("FFFF"));
+	ImGui::InputScalar("##beaddr", ImGuiDataType_S32, &s_bp_edit.addr, nullptr, nullptr, "%04X",
+	                   ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll);
+	if (s_bp_edit.addr < 0) s_bp_edit.addr = 0;
+	if (s_bp_edit.addr > 0xFFFF) s_bp_edit.addr = 0xFFFF;
+
+	const bool can_pin = debug_normalise_bank(0, s_bp_edit.addr, t.bank) != DEBUG_BANK_ANY;
+	bool show_pin = s_bp_edit.pin && can_pin;
+	ImGui::BeginDisabled(!can_pin);
+	if (ImGui::Checkbox("Only in bank", &show_pin))
+		s_bp_edit.pin = show_pin;
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!show_pin);
+	ImGui::SetNextItemWidth(dbgui_field_width("255") + ImGui::GetFrameHeight() * 2.0f);
+	ImGui::InputInt("##bebank", &s_bp_edit.bank);
+	s_bp_edit.bank = clamp_bank(s_bp_edit.bank, (uint16_t)s_bp_edit.addr);
+	ImGui::EndDisabled();
+	ImGui::EndDisabled();
+	ImGui::SetItemTooltip("RAM bank below $C000, ROM bank from $C000, in DECIMAL.\n"
+	                      "Unticked, it stops in every bank.");
+	if (s_bp_edit.why[0])
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_bp_edit.why);
+	ImGui::TextDisabled("Its condition, log and state carry over. Hits restart if it moves.");
+
+	ImGui::Separator();
+	if (ImGui::Button("Apply")) {
+		const int x16 = show_pin ? s_bp_edit.bank : DEBUG_BANK_ANY;
+		if (s_bp_edit.addr == t.pc && x16 == t.x16Bank) {
+			ImGui::CloseCurrentPopup();
+		} else if (const char *no = bp_move_refusal(t, s_bp_edit.addr, x16)) {
+			snprintf(s_bp_edit.why, sizeof s_bp_edit.why, "%s", no);
+		} else {
+			move->index   = index;
+			move->pc      = s_bp_edit.addr;
+			move->x16Bank = x16;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
+}
+
 void
 draw_breakpoints()
 {
@@ -493,6 +626,7 @@ draw_breakpoints()
 	ImGui::EndDisabled();
 
 	int remove_idx = -1;  // deferred per-row delete
+	BpMove move;          // deferred per-row edit
 
 	if (ImGui::BeginTable("bp_table", 7,
 	        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
@@ -508,7 +642,7 @@ draw_breakpoints()
 		ImGui::TableSetupColumn("Condition", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("Log",     ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed,
-		                        dbgui_col_fit("", dbgui_field_width("x")));
+		                        dbgui_col_fit("", row_buttons_width()));
 		ImGui::TableHeadersRow();
 
 		for (int i = 0; i < (int)s_tracked.size(); i++) {
@@ -552,6 +686,16 @@ draw_breakpoints()
 			log_field(t);
 
 			ImGui::TableNextColumn();
+			if (ImGui::SmallButton("edit")) {
+				s_bp_edit.addr   = t.pc & 0xFFFF;
+				s_bp_edit.pin    = t.x16Bank != DEBUG_BANK_ANY;
+				s_bp_edit.bank   = t.x16Bank != DEBUG_BANK_ANY ? t.x16Bank : 0;
+				s_bp_edit.why[0] = '\0';
+				ImGui::OpenPopup("bp_edit");
+			}
+			ImGui::SetItemTooltip("Change this breakpoint's address or bank.");
+			bp_edit_popup(t, i, &move);
+			ImGui::SameLine();
 			if (ImGui::SmallButton("x")) {
 				remove_idx = i;
 			}
@@ -581,6 +725,9 @@ draw_breakpoints()
 		if (log_refused_here(s_tracked[remove_idx]))
 			s_log_refused.active = false;
 		s_tracked.erase(s_tracked.begin() + remove_idx);
+	} else if (move.index >= 0 && move.index < (int)s_tracked.size()) {
+		move_breakpoint(s_tracked[move.index], move.pc, move.x16Bank);
+		sync_tracked();
 	}
 
 	// --- Run to address ---------------------------------------------------
@@ -680,6 +827,133 @@ wp_expr_popup(int index)
 	ImGui::EndPopup();
 }
 
+struct WatchEdit {
+	int  addr = 0;
+	int  len = 1;
+	int  bank = 0;
+	bool pin = false;
+	bool read = false;
+	bool write = true;
+	bool no_fetch = true;
+	char why[120] = "";
+};
+WatchEdit s_wp_edit;
+
+void
+wp_edit_load(const struct watchpoint *w)
+{
+	s_wp_edit.addr     = (int)w->addr;
+	s_wp_edit.len      = (int)w->len;
+	s_wp_edit.pin      = w->x16Bank != DEBUG_BANK_ANY;
+	s_wp_edit.bank     = w->x16Bank != DEBUG_BANK_ANY ? w->x16Bank : 0;
+	s_wp_edit.read     = (w->access & DEBUG_WP_ACCESS_READ) != 0;
+	s_wp_edit.write    = (w->access & DEBUG_WP_ACCESS_WRITE) != 0;
+	s_wp_edit.no_fetch = !s_wp_edit.read || w->exclude_fetch;
+	s_wp_edit.why[0]   = '\0';
+}
+
+void
+wp_edit_popup(int index)
+{
+	if (!ImGui::BeginPopup("wp_edit"))
+		return;
+	const struct watchpoint *w = debug_wp_at(index);
+	if (!w) {
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
+	const bool vram     = w->space == DEBUG_WP_SPACE_VRAM;
+	const bool editable = debug_wp_editable_at(index);
+	const int  top      = vram ? 0x1FFFF : 0xFFFF;
+
+	ImGui::Text(vram ? "VRAM watch $%05X" : "Watch $%04X", (unsigned)w->addr);
+	ImGui::Separator();
+	if (!editable)
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+		                   "A debug client holds this watch. Change it there.");
+
+	ImGui::BeginDisabled(!editable);
+	ImGui::TextUnformatted("Address $");
+	ImGui::SameLine(0.0f, 0.0f);
+	ImGui::SetNextItemWidth(dbgui_field_width("1FFFF"));
+	ImGui::InputScalar("##weaddr", ImGuiDataType_S32, &s_wp_edit.addr, nullptr, nullptr,
+	                   vram ? "%05X" : "%04X",
+	                   ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll);
+	if (s_wp_edit.addr < 0) s_wp_edit.addr = 0;
+	if (s_wp_edit.addr > top) s_wp_edit.addr = top;
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(dbgui_field_width("131072") + ImGui::GetFrameHeight() * 2.0f);
+	ImGui::InputInt("len##we", &s_wp_edit.len);
+	if (s_wp_edit.len < 1) s_wp_edit.len = 1;
+	if (s_wp_edit.len > top + 1 - s_wp_edit.addr) s_wp_edit.len = top + 1 - s_wp_edit.addr;
+
+	bool show_read = s_wp_edit.read && !vram;
+	ImGui::BeginDisabled(vram);
+	if (ImGui::Checkbox("Read", &show_read)) s_wp_edit.read = show_read;
+	ImGui::SameLine();
+	bool show_write = s_wp_edit.write || vram;
+	if (ImGui::Checkbox("Write", &show_write)) s_wp_edit.write = show_write;
+	ImGui::EndDisabled();
+	ImGui::SetItemTooltip(vram ? "VRAM watches catch writes only." : "Stop when the program writes.");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(vram || !s_wp_edit.read);
+	ImGui::Checkbox("Exclude fetch", &s_wp_edit.no_fetch);
+	ImGui::EndDisabled();
+
+	const bool bank_fits = !vram && s_wp_edit.addr >= 0xA000 &&
+	                       (s_wp_edit.addr < 0xC000) == (s_wp_edit.addr + s_wp_edit.len - 1 < 0xC000);
+	bool show_pin = s_wp_edit.pin && bank_fits;
+	ImGui::BeginDisabled(!bank_fits);
+	if (ImGui::Checkbox("Bank", &show_pin)) s_wp_edit.pin = show_pin;
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip(bank_fits ? "Stop only while this RAM or ROM bank is mapped."
+		                            : "A bank needs a CPU range inside $A000-$BFFF or $C000-$FFFF.");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!show_pin);
+	ImGui::SetNextItemWidth(dbgui_field_width("FF"));
+	ImGui::InputScalar("##webank", ImGuiDataType_S32, &s_wp_edit.bank, nullptr, nullptr, "%02X",
+	                   ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll);
+	ImGui::EndDisabled();
+	if (s_wp_edit.bank < 0) s_wp_edit.bank = 0;
+	if (s_wp_edit.bank > 0xFF) s_wp_edit.bank = 0xFF;
+	ImGui::EndDisabled();
+
+	if (s_wp_edit.why[0])
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_wp_edit.why);
+	ImGui::TextDisabled("Its condition and state carry over. Hits restart if the range moves.");
+
+	ImGui::Separator();
+	const uint8_t access = (uint8_t)(vram ? DEBUG_WP_ACCESS_WRITE
+	                                      : ((s_wp_edit.read ? DEBUG_WP_ACCESS_READ : 0) |
+	                                         (s_wp_edit.write ? DEBUG_WP_ACCESS_WRITE : 0)));
+	ImGui::BeginDisabled(!editable || !access);
+	if (ImGui::Button("Apply")) {
+		switch (debug_wp_edit_at(index, (uint32_t)s_wp_edit.addr, (uint32_t)s_wp_edit.len,
+		                         show_pin ? s_wp_edit.bank : DEBUG_BANK_ANY, access,
+		                         s_wp_edit.no_fetch)) {
+			case DEBUG_WP_EDIT_OK:
+				ImGui::CloseCurrentPopup();
+				break;
+			case DEBUG_WP_EDIT_TAKEN:
+				snprintf(s_wp_edit.why, sizeof s_wp_edit.why, "Another watch already has that range.");
+				break;
+			case DEBUG_WP_EDIT_HELD:
+				snprintf(s_wp_edit.why, sizeof s_wp_edit.why, "A debug client holds this watch.");
+				break;
+			default:
+				snprintf(s_wp_edit.why, sizeof s_wp_edit.why, "That range cannot be watched.");
+				break;
+		}
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
+}
+
 void
 draw_watchpoints()
 {
@@ -692,6 +966,7 @@ draw_watchpoints()
 	static bool wp_no_fetch = true;
 	static bool wp_pin = false;
 	static int  wp_bank = 0;
+	static char wp_add_why[96] = "";
 
 	if (ImGui::RadioButton("CPU", !wp_vram)) wp_vram = false;
 	if (ImGui::IsItemHovered())
@@ -776,13 +1051,14 @@ draw_watchpoints()
 		const int add_addr = wp_addr < 0 ? 0 : (wp_addr > wp_top ? wp_top : wp_addr);
 		const int add_room = wp_top + 1 - add_addr;
 		const int add_len  = wp_len > add_room ? add_room : wp_len;
-		if (wp_vram)
-			DEBUGAddVramWatchPoint((uint32_t)add_addr, (uint32_t)add_len);
-		else
-			DEBUGAddCpuWatch((uint16_t)add_addr, (uint32_t)(add_len > 0xFFFF ? 0xFFFF : add_len),
-			                 show_pin ? wp_bank : DEBUG_BANK_ANY,
-			                 (uint8_t)((wp_read ? DEBUG_WP_ACCESS_READ : 0) | (wp_write ? DEBUG_WP_ACCESS_WRITE : 0)),
-			                 wp_no_fetch);
+		const bool added = wp_vram
+			? DEBUGAddVramWatchPoint((uint32_t)add_addr, (uint32_t)add_len)
+			: DEBUGAddCpuWatch((uint16_t)add_addr, (uint32_t)(add_len > 0xFFFF ? 0xFFFF : add_len),
+			                   show_pin ? wp_bank : DEBUG_BANK_ANY,
+			                   (uint8_t)((wp_read ? DEBUG_WP_ACCESS_READ : 0) | (wp_write ? DEBUG_WP_ACCESS_WRITE : 0)),
+			                   wp_no_fetch);
+		snprintf(wp_add_why, sizeof wp_add_why, "%s",
+		         added ? "" : "That range is already watched with other settings. Use its edit button.");
 	}
 	ImGui::EndDisabled();
 	if (ImGui::IsItemHovered())
@@ -790,6 +1066,8 @@ draw_watchpoints()
 		                  "in the Memory panel and choose a \"Break on\" item.");
 	ImGui::SameLine();
 	ImGui::TextDisabled("(%d / %d used)", debug_wp_count(), MAX_WATCHPOINTS);
+	if (wp_add_why[0])
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", wp_add_why);
 
 	ImGui::Separator();
 
@@ -824,7 +1102,7 @@ draw_watchpoints()
 		                        dbgui_col_width("Hits", "9999999"));
 		ImGui::TableSetupColumn("Only when value", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed,
-		                        dbgui_col_fit("", dbgui_field_width("x")));
+		                        dbgui_col_fit("", row_buttons_width()));
 		ImGui::TableHeadersRow();
 
 		for (int i = 0; i < debug_wp_count(); i++) {
@@ -946,6 +1224,14 @@ draw_watchpoints()
 			}
 
 			ImGui::TableSetColumnIndex(9);
+			if (ImGui::SmallButton("edit")) {
+				wp_edit_load(w);
+				ImGui::OpenPopup("wp_edit");
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Change this watch's address, length, bank or access.");
+			wp_edit_popup(i);
+			ImGui::SameLine();
 			if (ImGui::SmallButton("x")) {
 				remove_index = i;
 			}

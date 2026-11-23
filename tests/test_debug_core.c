@@ -818,8 +818,8 @@ main(void)
 		      "an identical request shares the watch");
 		debug_wp_spec_t other = vram;
 		other.len = 8;
-		check(debug_wp_add_ex(&other, DEBUG_OWNER_UI) == DEBUG_ADD_CONFLICT,
-		      "a different range is refused");
+		check(debug_wp_add_ex(&other, DEBUG_OWNER_DAP_CONSOLE) == DEBUG_ADD_CONFLICT,
+		      "a client's different range is refused");
 		check(debug_wp_at(at)->len == 4, "and the watch is unchanged");
 
 		debug_wp_set_active_at(at, false);
@@ -1046,6 +1046,52 @@ main(void)
 		check(!debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0xA100, 7,
 		                            0xA100, 0x12),
 		      "and not the watch in another bank");
+
+		reset_all();
+		debug_wp_spec_t wide = {DEBUG_WP_SPACE_CPU, 0x9F20, 11, DEBUG_BANK_ANY};
+		debug_wp_spec_t one  = {DEBUG_WP_SPACE_CPU, 0x9F20, 1, DEBUG_BANK_ANY};
+		debug_wp_spec_t four = {DEBUG_WP_SPACE_CPU, 0x9F20, 4, DEBUG_BANK_ANY};
+		check(debug_wp_add_ex(&wide, DEBUG_OWNER_UI) == DEBUG_ADD_CREATED, "the UI adds a range");
+		check(debug_wp_add_ex(&one, DEBUG_OWNER_UI) == DEBUG_ADD_CREATED &&
+		          debug_wp_count() == 2, "and a shorter one from the same start");
+		check(debug_wp_add_ex(&one, DEBUG_OWNER_UI) == DEBUG_ADD_EXISTED, "the same length is one watch");
+		check(debug_wp_check_write(0x9F20, 0) && debug_wp_at(0)->hits == 1 && debug_wp_at(1)->hits == 1,
+		      "a write in both counts for both");
+		check(debug_wp_check_write(0x9F21, 0) && debug_wp_at(0)->hits == 2 && debug_wp_at(1)->hits == 1,
+		      "a write in one counts for it");
+		check(debug_wp_add_ex(&four, DEBUG_OWNER_MCP) == DEBUG_ADD_CONFLICT, "a client cannot add a third length");
+		check(debug_wp_add_ex(&one, DEBUG_OWNER_MCP) == DEBUG_ADD_EXISTED &&
+		          debug_wp_find_owned(DEBUG_WP_SPACE_CPU, 0x9F20, DEBUG_BANK_ANY, DEBUG_OWNER_MCP) == 1,
+		      "a client shares the matching length");
+		check(debug_wp_remove_ex(DEBUG_WP_SPACE_CPU, 0x9F20, DEBUG_BANK_ANY, DEBUG_OWNER_MCP) &&
+		          debug_wp_count() == 2 && debug_wp_at(0)->owners == (1u << DEBUG_OWNER_UI),
+		      "its remove reaches that entry");
+
+		check(debug_wp_edit_at(0, 0x9F20, 11, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_BOTH, true) == DEBUG_WP_EDIT_OK &&
+		          debug_wp_at(0)->access == DEBUG_WP_ACCESS_BOTH && debug_wp_at(0)->hits == 2,
+		      "access changes in place and keeps hits");
+		check(debug_wp_armed_cpu_read == 1, "the read path is armed");
+		check(debug_wp_edit_at(0, 0x9F20, 1, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_BOTH, true) == DEBUG_WP_EDIT_TAKEN,
+		      "an edit cannot duplicate a range");
+		check(debug_wp_edit_at(0, 0xA100, 2, 5, DEBUG_WP_ACCESS_WRITE, false) == DEBUG_WP_EDIT_OK &&
+		          debug_wp_at(0)->x16Bank == 5 && debug_wp_at(0)->hits == 0,
+		      "a move pins a bank and restarts hits");
+		check(debug_wp_edit_at(0, 0xBFFF, 2, 5, DEBUG_WP_ACCESS_WRITE, false) == DEBUG_WP_EDIT_INVALID,
+		      "a pin stays in one window");
+		check(debug_wp_edit_at(0, 0xFFFF, 2, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_WRITE, false) == DEBUG_WP_EDIT_INVALID,
+		      "a range stays in memory");
+		check(debug_wp_edit_at(0, 0x0400, 1, DEBUG_BANK_ANY, 0, false) == DEBUG_WP_EDIT_INVALID,
+		      "an access is required");
+		debug_wp_spec_t client = {DEBUG_WP_SPACE_CPU, 0x0500, 1, DEBUG_BANK_ANY};
+		debug_wp_add_ex(&client, DEBUG_OWNER_DAP_SOURCE);
+		check(debug_wp_edit_at(2, 0x0501, 1, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_WRITE, false) == DEBUG_WP_EDIT_HELD,
+		      "a client's watch is not edited");
+		debug_wp_spec_t vr = {DEBUG_WP_SPACE_VRAM, 0x1F000, 4, DEBUG_BANK_ANY};
+		debug_wp_add_ex(&vr, DEBUG_OWNER_UI);
+		check(debug_wp_edit_at(3, 0x1F000, 4, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_BOTH, false) == DEBUG_WP_EDIT_INVALID,
+		      "VRAM stays write only");
+		check(debug_wp_edit_at(3, 0x1F100, 8, DEBUG_BANK_ANY, DEBUG_WP_ACCESS_WRITE, false) == DEBUG_WP_EDIT_OK,
+		      "VRAM ranges edit");
 	}
 
 	// ── Every condition operand, in every CPU mode ──────────────────────────

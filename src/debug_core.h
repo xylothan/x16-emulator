@@ -462,6 +462,9 @@ debug_add_result_t debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t ow
 
 // The index of the watch with this identity, or -1.
 int  debug_wp_find(uint8_t space, uint32_t addr, int x16Bank);
+// The UI can hold ranges of different lengths from one start, so these name one.
+int  debug_wp_find_len(uint8_t space, uint32_t addr, int x16Bank, uint32_t len);
+int  debug_wp_find_owned(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner);
 bool debug_wp_remove_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner);
 bool debug_wp_has_owner_ex(uint8_t space, uint32_t addr, int x16Bank, debug_owner_t owner);
 
@@ -473,6 +476,18 @@ bool debug_wp_clear_value_at(int index);
 // Replaces any value filter or earlier expression. Takes `cond` on success.
 bool debug_wp_set_expr_at(int index, void *cond);
 bool debug_wp_delete_at(int index);
+typedef enum {
+	DEBUG_WP_EDIT_OK,
+	DEBUG_WP_EDIT_INVALID,   // a range, bank or access the watch cannot have
+	DEBUG_WP_EDIT_HELD,      // a client tracks this watch by its current key
+	DEBUG_WP_EDIT_TAKEN      // another watch already has that range
+} debug_wp_edit_t;
+// Changes what a watch covers, keeping its filter, ignore count and state. The
+// hit count restarts when the range or bank moves.
+debug_wp_edit_t debug_wp_edit_at(int index, uint32_t addr, uint32_t len, int x16Bank,
+                                 uint8_t access, bool exclude_fetch);
+// Whether the UI may change this watch's range or access.
+bool debug_wp_editable_at(int index);
 // Put back a count, for a client re-sending a watch it already had.
 bool debug_wp_set_hits_at(int index, uint32_t hits);
 
@@ -499,6 +514,7 @@ bool debug_wp_last_access(uint8_t *space, uint32_t *addr, uint8_t *value, int *p
 // Whether that access was a read or a write, and an instruction fetch.
 bool debug_wp_last_access_kind(uint8_t *access, bool *fetch);
 // debug_wp_fires_on() with the space and the kind of access spelled out.
+bool debug_wp_fires_on_at(int index, uint8_t access, bool fetch, uint32_t addr, uint8_t value);
 bool debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr, int x16Bank,
                           uint32_t addr, uint8_t value);
 

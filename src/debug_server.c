@@ -6940,7 +6940,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
             dbg_cond_free(expr);
 
         if (!why) {
-            const int at = debug_wp_find(space, addr, x16);
+            const int at = debug_wp_find_owned(space, addr, x16, DEBUG_OWNER_DAP_SOURCE);
             const struct watchpoint *w = debug_wp_at(at);
             for (int k = 0; w && k < num_previous; k++) {
                 const struct watchpoint *p = &previous[k];
@@ -7585,7 +7585,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         cJSON *xf = cJSON_GetObjectItemCaseSensitive(args, "excludeFetch");
         // Setting a watch this client alone holds and has disabled arms it again,
         // as it does for an exec breakpoint.
-        const int held = debug_wp_find(space, addr, x16);
+        const int held = debug_wp_find_len(space, addr, x16, len);
         const bool rearm = held >= 0 && !debug_wp_at(held)->active &&
                            debug_wp_at(held)->owners == (uint16_t)(1u << DEBUG_OWNER_MCP);
         if (rearm) debug_wp_set_active_at(held, true);
@@ -7733,7 +7733,7 @@ static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
         int x16 = DEBUG_BANK_ANY;
         const char *refused = NULL;
         if (!mcp_watch_range(args, &space, &addr, &len, &x16, why, sizeof why)) refused = why;
-        const int idx = refused ? -1 : debug_wp_find(space, addr, x16);
+        const int idx = refused ? -1 : debug_wp_find_owned(space, addr, x16, DEBUG_OWNER_MCP);
         const struct watchpoint *w = idx >= 0 ? debug_wp_at(idx) : NULL;
         if (!refused && (!w || !(w->owners & mine))) refused = "MCP has no watch at this address";
         if (!refused && w->access != access) refused = "the watch at this address is of a different kind";
@@ -7786,16 +7786,17 @@ static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
             send_dap_error_response(seq, cmd, why);
             return 0;
         }
-        if (!debug_wp_has_owner_ex(space, addr, x16, DEBUG_OWNER_MCP)) {
+        const int held = debug_wp_find_owned(space, addr, x16, DEBUG_OWNER_MCP);
+        if (held < 0) {
             send_dap_error_response(seq, cmd, "MCP has no watch at this address");
             return 0;
         }
-        if (debug_wp_at(debug_wp_find(space, addr, x16))->access != access) {
+        if (debug_wp_at(held)->access != access) {
             send_dap_error_response(seq, cmd, "the watch at this address is of a different kind");
             return 0;
         }
+        still_armed = (debug_wp_at(held)->owners & (uint16_t)~(1u << DEBUG_OWNER_MCP)) != 0;
         debug_wp_remove_ex(space, addr, x16, DEBUG_OWNER_MCP);
-        still_armed = debug_wp_find(space, addr, x16) >= 0;
     } else {
         struct breakpoint bp;
         if (!mcp_bp_key(args, "", &bp, why, sizeof why)) {
@@ -10553,10 +10554,9 @@ void debug_server_notify_stopped(const char *reason) {
                                                                          : DEBUG_WP_ACCESS_WRITE;
             for (int i = 0; i < num_data_bps; i++) {
                 if (data_bps[i].space == space &&
-                    debug_wp_has_owner_ex(space, data_bps[i].addr, data_bps[i].x16Bank,
-                                          DEBUG_OWNER_DAP_SOURCE) &&
-                    debug_wp_fires_on_ex(space, access, stop.fetch, data_bps[i].addr,
-                                         data_bps[i].x16Bank, stop.address, stop.value))
+                    debug_wp_fires_on_at(debug_wp_find_owned(space, data_bps[i].addr, data_bps[i].x16Bank,
+                                                             DEBUG_OWNER_DAP_SOURCE),
+                                         access, stop.fetch, stop.address, stop.value))
                     cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(data_bps[i].id));
             }
         }
