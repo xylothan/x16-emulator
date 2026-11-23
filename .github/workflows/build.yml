@@ -554,7 +554,8 @@ jobs:
   linux:
     name: linux (${{ matrix.arch }})
     needs: [version, README]
-    runs-on: ubuntu-latest
+    # arm-runner-action needs qemu-user-static, which Ubuntu 26.04 does not ship.
+    runs-on: ${{ matrix.emulated && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -580,11 +581,7 @@ jobs:
         if: ${{ matrix.emulated }}
         run: |
           sudo apt-get update
-          # qemu-user-static is only a virtual package on Ubuntu 26.04.
-          sudo apt-get install -y build-essential make qemu-user qemu-user-binfmt
-          # arm-runner-action copies these paths into the image.
-          test -x /usr/bin/qemu-arm-static
-          test -x /usr/bin/qemu-aarch64-static
+          sudo apt-get install -y build-essential make qemu-user-static
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
