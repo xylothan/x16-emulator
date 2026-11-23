@@ -413,7 +413,28 @@ struct bp_cond {
 	struct bp_dump *dump;   // x16Dump: write memory and continue (NULL = stop)
 	void    *log[DEBUG_OWNER_COUNT];   // each owner's logpoint, opaque here
 	uint16_t log_owners;               // the owners that have one
+	void    *expr;                     // an expression condition, or NULL
 };
+
+bool (*debug_cond_test)(void *cond, const debug_cond_access_t *access) = NULL;
+bool (*debug_cond_same)(const void *a, const void *b)                  = NULL;
+void (*debug_cond_free)(void *cond)                                    = NULL;
+
+static void
+expr_release(void **expr)
+{
+	if (*expr && debug_cond_free)
+		debug_cond_free(*expr);
+	*expr = NULL;
+}
+
+static bool
+expr_same(const void *a, const void *b)
+{
+	if (!a || !b || !debug_cond_same)
+		return a == b;
+	return debug_cond_same(a, b);
+}
 
 // A DUMP breakpoint does not stop for its own owner: each firing -- after its
 // condition and ignore budget, exactly where a plain breakpoint would stop --
@@ -501,6 +522,7 @@ cond_release(struct bp_cond *c)
 {
 	dump_release(c);
 	log_release(c, 0xFFFFu);
+	expr_release(&c->expr);
 }
 
 static struct bp_cond *bpConds     = NULL;
@@ -594,6 +616,8 @@ cond_operand_value(const struct bp_cond *c)
 static bool
 cond_satisfied(const struct bp_cond *c)
 {
+	if (c->expr)
+		return !debug_cond_test || debug_cond_test(c->expr, NULL);
 	if (!c->has_cond)
 		return true;
 
@@ -689,6 +713,7 @@ debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand, uint16_t 
 	struct bp_cond *c = cond_ensure(pc, bank, x16Bank);
 	if (!c)
 		return;
+	expr_release(&c->expr);
 	c->has_cond     = true;
 	c->operand      = operand;
 	c->operand_addr = operand_addr;
@@ -700,8 +725,30 @@ void
 debug_bp_clear_condition(int pc, uint8_t bank, int x16Bank)
 {
 	struct bp_cond *c = cond_find(pc, bank, x16Bank);
-	if (c)
+	if (c) {
 		c->has_cond = false; // drop the test, keep the count and ignore budget
+		expr_release(&c->expr);
+	}
+}
+
+void
+debug_bp_set_expr(int pc, uint8_t bank, int x16Bank, void *cond)
+{
+	struct bp_cond *c = cond_ensure(pc, bank, x16Bank);
+	if (!c) {
+		expr_release(&cond);
+		return;
+	}
+	expr_release(&c->expr);
+	c->has_cond = false;
+	c->expr     = cond;
+}
+
+void *
+debug_bp_expr(int pc, uint8_t bank, int x16Bank)
+{
+	const struct bp_cond *c = cond_find(pc, bank, x16Bank);
+	return c ? c->expr : NULL;
 }
 
 void
@@ -1030,6 +1077,9 @@ debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 	w->op        = BPCMP_EQ;
 	w->owners    = 0;
 	w->ignore    = 0;
+	w->expr      = NULL;
+	w->fired     = 0;
+	w->at_stop   = false;
 	const int created = numWatchpoints++;
 	wp_table_changed();
 	return created;
@@ -1038,6 +1088,7 @@ debug_wp_add(uint16_t addr, uint16_t len, int x16Bank)
 static void
 wp_erase(int idx)
 {
+	expr_release(&watchPoints[idx].expr);
 	for (int i = idx; i < numWatchpoints - 1; i++) {
 		watchPoints[i] = watchPoints[i + 1];
 	}
@@ -1082,6 +1133,9 @@ debug_wp_add_for(uint16_t addr, uint16_t len, int x16Bank, debug_owner_t owner)
 	w->op        = BPCMP_EQ;
 	w->owners    = bit;
 	w->ignore    = 0;
+	w->expr      = NULL;
+	w->fired     = 0;
+	w->at_stop   = false;
 	numWatchpoints++;
 	wp_table_changed();
 	return DEBUG_ADD_CREATED;
@@ -1101,7 +1155,8 @@ debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
 		struct watchpoint *w = &watchPoints[idx];
 		if (w->len != len || !w->active || w->access != access || w->ignore != spec->ignore ||
 		    w->exclude_fetch != exclude_fetch || w->has_value != spec->has_value ||
-		    (spec->has_value && (w->op != spec->op || w->value != spec->value)))
+		    (spec->has_value && (w->op != spec->op || w->value != spec->value)) ||
+		    !expr_same(w->expr, spec->expr))
 			return DEBUG_ADD_CONFLICT;
 		w->owners |= bit;
 		return DEBUG_ADD_EXISTED;
@@ -1123,6 +1178,9 @@ debug_wp_add_ex(const debug_wp_spec_t *spec, debug_owner_t owner)
 	w->op        = spec->has_value ? spec->op : BPCMP_EQ;
 	w->owners    = bit;
 	w->ignore    = spec->ignore;
+	w->expr      = spec->expr;
+	w->fired     = 0;
+	w->at_stop   = false;
 	numWatchpoints++;
 	wp_table_changed();
 	return DEBUG_ADD_CREATED;
@@ -1171,6 +1229,7 @@ debug_wp_set_value_at(int index, int op, uint8_t value)
 {
 	if (index < 0 || index >= numWatchpoints)
 		return false;
+	expr_release(&watchPoints[index].expr);
 	watchPoints[index].has_value = true;
 	watchPoints[index].op        = op;
 	watchPoints[index].value     = value;
@@ -1182,7 +1241,19 @@ debug_wp_clear_value_at(int index)
 {
 	if (index < 0 || index >= numWatchpoints)
 		return false;
+	expr_release(&watchPoints[index].expr);
 	watchPoints[index].has_value = false;
+	return true;
+}
+
+bool
+debug_wp_set_expr_at(int index, void *cond)
+{
+	if (index < 0 || index >= numWatchpoints)
+		return false;
+	expr_release(&watchPoints[index].expr);
+	watchPoints[index].has_value = false;
+	watchPoints[index].expr      = cond;
 	return true;
 }
 
@@ -1241,6 +1312,8 @@ debug_wp_has_owner(uint16_t addr, int x16Bank, debug_owner_t owner)
 void
 debug_wp_clear_all(void)
 {
+	for (int i = 0; i < numWatchpoints; i++)
+		expr_release(&watchPoints[i].expr);
 	numWatchpoints = 0;
 	wp_table_changed();
 }
@@ -1251,6 +1324,7 @@ debug_wp_set_value(uint16_t addr, int x16Bank, int op, uint8_t value)
 	int idx = wp_find(addr, x16Bank);
 	if (idx < 0)
 		return false;
+	expr_release(&watchPoints[idx].expr);
 	watchPoints[idx].has_value = true;
 	watchPoints[idx].op        = op;
 	watchPoints[idx].value     = value;
@@ -1278,6 +1352,7 @@ debug_wp_clear_value(uint16_t addr, int x16Bank)
 	int idx = wp_find(addr, x16Bank);
 	if (idx < 0)
 		return false;
+	expr_release(&watchPoints[idx].expr);
 	watchPoints[idx].has_value = false;
 	return true;
 }
@@ -1344,6 +1419,35 @@ static uint8_t  wpLastHitValue = 0;
 static int      wpLastHitPort  = -1;
 static uint8_t  wpLastHitAccess = DEBUG_WP_ACCESS_WRITE;
 static bool     wpLastHitFetch  = false;
+static uint32_t wpLastFired     = 0;   // numbers the checks that fired something
+
+// An expression can read anything, so it is judged once, at the access. Asked
+// again after the stop, the registers would already have moved on.
+static bool
+wp_filter_passes(const struct watchpoint *w, uint8_t access, bool fetch, uint32_t addr,
+                 uint8_t value)
+{
+	if (!w->expr)
+		return wp_value_passes(w, value);
+	if (!debug_cond_test)
+		return true;
+	const debug_cond_access_t a = {w->space, access, fetch, addr, value};
+	return debug_cond_test(w->expr, &a);
+}
+
+// What the check behind the stop decided, without judging the expression again.
+static bool
+wp_filter_fired(const struct watchpoint *w, uint8_t value)
+{
+	return w->expr ? w->at_stop : wp_value_passes(w, value);
+}
+
+void
+debug_wp_latch_stop(void)
+{
+	for (int i = 0; i < numWatchpoints; i++)
+		watchPoints[i].at_stop = wpLastFired != 0 && watchPoints[i].fired == wpLastFired;
+}
 
 static void
 wp_record_hit(uint8_t space, uint32_t addr, uint8_t value, int port, uint8_t access, bool fetch)
@@ -1372,15 +1476,19 @@ bool
 debug_wp_check_write(uint16_t addr, uint8_t value)
 {
 	bool fired = false;
+	const uint32_t check = wpLastFired + 1;
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
 		if ((w->access & DEBUG_WP_ACCESS_WRITE) && wp_covers_addr(w, addr) && wp_bank_ok(w) &&
-		    wp_value_passes(w, value) && wp_count_hit(w)) {
+		    wp_filter_passes(w, DEBUG_WP_ACCESS_WRITE, false, addr, value) && wp_count_hit(w)) {
+			w->fired = check;
 			fired = true;
 		}
 	}
-	if (fired)
+	if (fired) {
+		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_CPU, addr, value, -1, DEBUG_WP_ACCESS_WRITE, false);
+	}
 	return fired;
 }
 
@@ -1388,16 +1496,20 @@ bool
 debug_wp_check_read(uint16_t addr, uint8_t value, bool fetch)
 {
 	bool fired = false;
+	const uint32_t check = wpLastFired + 1;
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
 		if ((w->access & DEBUG_WP_ACCESS_READ) && !(fetch && w->exclude_fetch) &&
-		    wp_covers_addr(w, addr) && wp_bank_ok(w) && wp_value_passes(w, value) &&
-		    wp_count_hit(w)) {
+		    wp_covers_addr(w, addr) && wp_bank_ok(w) &&
+		    wp_filter_passes(w, DEBUG_WP_ACCESS_READ, fetch, addr, value) && wp_count_hit(w)) {
+			w->fired = check;
 			fired = true;
 		}
 	}
-	if (fired)
+	if (fired) {
+		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_CPU, addr, value, -1, DEBUG_WP_ACCESS_READ, fetch);
+	}
 	return fired;
 }
 
@@ -1405,14 +1517,19 @@ bool
 debug_wp_check_vram(uint32_t addr, uint8_t value, int port)
 {
 	bool fired = false;
+	const uint32_t check = wpLastFired + 1;
 	for (int i = 0; i < numWatchpoints; i++) {
 		struct watchpoint *w = &watchPoints[i];
-		if (wp_covers_vram(w, addr) && wp_value_passes(w, value) && wp_count_hit(w)) {
+		if (wp_covers_vram(w, addr) &&
+		    wp_filter_passes(w, DEBUG_WP_ACCESS_WRITE, false, addr, value) && wp_count_hit(w)) {
+			w->fired = check;
 			fired = true;
 		}
 	}
-	if (fired)
+	if (fired) {
+		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_VRAM, addr, value, port, DEBUG_WP_ACCESS_WRITE, false);
+	}
 	return fired;
 }
 
@@ -1472,9 +1589,9 @@ debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr
 	if (w->ignore && w->hits <= w->ignore)
 		return false;
 	if (space == DEBUG_WP_SPACE_VRAM)
-		return wp_covers_vram(w, addr) && wp_value_passes(w, value);
+		return wp_covers_vram(w, addr) && wp_filter_fired(w, value);
 	return addr <= 0xFFFF && wp_covers_addr(w, (uint16_t)addr) && wp_bank_ok(w) &&
-	       wp_value_passes(w, value);
+	       wp_filter_fired(w, value);
 }
 
 bool
@@ -1485,5 +1602,5 @@ debug_wp_fires_on(uint16_t wp_addr, int x16Bank, uint16_t addr, uint8_t value)
 		return false;
 	const struct watchpoint *w = &watchPoints[idx];
 	return (w->access & DEBUG_WP_ACCESS_WRITE) && wp_covers_addr(w, addr) && wp_bank_ok(w) &&
-	       wp_value_passes(w, value);
+	       wp_filter_fired(w, value);
 }

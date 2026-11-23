@@ -9,6 +9,7 @@
 #include "dap_refresh.h"
 #include "mcp_server.h"
 #include "dbg_info.h"
+#include "dbg_cond.h"
 #include "dbg_expr.h"
 #include "dbg_log.h"
 #include "dbg_machine.h"
@@ -1879,25 +1880,144 @@ static bool dap_parse_simple_cmp(const char *s, int *out_op, uint32_t *out_val) 
     return true;
 }
 
+// How an exec condition is held: the simple form the core tests itself, or an
+// expression, with any plain bank terms taken out as the breakpoint's pin.
+#define DAP_COND_MAX 192
+typedef struct {
+    bool expression;
+    int  bank;               // as dap_parse_bank_term(), -1 for none
+    char text[DAP_COND_MAX]; // the expression without its bank terms
+} dap_cond_form_t;
+
+// "&&"-joined bank pins and at most one value test. Anything this accepts keeps
+// the meaning it had before conditions were expressions.
+static bool dap_simple_condition(const char *cond, int *bank_out) {
+    char buf[DAP_COND_MAX];
+    *bank_out = -1;
+    strcpy(buf, cond);
+    int values = 0;
+    for (char *t = buf; t; ) {
+        char *amp = strstr(t, "&&");
+        if (amp) *amp = '\0';
+        while (*t == ' ') t++;
+        const int b = dap_parse_bank_term(t);
+        if (b == DAP_BANK_TERM_BAD) return false;
+        if (b != -1) {
+            if (*bank_out != -1 && *bank_out != b) return false;
+            *bank_out = b;
+        } else {
+            int operand, op; uint16_t oaddr; uint32_t val;
+            if (!dap_parse_value_term(t, &operand, &oaddr, &op, &val) || ++values > 1)
+                return false;
+        }
+        t = amp ? amp + 2 : NULL;
+    }
+    return true;
+}
+
+// The first `op` outside any () or [].
+static char *dap_top_level(char *s, const char *op) {
+    int depth = 0;
+    for (; *s; s++) {
+        if (*s == '(' || *s == '[') depth++;
+        else if (*s == ')' || *s == ']') depth--;
+        else if (depth == 0 && s[0] == op[0] && s[1] == op[1]) return s;
+    }
+    return NULL;
+}
+
+static char *dap_trim(char *s) {
+    while (*s == ' ') s++;
+    size_t n = strlen(s);
+    while (n && s[n - 1] == ' ') s[--n] = '\0';
+    return s;
+}
+
+// In the simple form a bare $addr is the byte there. In an expression it is the
+// number, so "$1234 == 5 && A" would quietly never be true.
+static const char *dap_bare_address_term(const char *text, char *term, size_t termn) {
+    char buf[DAP_COND_MAX];
+    strcpy(buf, text);
+    for (char *t = buf; t; ) {
+        char *a = dap_top_level(t, "&&"), *o = dap_top_level(t, "||");
+        char *end = (a && o) ? (a < o ? a : o) : (a ? a : o);
+        if (end) *end = '\0';
+        t = dap_trim(t);
+        int operand, op; uint16_t oaddr; uint32_t val;
+        if ((*t == '$' || (t[0] == '0' && (t[1] == 'x' || t[1] == 'X'))) &&
+            dap_parse_value_term(t, &operand, &oaddr, &op, &val)) {
+            snprintf(term, termn, "%s", t);
+            return term;
+        }
+        t = end ? end + 2 : NULL;
+    }
+    return NULL;
+}
+
+// Works out a condition's form without resolving any symbol, since one that was
+// valid must keep its bank when a reload takes its symbol away.
+static bool dap_condition_split(const char *cond, dap_cond_form_t *out, char *err, size_t errn) {
+    memset(out, 0, sizeof *out);
+    out->bank = -1;
+    if (!cond || !cond[0]) return true;
+    if (strlen(cond) >= sizeof out->text) {
+        if (err) snprintf(err, errn, "condition is too long");
+        return false;
+    }
+    if (dap_simple_condition(cond, &out->bank)) return true;
+    out->bank = -1;
+    out->expression = true;
+
+    char buf[DAP_COND_MAX], term[DAP_COND_MAX];
+    strcpy(buf, cond);
+    if (dap_bare_address_term(buf, term, sizeof term)) {
+        if (err) snprintf(err, errn, "in \"%.60s\", write the address as byte[...]", term);
+        return false;
+    }
+    // With || at the top level, a bank term is not a requirement of the whole.
+    if (dap_top_level(buf, "||")) {
+        strcpy(out->text, dap_trim(buf));
+        return true;
+    }
+    size_t used = 0;
+    for (char *t = buf; t; ) {
+        char *amp = dap_top_level(t, "&&");
+        if (amp) *amp = '\0';
+        t = dap_trim(t);
+        const int b = dap_parse_bank_term(t);
+        if (b == DAP_BANK_TERM_BAD && !strpbrk(t, "+-*/%&|^<>!~()[]:")) {
+            if (err) snprintf(err, errn, "cannot read the bank in \"%.60s\"", t);
+            return false;
+        }
+        if (b >= 0 || b == DAP_BANK_TERM_ANY) {
+            if (out->bank != -1 && out->bank != b) {
+                if (err) snprintf(err, errn, "condition names two different banks");
+                return false;
+            }
+            out->bank = b;
+        } else {
+            used += (size_t)snprintf(out->text + used, sizeof out->text - used, "%s%s",
+                                     used ? " && " : "", t);
+            if (used >= sizeof out->text) {
+                if (err) snprintf(err, errn, "condition is too long");
+                return false;
+            }
+        }
+        t = amp ? amp + 2 : NULL;
+    }
+    return true;
+}
+
 // The bank selector a source breakpoint is armed with: a "bank==N" term in its
 // condition, else `default_bank`. Normalised as the core will store it -- on a
 // gen2 with a non-zero program bank nothing above $A000 is banked either -- so
 // the condition records are keyed the same way as the breakpoint.
 static int dap_cond_bank_pin(dbg_addr_t addr, const char *cond_str, int default_bank) {
     int bank_pin = default_bank;
-    if (cond_str && cond_str[0]) {
-        char buf[192];
-        strncpy(buf, cond_str, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = '\0';
-        char *scan = buf;
-        while (scan && *scan) {
-            char *amp = strstr(scan, "&&");
-            if (amp) *amp = '\0';
-            int b = dap_parse_bank_term(scan);
-            if (b >= 0) bank_pin = b;
-            else if (b == DAP_BANK_TERM_ANY) bank_pin = DEBUG_BANK_ANY;
-            scan = amp ? amp + 2 : NULL;
-        }
+    dap_cond_form_t form;
+    if (dap_condition_split(cond_str, &form, NULL, 0)) {
+        if (form.bank >= 0) bank_pin = form.bank;
+        else if (form.bank == DAP_BANK_TERM_ANY) bank_pin = DEBUG_BANK_ANY;
     }
     return debug_normalise_bank(bank_pin, (int)(addr & 0xFFFF), (uint8_t)(addr >> 16));
 }
@@ -1910,6 +2030,7 @@ typedef struct {
     int      op;
     uint32_t value;
     uint32_t ignore;
+    char     expr[DAP_COND_MAX];   // an expression instead of the test above
 } dap_cond_t;
 
 // The value of a hitCondition: "N" or ">= N". Plain decimal only.
@@ -1922,8 +2043,11 @@ static bool dap_parse_hit(const char *h, uint32_t *n) {
 
 static void dap_read_condition(const char *cond, const char *hit, dap_cond_t *out) {
     memset(out, 0, sizeof *out);
-    if (cond && cond[0]) {
-        char buf[192];
+    dap_cond_form_t form;
+    if (cond && cond[0] && dap_condition_split(cond, &form, NULL, 0) && form.expression) {
+        strcpy(out->expr, form.text);
+    } else if (cond && cond[0]) {
+        char buf[DAP_COND_MAX];
         strncpy(buf, cond, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
         for (char *p = buf; p && *p && !out->has; ) {
@@ -1941,12 +2065,12 @@ static void dap_read_condition(const char *cond, const char *hit, dap_cond_t *ou
 
 // Parse a DAP source-breakpoint "condition"/"hitCondition" and apply it to the
 // conditional-breakpoint core for the breakpoint at (addr, bank 0). The condition
-// may combine a bank pin and a value test with "&&", e.g.
-//   "bank == 0 && byte[$1234] != 0"  or  "A == $05"  or  "rombank==3".
-// The value term (A/X/Y/SP/P, byte[$a], word[$a], $a  OP  value; only one is
-// applied) drives the conditional-BP core; the bank term is returned so the
-// caller can pin the breakpoint's x16Bank. hitCondition's number N means "stop
-// on the Nth hit". Returns the bank pin (0..255), or -1 for any bank.
+// is a bank pin, a value test, both joined with "&&", or any expression, e.g.
+//   "bank == 0 && byte[$1234] != 0"  or  "A == $05"  or  "rombank==3"
+//   or  "bank == 2 && A + X > $80 && rambank != 4".
+// The bank term is returned so the caller can pin the breakpoint's x16Bank.
+// hitCondition's number N means "stop on the Nth hit". Returns the bank pin
+// (0..255), or -1 for any bank.
 //
 // `default_bank` is used when the condition names no bank: the RAM bank the
 // debug info saw this code loaded into, or -1.
@@ -1979,7 +2103,9 @@ static int dap_apply_bp_condition(dbg_addr_t addr, const char *cond_str, const c
     // itself is left alone: an editor re-sends a whole file's breakpoints on
     // every keystroke, and a count that restarted each time could not drive a
     // hit condition at all.
-    if (want.has)
+    if (want.expr[0])
+        debug_bp_set_expr(pc, bank, bank_pin, dbg_cond_new(want.expr, false));
+    else if (want.has)
         debug_bp_set_condition(pc, bank, bank_pin, want.operand, want.oaddr, want.op, want.value);
     if (want.ignore)
         debug_bp_set_ignore(pc, bank, bank_pin, want.ignore);   // stop on the Nth hit
@@ -2000,6 +2126,9 @@ static bool dap_bp_cond_conflicts(dbg_addr_t addr, int pin, const char *cond, co
     uint16_t oaddr = 0;
     uint32_t value = 0, ignore = 0;
     debug_bp_get_condition(pc, bank, pin, &has, &operand, &oaddr, &op, &value, &ignore);
+    const dbg_cond_t *held = (const dbg_cond_t *)debug_bp_expr(pc, bank, pin);
+    if (held || want.expr[0])
+        return ignore != want.ignore || !held || strcmp(dbg_cond_text(held), want.expr) != 0;
     if (ignore != want.ignore || (has != 0) != want.has) return true;
     return want.has && (operand != want.operand || oaddr != want.oaddr
                         || op != want.op || value != want.value);
@@ -3324,6 +3453,14 @@ static const char *dap_wp_access_name(uint8_t access) {
 
 void debug_server_add_stop_info(cJSON *body) {
     if (!DEBUGIsPaused()) return;
+    const char *cond_text, *cond_message;
+    if (!cJSON_HasObjectItem(body, "conditionError") &&
+        dbg_cond_last_error(&cond_text, &cond_message)) {
+        cJSON *ce = cJSON_AddObjectToObject(body, "conditionError");
+        cJSON_AddStringToObject(ce, "condition", cond_text);
+        cJSON_AddStringToObject(ce, "message", cond_message);
+    }
+    if (cJSON_HasObjectItem(body, "stop")) return;
     debug_stop_exception_t ex;
     if (DEBUGGetStopException(&ex)) {
         cJSON *e = cJSON_AddObjectToObject(body, "stop");
@@ -4994,7 +5131,12 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
         uint32_t value = 0, ignore = 0;
         debug_bp_get_condition(bp->pc, bp->bank, bp->x16Bank, &has_cond, &operand,
                                &operand_addr, &op, &value, &ignore);
-        if (has_cond) {
+        const dbg_cond_t *expr = (const dbg_cond_t *)debug_bp_expr(bp->pc, bp->bank, bp->x16Bank);
+        if (expr) {
+            cJSON *cond = cJSON_CreateObject();
+            cJSON_AddStringToObject(cond, "expression", dbg_cond_text(expr));
+            cJSON_AddItemToObject(o, "condition", cond);
+        } else if (has_cond) {
             cJSON *cond = cJSON_CreateObject();
             cJSON_AddStringToObject(cond, "operand", bp_operand_name(operand));
             cJSON_AddNumberToObject(cond, "operandAddr", operand_addr);
@@ -5074,6 +5216,8 @@ static int handle_x16_list_breakpoints(int seq, cJSON *args) {
         } else {
             cJSON_AddNullToObject(o, "valueFilter");
         }
+        if (wp->expr) cJSON_AddStringToObject(o, "expression", dbg_cond_text((const dbg_cond_t *)wp->expr));
+        else          cJSON_AddNullToObject(o, "expression");
         cJSON_AddItemToArray(wps, o);
     }
     cJSON_AddItemToObject(body, "watchpoints", wps);
@@ -6204,49 +6348,53 @@ static void dap_fmt_bp(char *out, size_t n, int pc, uint8_t bank, int x16Bank) {
         snprintf(out, n, "$%04X", (unsigned)pc);
 }
 
-// Check a breakpoint condition is one this server can apply: "&&"-joined
-// terms, each a bank pin ("bank == 70", "bank == any") or a single value test
-// ("A == $05", "byte[$1234] != 0"). *bank_out gets the bank term: -1 for none,
-// else as dap_parse_bank_term() returns it. On failure, says why in err.
+// Check a breakpoint condition is one this server can apply. *bank_out gets the
+// bank term: -1 for none, else as dap_parse_bank_term() returns it. On failure,
+// says why in err.
 static bool dap_check_condition(const char *cond, int *bank_out, char *err, size_t errn) {
+    dap_cond_form_t form;
     *bank_out = -1;
     if (!cond || !cond[0]) return true;
-    char buf[192];
-    if (strlen(cond) >= sizeof buf) {
-        snprintf(err, errn, "condition is too long");
+    if (!dap_condition_split(cond, &form, err, errn)) return false;
+    *bank_out = form.bank;
+    if (!form.expression) return true;
+    char why[128];
+    if (!dbg_cond_check(form.text, false, why, sizeof why)) {
+        snprintf(err, errn, "cannot parse condition \"%.80s\": %s", cond, why);
         return false;
     }
-    strcpy(buf, cond);
-    int values = 0;
-    for (char *t = buf; t; ) {
-        char *amp = strstr(t, "&&");
-        if (amp) *amp = '\0';
-        while (*t == ' ') t++;
-        const int b = dap_parse_bank_term(t);
-        if (b == DAP_BANK_TERM_BAD) {
-            snprintf(err, errn, "cannot read the bank in \"%s\"", t);
+    return true;
+}
+
+// A watch condition: a byte comparison on one byte, as it always was, or an
+// expression over the access. On success *expr is the caller's to hand on.
+static bool dap_read_watch_condition(const char *cond, uint32_t len, bool *has_value, int *op,
+                                     uint32_t *val, dbg_cond_t **expr, char *why, size_t whyn) {
+    *has_value = false;
+    *expr = NULL;
+    if (!cond || !cond[0]) return true;
+    if (dap_parse_simple_cmp(cond, op, val)) {
+        if (len > 1) {
+            snprintf(why, whyn, "a value condition applies to a single byte; "
+                                "use an expression such as val == $05");
             return false;
         }
-        if (b != -1) {
-            if (*bank_out != -1 && *bank_out != b) {
-                snprintf(err, errn, "condition names two different banks");
-                return false;
-            }
-            *bank_out = b;
-        } else {
-            int operand, op; uint16_t oaddr; uint32_t val;
-            if (!dap_parse_value_term(t, &operand, &oaddr, &op, &val)) {
-                snprintf(err, errn,
-                         "cannot parse condition term \"%s\" (expected e.g. A == $05, "
-                         "byte[$1234] != 0, bank == 70)", t);
-                return false;
-            }
-            if (++values > 1) {
-                snprintf(err, errn, "only one value test per condition is supported");
-                return false;
-            }
+        if (*val > 0xFF) {
+            snprintf(why, whyn, "cannot parse condition (a byte comparison takes $00 to $FF)");
+            return false;
         }
-        t = amp ? amp + 2 : NULL;
+        *has_value = true;
+        return true;
+    }
+    char err[128];
+    if (!dbg_cond_check(cond, true, err, sizeof err)) {
+        snprintf(why, whyn, "cannot parse condition \"%.80s\": %s", cond, err);
+        return false;
+    }
+    *expr = dbg_cond_new(cond, true);
+    if (!*expr) {
+        snprintf(why, whyn, "out of memory");
+        return false;
     }
     return true;
 }
@@ -6623,10 +6771,12 @@ static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uin
 // while doing something else, and changing it would alter that owner's watch.
 static const char *dap_arm_watch(uint8_t space, uint8_t access, bool exclude_fetch, uint32_t addr,
                                  uint32_t len, bool has_value, int op, uint8_t value,
-                                 uint32_t ignore, debug_owner_t owner) {
+                                 dbg_cond_t *expr, uint32_t ignore, debug_owner_t owner) {
     const debug_wp_spec_t spec = { space, addr, len, DEBUG_BANK_ANY, has_value, op, value,
-                                   access, exclude_fetch, ignore };
-    switch (debug_wp_add_ex(&spec, owner)) {
+                                   access, exclude_fetch, ignore, expr };
+    const debug_add_result_t added = debug_wp_add_ex(&spec, owner);
+    if (added != DEBUG_ADD_CREATED) dbg_cond_free(expr);   // the core kept none of it
+    switch (added) {
     case DEBUG_ADD_FULL:
         return "the watchpoint table is full";
     case DEBUG_ADD_CONFLICT:
@@ -6642,10 +6792,17 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
     // console made are owned separately and are left alone, as are any from -wp.
     // An entry sent again unchanged keeps its count, as a code breakpoint does.
     struct watchpoint previous[MAX_WATCHPOINTS];
+    // By text, since clearing the owner below can free the condition itself.
+    static char previous_expr[MAX_WATCHPOINTS][DBG_EXPR_MAX_TEXT + 1];
     int num_previous = 0;
     for (int i = 0; i < debug_wp_count(); i++) {
         const struct watchpoint *w = debug_wp_at(i);
-        if (w->owners & (1u << DEBUG_OWNER_DAP_SOURCE)) previous[num_previous++] = *w;
+        if (w->owners & (1u << DEBUG_OWNER_DAP_SOURCE)) {
+            snprintf(previous_expr[num_previous], sizeof previous_expr[0], "%s",
+                     w->expr ? dbg_cond_text((const dbg_cond_t *)w->expr) : "");
+            previous[num_previous] = *w;
+            previous[num_previous++].expr = NULL;
+        }
     }
     debug_wp_clear_owner(DEBUG_OWNER_DAP_SOURCE);
     num_data_bps = 0;
@@ -6668,6 +6825,8 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         bool has_value = false;
         int op = 0;
         uint32_t val = 0;
+        dbg_cond_t *expr = NULL;
+        char cond_why[220];
 
         if (ac && cJSON_IsString(ac)) {
             if (!strcmp(ac->valuestring, "read")) access = DEBUG_WP_ACCESS_READ;
@@ -6689,23 +6848,19 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
             why = "cannot parse hitCondition (expected N: stop from the Nth hit on)";
         else if (c && !cJSON_IsString(c))
             why = "condition must be a string";
-        else if (c && c->valuestring[0]) {
-            // A written-value filter (e.g. "== $05", "!=0", "$FF"): only break
-            // when the byte written compares true.
-            has_value = true;
-            if (len > 1)
-                why = "a value condition applies to a single byte";
-            else if (!dap_parse_simple_cmp(c->valuestring, &op, &val) || val > 0xFF)
-                why = "cannot parse condition (expected a byte comparison, e.g. == $05)";
-        }
+        else if (c && !dap_read_watch_condition(c->valuestring, len, &has_value, &op, &val, &expr,
+                                                cond_why, sizeof cond_why))
+            why = cond_why;
         if (!why && num_data_bps >= MAX_WATCHPOINTS)
             why = "too many data breakpoints";
         uint32_t hit_at = 1;
         if (!why && hc && hc->valuestring[0]) dap_parse_hit(hc->valuestring, &hit_at);
         if (!why)
             // A data breakpoint is on data, so bytes fetched as code do not count.
-            why = dap_arm_watch(space, access, true, addr, len, has_value, op, (uint8_t)val,
+            why = dap_arm_watch(space, access, true, addr, len, has_value, op, (uint8_t)val, expr,
                                 hit_at - 1, DEBUG_OWNER_DAP_SOURCE);
+        else
+            dbg_cond_free(expr);
 
         if (!why) {
             const int at = debug_wp_find(space, addr, DEBUG_BANK_ANY);
@@ -6715,6 +6870,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
                 if (p->space == w->space && p->addr == w->addr && p->len == w->len &&
                     p->access == w->access && p->has_value == w->has_value &&
                     (!p->has_value || (p->op == w->op && p->value == w->value)) &&
+                    !strcmp(previous_expr[k], w->expr ? dbg_cond_text((const dbg_cond_t *)w->expr) : "") &&
                     p->hits > w->hits) {
                     debug_wp_set_hits_at(at, p->hits);
                     break;
@@ -7318,7 +7474,8 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         uint32_t addr = 0, len = 1;
         uint32_t val = 0;
         int op = 0;
-        const bool has_value = cond[0] != '\0';
+        bool has_value = false;
+        dbg_cond_t *expr = NULL;
         if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) {
             send_dap_error_response(seq, cmd, why);
             return 0;
@@ -7327,12 +7484,8 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
             send_dap_error_response(seq, cmd, "a watch takes no hit count");
             return 0;
         }
-        if (has_value && len > 1) {
-            send_dap_error_response(seq, cmd, "a value condition applies to a single byte");
-            return 0;
-        }
-        if (has_value && (!dap_parse_simple_cmp(cond, &op, &val) || val > 0xFF)) {
-            send_dap_error_response(seq, cmd, "cannot parse condition (expected a byte comparison, e.g. == $05)");
+        if (!dap_read_watch_condition(cond, len, &has_value, &op, &val, &expr, why, sizeof why)) {
+            send_dap_error_response(seq, cmd, why);
             return 0;
         }
         // Set again with the same values is fine; a different range or filter
@@ -7345,7 +7498,7 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
                            debug_wp_at(held)->owners == (uint16_t)(1u << DEBUG_OWNER_MCP);
         if (rearm) debug_wp_set_active_at(held, true);
         const char *refused = dap_arm_watch(space, access, !(xf && cJSON_IsFalse(xf)), addr, len,
-                                            has_value, op, (uint8_t)val, 0, DEBUG_OWNER_MCP);
+                                            has_value, op, (uint8_t)val, expr, 0, DEBUG_OWNER_MCP);
         if (refused) {
             if (rearm) debug_wp_set_active_at(held, false);
             send_dap_error_response(seq, cmd, refused);

@@ -7,6 +7,7 @@
 //               A X Y SP P PC R0-R15 rambank rombank
 //               byte[e] word[e] vbyte[e], byte[b:a] word[b:a], b:a
 //               name, name+offset
+//               val addr is_read is_write, in a watch condition only
 //
 // Values are unsigned 32-bit and arithmetic wraps. Comparison and division are
 // unsigned, so -1 is $FFFFFFFF and is not less than 0. A shift by 32 or more
@@ -57,6 +58,17 @@ typedef enum {
 	DBG_EXPR_REG_COUNT
 } dbg_expr_reg_t;
 
+// The access a watch condition is judged on, read through read_reg. Named only
+// when the environment sets `access`. Everywhere else they are ordinary symbols,
+// so a program's own label called addr or val keeps working.
+typedef enum {
+	DBG_EXPR_ACCESS_VAL = DBG_EXPR_REG_COUNT,
+	DBG_EXPR_ACCESS_ADDR,
+	DBG_EXPR_ACCESS_IS_READ,
+	DBG_EXPR_ACCESS_IS_WRITE,
+	DBG_EXPR_ACCESS_END
+} dbg_expr_access_t;
+
 typedef struct {
 	void *user;
 	// `addr` is 24-bit. `x16_bank` is a RAM or ROM bank, or DBG_EXPR_NO_BANK for
@@ -67,6 +79,7 @@ typedef struct {
 	// Called while compiling. On failure, `err` says why.
 	bool     (*symbol)(void *user, const char *name, uint32_t *value, int *bank,
 	                   char *err, size_t errn);
+	bool     access;    // val, addr, is_read and is_write are operands
 } dbg_expr_env_t;
 
 typedef struct {

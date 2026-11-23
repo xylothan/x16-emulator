@@ -1310,7 +1310,8 @@ if os.path.exists(dump_path):
 
 for bp, why in (
         ({"instructionReference": "$A000", "condition": "A == banana"}, "an unreadable condition"),
-        ({"instructionReference": "$A000", "condition": "A == 1 && X == 0"}, "two value tests"),
+        ({"instructionReference": "$A000", "condition": "A == 1 && X == banana"}, "an unreadable second test"),
+        ({"instructionReference": "$A000", "condition": "$1234 == 5 && A == 1"}, "a bare address in an expression"),
         ({"instructionReference": "2:A000", "condition": "bank == 1"}, "two different banks"),
         ({"instructionReference": "$A000", "x16Bank": 1, "condition": "bank == 2"}, "x16Bank vs condition bank"),
         ({"instructionReference": "$0401", "condition": "bank == 2"}, "a bank on unbanked memory"),

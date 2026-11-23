@@ -344,6 +344,7 @@ set(X16_SOURCES
     src/profile_run.c
     src/debugger.c
     src/dbg_info.c
+    src/dbg_cond.c
     src/dbg_expr.c
     src/dbg_log.c
     src/dbg_machine.c

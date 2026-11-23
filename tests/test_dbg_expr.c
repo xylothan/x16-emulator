@@ -51,7 +51,7 @@ static uint32_t
 read_reg(void *user, dbg_expr_reg_t reg)
 {
 	(void)user;
-	return reg_values[reg];
+	return (int)reg < DBG_EXPR_REG_COUNT ? reg_values[reg] : 0x100u + (uint32_t)reg;
 }
 
 static bool
@@ -543,6 +543,31 @@ test_targets(void)
 	expect_no_target("byte[1/0]", "division");
 }
 
+static void
+test_access_operands(void)
+{
+	static const struct { const char *name; int reg; } names[] = {
+		{"val", DBG_EXPR_ACCESS_VAL},         {"addr", DBG_EXPR_ACCESS_ADDR},
+		{"is_read", DBG_EXPR_ACCESS_IS_READ}, {"IS_WRITE", DBG_EXPR_ACCESS_IS_WRITE},
+	};
+	dbg_expr_env_t watch = env;
+	watch.access = true;
+	for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+		dbg_expr_t       e;
+		dbg_expr_value_t v = {0, -1};
+		char             err[160] = "", what[96];
+		const bool ok = dbg_expr_compile(names[i].name, &watch, &e, err, sizeof err) &&
+		                dbg_expr_eval(&e, &watch, &v, err, sizeof err);
+		snprintf(what, sizeof what, "%s reads its operand", names[i].name);
+		check(ok && v.value == 0x100u + (uint32_t)names[i].reg, what);
+		snprintf(what, sizeof what, "%s is not an operand without access", names[i].name);
+		check(!dbg_expr_compile(names[i].name, &env, &e, err, sizeof err), what);
+	}
+	check((int)DBG_EXPR_ACCESS_VAL == (int)DBG_EXPR_REG_COUNT, "access operands follow the registers");
+	check(dbg_expr_reg_name((dbg_expr_reg_t)(DBG_EXPR_REG_COUNT - 1))[0] != '\0', "last register named");
+	check(dbg_expr_reg_name(DBG_EXPR_REG_COUNT)[0] == '\0', "the register list ends at COUNT");
+}
+
 int
 main(void)
 {
@@ -556,6 +581,7 @@ main(void)
 	test_registers_and_names();
 	test_memory();
 	test_targets();
+	test_access_operands();
 
 	if (failures) {
 		printf("%d check(s) failed\n", failures);

@@ -82,6 +82,8 @@ struct CondEdit {
 	int  value   = 0;
 	int  ignore  = 0;
 	bool loaded  = false;
+	char expr[DBG_EXPR_MAX_TEXT + 1] = "";
+	char why[120] = "";
 };
 CondEdit s_edit;
 
@@ -93,7 +95,10 @@ cond_summary(char *out, size_t n, const TrackedBP &t)
 	uint16_t oaddr = 0;
 	uint32_t value = 0, ignore = 0;
 	bool     have = DEBUGGetBreakpointCondition(t.pc, t.bank, t.x16Bank, &has, &operand, &oaddr, &op, &value, &ignore);
-	if (have && has) {
+	const dbg_cond_t *expr = (const dbg_cond_t *)debug_bp_expr(t.pc, t.bank, t.x16Bank);
+	if (expr) {
+		snprintf(out, n, "%s", dbg_cond_text(expr));
+	} else if (have && has) {
 		if (operand == BP_OPND_BYTE)
 			snprintf(out, n, "byte[$%04X]%s$%X", oaddr, kOpNames[op], value);
 		else if (operand == BP_OPND_WORD)
@@ -125,11 +130,23 @@ cond_editor_popup(const TrackedBP &t)
 		s_edit.value   = (int)value;
 		s_edit.ignore  = (int)ignore;
 		s_edit.loaded  = true;
+		const dbg_cond_t *held = (const dbg_cond_t *)debug_bp_expr(t.pc, t.bank, t.x16Bank);
+		snprintf(s_edit.expr, sizeof s_edit.expr, "%s", held ? dbg_cond_text(held) : "");
+		s_edit.why[0] = '\0';
 	}
 
 	ImGui::Text("Breakpoint $%04X", (unsigned)(t.pc & 0xFFFF));
 	ImGui::Separator();
 	ImGui::TextUnformatted("Stop only when:");
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+	ImGui::InputTextWithHint("expression##cexpr", "A == 1 && rambank == 2", s_edit.expr,
+	                         sizeof s_edit.expr);
+	ImGui::SetItemTooltip("Any debugger expression. Registers, rambank, rombank, byte[], word[],\n"
+	                      "vbyte[], symbols, arithmetic, && and ||. Non-zero stops.\n"
+	                      "While this has text, the test below is not used.");
+	if (s_edit.why[0])
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_edit.why);
+	ImGui::BeginDisabled(s_edit.expr[0] != '\0');
 	ImGui::SetNextItemWidth(dbgui_combo_width("byte at $"));
 	ImGui::Combo("##opnd", &s_edit.operand, kOperandNames, IM_ARRAYSIZE(kOperandNames));
 	ImGui::SetItemTooltip("What to test: a CPU register, or the byte/word at an address.");
@@ -153,6 +170,7 @@ cond_editor_popup(const TrackedBP &t)
 	ImGui::SameLine();
 	ImGui::TextDisabled("(hex)");
 	ImGui::SetItemTooltip("Both the address and value fields above are hexadecimal.");
+	ImGui::EndDisabled();
 
 	ImGui::SetNextItemWidth(dbgui_field_width("99999") + ImGui::GetFrameHeight() * 2.0f);
 	ImGui::InputInt("ignore first N hits", &s_edit.ignore);
@@ -172,10 +190,18 @@ cond_editor_popup(const TrackedBP &t)
 
 	ImGui::Separator();
 	if (ImGui::Button("Apply")) {
-		DEBUGSetBreakpointCondition(t.pc, t.bank, t.x16Bank, s_edit.operand, (uint16_t)s_edit.addr,
-		                            s_edit.op, (uint32_t)s_edit.value);
-		DEBUGSetBreakpointIgnore(t.pc, t.bank, t.x16Bank, (uint32_t)s_edit.ignore);
-		ImGui::CloseCurrentPopup();
+		// Refused text stays in the field with its reason.
+		if (!s_edit.expr[0]) {
+			DEBUGSetBreakpointCondition(t.pc, t.bank, t.x16Bank, s_edit.operand, (uint16_t)s_edit.addr,
+			                            s_edit.op, (uint32_t)s_edit.value);
+			DEBUGSetBreakpointIgnore(t.pc, t.bank, t.x16Bank, (uint32_t)s_edit.ignore);
+			ImGui::CloseCurrentPopup();
+		} else if (dbg_cond_check(s_edit.expr, false, s_edit.why, sizeof s_edit.why)) {
+			s_edit.why[0] = '\0';
+			debug_bp_set_expr(t.pc, t.bank, t.x16Bank, dbg_cond_new(s_edit.expr, false));
+			DEBUGSetBreakpointIgnore(t.pc, t.bank, t.x16Bank, (uint32_t)s_edit.ignore);
+			ImGui::CloseCurrentPopup();
+		}
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Clear condition")) {
@@ -606,6 +632,54 @@ wp_op_name(int op)
 	return (op >= 0 && op < 6) ? names[op] : "==";
 }
 
+// A row's expression. Refused text stays in the field with its reason.
+struct WatchExprEdit {
+	char text[DBG_EXPR_MAX_TEXT + 1] = "";
+	char why[120] = "";
+};
+WatchExprEdit s_wp_expr;
+
+void
+wp_expr_popup(int index)
+{
+	if (!ImGui::BeginPopup("wp_expr"))
+		return;
+	ImGui::TextUnformatted("Stop only when:");
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+	ImGui::InputTextWithHint("##wexpr", "val == $FF && rambank == 2", s_wp_expr.text,
+	                         sizeof s_wp_expr.text);
+	ImGui::SetItemTooltip("Any debugger expression, plus the access itself:\n"
+	                      "val, addr, is_read and is_write. PC is the instruction\n"
+	                      "making the access. Non-zero stops.");
+	if (s_wp_expr.why[0])
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_wp_expr.why);
+	if (ImGui::Button("Apply")) {
+		if (!s_wp_expr.text[0]) {
+			const struct watchpoint *w = debug_wp_at(index);
+			if (w && w->expr)
+				debug_wp_clear_value_at(index);
+			ImGui::CloseCurrentPopup();
+		} else if (dbg_cond_check(s_wp_expr.text, true, s_wp_expr.why, sizeof s_wp_expr.why)) {
+			s_wp_expr.why[0] = '\0';
+			dbg_cond_t *c = dbg_cond_new(s_wp_expr.text, true);
+			if (c && !debug_wp_set_expr_at(index, c))
+				dbg_cond_free(c);
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Clear")) {
+		const struct watchpoint *w = debug_wp_at(index);
+		if (w && w->expr)
+			debug_wp_clear_value_at(index);
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
+}
+
 void
 draw_watchpoints()
 {
@@ -778,17 +852,35 @@ draw_watchpoints()
 
 			// Optional filter: only break when the value moved matches.
 			ImGui::TableSetColumnIndex(7);
+			const dbg_cond_t *w_expr = (const dbg_cond_t *)w->expr;
 			bool has = w->has_value;
+			ImGui::BeginDisabled(w_expr != nullptr);
 			if (ImGui::Checkbox("##hasval", &has)) {
 				if (has)
 					debug_wp_set_value_at(i, w->op, w->value);
 				else
 					debug_wp_clear_value_at(i);
 			}
+			ImGui::EndDisabled();
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip(w_expr ? "This watch has an expression instead. Clear it to use a value test."
+				                         : "Only break when the byte read or written satisfies a test,\n"
+				                           "rather than on every access.");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("expr")) {
+				snprintf(s_wp_expr.text, sizeof s_wp_expr.text, "%s", w_expr ? dbg_cond_text(w_expr) : "");
+				s_wp_expr.why[0] = '\0';
+				ImGui::OpenPopup("wp_expr");
+			}
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Only break when the byte read or written satisfies a test,\n"
-				                  "rather than on every access.");
-			if (w->has_value) {
+				ImGui::SetTooltip("Stop only when an expression is true, such as\n"
+				                  "val == $FF && rambank == 2.");
+			wp_expr_popup(i);
+			w_expr = (const dbg_cond_t *)w->expr;   // the popup may have replaced it
+			if (w_expr) {
+				ImGui::SameLine();
+				ImGui::TextUnformatted(dbg_cond_text(w_expr));
+			} else if (w->has_value) {
 				ImGui::SameLine();
 				ImGui::SetNextItemWidth(dbgui_combo_width(">="));
 				int op = w->op;
@@ -837,6 +929,13 @@ breakpoints_panel_render(bool *p_open)
 	if (ImGui::Begin("Breakpoints", p_open)) {
 		dbgui_window_zoom("breakpoints");
 		sync_tracked();
+
+		const char *cond_text, *cond_message;
+		if (DEBUGIsPaused() && dbg_cond_last_error(&cond_text, &cond_message)) {
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "Stopped: condition failed: %s",
+			                   cond_message);
+			ImGui::SetItemTooltip("%s", cond_text);
+		}
 
 		// Collapsible sections rather than tabs or fixed-height panes: these are
 		// two different triggers for the same job (stop the machine) and you

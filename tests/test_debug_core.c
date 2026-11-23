@@ -45,6 +45,38 @@ log_free(void *log)
 	g_log_freed[(char *)log - g_log_token]++;
 }
 
+// Expression condition hooks.
+#define COND_TOKENS 6
+static char                g_cond_token[COND_TOKENS];
+static int                 g_cond_freed[COND_TOKENS];
+static int                 g_cond_tests;
+static bool                g_cond_answer;
+static bool                g_cond_had_access;
+static debug_cond_access_t g_cond_access;
+
+static bool
+cond_test(void *cond, const debug_cond_access_t *access)
+{
+	(void)cond;
+	g_cond_tests++;
+	g_cond_had_access = access != NULL;
+	if (access)
+		g_cond_access = *access;
+	return g_cond_answer;
+}
+
+static bool
+cond_same(const void *a, const void *b)
+{
+	return a == b;
+}
+
+static void
+cond_free(void *cond)
+{
+	g_cond_freed[(char *)cond - g_cond_token]++;
+}
+
 // The four CPU configurations; three change register comparison width.
 typedef enum { CPU_65C02, CPU_816_EMU, CPU_816_NATIVE_8, CPU_816_NATIVE_16 } cpu_mode_t;
 
@@ -1833,6 +1865,118 @@ main(void)
 		check(g_log_freed[0] == 1, "log: released at shutdown");
 		debug_bp_log_fire = NULL;
 		debug_bp_log_free = NULL;
+		reset_all();
+	}
+
+	// ---- Expression conditions --------------------------------------------
+	{
+		debug_cond_test = cond_test;
+		debug_cond_same = cond_same;
+		debug_cond_free = cond_free;
+		char *const c0 = &g_cond_token[0], *const c1 = &g_cond_token[1], *const c2 = &g_cond_token[2];
+		memset(g_cond_freed, 0, sizeof g_cond_freed);
+
+		// Breakpoints.
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_set_expr(0x8000, 0, -1, c0);
+		check(debug_bp_expr(0x8000, 0, -1) == c0, "expr: stored on the breakpoint");
+		g_cond_answer = false;
+		check(!debug_bp_on_arrival(0x8000, 0), "expr: false does not stop");
+		check(!g_cond_had_access, "expr: an exec test has no access");
+		check(debug_bp_get_hits(0x8000, 0, -1) == 0, "expr: false is not a hit");
+		g_cond_answer = true;
+		check(debug_bp_on_arrival(0x8000, 0), "expr: true stops");
+		check(debug_bp_get_hits(0x8000, 0, -1) == 1, "expr: true is a hit");
+		debug_bp_set_ignore(0x8000, 0, -1, 2);
+		check(!debug_bp_on_arrival(0x8000, 0), "expr: the ignore budget still applies");
+		debug_bp_set_ignore(0x8000, 0, -1, 0);
+
+		debug_bp_set_expr(0x8000, 0, -1, c1);
+		check(g_cond_freed[0] == 1 && debug_bp_expr(0x8000, 0, -1) == c1, "expr: replaced and released");
+		debug_bp_set_condition(0x8000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 7);
+		check(g_cond_freed[1] == 1 && !debug_bp_expr(0x8000, 0, -1), "expr: a simple test replaces it");
+		int has = 0, operand = 0, op = 0;
+		uint16_t oaddr = 0;
+		uint32_t value = 0, ignore = 0;
+		debug_bp_set_expr(0x8000, 0, -1, c2);
+		debug_bp_get_condition(0x8000, 0, -1, &has, &operand, &oaddr, &op, &value, &ignore);
+		check(!has, "expr: replaces a simple test");
+		debug_bp_clear_condition(0x8000, 0, -1);
+		check(g_cond_freed[2] == 1 && !debug_bp_expr(0x8000, 0, -1), "expr: clear releases it");
+		debug_bp_set_expr(0x8000, 0, -1, c0);
+		debug_bp_forget(0x8000, 0, -1);
+		check(g_cond_freed[0] == 2, "expr: forget releases it");
+		reset_all();
+
+		// Watches.
+		memset(g_cond_freed, 0, sizeof g_cond_freed);
+		debug_wp_spec_t spec = { DEBUG_WP_SPACE_CPU, 0x0700, 4, DEBUG_BANK_ANY, false, 0, 0,
+		                         DEBUG_WP_ACCESS_BOTH, true, 0, c0 };
+		check(debug_wp_add_ex(&spec, DEBUG_OWNER_MCP) == DEBUG_ADD_CREATED, "expr: watch created");
+		check(debug_wp_at(0)->expr == c0, "expr: the watch took it");
+		check(debug_wp_add_ex(&spec, DEBUG_OWNER_UI) == DEBUG_ADD_EXISTED, "expr: the same one shares");
+		debug_wp_spec_t other = spec;
+		other.expr = c1;
+		check(debug_wp_add_ex(&other, DEBUG_OWNER_CLI) == DEBUG_ADD_CONFLICT, "expr: another conflicts");
+		other.expr = NULL;
+		check(debug_wp_add_ex(&other, DEBUG_OWNER_CLI) == DEBUG_ADD_CONFLICT, "expr: none conflicts");
+		check(g_cond_freed[0] == 0 && g_cond_freed[1] == 0, "expr: a refused one is the caller's");
+
+		g_cond_answer = false;
+		check(!debug_wp_check_write(0x0701, 0x12), "expr: false does not fire");
+		check(debug_wp_at(0)->hits == 0, "expr: false is not a hit");
+		g_cond_answer = true;
+		check(debug_wp_check_write(0x0702, 0x34), "expr: true fires");
+		check(g_cond_had_access && g_cond_access.space == DEBUG_WP_SPACE_CPU &&
+		      g_cond_access.access == DEBUG_WP_ACCESS_WRITE && !g_cond_access.fetch &&
+		      g_cond_access.addr == 0x0702 && g_cond_access.value == 0x34, "expr: a write's access");
+		check(debug_wp_check_read(0x0703, 0x56, false), "expr: fires on a read");
+		check(g_cond_access.access == DEBUG_WP_ACCESS_READ && g_cond_access.addr == 0x0703 &&
+		      g_cond_access.value == 0x56, "expr: a read's access");
+
+		// Which watch a stop names is decided at the access.
+		debug_wp_clear_all();
+		check(g_cond_freed[0] == 1, "expr: clear-all releases it");
+		debug_wp_spec_t first = { DEBUG_WP_SPACE_CPU, 0x0710, 2, DEBUG_BANK_ANY, false, 0, 0,
+		                          DEBUG_WP_ACCESS_WRITE, true, 0, c0 };
+		debug_wp_spec_t second = { DEBUG_WP_SPACE_CPU, 0x0711, 1, DEBUG_BANK_ANY, false, 0, 0,
+		                           DEBUG_WP_ACCESS_WRITE, true, 0, c1 };
+		debug_wp_add_ex(&first, DEBUG_OWNER_MCP);
+		debug_wp_add_ex(&second, DEBUG_OWNER_MCP);
+		g_cond_answer = true;
+		check(debug_wp_check_write(0x0710, 1), "expr: the first write fires");
+		debug_wp_latch_stop();
+		check(debug_wp_check_write(0x0711, 2), "expr: the same instruction's second write fires");
+		const int tests = g_cond_tests;
+		g_cond_answer = false;
+		check(debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0x0710,
+		                           DEBUG_BANK_ANY, 0x0710, 1), "expr: the stop names the first");
+		check(!debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0x0711,
+		                            DEBUG_BANK_ANY, 0x0711, 2), "expr: and not the second");
+		check(debug_wp_fires_on(0x0710, DEBUG_BANK_ANY, 0x0710, 1), "expr: fires_on agrees");
+		check(g_cond_tests == tests, "expr: not judged again after the stop");
+
+		check(debug_wp_set_value_at(0, BPCMP_EQ, 1) && g_cond_freed[0] == 2 && !debug_wp_at(0)->expr,
+		      "expr: a value filter replaces it");
+		check(debug_wp_set_expr_at(0, c2) && !debug_wp_at(0)->has_value && debug_wp_at(0)->expr == c2,
+		      "expr: replaces a value filter");
+		check(!debug_wp_set_expr_at(5, c0), "expr: no such watch");
+		check(debug_wp_clear_value_at(0) && g_cond_freed[2] == 1 && !debug_wp_at(0)->expr,
+		      "expr: clearing the filter releases it");
+		debug_wp_delete_at(0);
+		check(debug_wp_at(0)->expr == c1, "expr: a later entry keeps its own");
+		debug_wp_clear_owner(DEBUG_OWNER_MCP);
+		check(g_cond_freed[1] == 1, "expr: released with its last owner");
+
+		debug_wp_spec_t last = spec;
+		last.expr = c2;
+		debug_wp_add_ex(&last, DEBUG_OWNER_MCP);
+		debug_core_free();
+		check(g_cond_freed[2] == 2, "expr: released at shutdown");
+
+		debug_cond_test = NULL;
+		debug_cond_same = NULL;
+		debug_cond_free = NULL;
 		reset_all();
 	}
 

@@ -38,7 +38,7 @@ Why X16Emu ADD
 | **Graphical debugger** | A dockable Dear ImGui debug window with disassembly, CPU, memory, source, call stack, symbols, breakpoints, I/O and file access, VERA/PSG/FM/PCM inspectors, and a performance budget view. |
 | **Source-level debugging** | Point it at a cc65 `.dbg` file and step through the original `.s`/`.c` source, with labels, equates and live values. `.dbg` files auto-load, including for overlays the program `LOAD`s at runtime. |
 | **Debug from an editor** | A built-in DAP server means breakpoints, stepping, watches, memory and disassembly in VS Code, Visual Studio, or any DAP-speaking client. |
-| **Conditional breakpoints** | Break on `A == $05`, `byte[$1234] != 0`, a specific RAM bank, or the Nth hit. |
+| **Conditional breakpoints** | Break on any expression, like `A == 5 && byte[$1234] != 0`, in a specific RAM bank, or on the Nth hit. |
 | **Watchpoints** | Break on writes to an address or a whole range, with up to 64 of them. |
 | **Scriptable input** | Inject keystrokes, typed text and joystick state over DAP, making automated regression runs of a game practical. |
 | **VERA inspectors** | Live palette, tile, sprite, bitmap and tilemap viewers plus fully decoded VERA registers — decoded per scanline, so raster splits are visible. |
@@ -653,6 +653,10 @@ The panel lists every breakpoint with its bank, hit count and condition, and has
 
 ![Breakpoints panel listing an execution breakpoint with one hit, plus the Memory writes section](./.gh/screenshots/breakpoints-panel.png)
 
+For anything a single comparison cannot say, type an expression into the editor's **expression**
+field, such as `A == 1 && rambank == 2`. Each row in **Memory writes** has an **expr** button for the
+same thing, where the expression can also use the access itself.
+
 Conditions and hit counts set from a DAP client appear here too, and vice versa; the DAP syntax is
 documented under [Remote debugging with DAP](#remote-debugging-with-dap).
 
@@ -1119,18 +1123,27 @@ machine is always zero, so the breakpoint matched nothing while the client had b
 
 #### Conditional breakpoints
 
-Put a condition string on a breakpoint in `setBreakpoints`. Terms are joined with `&&`.
+Put a condition string on a breakpoint in `setBreakpoints`. It is an expression in the language of
+`evaluate`, and the breakpoint stops when it is non-zero.
 
-* **Pin to a bank:** `bank == 2`, `bank 2`, `rombank == 3`. Decimal or `$XX`/`0xXX`.
-* **Test a value:** operands `A`, `X`, `Y`, `SP`, `P`, `byte[$ADDR]`, `word[$ADDR]`, or a bare
-  `$ADDR` (which means `byte[$ADDR]`). Operators `==`, `!=`, `<`, `<=`, `>`, `>=`.
+* **Operands:** `A`, `X`, `Y`, `SP`, `P`, `PC`, `R0`-`R15`, `rambank`, `rombank`, `byte[e]`, `word[e]`,
+  `vbyte[e]`, `bank:addr`, symbols and numbers.
+* **Operators:** C's, with C's precedence: `||`, `&&`, comparisons, bitwise, shifts, arithmetic and
+  unary `-`, `!`, `~`.
+* **Pin to a bank:** a top-level term like `bank == 2`, `bank 2` or `rombank == 3` arms the breakpoint
+  for that bank rather than being tested. Decimal or `$XX`/`0xXX`.
 
 ```
 A == $05
 byte[$1234] != 0
 word[$0002] >= $0100
 bank == 0 && byte[$1234] != 0
+A == 1 && X > 3 && rambank != 4
+((word[ptr] + Y) & $FF) == 0
 ```
+
+A single test may also name a bare `$ADDR` to mean `byte[$ADDR]`. Beside other terms that is refused,
+since in an expression `$ADDR` is a number.
 
 A `hitCondition` of `"5"` or `">= 5"` stops from the fifth hit on. Source, function and instruction
 breakpoints all take these.
@@ -1138,6 +1151,10 @@ breakpoints all take these.
 A breakpoint that cannot be applied comes back `verified: false` with a `message`, and nothing is
 armed. That covers a condition that cannot be read, and one that differs from a breakpoint another
 owner already has at the same address, since a condition belongs to the address.
+
+A condition that cannot be evaluated while running, such as a division by zero or a symbol a reload
+removed, **stops the machine**. The `stopped` event and `x16/status` carry `conditionError` with the
+`condition` and a `message`, so a broken condition cannot pass for one that was never true.
 
 #### Data breakpoints
 
@@ -1147,9 +1164,19 @@ With `asAddress`, `name` is a CPU address, decimal or `0x` hex, or a `vram:` ref
 the watch to a range, and a range that runs off the end of its memory has a null `dataId`. A CPU
 watch covers whichever bank is mapped, so a range may cross `$A000` or `$C000`.
 
-`setDataBreakpoints` takes `write`, `read` or `readWrite` access (VRAM is `write` only), a one-byte
-value `condition` such as `== $05`, and a `hitCondition` of `"5"` or `">= 5"`, which stops from the
-fifth access on. Accesses the value condition filters out are not counted.
+`setDataBreakpoints` takes `write`, `read` or `readWrite` access (VRAM is `write` only), a
+`condition`, and a `hitCondition` of `"5"` or `">= 5"`, which stops from the fifth access on.
+Accesses the condition filters out are not counted.
+
+A condition is a byte comparison such as `== $05` on a one-byte watch, or an expression on a watch of
+any length. An expression can use everything a breakpoint condition can, plus the access: `val` (the
+byte), `addr`, `is_read` and `is_write`. `PC` is the instruction making the access.
+
+```
+val == $FF && rambank == 2
+is_write && addr >= $0410 && val != 0
+PC < $C000 && val & $80
+```
 
 #### Running to a place
 
