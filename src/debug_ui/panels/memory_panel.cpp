@@ -636,7 +636,7 @@ mem_context_menu(const char *id, MemSelection &sel, int16_t bank, uint16_t addr,
             if (wp_at >= 0)
                 debug_wp_delete_at(wp_at);
             if (!on)
-                DEBUGAddCpuWatch(start, len, k.access, true);
+                DEBUGAddCpuWatch(start, len, DEBUG_BANK_ANY, k.access, true);
             break;
         }
         if (ImGui::IsItemHovered()) {

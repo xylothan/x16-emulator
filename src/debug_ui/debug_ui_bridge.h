@@ -227,8 +227,9 @@ static inline bool DEBUGAddWatchPoint(uint16_t addr, uint16_t len) {
     const debug_add_result_t added = debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_UI);
     return added == DEBUG_ADD_CREATED || added == DEBUG_ADD_EXISTED;
 }
-static inline bool DEBUGAddCpuWatch(uint16_t addr, uint32_t len, uint8_t access, bool exclude_fetch) {
-    const debug_wp_spec_t spec = { DEBUG_WP_SPACE_CPU, addr, len, DEBUG_BANK_ANY, false, 0, 0,
+static inline bool DEBUGAddCpuWatch(uint16_t addr, uint32_t len, int x16Bank, uint8_t access,
+                                    bool exclude_fetch) {
+    const debug_wp_spec_t spec = { DEBUG_WP_SPACE_CPU, addr, len, x16Bank, false, 0, 0,
                                    access, exclude_fetch };
     const debug_add_result_t added = debug_wp_add_ex(&spec, DEBUG_OWNER_UI);
     return added == DEBUG_ADD_CREATED || added == DEBUG_ADD_EXISTED;

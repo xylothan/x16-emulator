@@ -1615,6 +1615,13 @@ debug_wp_last_access_kind(uint8_t *access, bool *fetch)
 	return true;
 }
 
+// The bank was judged at the access. The instruction may have moved it since.
+static bool
+wp_bank_at_stop(const struct watchpoint *w)
+{
+	return w->at_stop || wp_bank_ok(w);
+}
+
 bool
 debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr, int x16Bank,
                      uint32_t addr, uint8_t value)
@@ -1630,7 +1637,7 @@ debug_wp_fires_on_ex(uint8_t space, uint8_t access, bool fetch, uint32_t wp_addr
 		return false;
 	if (space == DEBUG_WP_SPACE_VRAM)
 		return wp_covers_vram(w, addr) && wp_filter_fired(w, value);
-	return addr <= 0xFFFF && wp_covers_addr(w, (uint16_t)addr) && wp_bank_ok(w) &&
+	return addr <= 0xFFFF && wp_covers_addr(w, (uint16_t)addr) && wp_bank_at_stop(w) &&
 	       wp_filter_fired(w, value);
 }
 
@@ -1641,6 +1648,6 @@ debug_wp_fires_on(uint16_t wp_addr, int x16Bank, uint16_t addr, uint8_t value)
 	if (idx < 0)
 		return false;
 	const struct watchpoint *w = &watchPoints[idx];
-	return (w->access & DEBUG_WP_ACCESS_WRITE) && wp_covers_addr(w, addr) && wp_bank_ok(w) &&
+	return (w->access & DEBUG_WP_ACCESS_WRITE) && wp_covers_addr(w, addr) && wp_bank_at_stop(w) &&
 	       wp_filter_fired(w, value);
 }

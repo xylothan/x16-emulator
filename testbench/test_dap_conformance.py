@@ -1361,6 +1361,46 @@ def test_data_breakpoint_bytes():
              d.req("x16/registers")["body"]["cpu"]["pc"] == 0x0826, str(ev))
         d.req("setDataBreakpoints", {"breakpoints": []})
 
+        for label, name, args in (
+                ("below the window", "0x1000", {"asAddress": True, "x16Bank": 1}),
+                ("across $C000", "0xBFFF", {"asAddress": True, "bytes": 2, "x16Bank": 1}),
+                ("on VRAM", "vram:1000", {"asAddress": True, "x16Bank": 1}),
+                ("past 255", "0xA000", {"asAddress": True, "x16Bank": 256}),
+                ("fractional", "0xA000", {"asAddress": True, "x16Bank": 1.5}),
+                ("as text", "0xA000", {"asAddress": True, "x16Bank": "1"})):
+            case(f"no pinned dataId: {label}", info(name, **args) is None, str(info(name, **args)))
+        for bad in ("4096@1", "49151:2@1", "40960@256", "40960@", "vram:1000@1"):
+            r = d.req("setDataBreakpoints", {"breakpoints": [{"dataId": bad}]})
+            case(f"a pinned dataId is refused: {bad}",
+                 r["body"]["breakpoints"][0].get("verified") is False, str(r))
+        d.req("setDataBreakpoints", {"breakpoints": []})
+
+        pinned = info("0xA000", asAddress=True, x16Bank=3)
+        case("a pinned dataId", pinned == "40960@3", str(pinned))
+        # INC $A000, LDA #3, STA $00, INC $A000, BRA self.
+        put_mem(d, 0x0830, [0xEE, 0x00, 0xA0, 0xA9, 0x03, 0x85, 0x00, 0xEE, 0x00, 0xA0, 0x80, 0xFE])
+        set_reg(d, "PC", "$0830")
+        set_reg(d, "RAM Bank", "$02")
+        r = d.req("setDataBreakpoints", {"breakpoints": [{"dataId": pinned, "accessType": "write"}]})
+        rb = r["body"]["breakpoints"][0]
+        case("it arms and names the bank", rb.get("verified") is True and "$03" in rb.get("message", ""), str(rb))
+        ev = go(d)
+        case("it skips another bank and stops in its own",
+             bool(ev) and ev["body"].get("hitBreakpointIds") == [rb.get("id")] and
+             d.req("x16/registers")["body"]["cpu"]["pc"] == 0x083A, str(ev))
+        d.req("setDataBreakpoints", {"breakpoints": []})
+
+        r = d.req("evaluate", {"expression": "watch_add 03:A000", "context": "repl"})
+        case("the console pins a watch", "03:A000" in r["body"]["result"], str(r))
+        r = d.req("evaluate", {"expression": "watch_list", "context": "repl"})
+        case("and lists its bank", "03:A000(1)" in r["body"]["result"], str(r))
+        r = d.req("evaluate", {"expression": "watch_add 03:0400", "context": "repl"})
+        case("the console refuses a bank outside a window", "needs a range" in r["body"]["result"], str(r))
+        r = d.req("evaluate", {"expression": "watch_remove A000", "context": "repl"})
+        case("removing without the bank leaves it", "no watchpoint" in r["body"]["result"], str(r))
+        r = d.req("evaluate", {"expression": "watch_remove 03:A000", "context": "repl"})
+        case("removing with it works", "removed" in r["body"]["result"], str(r))
+
 
 # --- views and wire format --------------------------------------------------
 

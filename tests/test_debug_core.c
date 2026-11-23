@@ -1032,6 +1032,20 @@ main(void)
 		check(!debug_wp_check_write(0xA100, 0x22), "that bank honours its filter");
 		g_ram_bank = 6;
 		check(debug_wp_check_write(0xA100, 0x22), "the other bank is unaffected");
+
+		reset_all();
+		debug_wp_add(0xA100, 1, 5);
+		debug_wp_add(0xA100, 1, 7);
+		g_ram_bank = 5;
+		check(debug_wp_check_write(0xA100, 0x12), "a pinned watch fires in its bank");
+		debug_wp_latch_stop();
+		g_ram_bank = 6;
+		check(debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0xA100, 5,
+		                           0xA100, 0x12),
+		      "the stop names it after the bank moves");
+		check(!debug_wp_fires_on_ex(DEBUG_WP_SPACE_CPU, DEBUG_WP_ACCESS_WRITE, false, 0xA100, 7,
+		                            0xA100, 0x12),
+		      "and not the watch in another bank");
 	}
 
 	// ── Every condition operand, in every CPU mode ──────────────────────────

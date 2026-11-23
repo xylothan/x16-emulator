@@ -1162,7 +1162,8 @@ removed, **stops the machine**. The `stopped` event and `x16/status` carry `cond
 stack entry. CPU registers and zero-page rows have no single address, so their `dataId` is null.
 With `asAddress`, `name` is a CPU address, decimal or `0x` hex, or a `vram:` reference. `bytes` widens
 the watch to a range, and a range that runs off the end of its memory has a null `dataId`. A CPU
-watch covers whichever bank is mapped, so a range may cross `$A000` or `$C000`.
+watch covers whichever bank is mapped, so a range may cross `$A000` or `$C000`. `x16Bank` pins it to
+one RAM or ROM bank, for a range inside `$A000-$BFFF` or `$C000-$FFFF`. Its `dataId` ends in `@bank`.
 
 `setDataBreakpoints` takes `write`, `read` or `readWrite` access (VRAM is `write` only), a
 `condition`, and a `hitCondition` of `"5"` or `">= 5"`, which stops from the fifth access on.
@@ -1212,7 +1213,7 @@ cannot trigger one. An expression that is not recognised is an error.
 | `vera_reg` | All 32 VERA registers |
 | `vera_line LINE` | Both layers as they stood when that display scanline (decimal, 0–479) was drawn: on or off, the row shown, and their registers. The way to catch a raster split. A line not drawn yet is an error, and under `-warp` this is the last frame drawn, one in 64 |
 | `bp_add ADDR`, `bp_remove ADDR`, `bp_list`, `bp_clear` | Manage breakpoints |
-| `watch_add ADDR [LEN]`, `watch_remove ADDR`, `watch_list`, `watch_clear` | Manage write watchpoints |
+| `watch_add [BANK:]ADDR [LEN]`, `watch_remove [BANK:]ADDR`, `watch_list`, `watch_clear` | Manage write watchpoints, in every bank or one |
 | `reset` | Reset the machine |
 
 A name from a loaded `.dbg` evaluates too: a label to its address, an equate to its value. Case
