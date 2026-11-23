@@ -29,6 +29,11 @@ typedef uint8_t (*call_stack_read_t)(uint16_t address, uint8_t bank);
 int call_stack_unwind(uint16_t pc, uint16_t sp, uint8_t program_bank, bool native,
                       call_stack_read_t read, uint16_t *frames);
 
+// The same, and `slots[i]` is where frame i's return address was found (its low
+// byte). slots[0] is 0, since the current frame has none.
+int call_stack_unwind_slots(uint16_t pc, uint16_t sp, uint8_t program_bank, bool native,
+                            call_stack_read_t read, uint16_t *frames, uint16_t *slots);
+
 // The instruction a frame is at: the PC for the current frame, the JSR for a
 // caller. A return address is the instruction after the call, which can be the
 // next source line or the next routine, so name and locate a caller by this.

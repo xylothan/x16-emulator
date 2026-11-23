@@ -14,6 +14,7 @@ static bool     wanted;
 static bool     listening;
 static bool     refused_logged;
 static int      logged_c_sp = -1;
+static int      tracked_c_sp = -1;
 
 static uint8_t
 host_read(uint16_t a)
@@ -33,6 +34,7 @@ static void
 sync(void)
 {
 	c_frames_config_t config = {0};
+	tracked_c_sp = -1;
 	const bool arm = wanted && dbg_info_cfunc_count() > 0 &&
 	                 c_frames_pick_symbols(dbg_info_symbol_count(), dbg_info_symbol_at,
 	                                       &config.c_sp_addr, &config.callax);
@@ -61,6 +63,7 @@ sync(void)
 		c_frames_configure(NULL);
 		return;
 	}
+	tracked_c_sp = config.c_sp_addr;
 	if (logged_c_sp != config.c_sp_addr) {
 		fprintf(stderr, "c_frames: tracking C calls, C stack pointer at $%02X\n", config.c_sp_addr);
 		logged_c_sp = config.c_sp_addr;
@@ -73,4 +76,13 @@ c_frames_host_start(bool debugger)
 	wanted = debugger;
 	dbg_info_set_change_hook(sync);
 	sync();
+}
+
+bool
+c_frames_host_c_sp(uint16_t *addr)
+{
+	if (tracked_c_sp < 0)
+		return false;
+	*addr = (uint16_t)tracked_c_sp;
+	return true;
 }

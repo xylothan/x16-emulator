@@ -55,6 +55,21 @@ main(void)
 	n = call_stack_unwind(0x1234, 0x01FF, 0, false, read_mem, f);
 	check(n == 1 && f[0] == 0x1234, "an empty stack is just the PC");
 
+	{
+		uint16_t slots[CALL_STACK_MAX];
+		clear();
+		push_call(0x01FE, 0x0A00, 0);
+		mem[0][0x01FD] = 0x55;
+		push_call(0x01FB, 0x0A10, 0);
+		n = call_stack_unwind_slots(0x1234, 0x01FA, 0, false, read_mem, f, slots);
+		check(n == 3 && slots[0] == 0, "the current frame has no slot");
+		check(n == 3 && f[1] == 0x0A13 && slots[1] == 0x01FB, "slot of the inner return address");
+		check(n == 3 && f[2] == 0x0A03 && slots[2] == 0x01FE, "past a stray byte");
+		uint16_t plain[CALL_STACK_MAX];
+		const int m = call_stack_unwind(0x1234, 0x01FA, 0, false, read_mem, plain);
+		check(m == n && !memcmp(plain, f, (size_t)n * sizeof f[0]), "the plain unwind agrees");
+	}
+
 	clear();
 	push_call(0x01FE, 0x0A00, 0);
 	push_call(0x01FC, 0x0A10, 0);
