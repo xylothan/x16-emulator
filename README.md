@@ -584,7 +584,8 @@ The 65C02 has no frame pointer, so this is a heuristic unwind of the hardware st
 useful one. Each frame is named after the nearest enclosing label and resolved back to a source
 file and line, and frames that fall outside your debug info are still labelled with where they are
 (`[KERNAL/ROM]`, `[stub/KERNAL RAM]`) rather than dropped. Click any frame to send both the Source
-and Disassembly panels to it.
+and Disassembly panels to it. Below the frames, the selected frame's cc65 C function-level variables
+are shown read-only, with a reason in place of any value whose address cannot be verified.
 
 #### Symbols
 

@@ -1526,49 +1526,6 @@ static int c_locals_ref_frame(int ref) {
     return ref & 0x7F;
 }
 
-// What a row shows. Never starts with '$', which dap_apply_value_format rewrites.
-static void c_local_text(const c_locals_frame_t *f, const c_locals_row_t *row, char *out, size_t size) {
-    const c_local_t *l = &row->local;
-    switch (l->status) {
-    case C_LOCAL_OK: {
-        uint8_t bytes[C_LOCALS_SHOW_MAX];
-        bool    truncated = false;
-        const int n = c_locals_host_bytes(l, bytes, &truncated);
-        size_t len = 0;
-        for (int i = 0; i < n && len + 4 < size; i++)
-            len += (size_t)snprintf(out + len, size - len, i ? " %02X" : "%02X", bytes[i]);
-        if (truncated && len < size)
-            len += (size_t)snprintf(out + len, size - len, " ...");
-        if (!l->size && len < size)
-            snprintf(out + len, size - len, " (size unknown)");
-        break;
-    }
-    case C_LOCAL_UNALLOCATED:
-        snprintf(out, size, "unallocated, at $%04X", l->address);
-        break;
-    case C_LOCAL_NOT_STORED:
-        snprintf(out, size, "not stored yet, still in A/X");
-        break;
-    case C_LOCAL_REFUSED_VARIADIC:
-        snprintf(out, size, "refused: fixed parameter of a variadic function");
-        break;
-    case C_LOCAL_REFUSED_REGISTER:
-        snprintf(out, size, "refused: register variable");
-        break;
-    case C_LOCAL_REFUSED_LOCATION:
-        snprintf(out, size, "refused: not in plain RAM");
-        break;
-    case C_LOCAL_UNKNOWN_FRAME:
-    default:
-        snprintf(out, size, "unknown: %s", c_frame_state_reason(f->view.state));
-        break;
-    }
-}
-
-static const char *c_local_kind(const c_locals_row_t *row) {
-    return row->var.is_register ? "register" : row->local.is_param ? "parameter" : "local";
-}
-
 static int handle_c_locals_variables(int seq, int ref) {
     static const char cmd[] = "variables";
     const int frame = c_locals_ref_frame(ref);
@@ -1583,11 +1540,11 @@ static int handle_c_locals_variables(int seq, int ref) {
     c_locals_row_t *rows = c_locals_host_rows(&f);
     for (int i = 0; rows && i < f.var_count; i++) {
         char text[C_LOCALS_SHOW_MAX * 3 + 32];
-        c_local_text(&f, &rows[i], text, sizeof text);
+        c_locals_host_text(&f, &rows[i], text, sizeof text);
         cJSON *v = cJSON_CreateObject();
         cJSON_AddStringToObject(v, "name", rows[i].var.name);
         cJSON_AddStringToObject(v, "value", text);
-        cJSON_AddStringToObject(v, "type", c_local_kind(&rows[i]));
+        cJSON_AddStringToObject(v, "type", c_locals_row_kind(&rows[i]));
         cJSON_AddNumberToObject(v, "variablesReference", 0);
         if (rows[i].local.status == C_LOCAL_OK) {
             char at[12];
@@ -1647,7 +1604,7 @@ static int handle_x16_locals(int seq, cJSON *args) {
             const c_local_t *l = &rows[i].local;
             cJSON *v = cJSON_CreateObject();
             cJSON_AddStringToObject(v, "name", rows[i].var.name);
-            cJSON_AddStringToObject(v, "kind", c_local_kind(&rows[i]));
+            cJSON_AddStringToObject(v, "kind", c_locals_row_kind(&rows[i]));
             cJSON_AddStringToObject(v, "status", c_local_status_name(l->status));
             if (rows[i].var.is_anonymous)
                 cJSON_AddBoolToObject(v, "anonymous", true);
@@ -1671,7 +1628,7 @@ static int handle_x16_locals(int seq, cJSON *args) {
                     cJSON_AddBoolToObject(v, "truncated", true);
             } else {
                 char why[96];
-                c_local_text(&f, &rows[i], why, sizeof why);
+                c_locals_host_text(&f, &rows[i], why, sizeof why);
                 cJSON_AddStringToObject(v, "reason", why);
             }
             cJSON_AddItemToArray(vars, v);
