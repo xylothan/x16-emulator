@@ -122,6 +122,10 @@ main(void)
 	ss_layout newer = counted;
 	newer.chunks[0].version = 2;
 	check(ss_layout_diff(&counted, &newer) == 0, "a chunk of another version is found");
+	check(ss_layout_unreadable(&newer, &counted) == -1, "an older chunk of the same length is readable");
+	check(ss_layout_unreadable(&counted, &newer) == 0, "a newer chunk is not readable");
+	check(ss_layout_unreadable(&newer, &shorter) == 1, "an older chunk of another length is not readable");
+	check(ss_layout_unreadable(&counted, &fewer) == 1, "a missing chunk is not readable");
 
 	uint8_t junk[20] = { 'X', 'X', 'X', 'X', 1, 0, 0, 0, 0xFF, 0xFF, 0, 0 };
 	ss_layout bad;

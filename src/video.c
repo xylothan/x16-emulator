@@ -226,7 +226,6 @@ static uint32_t fx_y_pixel_increment;  // 11.9 fixed point (6.9 without 32x mult
 static uint32_t fx_x_pixel_position;   // 11.9 fixed point
 static uint32_t fx_y_pixel_position;   // 11.9 fixed point
 
-static uint16_t fx_poly_fill_length;      // 10 bits
 
 static uint32_t fx_affine_tile_base;
 static uint32_t fx_affine_map_base;
@@ -255,6 +254,14 @@ static uint8_t fx_16bit_hop_align;
 
 static bool fx_nibble_bit[2];
 static bool fx_nibble_incr[2];
+static bool fx_pending_pos_calc;
+
+// addr_data.v:352-375
+static inline uint16_t
+fx_fill_length(void)
+{
+	return (uint16_t)(((fx_y_pixel_position >> 16) - (fx_x_pixel_position >> 16)) & 0x3ff);
+}
 
 static uint8_t fx_cache[4];
 
@@ -397,12 +404,12 @@ video_reset()
 
 	fx_16bit_hop_align = 0;
 
+	fx_pending_pos_calc = false;
 	fx_nibble_bit[0] = false;
 	fx_nibble_bit[1] = false;
 	fx_nibble_incr[0] = false;
 	fx_nibble_incr[1] = false;
 
-	fx_poly_fill_length = 0;
 	fx_affine_tile_base = 0;
 	fx_affine_map_base = 0;
 	fx_affine_map_size = 2;
@@ -2703,8 +2710,10 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 	}
 }
 
+#define VERA_CHUNK_VERSION 2
+
 static void
-video_state_io(ss_writer *w, ss_reader *r)
+video_state_io(ss_writer *w, ss_reader *r, int version)
 {
 #define SS_BLOCK(x) do { if (w) ss_put(w, &(x), sizeof(x)); else ss_get(r, &(x), sizeof(x)); } while (0)
 	SS_BLOCK(video_ram);
@@ -2739,7 +2748,13 @@ video_state_io(ss_writer *w, ss_reader *r)
 	SS_BLOCK(fx_y_pixel_increment);
 	SS_BLOCK(fx_x_pixel_position);
 	SS_BLOCK(fx_y_pixel_position);
-	SS_BLOCK(fx_poly_fill_length);
+	// v1 held the fill length here, now derived; v2 keeps the slot so sizes match.
+	if (w) {
+		ss_put_u16(w, fx_pending_pos_calc ? 1 : 0);
+	} else {
+		uint16_t slot = ss_get_u16(r);
+		fx_pending_pos_calc = version >= 2 && slot != 0;
+	}
 	SS_BLOCK(fx_affine_tile_base);
 	SS_BLOCK(fx_affine_map_base);
 	SS_BLOCK(fx_affine_map_size);
@@ -2772,6 +2787,11 @@ video_state_io(ss_writer *w, ss_reader *r)
 	SS_BLOCK(s_pos_x_p);
 	SS_BLOCK(eff_y_fp);
 #undef SS_BLOCK
+
+	if (r && version < 2) {
+		io_addr[0] &= 0x1ffff;
+		io_addr[1] &= 0x1ffff;
+	}
 }
 
 // A hash of the picture as last drawn. Output only, so not part of a state:
@@ -2786,16 +2806,16 @@ video_screen_hash(void)
 void
 video_state_save(ss_writer *w)
 {
-	ss_begin(w, "VERA", 1);
-	video_state_io(w, NULL);
+	ss_begin(w, "VERA", VERA_CHUNK_VERSION);
+	video_state_io(w, NULL, VERA_CHUNK_VERSION);
 	ss_end(w);
 }
 
 void
 video_state_load(ss_reader *r)
 {
-	ss_open(r, "VERA");
-	video_state_io(NULL, r);
+	int version = ss_open(r, "VERA");
+	video_state_io(NULL, r, version);
 	ss_close(r);
 
 	// The colours are derived from the palette; the per-line debug history
@@ -3793,7 +3813,7 @@ video_get_state(struct video_state *out)
 	out->fx_y_increment          = (int32_t)fx_y_pixel_increment;
 	out->fx_x_position           = fx_x_pixel_position;
 	out->fx_y_position           = fx_y_pixel_position;
-	out->fx_poly_fill_length     = fx_poly_fill_length;
+	out->fx_poly_fill_length     = fx_fill_length();
 	out->fx_affine_tile_base     = fx_affine_tile_base;
 	out->fx_affine_map_base      = fx_affine_map_base;
 	out->fx_affine_map_size      = fx_affine_map_size;
@@ -3808,11 +3828,75 @@ video_get_address(uint8_t sel)
 	return address & 0x1ffff;
 }
 
+void fx_affine_prefetch(void);
+
+// addr_data.v:872-880, 934-938
+static void
+fx_poly_addr1(bool fetch)
+{
+	int32_t x = (int32_t)(fx_x_pixel_position << 5) >> 5;
+	if (fx_4bit_mode) {
+		io_addr[1] = (io_addr[0] + (x >> 17)) & 0x1ffff;
+		fx_nibble_bit[1] = (fx_x_pixel_position >> 16) & 1;
+	} else {
+		io_addr[1] = (io_addr[0] + (x >> 16)) & 0x1ffff;
+		fx_nibble_bit[1] = 0;
+	}
+	if (fetch) {
+		io_rddata[1] = video_space_read(io_addr[1]);
+	}
+}
+
+// addr_data.v:888-910: requested in any mode, held until mode 2 or 3.
+static void
+fx_resolve_pending(void)
+{
+	if (!fx_pending_pos_calc) {
+		return;
+	}
+	if (fx_addr1_mode == 3) {
+		fx_pending_pos_calc = false;
+		fx_affine_prefetch();
+	} else if (fx_addr1_mode == 2) {
+		fx_pending_pos_calc = false;
+		fx_poly_addr1(true);
+	}
+}
+
+// mult_accum.v OLOAD: with the multiplier off, accumulate loads the cache.
+static void
+fx_accum_step(void)
+{
+	if (fx_multiplier) {
+		int32_t m = (int16_t)((fx_cache[1] << 8) | fx_cache[0]) * (int16_t)((fx_cache[3] << 8) | fx_cache[2]);
+		if (fx_subtract) {
+			fx_mult_accumulator -= m;
+		} else {
+			fx_mult_accumulator += m;
+		}
+	} else {
+		fx_mult_accumulator = (int32_t)((uint32_t)fx_cache[0] | (uint32_t)fx_cache[1] << 8 |
+			(uint32_t)fx_cache[2] << 16 | (uint32_t)fx_cache[3] << 24);
+	}
+}
+
+// PSG, palette and sprite attributes: addr_data.v:691-697.
+static inline bool
+fx_special_addr(uint32_t a)
+{
+	a &= 0x1ffff;
+	return (a >> 6) == 0x7E7 || (a >> 9) == 0xFD || (a >> 10) == 0x7F;
+}
+
 uint32_t
 get_and_inc_address(uint8_t sel, bool write)
 {
 	uint32_t address = io_addr[sel];
 	int16_t incr = increments[io_inc[sel]];
+
+	if (sel == 1 && fx_addr1_mode == 2 && !write && fx_2bit_poking) {
+		return address;
+	}
 
 	if (fx_4bit_mode && fx_nibble_incr[sel] && !incr) {
 		if (fx_nibble_bit[sel]) {
@@ -3842,38 +3926,49 @@ get_and_inc_address(uint8_t sel, bool write)
 
 	if (sel == 1 && fx_addr1_mode == 1) { // FX line draw mode
 		fx_x_pixel_position += fx_x_pixel_increment;
+		fx_y_pixel_position += fx_y_pixel_increment;
 		if (fx_x_pixel_position & 0x10000) {
 			fx_x_pixel_position &= ~0x10000;
-			if (fx_4bit_mode && fx_nibble_incr[0]) {
+			int32_t step0 = increments[io_inc[0]];
+			if (fx_4bit_mode && fx_nibble_incr[0] && !step0) {
+				bool dec = io_inc[0] & 1;
+				// VERA 49: the step follows ADDR1's nibble, and flips it.
 				if (fx_nibble_bit[1]) {
-					if ((io_inc[0] & 1) == 0) io_addr[1] += 1;
+					if (!dec) {
+						io_addr[1] += 1;
+					}
 					fx_nibble_bit[1] = 0;
 				} else {
-					if (io_inc[0] & 1) io_addr[1] -= 1;
+					if (dec) {
+						io_addr[1] -= 1;
+					}
 					fx_nibble_bit[1] = 1;
 				}
+			} else {
+				io_addr[1] += step0;
 			}
-			io_addr[1] += increments[io_inc[0]];
 		}
 	} else if (fx_addr1_mode == 2 && write == false) { // FX polygon fill mode
-		fx_x_pixel_position += fx_x_pixel_increment;
-		fx_y_pixel_position += fx_y_pixel_increment;
-		fx_poly_fill_length = ((int32_t) fx_y_pixel_position >> 16) - ((int32_t) fx_x_pixel_position >> 16);
-		if (sel == 0 && fx_cache_byte_cycling && !fx_cache_fill) {
-			fx_cache_byte_index = (fx_cache_byte_index + 1) & 3;
-		}
-		if (sel == 1) {
-			if (fx_4bit_mode) {
-				io_addr[1] = io_addr[0] + (fx_x_pixel_position >> 17);
-				fx_nibble_bit[1] = (fx_x_pixel_position >> 16) & 1;
-			} else {
-				io_addr[1] = io_addr[0] + (fx_x_pixel_position >> 16);
+		if (!(sel == 1 && fx_2bit_poking)) {
+			fx_x_pixel_position += fx_x_pixel_increment;
+			fx_y_pixel_position += fx_y_pixel_increment;
+			if (sel == 0 && fx_cache_byte_cycling && !fx_cache_fill) {
+				if (fx_cache_increment_mode) {
+					fx_cache_byte_index = (fx_cache_byte_index & 2) | ((fx_cache_byte_index + 1) & 1);
+				} else {
+					fx_cache_byte_index = (fx_cache_byte_index + 1) & 3;
+				}
+			}
+			if (sel == 1) {
+				fx_poly_addr1(false);
 			}
 		}
-	} else if (sel == 1 && fx_addr1_mode == 3 && write == false) { // FX affine mode
+	} else if (sel == 1 && fx_addr1_mode == 3) { // FX affine mode
 		fx_x_pixel_position += fx_x_pixel_increment;
 		fx_y_pixel_position += fx_y_pixel_increment;
 	}
+	io_addr[0] &= 0x1ffff;
+	io_addr[1] &= 0x1ffff;
 	return address;
 }
 
@@ -3907,8 +4002,8 @@ fx_affine_prefetch(void)
 		address += (affine_y_sub_tile << (3 - fx_4bit_mode)) + (affine_x_sub_tile >> (uint8_t)fx_4bit_mode);
 		fx_nibble_bit[1] = (affine_x_sub_tile & 1) >> (1 - fx_4bit_mode);
 	}
-	io_addr[1] = address;
-	io_rddata[1] = video_space_read(address);
+	io_addr[1] = address & 0x1ffff;
+	io_rddata[1] = video_space_read(io_addr[1]);
 }
 
 //
@@ -4070,32 +4165,20 @@ uint8_t video_get_dc_value(uint8_t reg) {
 		case 0x15: // DCSEL=4, $9F2A
 			return (fx_y_pixel_position >> 8) & 0xff;
 			break;
-		case 0x16: // DCSEL=5, 0x9F2B
-			if (fx_poly_fill_length >= 768) {
-				return ((fx_2bit_poly && fx_addr1_mode == 2) ? 0x00 : 0x80);
-			}
-			if (fx_4bit_mode) {
-				if (fx_2bit_poly && fx_addr1_mode == 2) {
-					return ((fx_y_pixel_position & 0x00008000) >> 8) |
-						((fx_x_pixel_position >> 11) & 0x60) |
-						((fx_x_pixel_position >> 14) & 0x10) |
-						((fx_poly_fill_length & 0x0007) << 1) |
-						((fx_x_pixel_position & 0x00008000) >> 15);
-				} else {
-					return ((!!(fx_poly_fill_length & 0xfff8)) << 7) |
-						((fx_x_pixel_position >> 11) & 0x60) |
-						((fx_x_pixel_position >> 14) & 0x10) |
-						((fx_poly_fill_length & 0x0007) << 1);
-				}
-			} else {
-				return ((!!(fx_poly_fill_length & 0xfff0)) << 7) |
-					((fx_x_pixel_position >> 11) & 0x60) |
-					((fx_poly_fill_length & 0x000f) << 1);
-			}
-			break;
-		case 0x17: // DCSEL=5, 0x9F2C
-			return ((fx_poly_fill_length & 0x03f8) >> 2);
-			break;
+		case 0x16:
+		case 0x17: {
+			uint32_t xp = (fx_x_pixel_position >> 7) & 0xfffff, yp = (fx_y_pixel_position >> 7) & 0xfffff;
+			uint32_t fill = (((yp >> 9) & 0x3ff) - ((xp >> 9) & 0x3ff)) & 0x3ff;
+			bool ovf = (fill >> 8) == 3;
+			bool m2 = fx_addr1_mode == 2 && fx_4bit_mode && fx_2bit_poly;
+			if ((reg & 0x1f) == 0x17) return (uint8_t)((fill >> 3) << 1);
+			uint8_t l = m2 && ((xp >> 8) & 1);
+			if (!ovf) l |= (fill & 7) << 1;
+			if (!ovf && ((!fx_4bit_mode && ((fill >> 3) & 1)) || (fx_4bit_mode && ((xp >> 11) & 1)))) l |= 0x10;
+			if (!ovf) l |= ((xp >> 9) & 3) << 5;
+			if ((!fx_4bit_mode && (fill >> 4)) || (!m2 && fx_4bit_mode && (fill >> 3)) || (m2 && ((yp >> 8) & 1))) l |= 0x80;
+			return l;
+		}
 		case 0x18: // DCSEL=6, 0x9F29
 			return fx_cache[0];
 			break;
@@ -4198,7 +4281,7 @@ static void check_not_writeonly(uint8_t reg) {
 		printf("Warning: %04X read from write-only VERA register at 9F%02X (DCSEL=%d)\n", opcode_addr, reg+0x20, io_dcsel);
 }
 
-uint8_t video_read(uint8_t reg, bool debugOn) {
+static uint8_t video_read_inner(uint8_t reg, bool debugOn) {
 	bool ntsc_mode = reg_composer[0] & 2;
 	uint16_t scanline = ntsc_mode ? ntsc_scan_pos_y % SCAN_HEIGHT : vga_scan_pos_y;
 	if (scanline >= 512) scanline=511;
@@ -4296,12 +4379,7 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 					// fall out of the switch
 					break;
 				case 0x19: // DCSEL=6, 0x9F2A
-					; // <- avoids the error in some compilers about a declaration after a label
-					int32_t m_result = (int16_t)((fx_cache[1] << 8) | fx_cache[0]) * (int16_t)((fx_cache[3] << 8) | fx_cache[2]);
-					if (fx_subtract)
-						fx_mult_accumulator -= m_result;
-					else
-						fx_mult_accumulator += m_result;
+					fx_accum_step();
 					// fall out of the switch
 					break;
 				default:
@@ -4354,7 +4432,7 @@ uint8_t video_read(uint8_t reg, bool debugOn) {
 	return 0;
 }
 
-void video_write(uint8_t reg, uint8_t value) {
+static void video_write_inner(uint8_t reg, uint8_t value) {
 	// if (reg > 4) {
 	// 	printf("ioregisters[0x%02X] = 0x%02X\n", reg, value);
 	// }
@@ -4364,6 +4442,8 @@ void video_write(uint8_t reg, uint8_t value) {
 
 	switch (reg & 0x1F) {
 		case 0x00:
+			if (fx_16bit_hop && io_addrsel == 1)
+				fx_16bit_hop_align = value & 3;
 			if (fx_2bit_poly && fx_4bit_mode && fx_addr1_mode == 2 && io_addrsel == 1) {
 				fx_2bit_poking = true;
 				io_addr[1] = (io_addr[1] & 0x1fffc) | (value & 0x3);
@@ -4387,7 +4467,7 @@ void video_write(uint8_t reg, uint8_t value) {
 			break;
 		case 0x03:
 		case 0x04: {
-			if (fx_2bit_poking && fx_addr1_mode) {
+			if (fx_2bit_poking && fx_addr1_mode == 2 && reg == 4) {
 				fx_2bit_poking = false;
 				// Still a guest byte through the port reaching VRAM, even
 				// though it takes its own path out of this switch below.
@@ -4422,6 +4502,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				printf("WRITE video_space[$%X] = $%02X\n", address, value);
 			}
 
+			bool special = fx_special_addr(address);
 			uint8_t wrdata_to_use;
 			uint8_t ram_wrdata[4];
 			uint8_t nibble_mask[4];
@@ -4441,13 +4522,13 @@ void video_write(uint8_t reg, uint8_t value) {
 				memcpy(cache_to_use, fx_cache, sizeof(fx_cache));
 			}
 
-			if (fx_cache_byte_cycling) {
+			if (fx_cache_byte_cycling && !special) {
 				wrdata_to_use = fx_cache[fx_cache_byte_index];
 			} else {
 				wrdata_to_use = value;
 			}
 
-			if (fx_cache_write && !fx_cache_byte_cycling) {
+			if (fx_cache_write && !fx_cache_byte_cycling && !special) {
 				ram_wrdata[0] = cache_to_use[0];
 				ram_wrdata[1] = cache_to_use[1];
 				ram_wrdata[2] = cache_to_use[2];
@@ -4459,7 +4540,7 @@ void video_write(uint8_t reg, uint8_t value) {
 				ram_wrdata[3] = wrdata_to_use;
 			}
 
-			if (fx_cache_write) {
+			if (fx_cache_write && !special) {
 				address &= 0x1fffc;
 				// One store, four bytes into VRAM. This is the whole reason FX
 				// is worth charging separately: the CPU issued a single write
@@ -4493,10 +4574,16 @@ void video_write(uint8_t reg, uint8_t value) {
 			} else {
 				note_port_traffic(true, 1);
 				note_vram_write(address, wrdata_to_use, false);
-				fx_video_space_write(address, nibble, wrdata_to_use); // Normal write
+				if (special) {
+					video_space_write(address, value);
+					note_vram_watch(address, value);
+				} else {
+					fx_video_space_write(address, nibble, wrdata_to_use);
+				}
 			}
 
-			io_rddata[reg - 3] = video_space_read(io_addr[reg - 3]);
+			if (reg == 4 && fx_addr1_mode == 3) fx_affine_prefetch();
+			else io_rddata[reg - 3] = video_space_read(io_addr[reg - 3]);
 			break;
 		}
 		case 0x05:
@@ -4569,13 +4656,7 @@ void video_write(uint8_t reg, uint8_t value) {
 					fx_cache_byte_index = (value & 0x0c) >> 2;
 					fx_multiplier = (value & 0x10) >> 4;
 					fx_subtract = (value & 0x20) >> 5;
-					if (value & 0x40) { // accumulate
-						int32_t m_result = (int16_t)((fx_cache[1] << 8) | fx_cache[0]) * (int16_t)((fx_cache[3] << 8) | fx_cache[2]);
-						if (fx_subtract)
-							fx_mult_accumulator -= m_result;
-						else
-							fx_mult_accumulator += m_result;
-					}
+					if (value & 0x40) fx_accum_step();
 					if (value & 0x80) { // reset accumulator
 						fx_mult_accumulator = 0;
 					}
@@ -4591,6 +4672,7 @@ void video_write(uint8_t reg, uint8_t value) {
 						<< 5*(!!(reg_composer[0x0d] & 0x80)); // multiply by 32 if flag set
 					if (fx_addr1_mode == 1 || fx_addr1_mode == 2) {
 						// Reset subpixel to 0.5
+						if (fx_addr1_mode == 1) fx_x_pixel_position &= ~0x10000;
 						fx_x_pixel_position = (fx_x_pixel_position & 0x07ff0000) | 0x00008000;
 					}
 					break;
@@ -4610,19 +4692,19 @@ void video_write(uint8_t reg, uint8_t value) {
 					break;
 				case 0x10: // DCSEL=4, $9F29
 					fx_x_pixel_position = (fx_x_pixel_position & 0x0700ff80) | (value << 16);
-					fx_affine_prefetch();
+					fx_pending_pos_calc = true;
 					break;
 				case 0x11: // DCSEL=4, $9F2A
 					fx_x_pixel_position = (fx_x_pixel_position & 0x00ffff00) | ((value & 0x7) << 24) | (value & 0x80);
-					fx_affine_prefetch();
+					fx_pending_pos_calc = true;
 					break;
 				case 0x12: // DCSEL=4, $9F2B
 					fx_y_pixel_position = (fx_y_pixel_position & 0x0700ff80) | (value << 16);
-					fx_affine_prefetch();
+					fx_pending_pos_calc = true;
 					break;
 				case 0x13: // DCSEL=4, $9F2C
 					fx_y_pixel_position = (fx_y_pixel_position & 0x00ffff00) | ((value & 0x7) << 24) | (value & 0x80);
-					fx_affine_prefetch();
+					fx_pending_pos_calc = true;
 					break;
 				case 0x14: // DCSEL=5, $9F29
 					fx_x_pixel_position = (fx_x_pixel_position & 0x07ff0080) | (value << 8);
@@ -4764,4 +4846,22 @@ stop6502(uint16_t address, uint8_t bank) {
 			machine_reset();
 		};
 	}
+}
+
+
+void
+video_write(uint8_t reg, uint8_t value)
+{
+	video_write_inner(reg, value);
+	fx_resolve_pending();
+}
+
+uint8_t
+video_read(uint8_t reg, bool debugOn)
+{
+	uint8_t value = video_read_inner(reg, debugOn);
+	if (!debugOn) {
+		fx_resolve_pending();
+	}
+	return value;
 }

@@ -67,7 +67,7 @@ extern bool no_ieee_intercept;
 // over DAP (x16/status) so a state's writer can still be traced.
 
 #define SAVESTATE_LAYOUT_VERSION  1
-#define SAVESTATE_MACHINE_VERSION 3
+#define SAVESTATE_MACHINE_VERSION 4
 
 extern const char x16_source_id[];
 
@@ -504,7 +504,7 @@ savestate_check(const void *data, size_t len, char *err, size_t err_len)
 		snprintf(err, err_len, "the state is damaged: its sections do not add up");
 		return false;
 	}
-	const int i = ss_layout_diff(&expect, &got);
+	const int i = ss_layout_unreadable(&expect, &got);
 	if (i >= 0) {
 		if (i < got.count && i < expect.count) {
 			snprintf(err, err_len, "the state's '%.4s' section does not match this machine's", expect.chunks[i].tag);
