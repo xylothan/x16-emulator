@@ -8,6 +8,7 @@ X16_VERA_DIFF_REQUIRED is set.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,31 @@ def unavailable(why):
     return SKIP
 
 
+def apply_v49(source):
+    """RTL v48.0.1 plus the VERA 49 line-draw nibble step."""
+    text, n = re.subn(
+        r"(wire \[16:0\] vram_addr_1_incr_decr_10 = )vram_addr_1_incr_decr_1 \+ "
+        r"\{ \{6\{incr_decr_0\[10\]\}\}, incr_decr_0\};",
+        "wire v49_nib_step = fx_4bit_mode_r && vram_addr_nib_incr_0_r && !vram_addr_incr_0_r;\n"
+        "    wire v49_nib_after = vram_addr_nib_1_incr_decr_1;\n"
+        "    wire signed [10:0] v49_step = !v49_nib_step ? incr_decr_0 :\n"
+        "        vram_addr_decr_0_r ? (v49_nib_after ? 11'd0 : -11'd1) : (v49_nib_after ? 11'd1 : 11'd0);\n"
+        r"    \1vram_addr_1_incr_decr_1 + { {6{v49_step[10]}}, v49_step};",
+        source,
+    )
+    if n != 1:
+        raise RuntimeError("v49 address patch did not apply")
+    text, n = re.subn(
+        r"(vram_addr_1_next = vram_addr_1_incr_decr_10;\s+vram_addr_nib_1_next = )"
+        r"vram_addr_nib_1_incr_decr_1;",
+        r"\1vram_addr_nib_1_incr_decr_1 ^ v49_nib_step;",
+        text,
+    )
+    if n != 1:
+        raise RuntimeError("v49 nibble patch did not apply")
+    return text
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -54,9 +80,11 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         tb = tmp / "tb.vvp"
+        addr_data = tmp / "addr_data.v"
+        addr_data.write_text(apply_v49((RTL / "addr_data.v").read_text()))
         subprocess.run(
-            ["iverilog", "-g2005", "-o", str(tb), "-s", "tb", str(HERE / "tb_fx.v"), str(HERE / "models.v")]
-            + [str(RTL / name) for name in RTL_SOURCES],
+            ["iverilog", "-g2005", "-o", str(tb), "-s", "tb", str(HERE / "tb_fx.v"), str(HERE / "models.v"),
+             str(addr_data), str(RTL / "vram_if.v")],
             check=True,
         )
         for seed, seqs, ops, flag in CORPORA:

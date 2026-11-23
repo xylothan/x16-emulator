@@ -3932,9 +3932,21 @@ get_and_inc_address(uint8_t sel, bool write)
 			int32_t step0 = increments[io_inc[0]];
 			if (fx_4bit_mode && fx_nibble_incr[0] && !step0) {
 				bool dec = io_inc[0] & 1;
-				step0 = dec ? (fx_nibble_bit[0] ? 0 : -1) : (fx_nibble_bit[0] ? 1 : 0);
+				// VERA 49: the step follows ADDR1's nibble, and flips it.
+				if (fx_nibble_bit[1]) {
+					if (!dec) {
+						io_addr[1] += 1;
+					}
+					fx_nibble_bit[1] = 0;
+				} else {
+					if (dec) {
+						io_addr[1] -= 1;
+					}
+					fx_nibble_bit[1] = 1;
+				}
+			} else {
+				io_addr[1] += step0;
 			}
-			io_addr[1] += step0;
 		}
 	} else if (fx_addr1_mode == 2 && write == false) { // FX polygon fill mode
 		if (!(sel == 1 && fx_2bit_poking)) {
