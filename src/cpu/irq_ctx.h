@@ -95,6 +95,7 @@ uint32_t cpu_irq_reset_count(void);
 // push for a call or interrupt, after the pull for a return or RTI.
 //   CALL:       pc = the target (24-bit), ret = the return address pushed
 //               (the call's last byte, so inline operands start at ret + 1)
+//   CALL_LONG:  the same for JSL, which pushes the program bank first
 //   RETURN:     pc = where it returned to
 //   IRQ_ENTER:  pc = the handler's first instruction, ret = the vector
 //   IRQ_LEAVE:  pc = where RTI returned to
@@ -104,9 +105,17 @@ enum {
 	CPU_FLOW_RETURN,
 	CPU_FLOW_IRQ_ENTER,
 	CPU_FLOW_IRQ_LEAVE,
+	CPU_FLOW_CALL_LONG,
 };
 typedef void (*cpu_flow_hook_fn)(int kind, uint32_t pc, uint16_t sp, uint16_t ret);
 extern cpu_flow_hook_fn cpu_flow_hook;
+
+// Listeners share the hook, and only these two functions assign it: NULL with
+// no listener, the listener itself with one, a dispatcher with more. Listening
+// twice counts once. False when the table is full. Not callable from a listener.
+#define CPU_FLOW_LISTENER_MAX 2
+bool cpu_flow_listen(cpu_flow_hook_fn fn);
+void cpu_flow_unlisten(cpu_flow_hook_fn fn);
 
 // Called after each instruction while an interrupt line is asserted: `held`
 // when the I flag kept it from being taken. NULL when nothing is listening,

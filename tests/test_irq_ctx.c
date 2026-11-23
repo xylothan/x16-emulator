@@ -27,6 +27,43 @@ check(bool cond, const char *what)
 
 // CPU_IRQ_CTX_MAX comes from the header, not a private copy.
 
+static int      a_calls, b_calls, c_calls;
+static int      a_kind;
+static uint32_t a_pc;
+static uint16_t a_sp, a_ret;
+static int      b_after_a;
+
+static void
+listener_a(int kind, uint32_t pc, uint16_t sp, uint16_t ret)
+{
+	a_calls++;
+	a_kind = kind;
+	a_pc   = pc;
+	a_sp   = sp;
+	a_ret  = ret;
+}
+
+static void
+listener_b(int kind, uint32_t pc, uint16_t sp, uint16_t ret)
+{
+	(void)kind;
+	(void)pc;
+	(void)sp;
+	(void)ret;
+	b_calls++;
+	b_after_a = a_calls;
+}
+
+static void
+listener_c(int kind, uint32_t pc, uint16_t sp, uint16_t ret)
+{
+	(void)kind;
+	(void)pc;
+	(void)sp;
+	(void)ret;
+	c_calls++;
+}
+
 int
 main(void)
 {
@@ -401,6 +438,49 @@ main(void)
 		cpu_irq_ctx_reset();
 		check(cpu_irq_reset_count() == before + 1, "resets are counted");
 		check(cpu_irq_take_entered_kinds() == 0, "a reset clears the kinds");
+	}
+
+	// ── Flow hook listeners ─────────────────────────────────────────────────
+	{
+		check(cpu_flow_hook == NULL, "flow hook starts NULL");
+
+		cpu_flow_unlisten(listener_a);
+		check(cpu_flow_hook == NULL, "removing an absent listener changes nothing");
+		check(!cpu_flow_listen(NULL), "a NULL listener is refused");
+		check(cpu_flow_hook == NULL, "and leaves the hook NULL");
+
+		check(cpu_flow_listen(listener_a), "first listener accepted");
+		check(cpu_flow_hook == listener_a, "one listener is called directly");
+		check(cpu_flow_listen(listener_a), "listening twice succeeds");
+		check(cpu_flow_hook == listener_a, "and stays direct");
+		cpu_flow_unlisten(listener_a);
+		check(cpu_flow_hook == NULL, "listening twice counts once");
+
+		check(cpu_flow_listen(listener_a) && cpu_flow_listen(listener_b), "two listeners accepted");
+		check(cpu_flow_hook != NULL && cpu_flow_hook != listener_a && cpu_flow_hook != listener_b,
+		      "two listeners go through the dispatcher");
+		check(!cpu_flow_listen(listener_c), "a listener past the limit is refused");
+		cpu_flow_hook(CPU_FLOW_CALL_LONG, 0x123456, 0x01FD, 0xBEEF);
+		check(a_calls == 1 && b_calls == 1 && c_calls == 0, "each listener runs once");
+		check(b_after_a == 1, "in the order they were added");
+		check(a_kind == CPU_FLOW_CALL_LONG && a_pc == 0x123456 && a_sp == 0x01FD && a_ret == 0xBEEF,
+		      "with the event's arguments");
+
+		cpu_flow_unlisten(listener_a);
+		check(cpu_flow_hook == listener_b, "removing the first leaves the second direct");
+		cpu_flow_unlisten(listener_b);
+		check(cpu_flow_hook == NULL, "removing both clears the hook");
+
+		check(cpu_flow_listen(listener_a) && cpu_flow_listen(listener_b), "two listeners again");
+		cpu_flow_unlisten(listener_b);
+		check(cpu_flow_hook == listener_a, "removing the second leaves the first direct");
+		check(cpu_flow_listen(listener_c), "a freed slot can be reused");
+		a_calls = c_calls = 0;
+		cpu_flow_hook(CPU_FLOW_CALL, 0, 0, 0);
+		check(a_calls == 1 && c_calls == 1, "and its listener runs");
+		cpu_flow_unlisten(listener_a);
+		cpu_flow_unlisten(listener_c);
+		check(cpu_flow_hook == NULL, "hook is NULL after the last removal");
 	}
 
 	if (failures) {
