@@ -1408,6 +1408,8 @@ def test_refresh_memory():
         with session(OPT_IN, {}) as e:
             d = e.d
             plant(d, pc="$0810")
+            # LDA #$A5; STA $1000; JMP $0810
+            put_mem(d, 0x0810, [0xA9, 0xA5, 0x8D, 0x00, 0x10, 0x4C, 0x10, 0x08])
             d.drain(0.2)
 
             start = len(d.msgs)
@@ -1420,7 +1422,8 @@ def test_refresh_memory():
             d.drain(0.5)
             d.pause()
             d.drain(0.2)
-            case("the loop stored to memory", get_byte(d, 0x1000) != 0)
+            stored = get_byte(d, 0x1000)
+            case("the loop stored to memory", stored == 0xA5, f"${stored:02X}")
             got = events_of(d, start, "memory")
             case("CPU stores send nothing", not got, str(got)[:200])
 
