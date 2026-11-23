@@ -1063,7 +1063,7 @@ Values default to both bases, `$12 (18)`. `{"hex": true}` gives `$12` and `{"hex
 `18`. Flags, labels, console listings and `bank:addr` values have no second base and are unchanged,
 and in a stack frame's name `hex` applies to the offset from the label.
 
-Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sprites`, `x16/palette`, `x16/tilemap`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
+Custom requests: `x16/status`, `x16/step`, `x16/runTo`, `x16/readLog`, `x16/saveState`, `x16/loadState`, `x16/registers`, `x16/callStack`, `x16/locals`, `x16/searchMemory`, `x16/audio`, `x16/setVoiceMute`, `x16/io`, `x16/ioTrace`, `x16/ioCapture`, `x16/interrupt`, `x16/sprites`, `x16/palette`, `x16/tilemap`, `x16/sourceLocation`, `x16/sendKey`, `x16/type`, `x16/joystick`, `x16/screen`, `x16/screenshot`, `x16/vera`, `x16/perfStats`,
 `x16/perfConfig`, `x16/spriteMuxStats`, `x16/spriteMuxConfig` and `x16/sdcard` (card state, the image's file index with per-file byte counts,
 and the block history; `x16dbg sd`). The server also emits a custom `x16/perfBudgetOverrun` event. Clients can detect
 the profiling surface from the `supportsX16PerfStats` capability in the `initialize` response.
@@ -1561,7 +1561,7 @@ debugging it.
 | Tools | |
 | --- | --- |
 | Run control | `get_status`, `pause`, `continue`, `step`, `run_frames`, `run_to`, `wait_for_stop`, `reset` |
-| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `search_memory`, `disassemble`, `get_stack`, `evaluate`, `get_audio_state`, `set_voice_mute` |
+| State | `get_registers`, `set_registers`, `read_memory`, `write_memory`, `search_memory`, `disassemble`, `get_stack`, `get_locals`, `evaluate`, `get_audio_state`, `set_voice_mute` |
 | Breakpoints | `set_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `set_stop_on`, `list_breakpoints`, `read_log` |
 | Symbols | `load_symbols`, `lookup_symbol`, `list_symbols` |
 | Source | `list_sources`, `read_source`, `source_location` |
@@ -1656,6 +1656,26 @@ the fields of `next` back to continue. A call can return `more: true` with no ma
 `get_stack` guesses callers from the hardware stack, because the CPU keeps no frame pointer. It
 recognises `JSR` only, so calls through `JSL` or the KERNAL's far call are missed. A caller's
 `address` is where it returns to, and its symbol, file and line are those of the `JSR` (`callSite`).
+
+`get_locals` (`x16/locals`, and a "C Locals (function level)" DAP scope) lists a cc65 function's
+parameters and function-level locals for one stack frame, read-only, while paused. It needs a
+debugger on the command line and a `.dbg` with C symbols, loaded before the call to be seen. A value
+is shown only when its address is known. `.dbg` has no C types, so a value is bytes in memory order,
+with a size inferred from the next variable's offset, or none. Other statuses show no value:
+
+| Status | Meaning |
+|---|---|
+| `unallocated` | Below the current C stack pointer, so address only |
+| `not-stored` | The last `fastcall` parameter, still in A/X during the prologue |
+| `unknown-frame` | This call was not seen entering, for example it began before a state load or was a tail call |
+| `refused-variadic` | A fixed parameter of a variadic function |
+| `refused-register` | A `register` variable |
+| `refused-location` | Not wholly in RAM below `$9F00` |
+
+A whole frame is refused in 65C816 native mode, with a non-zero direct page, in banked code, without
+a C stack pointer symbol, or when the function's first call cannot be identified. Nested-block and
+`static` locals have no record, and an inner declaration can shadow a listed name. A DAP hover or
+watch on a C variable's name is an error rather than the register or label of that name.
 
 `load_symbols`, `load_prg` and `read_source` read only inside `-fsroot` (the working folder when
 there is none), the dump folder, or the folder of the `-prg` the emulator started with. Links are

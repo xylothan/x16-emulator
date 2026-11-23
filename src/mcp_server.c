@@ -1522,6 +1522,10 @@ static cJSON *tool_get_stack(cJSON *args) {
     return tool_forward("x16/callStack", args);
 }
 
+static cJSON *tool_get_locals(cJSON *args) {
+    return tool_forward("x16/locals", args);
+}
+
 // hash_memory and dump_memory take the same range as read_memory.
 static cJSON *tool_range(const char *command, cJSON *args, bool to_file) {
     char err[200], ref[48];
@@ -2073,6 +2077,18 @@ static const mcp_tool_t tools[] = {
       "\"levels\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":64,\"default\":0,\"description\":\"0 means all\"}"
       "},\"additionalProperties\":false}",
       TOOL_READ, tool_get_stack },
+    { "get_locals",
+      "A cc65 C function's parameters and function-level locals, for one get_stack frame, while "
+      "paused. Nested-block and static locals are not listed, and an inner declaration can "
+      "shadow a listed name. There are no C types: each row has name, kind, status, and for "
+      "status ok an address, size (null when unknown) and hex bytes in memory order. Any other "
+      "status means no value is shown: unallocated, not-stored, unknown-frame, refused-variadic, "
+      "refused-register or refused-location, with a reason. Frames entered before tracking "
+      "began, or by a tail call, are unknown-frame.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"frame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":63,\"default\":0}"
+      "},\"additionalProperties\":false}",
+      TOOL_READ, tool_get_locals },
     { "set_breakpoint",
       "Stop when code runs at a CPU address (kind \"exec\"), or when it is written (\"write\"), "
       "read (\"read\") or either (\"access\"), with an optional length. Instead of 'address', "

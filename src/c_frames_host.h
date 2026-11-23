@@ -4,6 +4,7 @@
 #define _C_FRAMES_HOST_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +17,9 @@ extern "C" {
 // A snapshot on purpose. The guest can clear debugger_enabled through $9FB0,
 // and following it would lose the frames open at that moment.
 void c_frames_host_start(bool debugger);
+
+// Where the C stack pointer is, while calls are being tracked.
+bool c_frames_host_c_sp(uint16_t *addr);
 
 #ifdef __cplusplus
 }

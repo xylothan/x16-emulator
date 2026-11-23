@@ -357,6 +357,8 @@ set(X16_SOURCES
     src/call_stack.c
     src/c_frames.c
     src/c_frames_host.c
+    src/c_locals.c
+    src/c_locals_host.c
     src/mem_search.c
     src/cpu/irq_ctx.c
     src/javascript_interface.c
@@ -778,6 +780,10 @@ x16_add_test(call_stack
 # Reads the machine through callbacks, so it links alone.
 x16_add_test(c_frames
     SOURCES tests/test_c_frames.c src/c_frames.c)
+
+# Takes everything as arguments, so it links alone.
+x16_add_test(c_locals
+    SOURCES tests/test_c_locals.c src/c_locals.c)
 
 # The search reads memory through a callback, so it links alone too.
 x16_add_test(mem_search

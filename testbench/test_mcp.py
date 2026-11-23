@@ -9,10 +9,12 @@ else would break a real client.
 """
 
 import base64
+import gzip
 import hashlib
 import json
 import os
 import queue
+import re
 import socket
 import struct
 import subprocess
@@ -184,7 +186,7 @@ def test_protocol():
 
 READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "list_breakpoints",
                  "wait_for_stop", "get_screen", "screenshot",
-                 "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack",
+                 "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack", "get_locals",
                  "get_audio_state", "get_io_state", "read_io_trace", "get_sprites", "get_palette", "get_tilemap",
                  "list_sources", "read_source", "source_location", "host_perf",
                  "get_sdcard", "evaluate", "read_log"}
@@ -2874,6 +2876,212 @@ def source_dbg(forged, bankb_size=4):
     return (text + "".join(syms) + 'mod\tid=0,name="src.o",file=0\n').encode("latin-1")
 
 
+# name, then (variable, index in g_addr, expected leading bytes).
+C_LOCALS_CASES = [
+    ("fast1", [("a", 0, "1111"), ("l", 1, "3412"), ("arr", 2, "A1A2A3")]),
+    ("fast3", [("a", 0, "22"), ("b", 1, "3333"), ("c", 2, "77665544"), ("x", 3, "5A")]),
+    ("cd", [("a", 0, "0201"), ("b", 1, "03"), ("l", 2, "8877")]),
+    ("recurse", None),
+    ("viaptr", [("v", 0, "AD0B"), ("w", 1, "6824")]),
+    ("va", [("l", 0, "4433")]),
+    ("withreg", [("a", 0, "0B0A"), ("l", 1, "5566")]),
+]
+
+
+def test_c_locals():
+    print("c locals")
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "c_locals")
+    with open(os.path.join(here, "locals.prg"), "rb") as f:
+        prg = f.read()[2:]
+    with gzip.open(os.path.join(here, "locals.dbg.gz")) as z:
+        dbg_text = z.read()
+    syms = {m.group(1).decode(): int(m.group(2), 16) for m in
+            re.finditer(rb'^sym\t[^\n]*?name="([^"]+)"[^\n]*?val=0x([0-9A-Fa-f]+)[^\n]*type=lab', dbg_text, re.M)}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dbg = os.path.join(tmp, "locals.dbg")
+        with open(dbg, "wb") as f:
+            f.write(dbg_text)
+        port = free_port()
+        with Mcp(["-debugport", str(port), "-fsroot", tmp, "-dbgfile", dbg]) as m:
+            m.init()
+            case("c locals: reaches BASIC", wait_basic(m))
+            m.call("pause")
+            for i in range(0, len(prg), 200):
+                m.call("write_memory", address=0x0801 + i, hex=prg[i:i + 200].hex())
+            dap = Dap(port)
+            dap.session()
+
+            def go():
+                since = data(m.call("get_status"))["stopId"]
+                m.call("continue")
+                m.call("wait_for_stop", sinceStopId=since)
+
+            def locals_at(frame):
+                return data(m.call("get_locals", frame=frame))
+
+            def frame_of(name, start=0):
+                for i in range(start, data(m.call("get_stack")).get("totalFrames", 0)):
+                    if locals_at(i).get("function") == name:
+                        return i
+                return -1
+
+            def oracle(n):
+                raw = mem_bytes(m, address=syms["_g_addr"], length=n * 2)
+                return [raw[i] | raw[i + 1] << 8 for i in range(0, n * 2, 2)]
+
+            def row(d, name):
+                return next((v for v in d.get("variables", []) if v["name"] == name), {})
+
+            # ── The prologue ──
+            m.call("set_breakpoint", address=syms["_fast1"])
+            status = data(m.call("get_registers"))["cpu"]["status"]
+            m.call("set_registers", pc=0x080D, sp=0x01F0, status=status & ~0x0C)
+            go()
+            d = locals_at(0)
+            case("at the entry, the frame is known", d.get("function") == "fast1" and d.get("state") == "known", str(d))
+            case("the last parameter is not stored yet", row(d, "a").get("status") == "not-stored", str(d))
+            case("and shows no bytes", "bytes" not in row(d, "a"), str(d))
+            case("locals are not allocated yet", row(d, "l").get("status") == "unallocated", str(d))
+            entry_l = row(d, "l").get("address")
+            m.call("step")
+            d = locals_at(0)
+            case("inside the prologue helper is no C function", d.get("function") is None and d.get("state") == "not-c", str(d))
+            d = locals_at(1)
+            case("the caller's parameter is still not stored", row(d, "a").get("status") == "not-stored", str(d))
+            m.call("remove_breakpoint", address=syms["_fast1"])
+            m.call("set_breakpoint", address=syms["_probe"])
+
+            # ── Every function ──
+            for name, want in C_LOCALS_CASES:
+                go()
+                if want is None:
+                    addrs = oracle(4)
+                    at = -1
+                    for depth in range(4):
+                        at = frame_of("recurse", at + 1)
+                        d = locals_at(at) if at >= 0 else {}
+                        v = row(d, "tag")
+                        case(f"recursion depth {depth}: known", d.get("state") == "known", str(d))
+                        case(f"recursion depth {depth}: address", v.get("address") == addrs[depth], str(v))
+                        case(f"recursion depth {depth}: value",
+                             str(v.get("bytes", "")).startswith(f"{depth:02X}40"), str(v))
+                    continue
+                at = frame_of(name)
+                d = locals_at(at) if at >= 0 else {}
+                case(f"{name}: frame is known", d.get("state") == "known", str(d))
+                addrs = oracle(len(want))
+                for var, index, value in want:
+                    v = row(d, var)
+                    case(f"{name}.{var}: ok", v.get("status") == "ok", str(v))
+                    case(f"{name}.{var}: address", v.get("address") == addrs[index], f"{v} != {addrs[index]:#x}")
+                    case(f"{name}.{var}: value", str(v.get("bytes", "")).startswith(value), str(v))
+                if name == "fast1":
+                    case("the address before the prologue was the same", entry_l == row(d, "l").get("address"))
+                    case("arr has its size from the gap", row(d, "arr").get("size") == 3, str(row(d, "arr")))
+                    case("the highest offset has no size", row(d, "a").get("size", 0) is None, str(row(d, "a")))
+                    case("kinds", (row(d, "a").get("kind"), row(d, "l").get("kind")) == ("parameter", "local"), str(d))
+
+                    main_at = frame_of("main")
+                    dm = locals_at(main_at) if main_at >= 0 else {}
+                    case("main: frame is known", dm.get("state") == "known", str(dm))
+                    raw = mem_bytes(m, address=syms["_g_main_addr"], length=6)
+                    for index, var in enumerate(("argc", "argv", "mine")):
+                        v = row(dm, var)
+                        real = raw[index * 2] | raw[index * 2 + 1] << 8
+                        case(f"main.{var}: ok", v.get("status") == "ok", str(v))
+                        case(f"main.{var}: address", v.get("address") == real, f"{v} != {real:#x}")
+                    case("main.mine: value", str(row(dm, "mine").get("bytes", "")).startswith("414D"), str(dm))
+
+                    frame_id = at + 1
+                    scopes = dap.request("scopes", {"frameId": frame_id})["body"]["scopes"]
+                    scope = next((s for s in scopes if s["name"] == "C Locals (function level)"), None)
+                    case("the DAP scope is offered", scope is not None and scope.get("presentationHint") == "locals",
+                         str(scopes)[:200])
+                    other = dap.request("scopes", {"frameId": 1})["body"]["scopes"]
+                    case("not for a frame in no C function",
+                         all(s["name"] != "C Locals (function level)" for s in other), str(other)[:200])
+                    ref = scope["variablesReference"]
+                    rows = dap.request("variables", {"variablesReference": ref})["body"]["variables"]
+                    a = next(r for r in rows if r["name"] == "l")
+                    case("a DAP row has the bytes", a["value"].startswith("34 12"), str(a))
+                    case("and a memory reference",
+                         int(a.get("memoryReference", "0"), 16) == row(d, "l").get("address"), str(a))
+                    case("and is read-only", a.get("presentationHint", {}).get("attributes") == ["readOnly"], str(a))
+                    hexed = dap.request("variables", {"variablesReference": ref, "format": {"hex": True}})
+                    case("a hex format leaves it alone",
+                         next(r for r in hexed["body"]["variables"] if r["name"] == "l")["value"] == a["value"])
+                    r = dap.request("setVariable", {"variablesReference": ref, "name": "l", "value": "1"})
+                    case("setVariable refuses", r.get("success") is False, str(r)[:200])
+                    r = dap.request("dataBreakpointInfo", {"variablesReference": ref, "name": "l"})
+                    case("a data breakpoint is refused", r.get("body", {}).get("dataId") is None, str(r)[:200])
+
+                    for context in ("hover", "watch"):
+                        r = dap.request("evaluate", {"expression": "a", "context": context, "frameId": frame_id})
+                        case(f"{context} on a C name is an error", r.get("success") is False, str(r)[:200])
+                        r = dap.request("evaluate", {"expression": "byte[l]+1", "context": context, "frameId": frame_id})
+                        case(f"{context} on a C name inside an expression", r.get("success") is False, str(r)[:200])
+                        r = dap.request("evaluate", {"expression": "A", "context": context, "frameId": frame_id})
+                        case(f"{context} on the register A still works", r.get("success") is True, str(r)[:200])
+                    r = dap.request("evaluate", {"expression": "a", "context": "repl", "frameId": frame_id})
+                    case("the console keeps its meaning", r.get("success") is True, str(r)[:200])
+
+                    before = data(m.call("get_registers"))
+                    locals_at(at)
+                    case("reading locals changes nothing", before == data(m.call("get_registers")))
+                    m.call("step")
+                    r = dap.request("variables", {"variablesReference": ref})
+                    case("a reference from before a step is an error", r.get("success") is False, str(r)[:200])
+                if name == "va":
+                    v = row(d, "fixed")
+                    case("a variadic fixed parameter is refused", v.get("status") == "refused-variadic", str(v))
+                    case("with no address", "address" not in v, str(v))
+                if name == "withreg":
+                    v = row(d, "r")
+                    case("a register variable is refused", v.get("status") == "refused-register", str(v))
+                    case("and is its own kind", v.get("kind") == "register", str(v))
+
+            # ── An interrupt handler on its own C stack ──
+            m.call("remove_breakpoint", address=syms["_probe"])
+            m.call("set_breakpoint", address=syms["_irq_probe"])
+            go()
+            at = frame_of("on_irq")
+            d = locals_at(at) if at >= 0 else {}
+            v = row(d, "mine")
+            real = int.from_bytes(mem_bytes(m, address=syms["_g_irq_addr"], length=2), "little")
+            if v.get("status") == "ok":
+                case("a C handler's variable reads right",
+                     v.get("address") == real and str(v.get("bytes", "")).startswith("E71E"), f"{v} != {real:#x}")
+            else:
+                case("a C handler's variable is reported unknown", v.get("status") == "unknown-frame", str(d))
+
+            # ── Open frames after a state load ──
+            m.call("remove_breakpoint", address=syms["_irq_probe"])
+            m.call("set_breakpoint", address=syms["_probe"])
+            go()
+            at = frame_of("spin")
+            d = locals_at(at) if at >= 0 else {}
+            addrs = oracle(2)
+            case("spin: known", d.get("state") == "known" and row(d, "w").get("address") == addrs[1], str(d))
+            m.call("remove_breakpoint", address=syms["_probe"])
+            m.call("run_frames", frames=2)
+            d = locals_at(0)
+            case("still known a frame later", d.get("function") == "spin" and d.get("state") == "known", str(d))
+            r = m.call("save_state", slot="c")
+            case("state saved", not is_error(r), str(r)[:200])
+            m.call("load_state", slot="c")
+            d = locals_at(0)
+            case("after a load the open frame is unknown", d.get("state") == "unknown-frame", str(d))
+            case("and its variables show no address",
+                 all("address" not in v and v.get("status") == "unknown-frame" for v in d.get("variables", [])), str(d))
+            case("get_locals refuses a bad frame", is_error(m.call("get_locals", frame=64)))
+            case("get_locals refuses a frame past the stack", is_error(m.call("get_locals", frame=63)))
+            case("get_locals refuses an unknown argument", is_error(m.call("get_locals", banana=1)))
+            m.call("continue")
+            case("get_locals needs a paused machine", is_error(m.call("get_locals")))
+            dap.close()
+
+
 def test_sources():
     print("source lookup")
 
@@ -5365,7 +5573,7 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_call_stack, test_sources, test_source_fifo, test_dbg_fifo,
+                 test_client_format, test_call_stack, test_c_locals, test_sources, test_source_fifo, test_dbg_fifo,
                  test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint, test_enable_per_owner,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
