@@ -121,6 +121,102 @@ write_temp_banked_dbg(void)
 	return write_temp(k_dbg_banked, "x16_dbg_info_banked.dbg");
 }
 
+// cc65 2.19 shape: `csym` ahead of the records it refers to.
+#define CSYM_HEADER \
+	"version\tmajor=2,minor=0\n" \
+	"info\tcsym=0,file=1,lib=0,line=0,mod=1,scope=4,seg=2,span=4,sym=%d,type=1\n" \
+	"%s%s"
+
+#define CSYM_FC \
+	"csym\tid=0,name=\"fc\",scope=1,type=0,sc=static,sym=23\n" \
+	"csym\tid=1,name=\"a\",scope=1,type=0,sc=auto,offs=1\n" \
+	"csym\tid=2,name=\"b\",scope=1,type=0,sc=auto\n" \
+	"csym\tid=3,name=\"l\",scope=1,type=0,sc=auto,offs=-1\n"
+
+#define CSYM_CD \
+	"csym\tid=4,name=\"cd\",scope=2,type=0,sc=static,sym=22\n" \
+	"csym\tid=5,name=\"$anon-param-0001\",scope=2,type=0,sc=auto,offs=2\n" \
+	"csym\tid=6,name=\"r\",scope=2,type=0,sc=reg,offs=4,sym=15\n" \
+	"csym\tid=7,name=\"s\",scope=2,type=0,sc=auto\n"
+
+static const char k_csym_tail[] =
+	"file\tid=0,name=\"f.c\",size=10,mtime=0x00000000,mod=0\n"
+	"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+	"seg\tid=1,name=\"DATA\",start=0x001000,size=0x0010,addrsize=absolute,type=rw\n"
+	"span\tid=0,seg=0,start=0,size=16\n"
+	"span\tid=1,seg=0,start=16,size=16\n"
+	"span\tid=2,seg=1,start=0,size=2,type=6\n"
+	"span\tid=3,seg=0,start=32,size=8\n"
+	"scope\tid=0,name=\"\",mod=0,size=40,span=0+1\n"
+	"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+	"scope\tid=2,name=\"_cd\",mod=0,type=scope,size=16,parent=0,sym=22,span=2+1\n"
+	"scope\tid=3,name=\"_asm\",mod=0,type=scope,size=8,parent=0,sym=21,span=3\n"
+	"sym\tid=23,name=\"_fc\",addrsize=absolute,size=16,scope=0,def=0,val=0x840,seg=0,type=lab\n"
+	"sym\tid=22,name=\"_cd\",addrsize=absolute,size=16,scope=0,def=0,val=0x850,seg=0,type=lab\n"
+	"sym\tid=21,name=\"_asm\",addrsize=absolute,size=8,scope=0,def=0,val=0x860,seg=0,type=lab\n"
+	"sym\tid=15,name=\"regbank\",addrsize=zeropage,size=6,scope=0,def=0,val=0x22,type=lab\n";
+
+// The same ids, elsewhere in memory.
+static const char k_csym_tail_b[] =
+	"file\tid=0,name=\"g.c\",size=10,mtime=0x00000000,mod=0\n"
+	"seg\tid=0,name=\"CODE\",start=0x002000,size=0x0010,addrsize=absolute,type=ro\n"
+	"span\tid=0,seg=0,start=0,size=16\n"
+	"scope\tid=1,name=\"_other\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+	"sym\tid=23,name=\"_other\",addrsize=absolute,size=16,scope=0,def=0,val=0x2000,seg=0,type=lab\n";
+
+static int
+load_csym(const char *leaf, int syms, const char *csym, const char *tail)
+{
+	const size_t n    = sizeof CSYM_HEADER + 16 + strlen(csym) + strlen(tail);
+	char        *text = (char *)malloc(n);
+	if (!text) {
+		return -1;
+	}
+	snprintf(text, n, CSYM_HEADER, syms, csym, tail);
+	char *path = write_temp(text, leaf);
+	free(text);
+	if (!path) {
+		return -1;
+	}
+	const int result = dbg_info_load(path);
+	remove(path);
+	return result;
+}
+
+static const char *
+cfunc_name_at(dbg_addr_t addr)
+{
+	dbg_cfunc_t f;
+	const int   i = dbg_info_cfunc_containing(addr);
+	return i >= 0 && dbg_info_cfunc_at(i, &f) ? f.name : "";
+}
+
+static bool
+cvar_is(int func, int var, const char *name, int offs, bool is_register, bool is_anonymous)
+{
+	dbg_cvar_t v;
+	return dbg_info_cfunc_var_at(func, var, &v) && !strcmp(v.name, name) && v.offs == offs &&
+	       v.is_register == is_register && v.is_anonymous == is_anonymous;
+}
+
+// fc's records with one fault; cd beside them must survive.
+static const char *const k_csym_bad[] = {
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1,sc=auto,offs=abc\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1,sc=auto,offs=12x\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1,sc=auto,offs=\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1,sc=auto,offs=32768\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1,sc=auto,offs=-32768\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,scope=1,sc=auto\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"\",scope=1,sc=auto\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a b\",scope=1,sc=auto\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"a\",scope=1\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=x,name=\"a\",scope=1,sc=auto\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=0,name=\"a\",scope=1,sc=auto\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\ncsym\tid=1,name=\"fd\",scope=1,sc=static,sym=23\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=static,sym=22\n",
+	"csym\tid=0,name=\"fc\",scope=1,sc=auto,sym=23\n",
+};
+
 int
 main(void)
 {
@@ -1907,6 +2003,264 @@ main(void)
 		if (lp)
 			remove(lp);
 		dbg_info_free();
+	}
+
+	// ── C functions (csym) ──────────────────────────────────────────────────
+	{
+		dbg_info_free();
+		check(dbg_info_cfunc_count() == 0, "csym: none before a load");
+		check(dbg_info_cfunc_at_entry(0x0840) == -1 && dbg_info_cfunc_containing(0x0840) == -1,
+		      "csym: lookups decline");
+		dbg_cfunc_t f = {0};
+		dbg_cvar_t  v = {0};
+		check(!dbg_info_cfunc_at(0, &f) && !dbg_info_cfunc_var_at(0, 0, &v), "csym: by index declines");
+
+		// Label, name and scope results with no csym, for the pin below.
+		check(load_csym("x16_csym_none.dbg", 4, "", k_csym_tail) == 0, "csym: a file with none loads");
+		check(dbg_info_cfunc_count() == 0, "csym: and has no functions");
+		const int   pin_syms = dbg_info_symbol_count();
+		bool        pin_scope[8] = {false};
+		for (int i = 0; i < pin_syms && i < 8; i++) {
+			pin_scope[i] = dbg_info_symbol_is_scope_at(i);
+		}
+		dbg_info_free();
+
+		check(load_csym("x16_csym.dbg", 4, CSYM_FC CSYM_CD, k_csym_tail) == 0, "csym: 2.19 shape loads");
+		check(dbg_info_cfunc_count() == 2, "csym: two functions, the assembly scope is not one");
+		const int fc = dbg_info_cfunc_at_entry(0x0840), cd = dbg_info_cfunc_at_entry(0x0850);
+		check(fc >= 0 && dbg_info_cfunc_at(fc, &f) && !strcmp(f.name, "fc") && f.entry == 0x0840 &&
+		          f.var_count == 3,
+		      "csym: function name, entry, variable count");
+		check(cvar_is(fc, 0, "a", 1, false, false), "csym: offs read");
+		check(cvar_is(fc, 1, "b", 0, false, false), "csym: missing offs is 0");
+		check(cvar_is(fc, 2, "l", -1, false, false), "csym: offs=-1 is not missing");
+		check(!dbg_info_cfunc_var_at(fc, 3, &v) && !dbg_info_cfunc_var_at(fc, -1, &v),
+		      "csym: variable index bounded");
+		check(cd >= 0 && dbg_info_cfunc_at(cd, &f) && f.var_count == 3, "csym: second function");
+		check(cvar_is(cd, 0, "$anon-param-0001", 2, false, true), "csym: unnamed parameter keeps its slot");
+		check(cvar_is(cd, 1, "r", 4, true, false), "csym: sc=reg with sym= is a variable");
+		check(!strcmp(cfunc_name_at(0x084F), "fc") && !strcmp(cfunc_name_at(0x0850), "cd"),
+		      "csym: address finds its function");
+		check(dbg_info_cfunc_containing(0x1000) == -1, "csym: a span in another segment is not code");
+		check(dbg_info_cfunc_containing(0x0860) == -1, "csym: nor is an assembly scope");
+
+		// Unchanged by csym.
+		check(dbg_info_symbol_count() == pin_syms, "csym: symbol count unchanged");
+		for (int i = 0; i < pin_syms && i < 8; i++) {
+			check(dbg_info_symbol_is_scope_at(i) == pin_scope[i], "csym: scope marks unchanged");
+		}
+		dbg_name_hit_t hits[4];
+		dbg_resolved_t r;
+		dbg_addr_t     at = 0;
+		char           err[200];
+		check(dbg_info_find_name("fc", hits, 4) == 0 && dbg_info_find_name("a", hits, 4) == 0,
+		      "csym: C names are not found");
+		check(dbg_info_find_name("_fc", hits, 4) == 1 && hits[0].addr == 0x0840, "csym: the label still is");
+		check(!dbg_info_resolve("fc", &r, err, sizeof err) && !dbg_info_resolve("l", &r, err, sizeof err),
+		      "csym: C names do not resolve");
+		check(!dbg_info_name_to_value("b", &at, NULL) && !dbg_info_label_to_addr("b", &at),
+		      "csym: nor reach label lookups");
+
+		// Reload, rejection.
+		check(load_csym("x16_csym.dbg", 4, CSYM_FC CSYM_CD, k_csym_tail) == 0, "csym: reload");
+		check(dbg_info_cfunc_count() == 2 && dbg_info_cfunc_at_entry(0x0840) >= 0,
+		      "csym: a reload does not duplicate");
+		check(load_csym("x16_csym.dbg", 99, CSYM_FC, k_csym_tail) != 0, "csym: a short file is refused");
+		check(dbg_info_cfunc_count() == 2 && dbg_info_cfunc_at_entry(0x0850) >= 0,
+		      "csym: and leaves the table");
+		check(load_csym("x16_csym.dbg", 4, CSYM_FC, k_csym_tail) == 0, "csym: reload with fewer");
+		check(dbg_info_cfunc_count() == 1 && dbg_info_cfunc_at_entry(0x0850) == -1, "csym: replaces the old");
+		dbg_info_free();
+		check(dbg_info_cfunc_count() == 0, "csym: free clears");
+
+		{
+			char *only = write_temp("csym\tid=0,name=\"x\",scope=1,sc=static,sym=1\n", "x16_csym_only.dbg");
+			check(only && dbg_info_load(only) != 0, "csym: alone is not a usable file");
+			check(dbg_info_cfunc_count() == 0, "csym: and adds nothing");
+			if (only) {
+				remove(only);
+			}
+			dbg_info_free();
+		}
+
+		// 2.18 shape: sc=ext functions, a stray reference record.
+		{
+			static const char tail218[] =
+				"sym\tid=30,name=\"_memcpy\",addrsize=absolute,type=imp\n";
+			char buf[2048];
+			snprintf(buf, sizeof buf, "%s%s", k_csym_tail, tail218);
+			check(load_csym("x16_csym218.dbg", 5,
+			                "csym\tid=0,name=\"fc\",scope=1,type=0,sc=ext,sym=23\n"
+			                "csym\tid=1,name=\"a\",scope=1,type=0,sc=auto,offs=1\n"
+			                "csym\tid=9,name=\"memcpy\",scope=0,type=0,sc=ext,sym=30\n",
+			                buf) == 0,
+			      "csym: 2.18 shape loads");
+			const int i = dbg_info_cfunc_at_entry(0x0840);
+			check(dbg_info_cfunc_count() == 1 && i >= 0 && dbg_info_cfunc_at(i, &f) &&
+			          !strcmp(f.name, "fc") && f.var_count == 1,
+			      "csym: sc=ext function, the reference is not one");
+			dbg_info_free();
+		}
+
+		// Clashing ids across files; unload.
+		check(load_csym("x16_csym_a.dbg", 4, CSYM_FC CSYM_CD, k_csym_tail) == 0 &&
+		          load_csym("x16_csym_b.dbg", 1,
+		                    "csym\tid=0,name=\"other\",scope=1,type=0,sc=static,sym=23\n"
+		                    "csym\tid=1,name=\"o\",scope=1,type=0,sc=auto\n",
+		                    k_csym_tail_b) == 0,
+		      "csym: two files with the same ids");
+		check(dbg_info_cfunc_count() == 3 && !strcmp(cfunc_name_at(0x0840), "fc") &&
+		          !strcmp(cfunc_name_at(0x2000), "other"),
+		      "csym: each id resolves in its own file");
+		dbg_info_unload_range(0x2000, 0x200F);
+		check(dbg_info_cfunc_count() == 2 && dbg_info_cfunc_containing(0x2000) == -1 &&
+		          !strcmp(cfunc_name_at(0x0850), "cd"),
+		      "csym: unload drops that module's functions");
+		dbg_info_unload_range(0x0848, 0x0848);
+		check(dbg_info_cfunc_at_entry(0x0840) == -1 && dbg_info_cfunc_count() == 1,
+		      "csym: overlapping part of a function drops it");
+		dbg_info_free_keep_labels();
+		check(dbg_info_cfunc_count() == 0, "csym: free keeping labels clears");
+		dbg_info_free();
+
+		// Two functions at one address.
+		check(load_csym("x16_csym_a.dbg", 4, CSYM_FC, k_csym_tail) == 0 &&
+		          load_csym("x16_csym_c.dbg", 4, CSYM_FC, k_csym_tail) == 0,
+		      "csym: same code from two files");
+		check(dbg_info_cfunc_count() == 2 && dbg_info_cfunc_at_entry(0x0840) == -1 &&
+		          dbg_info_cfunc_containing(0x0840) == -1,
+		      "csym: an ambiguous address answers none");
+		dbg_info_free();
+
+		// Malformed.
+		for (size_t c = 0; c < sizeof k_csym_bad / sizeof k_csym_bad[0]; c++) {
+			char records[512];
+			snprintf(records, sizeof records, "%s%s", k_csym_bad[c], CSYM_CD);
+			check(load_csym("x16_csym_bad.dbg", 4, records, k_csym_tail) == 0, "csym: malformed still loads");
+			check(dbg_info_cfunc_at_entry(0x0840) == -1, "csym: that function is left out");
+			check(dbg_info_cfunc_at_entry(0x0850) >= 0, "csym: others stay");
+			dbg_info_free();
+		}
+
+		// Bad targets.
+		{
+			static const char far_entry[] =
+				"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,val=0x900,seg=0,type=lab\n";
+			check(load_csym("x16_csym_bad.dbg", 1, CSYM_FC, far_entry) == 0 && dbg_info_cfunc_count() == 0,
+			      "csym: an entry outside its span is refused");
+			dbg_info_free();
+
+			static const char import[] =
+				"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,type=imp\n";
+			check(load_csym("x16_csym_bad.dbg", 1, CSYM_FC, import) == 0 && dbg_info_cfunc_count() == 0,
+			      "csym: an imported head is refused");
+			dbg_info_free();
+
+			static const char twice[] =
+				"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"scope\tid=1,name=\"_fd\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,val=0x840,seg=0,type=lab\n";
+			check(load_csym("x16_csym_bad.dbg", 1, CSYM_FC, twice) == 0 && dbg_info_cfunc_count() == 0,
+			      "csym: a repeated scope id is refused");
+			dbg_info_free();
+
+			static const char dup_sym[] =
+				"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,val=0x840,seg=0,type=lab\n"
+				"sym\tid=23,name=\"_fd\",addrsize=absolute,val=0x844,seg=0,type=lab\n";
+			check(load_csym("x16_csym_bad.dbg", 2, CSYM_FC, dup_sym) == 0 && dbg_info_cfunc_count() == 0,
+			      "csym: a repeated symbol id is refused");
+			dbg_info_free();
+
+			static const char huge_span[] =
+				"seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=16\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=2147483647\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,val=0x840,seg=0,type=lab\n";
+			check(load_csym("x16_csym_a.dbg", 4, CSYM_CD, k_csym_tail) == 0 &&
+			          load_csym("x16_csym_bad.dbg", 1, CSYM_FC, huge_span) == 0 &&
+			          dbg_info_cfunc_at_entry(0x0840) == -1,
+			      "csym: a span id at INT_MAX is refused with a nonzero base");
+			dbg_info_free();
+
+			static const char past_24[] =
+				"seg\tid=0,name=\"CODE\",start=0xFFFFF0,size=0x0100,addrsize=absolute,type=ro\n"
+				"span\tid=0,seg=0,start=0,size=256\n"
+				"scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0\n"
+				"sym\tid=23,name=\"_fc\",addrsize=absolute,val=0xFFFFF0,seg=0,type=lab\n";
+			check(load_csym("x16_csym_bad.dbg", 1, CSYM_FC, past_24) == 0 && dbg_info_cfunc_count() == 0,
+			      "csym: a span past 24 bits is refused");
+			dbg_info_free();
+		}
+
+		// Oversized.
+		{
+			const size_t cap   = 128 * 1100;
+			char        *text  = (char *)malloc(cap);
+			char        *tail  = (char *)malloc(4096);
+			check(text && tail, "csym: test buffers");
+			if (text && tail) {
+				char name[300];
+				memset(name, 'n', 255);
+				name[255] = '\0';
+				snprintf(text, cap,
+				         "csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\n"
+				         "csym\tid=1,name=\"%s\",scope=1,sc=auto\n", name);
+				check(load_csym("x16_csym_big.dbg", 4, text, k_csym_tail) == 0 &&
+				          dbg_info_cfunc_at_entry(0x0840) >= 0,
+				      "csym: a 255-character name is kept");
+				dbg_info_free();
+				memset(name, 'n', 256);
+				name[256] = '\0';
+				snprintf(text, cap,
+				         "csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\n"
+				         "csym\tid=1,name=\"%s\",scope=1,sc=auto\n", name);
+				check(load_csym("x16_csym_big.dbg", 4, text, k_csym_tail) == 0 &&
+				          dbg_info_cfunc_at_entry(0x0840) == -1,
+				      "csym: a longer one refuses the function");
+				dbg_info_free();
+
+				for (int count = 1024; count <= 1025; count++) {
+					size_t o = (size_t)snprintf(text, cap, "csym\tid=0,name=\"fc\",scope=1,sc=static,sym=23\n");
+					for (int i = 1; i <= count; i++) {
+						o += (size_t)snprintf(text + o, cap - o, "csym\tid=%d,name=\"v%d\",scope=1,sc=auto,offs=-%d\n",
+						                      i, i, i);
+					}
+					check(load_csym("x16_csym_big.dbg", 4, text, k_csym_tail) == 0, "csym: many variables load");
+					const int i = dbg_info_cfunc_at_entry(0x0840);
+					check(count == 1024 ? (i >= 0 && dbg_info_cfunc_at(i, &f) && f.var_count == 1024) : i == -1,
+					      count == 1024 ? "csym: 1024 variables kept" : "csym: 1025 refuses the function");
+					dbg_info_free();
+				}
+
+				for (int count = 64; count <= 65; count++) {
+					size_t o = (size_t)snprintf(tail, 4096,
+					                            "seg\tid=0,name=\"CODE\",start=0x000840,size=0x0100,addrsize=absolute,type=ro\n"
+					                            "span\tid=0,seg=0,start=0,size=16\n"
+					                            "scope\tid=1,name=\"_fc\",mod=0,type=scope,size=16,parent=0,sym=23,span=0");
+					for (int i = 1; i < count; i++) {
+						o += (size_t)snprintf(tail + o, 4096 - o, "+0");
+					}
+					snprintf(tail + o, 4096 - o, "\nsym\tid=23,name=\"_fc\",addrsize=absolute,val=0x840,seg=0,type=lab\n");
+					check(load_csym("x16_csym_big.dbg", 1, CSYM_FC, tail) == 0, "csym: long span list loads");
+					check((dbg_info_cfunc_at_entry(0x0840) >= 0) == (count == 64),
+					      count == 64 ? "csym: 64 spans kept" : "csym: 65 refuses the function");
+					dbg_info_free();
+				}
+			}
+			free(text);
+			free(tail);
+		}
 	}
 
 #ifndef _WIN32

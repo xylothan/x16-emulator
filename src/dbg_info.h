@@ -233,6 +233,37 @@ int  dbg_info_symbol_bank_at(int index);
 // type=scope names it): a routine, rather than a local label inside one.
 bool dbg_info_symbol_is_scope_at(int index);
 
+// ---- C functions and their variables (cc65 `csym` records) -------------------
+// Held apart from the symbol table, so a C name never resolves as a label, in
+// an expression, in a hover or in a watch. Function-level variables only: cc65
+// writes no record for a nested-block or `static` local.
+//
+// Indices and names last until the next load, unload or free; compare
+// dbg_info_changes(). A function whose records are malformed is left out whole,
+// because a partial variable list would misplace the sizes inferred from it.
+typedef struct {
+	const char *name;      // as written in C, without the assembler's underscore
+	dbg_addr_t  entry;     // its first instruction
+	int         var_count;
+} dbg_cfunc_t;
+
+typedef struct {
+	const char *name;
+	int         offs;         // as recorded; 0 when the record has none
+	bool        is_register;  // sc=reg: `offs` is not a C stack offset
+	bool        is_anonymous; // an unnamed parameter: holds a slot, has no C name
+} dbg_cvar_t;
+
+int  dbg_info_cfunc_count(void);
+bool dbg_info_cfunc_at(int index, dbg_cfunc_t *out);
+// The function entered at `entry`, or -1 when none is or more than one is: two
+// banks can hold different functions at one address.
+int  dbg_info_cfunc_at_entry(dbg_addr_t entry);
+// The function whose code covers `addr`, on the same terms.
+int  dbg_info_cfunc_containing(dbg_addr_t addr);
+// Variables in record order, 0 <= var < dbg_cfunc_t.var_count.
+bool dbg_info_cfunc_var_at(int func, int var, dbg_cvar_t *out);
+
 // ---- Label files (ld65 -Ln, VICE "al" format) --------------------------------
 // A program built without a .dbg can still have names. Labels join the same
 // table as .dbg symbols, so disassembly, the Symbols panel and the profiler see

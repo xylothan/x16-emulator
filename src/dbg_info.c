@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include "dirent_win32.h" // portable opendir/readdir (native <dirent.h> elsewhere)
 
 #ifdef _WIN32
@@ -116,6 +117,72 @@ static int   scope_head_cap;
 static dbg_sym_t       *syms;
 static int              sym_count;
 static int              sym_cap;
+
+/* C functions from cc65 `csym` records. Not in syms[]: see dbg_info.h. */
+typedef struct {
+	dbg_addr_t start, end; /* inclusive */
+} dbg_crange_t;
+
+typedef struct {
+	char *name;
+	int   offs;
+	bool  is_register;
+	bool  is_anonymous;
+} dbg_cvar_rec_t;
+
+typedef struct {
+	char           *name;
+	dbg_addr_t      entry;
+	int             owner;
+	dbg_crange_t   *ranges; /* its spans in the entry's segment */
+	int             range_count;
+	dbg_cvar_rec_t *vars;
+	int             var_count;
+} dbg_cfunc_rec_t;
+
+static dbg_cfunc_rec_t *cfuncs;
+static int              cfunc_count;
+static int              cfunc_cap;
+
+/* A .dbg is untrusted: load_prg can bring in a forged one. */
+#define CSYM_RAW_MAX   0x40000
+#define CSYM_SCOPE_MAX 0x10000
+#define CFUNC_MAX      0x8000
+#define CFUNC_VAR_MAX  1024
+#define CFUNC_SPAN_MAX 64
+#define CSYM_NAME_MAX  255
+#define CSYM_OFFS_MAX  0x7FFF
+
+enum { CSYM_KIND_NONE, CSYM_KIND_FUNC, CSYM_KIND_AUTO, CSYM_KIND_REG };
+
+/* The file being loaded. ld65 writes `csym` before `scope`, `span` and `sym`, so
+ * these wait until the whole file has been read and accepted. `id` comes first
+ * in both, so cmp_long() orders and searches them. */
+typedef struct {
+	long  id;
+	long  scope;
+	long  sym;  /* -1 when the record has none */
+	char *name;
+	int   offs;
+	int   kind;
+	bool  bad;
+} csym_raw_t;
+
+typedef struct {
+	long  id;
+	long  sym;
+	int  *span_ids;
+	int   span_count;
+	bool  refused;
+} csym_scope_t;
+
+static csym_raw_t   *csym_raw;
+static int           csym_raw_count;
+static int           csym_raw_cap;
+static csym_scope_t *csym_scopes;
+static int           csym_scope_count;
+static int           csym_scope_cap;
+static bool          csym_overflow;
 
 /* Label files loaded separately from any .dbg. */
 typedef struct {
@@ -771,6 +838,132 @@ static bool parse_sym_record(const char *p)
 	return true;
 }
 
+/* A whole integer value, unlike parse_int_key(), which cannot tell a missing
+ * key from -1 and reads "12x" as 12. */
+static bool parse_strict_long(const char *p, const char *key, long *out)
+{
+	const char *v;
+	const int   len = find_value(p, key, &v);
+	char        buf[16];
+	if (len <= 0 || len >= (int)sizeof buf)
+		return false;
+	memcpy(buf, v, (size_t)len);
+	buf[len] = '\0';
+
+	const bool hex = buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X');
+	if (!hex && buf[0] != '-' && !isdigit((unsigned char)buf[0]))
+		return false;
+	char           *end;
+	const long long n = strtoll(buf, &end, hex ? 16 : 10);
+	if (end == buf || *end != '\0' || n < -0x7FFFFFFFLL || n > 0x7FFFFFFFLL)
+		return false;
+	*out = (long)n;
+	return true;
+}
+
+static void csym_pending_clear(void)
+{
+	for (int i = 0; i < csym_raw_count; i++)
+		free(csym_raw[i].name);
+	free(csym_raw);
+	csym_raw       = NULL;
+	csym_raw_count = 0;
+	csym_raw_cap   = 0;
+
+	for (int i = 0; i < csym_scope_count; i++)
+		free(csym_scopes[i].span_ids);
+	free(csym_scopes);
+	csym_scopes      = NULL;
+	csym_scope_count = 0;
+	csym_scope_cap   = 0;
+
+	csym_overflow = false;
+}
+
+static bool csym_name_ok(const char *v, int len)
+{
+	if (len <= 0 || len > CSYM_NAME_MAX)
+		return false;
+	for (int i = 0; i < len; i++) {
+		if ((unsigned char)v[i] <= 0x20 || (unsigned char)v[i] >= 0x7F)
+			return false;
+	}
+	return true;
+}
+
+static void parse_csym_record(const char *p)
+{
+	long scope;
+	if (!parse_strict_long(p, "scope", &scope) || scope < 0)
+		return;
+	if (csym_raw_count >= CSYM_RAW_MAX ||
+	    !GROW_ARRAY(csym_raw, csym_raw_count, csym_raw_cap, csym_raw_t)) {
+		csym_overflow = true;
+		return;
+	}
+
+	csym_raw_t r;
+	memset(&r, 0, sizeof r);
+	r.scope = scope;
+	r.sym   = -1;
+
+	if (!parse_strict_long(p, "id", &r.id) || r.id < 0)
+		r.bad = true;
+
+	const char *v;
+	const int   nlen = find_value(p, "name", &v);
+	if (csym_name_ok(nlen > 0 ? v : "", nlen))
+		r.name = parse_str_key(p, "name");
+	if (!r.name)
+		r.bad = true;
+
+	const int sclen = find_value(p, "sc", &v);
+	if (sclen == 4 && !strncmp(v, "auto", 4))
+		r.kind = CSYM_KIND_AUTO;
+	else if (sclen == 3 && !strncmp(v, "reg", 3))
+		r.kind = CSYM_KIND_REG;
+	else if ((sclen == 3 && !strncmp(v, "ext", 3)) || (sclen == 6 && !strncmp(v, "static", 6)))
+		r.kind = CSYM_KIND_FUNC;
+	else if (sclen <= 0)
+		r.bad = true;
+
+	if (find_value(p, "offs", &v) >= 0) {
+		long offs;
+		if (!parse_strict_long(p, "offs", &offs) || offs < -CSYM_OFFS_MAX || offs > CSYM_OFFS_MAX)
+			r.bad = true;
+		else
+			r.offs = (int)offs;
+	}
+	if (find_value(p, "sym", &v) >= 0 && (!parse_strict_long(p, "sym", &r.sym) || r.sym < 0))
+		r.bad = true;
+
+	csym_raw[csym_raw_count++] = r;
+}
+
+static void note_csym_scope(const char *p, long sym)
+{
+	long id;
+	if (!parse_strict_long(p, "id", &id) || id < 0)
+		return;
+	if (csym_scope_count >= CSYM_SCOPE_MAX ||
+	    !GROW_ARRAY(csym_scopes, csym_scope_count, csym_scope_cap, csym_scope_t)) {
+		csym_overflow = true;
+		return;
+	}
+	csym_scope_t s;
+	memset(&s, 0, sizeof s);
+	s.id       = id;
+	s.sym      = sym;
+	s.span_ids = parse_span_list(p, &s.span_count);
+	if (s.span_count > CFUNC_SPAN_MAX) {
+		free(s.span_ids);
+		s.span_ids   = NULL;
+		s.span_count = 0;
+		s.refused    = true;
+	}
+	csym_scopes[csym_scope_count++] = s;
+}
+
 /* A `scope` record of type=scope names, in `sym=`, the label that opens it. */
 static void parse_scope_record(const char *p)
 {
@@ -781,6 +974,7 @@ static void parse_scope_record(const char *p)
 	const long head = parse_int_key(p, "sym");
 	if (head < 0)
 		return;
+	note_csym_scope(p, head);
 	if (!GROW_ARRAY(scope_heads, scope_head_count, scope_head_cap, long))
 		return;
 	scope_heads[scope_head_count++] = head;
@@ -861,6 +1055,182 @@ static int seg_observed_bank(int seg_id, dbg_addr_t addr)
 static const dbg_span_t *find_span(int id)
 {
 	DBG_FIND_BY_ID(spans, span_count, id);
+}
+
+/* ---- C functions ----------------------------------------------------------- */
+
+typedef struct {
+	long       id;  /* first, for cmp_long() */
+	dbg_addr_t addr;
+	int        seg;
+} csym_sym_ref_t;
+
+static int cmp_csym_raw(const void *a, const void *b)
+{
+	const csym_raw_t *x = (const csym_raw_t *)a, *y = (const csym_raw_t *)b;
+	if (x->scope != y->scope)
+		return (x->scope > y->scope) - (x->scope < y->scope);
+	return (x->id > y->id) - (x->id < y->id);
+}
+
+static void cfunc_free(dbg_cfunc_rec_t *f)
+{
+	for (int i = 0; i < f->var_count; i++)
+		free(f->vars[i].name);
+	free(f->vars);
+	free(f->ranges);
+	free(f->name);
+}
+
+static void cfuncs_drop_owner(int owner)
+{
+	int w = 0;
+	for (int i = 0; i < cfunc_count; i++) {
+		if (cfuncs[i].owner == owner)
+			cfunc_free(&cfuncs[i]);
+		else
+			cfuncs[w++] = cfuncs[i];
+	}
+	cfunc_count = w;
+}
+
+/* `r` is every record of one scope, sorted by id. A function is the record whose
+ * `sym=` is the scope's own: storage class varies by cc65 version, and sc=reg
+ * records carry a `sym=` of their own, the register bank. */
+static void build_cfunc(const csym_scope_t *sc, csym_raw_t *r, int n,
+                        const csym_sym_ref_t *refs, int nref)
+{
+	csym_raw_t *head = NULL;
+	int         vars = 0;
+	for (int i = 0; i < n; i++) {
+		if (r[i].bad || (i > 0 && r[i].id == r[i - 1].id))
+			return;
+		if (r[i].kind == CSYM_KIND_FUNC && r[i].sym == sc->sym) {
+			if (head)
+				return;
+			head = &r[i];
+		} else if (r[i].kind == CSYM_KIND_AUTO || r[i].kind == CSYM_KIND_REG) {
+			vars++;
+		}
+	}
+	if (!head || vars > CFUNC_VAR_MAX || cfunc_count >= CFUNC_MAX || sc->span_count <= 0)
+		return;
+
+	const csym_sym_ref_t *ref = (const csym_sym_ref_t *)bsearch(&sc->sym, refs, (size_t)nref,
+	                                                            sizeof *refs, cmp_long);
+	if (!ref)
+		return;
+
+	dbg_cfunc_rec_t f;
+	memset(&f, 0, sizeof f);
+	f.name   = NULL;
+	f.entry  = ref->addr;
+	f.owner  = cur_owner;
+	f.ranges = (dbg_crange_t *)malloc((size_t)sc->span_count * sizeof *f.ranges);
+	f.vars   = vars ? (dbg_cvar_rec_t *)calloc((size_t)vars, sizeof *f.vars) : NULL;
+	if (!f.ranges || (vars && !f.vars)) {
+		free(f.ranges);
+		free(f.vars);
+		return;
+	}
+
+	/* A function's scope can also hold a span of its `static` data. */
+	bool covers_entry = false;
+	for (int j = 0; j < sc->span_count; j++) {
+		const int raw = sc->span_ids[j];
+		if (raw < 0 || raw > INT_MAX - id_base_span)
+			continue;
+		const dbg_span_t *sp = find_span(raw + id_base_span);
+		if (!sp || sp->seg != ref->seg || !sp->size)
+			continue;
+		const dbg_seg_t *sg = find_seg(sp->seg);
+		if (!sg)
+			continue;
+		const uint64_t first = (uint64_t)sg->start + sp->start;
+		const uint64_t last  = first + sp->size - 1;
+		if (last > 0xFFFFFF)
+			continue;
+		f.ranges[f.range_count].start = (dbg_addr_t)first;
+		f.ranges[f.range_count].end   = (dbg_addr_t)last;
+		f.range_count++;
+		if (ref->addr >= first && ref->addr <= last)
+			covers_entry = true;
+	}
+	if (!covers_entry || !GROW_ARRAY(cfuncs, cfunc_count, cfunc_cap, dbg_cfunc_rec_t)) {
+		free(f.ranges);
+		free(f.vars);
+		return;
+	}
+
+	for (int i = 0; i < n; i++) {
+		if (r[i].kind != CSYM_KIND_AUTO && r[i].kind != CSYM_KIND_REG)
+			continue;
+		dbg_cvar_rec_t *v = &f.vars[f.var_count++];
+		v->name         = r[i].name;
+		v->offs         = r[i].offs;
+		v->is_register  = r[i].kind == CSYM_KIND_REG;
+		v->is_anonymous = !strncmp(r[i].name, "$anon-", 6);
+		r[i].name       = NULL;
+	}
+	f.name    = head->name;
+	head->name = NULL;
+	cfuncs[cfunc_count++] = f;
+}
+
+/* Turn this load's raw records into functions. Call before build_addr_map(),
+ * which reorders syms[]. */
+static void commit_csyms(int sym_first)
+{
+	const int nsyms = sym_count - sym_first;
+	csym_sym_ref_t *refs = NULL;
+	if (!csym_overflow && csym_raw_count > 0 && csym_scope_count > 0 && nsyms > 0)
+		refs = (csym_sym_ref_t *)malloc((size_t)nsyms * sizeof *refs);
+
+	if (refs) {
+		int nref = 0;
+		for (int i = sym_first; i < sym_count; i++) {
+			if (syms[i].raw_id < 0)
+				continue;
+			refs[nref].id   = syms[i].raw_id;
+			refs[nref].addr = syms[i].addr;
+			refs[nref].seg  = syms[i].seg;
+			nref++;
+		}
+		qsort(refs, (size_t)nref, sizeof *refs, cmp_long);
+
+		/* An id used twice says nothing about either record. */
+		int w = 0;
+		for (int i = 0; i < nref;) {
+			int j = i + 1;
+			while (j < nref && refs[j].id == refs[i].id)
+				j++;
+			if (j == i + 1)
+				refs[w++] = refs[i];
+			i = j;
+		}
+		nref = w;
+
+		qsort(csym_scopes, (size_t)csym_scope_count, sizeof *csym_scopes, cmp_long);
+		for (int i = 1; i < csym_scope_count; i++) {
+			if (csym_scopes[i].id == csym_scopes[i - 1].id)
+				csym_scopes[i].refused = csym_scopes[i - 1].refused = true;
+		}
+		qsort(csym_raw, (size_t)csym_raw_count, sizeof *csym_raw, cmp_csym_raw);
+
+		for (int i = 0; i < csym_raw_count;) {
+			int end = i + 1;
+			while (end < csym_raw_count && csym_raw[end].scope == csym_raw[i].scope)
+				end++;
+			const csym_scope_t *sc = (const csym_scope_t *)bsearch(
+			    &csym_raw[i].scope, csym_scopes, (size_t)csym_scope_count,
+			    sizeof *csym_scopes, cmp_long);
+			if (sc && !sc->refused)
+				build_cfunc(sc, &csym_raw[i], end - i, refs, nref);
+			i = end;
+		}
+		free(refs);
+	}
+	csym_pending_clear();
 }
 
 static const dbg_file_t *find_file(int id)
@@ -1212,6 +1582,7 @@ int dbg_info_load(const char *path)
 	// whole file is in.
 	const int sym_first = sym_count;
 	scope_head_count    = 0;
+	csym_pending_clear();
 
 	while (read_line(f, &buf, &cap)) {
 		/* Strip trailing newline / carriage-return */
@@ -1245,8 +1616,11 @@ int dbg_info_load(const char *path)
 			expect_syms = parse_int_key(p + 4, "sym");
 		} else if (strncmp(p, "scope", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
 			parse_scope_record(p + 5);
+		} else if (strncmp(p, "csym", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+			/* Not counted in `records`: alone it is not a usable file. */
+			parse_csym_record(p + 4);
 		}
-		/* Other record types (version, csym, type, …) are silently skipped. */
+		/* Other record types (version, type, …) are silently skipped. */
 	}
 
 	fclose(f);
@@ -1279,6 +1653,7 @@ int dbg_info_load(const char *path)
 			        path, expect_syms, syms);
 		else
 			fprintf(stderr, "dbg_info: no usable records in '%s'\n", path);
+		csym_pending_clear();
 		build_addr_map();
 		return -1;
 	}
@@ -1290,8 +1665,11 @@ int dbg_info_load(const char *path)
 	// something: the per-name replacement above only matches within a
 	// generation, so without this a reload would leave the old value in front
 	// of the new one for every lookup.
-	if (expect_syms >= 0 || syms > 0)
+	if (expect_syms >= 0 || syms > 0) {
 		drop_stale_equates(cur_owner, cur_gen);
+		cfuncs_drop_owner(cur_owner);
+	}
+	commit_csyms(sym_first);
 
 	// Now that every `file` record has been seen, turn this load's raw file IDs
 	// into the records that actually describe them.
@@ -2640,6 +3018,21 @@ void dbg_info_unload_range(dbg_addr_t start, dbg_addr_t end)
 	if (!loaded) return;
 	changes++;
 
+	// A function any of whose code is in the range is no longer what is there.
+	{
+		int cdst = 0;
+		for (int i = 0; i < cfunc_count; i++) {
+			bool hit = false;
+			for (int r = 0; r < cfuncs[i].range_count && !hit; r++)
+				hit = cfuncs[i].ranges[r].start <= end && cfuncs[i].ranges[r].end >= start;
+			if (hit)
+				cfunc_free(&cfuncs[i]);
+			else
+				cfuncs[cdst++] = cfuncs[i];
+		}
+		cfunc_count = cdst;
+	}
+
 	// Drop the RAW line records that map into this range FIRST. build_addr_map()
 	// regenerates addr_map from lines[] on every load, so pruning only the
 	// derived map below would be silently undone by the next dbg_info_load():
@@ -2866,6 +3259,62 @@ const char *dbg_info_loaded_at(int index)
 	return (index >= 0 && index < owner_count) ? owners[index] : NULL;
 }
 
+int dbg_info_cfunc_count(void)
+{
+	return cfunc_count;
+}
+
+bool dbg_info_cfunc_at(int index, dbg_cfunc_t *out)
+{
+	if (index < 0 || index >= cfunc_count || !out)
+		return false;
+	out->name      = cfuncs[index].name;
+	out->entry     = cfuncs[index].entry;
+	out->var_count = cfuncs[index].var_count;
+	return true;
+}
+
+int dbg_info_cfunc_at_entry(dbg_addr_t entry)
+{
+	int hit = -1;
+	for (int i = 0; i < cfunc_count; i++) {
+		if (cfuncs[i].entry != entry)
+			continue;
+		if (hit >= 0)
+			return -1;
+		hit = i;
+	}
+	return hit;
+}
+
+int dbg_info_cfunc_containing(dbg_addr_t addr)
+{
+	int hit = -1;
+	for (int i = 0; i < cfunc_count; i++) {
+		for (int r = 0; r < cfuncs[i].range_count; r++) {
+			if (addr < cfuncs[i].ranges[r].start || addr > cfuncs[i].ranges[r].end)
+				continue;
+			if (hit >= 0)
+				return -1;
+			hit = i;
+			break;
+		}
+	}
+	return hit;
+}
+
+bool dbg_info_cfunc_var_at(int func, int var, dbg_cvar_t *out)
+{
+	if (func < 0 || func >= cfunc_count || var < 0 || var >= cfuncs[func].var_count || !out)
+		return false;
+	const dbg_cvar_rec_t *v = &cfuncs[func].vars[var];
+	out->name         = v->name;
+	out->offs         = v->offs;
+	out->is_register  = v->is_register;
+	out->is_anonymous = v->is_anonymous;
+	return true;
+}
+
 static void free_records(bool keep_labels)
 {
 	changes++;
@@ -2887,6 +3336,14 @@ static void free_records(bool keep_labels)
 	scope_heads      = NULL;
 	scope_head_count = 0;
 	scope_head_cap   = 0;
+
+	csym_pending_clear();
+	for (int i = 0; i < cfunc_count; i++)
+		cfunc_free(&cfuncs[i]);
+	free(cfuncs);
+	cfuncs      = NULL;
+	cfunc_count = 0;
+	cfunc_cap   = 0;
 
 	for (int i = 0; i < file_count; i++)
 		free(files[i].name);
