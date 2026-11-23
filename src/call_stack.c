@@ -7,7 +7,15 @@
 int call_stack_unwind(uint16_t pc, uint16_t sp, uint8_t program_bank, bool native,
                       call_stack_read_t read, uint16_t *frames)
 {
+	uint16_t slots[CALL_STACK_MAX];
+	return call_stack_unwind_slots(pc, sp, program_bank, native, read, frames, slots);
+}
+
+int call_stack_unwind_slots(uint16_t pc, uint16_t sp, uint8_t program_bank, bool native,
+                            call_stack_read_t read, uint16_t *frames, uint16_t *slots)
+{
 	int count = 0;
+	slots[count]    = 0;
 	frames[count++] = pc;
 
 	// Emulation mode: the rest of page 1. Native: a bounded window above SP.
@@ -21,6 +29,7 @@ int call_stack_unwind(uint16_t pc, uint16_t sp, uint8_t program_bank, bool nativ
 		// JSR pushes the address of its own last byte, so the opcode is two
 		// below that and execution resumes one above it.
 		if (read((uint16_t)(pushed - 2), program_bank) == OPCODE_JSR) {
+			slots[count]    = (uint16_t)a;
 			frames[count++] = (uint16_t)(pushed + 1);
 			a += 2;
 		} else {

@@ -15,6 +15,7 @@
 #include "dbg_machine.h"
 #include "logpoint.h"
 #include "call_stack.h"
+#include "c_locals_host.h"
 #include "debugger.h"
 #include "disasm.h"
 #include "code_map.h"
@@ -1488,10 +1489,222 @@ static int handle_x16_call_stack(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── C locals ────────────────────────────────────────────────────────────
+// A scope's reference names a frame of one stop. The machine moving, or SP, PC
+// or the debug info being changed under it, makes the reference stale, and a
+// stale one is an error rather than another frame's values.
+#define VARREF_C_LOCALS 0x40000000
+
+static struct {
+    bool     valid;
+    uint32_t generation, ticks;
+    uint16_t pc, sp;
+    unsigned debug_info;
+} c_locals_stamp;
+
+static bool c_locals_stamp_current(void) {
+    return c_locals_stamp.valid && c_locals_stamp.ticks == (uint32_t)clockticks6502 &&
+           c_locals_stamp.pc == regs.pc && c_locals_stamp.sp == regs.sp &&
+           c_locals_stamp.debug_info == dbg_info_changes();
+}
+
+static int c_locals_ref(int frame) {
+    if (!c_locals_stamp_current()) {
+        c_locals_stamp.valid      = true;
+        c_locals_stamp.generation = (c_locals_stamp.generation + 1) & 0x7FFFFF;
+        c_locals_stamp.ticks      = (uint32_t)clockticks6502;
+        c_locals_stamp.pc         = regs.pc;
+        c_locals_stamp.sp         = regs.sp;
+        c_locals_stamp.debug_info = dbg_info_changes();
+    }
+    return VARREF_C_LOCALS | (int)(c_locals_stamp.generation << 7) | frame;
+}
+
+// The frame a reference names, or -1 when it is stale.
+static int c_locals_ref_frame(int ref) {
+    if (!c_locals_stamp_current() ||
+        (uint32_t)((ref & ~VARREF_C_LOCALS) >> 7) != c_locals_stamp.generation)
+        return -1;
+    return ref & 0x7F;
+}
+
+// What a row shows. Never starts with '$', which dap_apply_value_format rewrites.
+static void c_local_text(const c_locals_frame_t *f, const c_locals_row_t *row, char *out, size_t size) {
+    const c_local_t *l = &row->local;
+    switch (l->status) {
+    case C_LOCAL_OK: {
+        uint8_t bytes[C_LOCALS_SHOW_MAX];
+        bool    truncated = false;
+        const int n = c_locals_host_bytes(l, bytes, &truncated);
+        size_t len = 0;
+        for (int i = 0; i < n && len + 4 < size; i++)
+            len += (size_t)snprintf(out + len, size - len, i ? " %02X" : "%02X", bytes[i]);
+        if (truncated && len < size)
+            len += (size_t)snprintf(out + len, size - len, " ...");
+        if (!l->size && len < size)
+            snprintf(out + len, size - len, " (size unknown)");
+        break;
+    }
+    case C_LOCAL_UNALLOCATED:
+        snprintf(out, size, "unallocated, at $%04X", l->address);
+        break;
+    case C_LOCAL_NOT_STORED:
+        snprintf(out, size, "not stored yet, still in A/X");
+        break;
+    case C_LOCAL_REFUSED_VARIADIC:
+        snprintf(out, size, "refused: fixed parameter of a variadic function");
+        break;
+    case C_LOCAL_REFUSED_REGISTER:
+        snprintf(out, size, "refused: register variable");
+        break;
+    case C_LOCAL_REFUSED_LOCATION:
+        snprintf(out, size, "refused: not in plain RAM");
+        break;
+    case C_LOCAL_UNKNOWN_FRAME:
+    default:
+        snprintf(out, size, "unknown: %s", c_frame_state_reason(f->view.state));
+        break;
+    }
+}
+
+static const char *c_local_kind(const c_locals_row_t *row) {
+    return row->var.is_register ? "register" : row->local.is_param ? "parameter" : "local";
+}
+
+static int handle_c_locals_variables(int seq, int ref) {
+    static const char cmd[] = "variables";
+    const int frame = c_locals_ref_frame(ref);
+    c_locals_frame_t f;
+    if (frame < 0 || step.pending || !DEBUGIsPaused() || !c_locals_host_frame(frame, &f) ||
+        f.func < 0) {
+        send_dap_error_response(seq, cmd, "this frame is gone; request its scopes again");
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    cJSON *vars = cJSON_CreateArray();
+    c_locals_row_t *rows = c_locals_host_rows(&f);
+    for (int i = 0; rows && i < f.var_count; i++) {
+        char text[C_LOCALS_SHOW_MAX * 3 + 32];
+        c_local_text(&f, &rows[i], text, sizeof text);
+        cJSON *v = cJSON_CreateObject();
+        cJSON_AddStringToObject(v, "name", rows[i].var.name);
+        cJSON_AddStringToObject(v, "value", text);
+        cJSON_AddStringToObject(v, "type", c_local_kind(&rows[i]));
+        cJSON_AddNumberToObject(v, "variablesReference", 0);
+        if (rows[i].local.status == C_LOCAL_OK) {
+            char at[12];
+            snprintf(at, sizeof at, "0x%04X", rows[i].local.address);
+            cJSON_AddStringToObject(v, "memoryReference", at);
+        }
+        cJSON *hint  = cJSON_CreateObject();
+        cJSON *attrs = cJSON_CreateArray();
+        cJSON_AddItemToArray(attrs, cJSON_CreateString("readOnly"));
+        cJSON_AddItemToObject(hint, "attributes", attrs);
+        cJSON_AddItemToObject(v, "presentationHint", hint);
+        cJSON_AddItemToArray(vars, v);
+    }
+    free(rows);
+    cJSON_AddItemToObject(body, "variables", vars);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+static int handle_x16_locals(int seq, cJSON *args) {
+    static const char cmd[] = "x16/locals";
+    cJSON *fr = args ? cJSON_GetObjectItemCaseSensitive(args, "frame") : NULL;
+    if (fr && (!cJSON_IsNumber(fr) || fr->valuedouble < 0 || fr->valuedouble >= CALL_STACK_MAX ||
+               fr->valuedouble != (int)fr->valuedouble)) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "'frame' is a whole number from 0 to %d", CALL_STACK_MAX - 1);
+        send_dap_error_response(seq, cmd, msg);
+        return 0;
+    }
+    if (step.pending || !DEBUGIsPaused()) {
+        send_dap_error_response(seq, cmd, "the machine must be paused");
+        return 0;
+    }
+    const int frame = fr ? (int)fr->valuedouble : 0;
+    c_locals_frame_t f;
+    if (!c_locals_host_frame(frame, &f)) {
+        send_dap_error_response(seq, cmd, "the call stack has no such frame");
+        return 0;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *vars = cJSON_CreateArray();
+    cJSON_AddNumberToObject(body, "frame", frame);
+    cJSON_AddBoolToObject(body, "functionLevelOnly", true);
+    if (f.func < 0) {
+        cJSON_AddNullToObject(body, "function");
+        cJSON_AddStringToObject(body, "state", "not-c");
+        cJSON_AddStringToObject(body, "reason", "not in a C function with debug info");
+    } else {
+        cJSON_AddStringToObject(body, "function", f.name);
+        cJSON_AddNumberToObject(body, "entry", f.entry);
+        cJSON_AddStringToObject(body, "state", c_frame_state_name(f.view.state));
+        if (f.view.state != C_FRAME_KNOWN)
+            cJSON_AddStringToObject(body, "reason", c_frame_state_reason(f.view.state));
+        c_locals_row_t *rows = c_locals_host_rows(&f);
+        for (int i = 0; rows && i < f.var_count; i++) {
+            const c_local_t *l = &rows[i].local;
+            cJSON *v = cJSON_CreateObject();
+            cJSON_AddStringToObject(v, "name", rows[i].var.name);
+            cJSON_AddStringToObject(v, "kind", c_local_kind(&rows[i]));
+            cJSON_AddStringToObject(v, "status", c_local_status_name(l->status));
+            if (rows[i].var.is_anonymous)
+                cJSON_AddBoolToObject(v, "anonymous", true);
+            if (l->has_address) {
+                cJSON_AddNumberToObject(v, "address", l->address);
+                if (l->size)
+                    cJSON_AddNumberToObject(v, "size", l->size);
+                else
+                    cJSON_AddNullToObject(v, "size");
+            }
+            if (l->status == C_LOCAL_OK) {
+                uint8_t bytes[C_LOCALS_SHOW_MAX];
+                char    hex[C_LOCALS_SHOW_MAX * 2 + 1];
+                bool    truncated = false;
+                const int n = c_locals_host_bytes(l, bytes, &truncated);
+                for (int b = 0; b < n; b++)
+                    snprintf(hex + b * 2, 3, "%02X", bytes[b]);
+                hex[n * 2] = '\0';
+                cJSON_AddStringToObject(v, "bytes", hex);
+                if (truncated)
+                    cJSON_AddBoolToObject(v, "truncated", true);
+            } else {
+                char why[96];
+                c_local_text(&f, &rows[i], why, sizeof why);
+                cJSON_AddStringToObject(v, "reason", why);
+            }
+            cJSON_AddItemToArray(vars, v);
+        }
+        free(rows);
+    }
+    cJSON_AddItemToObject(body, "variables", vars);
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 static int handle_dap_scopes(int seq, cJSON *args) {
-    (void)args;
     cJSON *body = cJSON_CreateObject();
     cJSON *scopes = cJSON_CreateArray();
+
+    // Only for a frame in a C function with variables, while stopped.
+    cJSON *frame_id = args ? cJSON_GetObjectItemCaseSensitive(args, "frameId") : NULL;
+    if (frame_id && cJSON_IsNumber(frame_id) && frame_id->valuedouble >= 1 &&
+        frame_id->valuedouble <= CALL_STACK_MAX && !step.pending && DEBUGIsPaused()) {
+        const int frame = (int)frame_id->valuedouble - 1;
+        c_locals_frame_t f;
+        if (c_locals_host_frame(frame, &f) && f.func >= 0 && f.var_count > 0) {
+            cJSON *c_scope = cJSON_CreateObject();
+            cJSON_AddStringToObject(c_scope, "name", "C Locals (function level)");
+            cJSON_AddNumberToObject(c_scope, "variablesReference", c_locals_ref(frame));
+            cJSON_AddNumberToObject(c_scope, "namedVariables", f.var_count);
+            cJSON_AddBoolToObject(c_scope, "expensive", false);
+            cJSON_AddStringToObject(c_scope, "presentationHint", "locals");
+            cJSON_AddItemToArray(scopes, c_scope);
+        }
+    }
 
     // Registers scope
     cJSON *reg_scope = cJSON_CreateObject();
@@ -1655,6 +1868,7 @@ static int handle_dap_variables(int seq, cJSON *args) {
         cJSON *ref_item = cJSON_GetObjectItemCaseSensitive(args, "variablesReference");
         if (ref_item && cJSON_IsNumber(ref_item)) ref = (int)ref_item->valuedouble;
     }
+    if (ref >= VARREF_C_LOCALS) return handle_c_locals_variables(seq, ref);
 
     cJSON *body = cJSON_CreateObject();
     cJSON *vars = cJSON_CreateArray();
@@ -2782,6 +2996,21 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
     if (!from_console && dap_eval_changes_state(expr)) {
         send_dap_error_response(seq, "evaluate", "this command only runs from the debug console");
         return 0;
+    }
+    // A hover or watch on a C variable would otherwise answer with the register
+    // or label of that name.
+    if (ctx_item && cJSON_IsString(ctx_item) && dbg_info_cfunc_count() > 0 &&
+        (!strcmp(ctx_item->valuestring, "hover") || !strcmp(ctx_item->valuestring, "watch"))) {
+        cJSON *fid = cJSON_GetObjectItemCaseSensitive(args, "frameId");
+        const int frame = (fid && cJSON_IsNumber(fid) && fid->valuedouble >= 1 &&
+                           fid->valuedouble <= CALL_STACK_MAX) ? (int)fid->valuedouble - 1 : 0;
+        const char *cname = c_locals_host_expr_name(frame, expr);
+        if (cname) {
+            char msg[320];
+            snprintf(msg, sizeof msg, "'%s' is a C variable here; see the C Locals scope", cname);
+            send_dap_error_response(seq, "evaluate", msg);
+            return 0;
+        }
     }
     if (ctx_item && cJSON_IsString(ctx_item) && !strcmp(ctx_item->valuestring, "clipboard")) {
         char *whole = dap_eval_clipboard(expr);
@@ -9802,6 +10031,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "threads"))       result = handle_dap_threads(seq);
     else if (!strcmp(cmd, "stackTrace"))    result = handle_dap_stack_trace(seq, args);
     else if (!strcmp(cmd, "x16/callStack")) result = handle_x16_call_stack(seq, args);
+    else if (!strcmp(cmd, "x16/locals"))    result = handle_x16_locals(seq, args);
     else if (!strcmp(cmd, "x16/sourceLocation")) result = handle_x16_source_location(seq, args);
     else if (!strcmp(cmd, "scopes"))        result = handle_dap_scopes(seq, args);
     else if (!strcmp(cmd, "variables"))     result = handle_dap_variables(seq, args);
@@ -9946,7 +10176,7 @@ static const char *const callable_commands[] = {
     "x16/step", "x16/runTo", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",
-    "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack",
+    "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack", "x16/locals",
     "loadedSources", "x16/sourceLocation", "mcp/readSource",
     "x16/hashMemory", "x16/dumpMemory", "x16/searchMemory", "x16/setWarp", "x16/mouse", "x16/loadPrg",
     "x16/perfHist", "x16/perfConfig", "x16/hostPerf", "x16/capture",
