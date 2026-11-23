@@ -46,7 +46,7 @@ jobs:
   #     the name means "the third check-in of the tenth" and can be worked out
   #     again later from the history alone.
   version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       # Only bump this if the first tag ends up cut against a different
       # upstream release; after that the tags themselves take over.
@@ -96,7 +96,7 @@ jobs:
           echo "Build identifier: $build"
   README:
     needs: [version]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -141,7 +141,7 @@ jobs:
   # actually executes any code, so it runs unconditionally rather than hanging
   # off README like the platform builds do.
   unit-tests:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # buildtables.py generates cpu/tables.h and cpu/mnemonics.h; CMake looks
@@ -248,7 +248,7 @@ jobs:
   # it would catch incorrect behaviour; this is the half that does. Kept out of
   # unit-tests because it rebuilds once per mutation.
   mutation-tests:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -280,7 +280,7 @@ jobs:
   # the version must be bumped. The ROM is pinned, because the goldens depend on
   # it and the platform jobs take whatever x16-rom built last.
   machine-version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -551,7 +551,7 @@ jobs:
   linux:
     name: linux (${{ matrix.arch }})
     needs: [version, README]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -662,9 +662,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-15-intel and macos-15 (arm64) are both currently Sequoia.
+          # Intel has no free -latest label.
           - { arch: x86_64, runner: macos-15-intel, python: '3.9',  package: x16emu_macos_intel }
-          - { arch: arm64,  runner: macos-15,       python: '3.10', package: x16emu_macos_m1 }
+          - { arch: arm64,  runner: macos-latest,   python: '3.10', package: x16emu_macos_m1 }
     steps:
       - uses: actions/checkout@v4
       - name: Install Dependencies
@@ -785,7 +785,7 @@ jobs:
       - linux
       - macos
       - wasm
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       # The default token is read-only, and creating a release needs to write.
       contents: write
