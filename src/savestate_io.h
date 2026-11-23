@@ -306,4 +306,19 @@ ss_layout_diff(const ss_layout *a, const ss_layout *b)
 	return a->count == b->count ? -1 : n;
 }
 
+// The first chunk of a saved layout this build cannot read, or -1. A loader
+// reads its own version and older ones of the same length.
+static inline int
+ss_layout_unreadable(const ss_layout *current, const ss_layout *saved)
+{
+	const int n = current->count < saved->count ? current->count : saved->count;
+	for (int i = 0; i < n; i++) {
+		const ss_chunk_info *x = &current->chunks[i], *y = &saved->chunks[i];
+		if (memcmp(x->tag, y->tag, 4) != 0 || y->version > x->version || x->length != y->length) {
+			return i;
+		}
+	}
+	return current->count == saved->count ? -1 : n;
+}
+
 #endif

@@ -702,7 +702,7 @@ add_custom_target(unit_tests)
 # are skipped rather than failing the build when SDL is absent, so the tests that
 # genuinely stand alone still run on a machine without it.
 function(x16_add_test name)
-    cmake_parse_arguments(T "NEEDS_SDL;NEEDS_CPU_TABLES" "" "SOURCES" ${ARGN})
+    cmake_parse_arguments(T "NEEDS_SDL;NEEDS_CPU_TABLES" "" "SOURCES;DRIVER" ${ARGN})
 
     string(TOUPPER "${name}" name_uc)
     option(BUILD_${name_uc}_TEST "Build the ${name} unit test" OFF)
@@ -729,7 +729,8 @@ function(x16_add_test name)
         add_dependencies(${name}_test gen_cpu_tables)
     endif()
     add_dependencies(unit_tests ${name}_test)
-    add_test(NAME ${name} COMMAND ${name}_test)
+    # DRIVER: a command that runs the executable, which it is passed last.
+    add_test(NAME ${name} COMMAND ${T_DRIVER} $<TARGET_FILE:${name}_test>)
 endfunction()
 
 # dbg_info.c has no dependency on the emulator core, so this links it on its own.
@@ -1025,6 +1026,23 @@ if(TARGET vera_regbank_test)
     if(UNIX AND NOT APPLE)
         target_link_libraries(vera_regbank_test PRIVATE m)
     endif()
+endif()
+
+# FX and data ports against the RTL, in Icarus Verilog. Skipped without it.
+x16_add_test(vera_fx_rtl NEEDS_SDL
+    DRIVER "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/rtl_diff/run_fx.py"
+    SOURCES tests/rtl_diff/replay_fx.c tests/support/video_fixture.c tests/support/harness.c
+            ${VERA_VIDEO_TEST_SOURCES})
+
+if(TARGET vera_fx_rtl_test)
+    target_include_directories(vera_fx_rtl_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_fx_rtl_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_fx_rtl_test PRIVATE m)
+    endif()
+    set_tests_properties(vera_fx_rtl PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
 
 # The value half of the debugOn contract: a debug read must report what a real

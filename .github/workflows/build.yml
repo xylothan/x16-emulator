@@ -155,7 +155,7 @@ jobs:
         # here links the emulator.
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev iverilog
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
@@ -189,6 +189,7 @@ jobs:
         env:
           X16_KLAUS_REQUIRED: 1
           X16_VERA_RTL_REQUIRED: 1
+          X16_VERA_DIFF_REQUIRED: 1
         run: |
           if ! ctest --test-dir build -V > ctest.log 2>&1; then
             cat ctest.log
