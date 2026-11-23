@@ -690,6 +690,8 @@ draw_watchpoints()
 	static bool wp_read = false;
 	static bool wp_write = true;
 	static bool wp_no_fetch = true;
+	static bool wp_pin = false;
+	static int  wp_bank = 0;
 
 	if (ImGui::RadioButton("CPU", !wp_vram)) wp_vram = false;
 	if (ImGui::IsItemHovered())
@@ -744,6 +746,30 @@ draw_watchpoints()
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("How many consecutive bytes to cover. An access anywhere in the\n"
 		                  "range triggers the break.");
+
+	// Stays on screen where a bank cannot apply, and shows that.
+	const bool bank_fits = !wp_vram && wp_addr >= 0xA000 &&
+	                       (wp_addr < 0xC000) == (wp_addr + wp_len - 1 < 0xC000);
+	ImGui::SameLine();
+	bool show_pin = wp_pin && bank_fits;
+	ImGui::BeginDisabled(!bank_fits);
+	if (ImGui::Checkbox("Bank", &show_pin)) wp_pin = show_pin;
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip(bank_fits ? "Stop only while this RAM or ROM bank is mapped.\n"
+		                              "Unticked, the watch covers every bank."
+		                            : "A bank needs a CPU range inside $A000-$BFFF or $C000-$FFFF.");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!show_pin);
+	ImGui::SetNextItemWidth(dbgui_field_width("FF"));
+	ImGui::InputScalar("##wpbank", ImGuiDataType_S32, &wp_bank, nullptr, nullptr, "%02X",
+	                   ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_AutoSelectAll);
+	ImGui::EndDisabled();
+	if (wp_bank < 0) wp_bank = 0;
+	if (wp_bank > 0xFF) wp_bank = 0xFF;
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("RAM bank below $C000, ROM bank from $C000 (hex).");
+
 	ImGui::SameLine();
 	ImGui::BeginDisabled(debug_wp_count() >= MAX_WATCHPOINTS || (!wp_vram && !wp_read && !wp_write));
 	if (ImGui::Button("Add")) {
@@ -754,6 +780,7 @@ draw_watchpoints()
 			DEBUGAddVramWatchPoint((uint32_t)add_addr, (uint32_t)add_len);
 		else
 			DEBUGAddCpuWatch((uint16_t)add_addr, (uint32_t)(add_len > 0xFFFF ? 0xFFFF : add_len),
+			                 show_pin ? wp_bank : DEBUG_BANK_ANY,
 			                 (uint8_t)((wp_read ? DEBUG_WP_ACCESS_READ : 0) | (wp_write ? DEBUG_WP_ACCESS_WRITE : 0)),
 			                 wp_no_fetch);
 	}
@@ -776,7 +803,7 @@ draw_watchpoints()
 	// --- List --------------------------------------------------------------
 	int remove_index = -1;
 
-	if (ImGui::BeginTable("wp_table", 9,
+	if (ImGui::BeginTable("wp_table", 10,
 	        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
 	            DBGUI_TABLE_FLAGS_RESIZABLE)) {
 		ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed,
@@ -789,6 +816,8 @@ draw_watchpoints()
 		                        dbgui_col_width("Len", "131072"));
 		ImGui::TableSetupColumn("Range",   ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_width("Range", "$1FFFF-$1FFFF"));
+		ImGui::TableSetupColumn("Bank",    ImGuiTableColumnFlags_WidthFixed,
+		                        dbgui_col_width("Bank", "any"));
 		ImGui::TableSetupColumn("Access",  ImGuiTableColumnFlags_WidthFixed,
 		                        dbgui_col_width("Access", "RW+fetch"));
 		ImGui::TableSetupColumn("Hits",    ImGuiTableColumnFlags_WidthFixed,
@@ -839,6 +868,16 @@ draw_watchpoints()
 				ImGui::TextDisabled("-");
 
 			ImGui::TableSetColumnIndex(5);
+			if (w_vram || w->addr + w->len <= 0xA000)
+				ImGui::TextDisabled("-");
+			else if (w->x16Bank == DEBUG_BANK_ANY)
+				ImGui::TextDisabled("any");
+			else
+				ImGui::Text("$%02X", (unsigned)w->x16Bank);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("The RAM or ROM bank this watch applies to.");
+
+			ImGui::TableSetColumnIndex(6);
 			{
 				const bool r = (w->access & DEBUG_WP_ACCESS_READ) != 0;
 				const bool wr = (w->access & DEBUG_WP_ACCESS_WRITE) != 0;
@@ -847,11 +886,11 @@ draw_watchpoints()
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("R reads, W writes. +fetch also counts bytes fetched as instructions.");
 
-			ImGui::TableSetColumnIndex(6);
+			ImGui::TableSetColumnIndex(7);
 			ImGui::Text("%u", (unsigned)w->hits);
 
 			// Optional filter: only break when the value moved matches.
-			ImGui::TableSetColumnIndex(7);
+			ImGui::TableSetColumnIndex(8);
 			const dbg_cond_t *w_expr = (const dbg_cond_t *)w->expr;
 			bool has = w->has_value;
 			ImGui::BeginDisabled(w_expr != nullptr);
@@ -906,7 +945,7 @@ draw_watchpoints()
 				ImGui::TextDisabled("any value");
 			}
 
-			ImGui::TableSetColumnIndex(8);
+			ImGui::TableSetColumnIndex(9);
 			if (ImGui::SmallButton("x")) {
 				remove_index = i;
 			}

@@ -264,6 +264,7 @@ static struct {
     int      id;
     uint8_t  space;
     uint32_t addr;
+    int      x16Bank;
 } data_bps[MAX_WATCHPOINTS];
 static int      num_data_bps = 0;
 
@@ -428,6 +429,15 @@ static void dap_add_bank_message(cJSON *bp, int x16Bank) {
     snprintf(msg, sizeof msg, "bank $%02X only", (unsigned)x16Bank);
     cJSON_AddStringToObject(bp, "message", msg);
 }
+
+// A watch judges its bank at the start of its range, so a pinned range stays in
+// one window.
+static bool dap_watch_bank_fits(uint32_t addr, uint32_t len) {
+    return addr >= 0xA000 && len >= 1 && len <= 0x10000 - addr &&
+           (addr < 0xC000) == (addr + len - 1 < 0xC000);
+}
+
+#define DAP_WATCH_BANK_RANGE "a bank needs a range inside $A000-$BFFF or $C000-$FFFF"
 
 // Source files match addresses by basename, so several entries can share one
 // core entry and this owner's single claim on it. It is a logpoint only if all of
@@ -2687,10 +2697,31 @@ static void dap_text_watch_list(char *out, size_t size) {
     for (int i = 0; i < n && len < (int)size - 20; i++) {
         const struct watchpoint *wp = debug_wp_at(i);
         if (!wp) break;
-        len += snprintf(out + len, size - len,
-                        wp->space == DEBUG_WP_SPACE_VRAM ? " vram:%05X(%u)" : " $%04X(%u)",
-                        (unsigned)wp->addr, (unsigned)wp->len);
+        if (wp->space == DEBUG_WP_SPACE_CPU && wp->x16Bank != DEBUG_BANK_ANY)
+            len += snprintf(out + len, size - len, " %02X:%04X(%u)", (unsigned)wp->x16Bank,
+                            (unsigned)wp->addr, (unsigned)wp->len);
+        else
+            len += snprintf(out + len, size - len,
+                            wp->space == DEBUG_WP_SPACE_VRAM ? " vram:%05X(%u)" : " $%04X(%u)",
+                            (unsigned)wp->addr, (unsigned)wp->len);
     }
+}
+
+// ADDR or BANK:ADDR, in hex.
+static bool dap_console_watch_target(const char *s, uint16_t *addr, int *bank, char **endp) {
+    const unsigned long first = strtoul(s, endp, 16);
+    *bank = DEBUG_BANK_ANY;
+    if (**endp != ':') {
+        *addr = (uint16_t)first;
+        return true;
+    }
+    const char *second = *endp + 1;
+    if (*endp == s || first > 0xFF || !isxdigit((unsigned char)*second)) return false;
+    const unsigned long a = strtoul(second, endp, 16);
+    if (a > 0xFFFF) return false;
+    *addr = (uint16_t)a;
+    *bank = (int)first;
+    return true;
 }
 
 // vram ADDR [COUNT]: VERA VRAM bytes (17-bit address), at most `max` of them.
@@ -2885,30 +2916,49 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         snprintf(result, sizeof(result), "PC=$%04X A=$%02X X=$%02X Y=$%02X SP=$%02X P=$%02X",
                  regs.pc, regs.a, (uint8_t)regs.x, (uint8_t)regs.y, (uint8_t)regs.sp, regs.status);
     } else if (strncmp(expr, "watch_add ", 10) == 0) {
-        // watch_add ADDR [LEN]  — add memory write watchpoint
+        // watch_add [BANK:]ADDR [LEN]  — add memory write watchpoint
         char *endp;
-        uint16_t addr = (uint16_t)strtoul(expr + 10, &endp, 16);
+        char at[16];
+        uint16_t addr;
+        int wbank;
         uint16_t len = 1;
-        if (*endp == ' ') len = (uint16_t)strtoul(endp + 1, NULL, 16);
+        const bool parsed = dap_console_watch_target(expr + 10, &addr, &wbank, &endp);
+        if (parsed && *endp == ' ') len = (uint16_t)strtoul(endp + 1, NULL, 16);
         if (len == 0) len = 1;
-        // Owned by the console, so it goes away with the session. An untracked
-        // one outlived the client that made it and could halt a headless
-        // machine with nobody able to resume it.
-        const debug_add_result_t added =
-            debug_wp_add_for(addr, len, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_CONSOLE);
-        if (added == DEBUG_ADD_FULL)
-            snprintf(result, sizeof(result), "watchpoint table full (max %d)", MAX_WATCHPOINTS);
-        else if (added == DEBUG_ADD_CONFLICT)
-            snprintf(result, sizeof(result), "a read watch is already set at $%04X", addr);
-        else
-            snprintf(result, sizeof(result), "watchpoint added at $%04X len %d", addr, len);
+        if (!parsed) {
+            snprintf(result, sizeof(result), "expected ADDR or BANK:ADDR, in hex");
+        } else if (wbank != DEBUG_BANK_ANY && !dap_watch_bank_fits(addr, len)) {
+            snprintf(result, sizeof(result), DAP_WATCH_BANK_RANGE);
+        } else {
+            dap_fmt_bp(at, sizeof at, addr, 0, wbank);
+            // Owned by the console, so it goes away with the session. An untracked
+            // one outlived the client that made it and could halt a headless
+            // machine with nobody able to resume it.
+            const debug_add_result_t added =
+                debug_wp_add_for(addr, len, wbank, DEBUG_OWNER_DAP_CONSOLE);
+            if (added == DEBUG_ADD_FULL)
+                snprintf(result, sizeof(result), "watchpoint table full (max %d)", MAX_WATCHPOINTS);
+            else if (added == DEBUG_ADD_CONFLICT)
+                snprintf(result, sizeof(result), "a read watch is already set at %s", at);
+            else
+                snprintf(result, sizeof(result), "watchpoint added at %s len %d", at, len);
+        }
     } else if (strncmp(expr, "watch_remove ", 13) == 0) {
-        uint16_t addr = (uint16_t)strtoul(expr + 13, NULL, 16);
-        // Typed by a person, so it takes the watch away whoever asked for it.
-        if (debug_wp_delete(addr, DEBUG_BANK_ANY))
-            snprintf(result, sizeof(result), "watchpoint removed at $%04X", addr);
-        else
-            snprintf(result, sizeof(result), "no watchpoint at $%04X", addr);
+        char *endp;
+        char at[16];
+        uint16_t addr;
+        int wbank;
+        if (!dap_console_watch_target(expr + 13, &addr, &wbank, &endp)) {
+            snprintf(result, sizeof(result), "expected ADDR or BANK:ADDR, in hex");
+        } else {
+            dap_fmt_bp(at, sizeof at, addr, 0, wbank);
+            // Typed by a person, so it takes the watch away whoever asked for it.
+            if ((wbank == DEBUG_BANK_ANY || dap_watch_bank_fits(addr, 1)) &&
+                debug_wp_delete(addr, wbank))
+                snprintf(result, sizeof(result), "watchpoint removed at %s", at);
+            else
+                snprintf(result, sizeof(result), "no watchpoint at %s", at);
+        }
     } else if (!strcmp(expr, "watch_list")) {
         dap_text_watch_list(result, sizeof result);
     } else if (!strcmp(expr, "watch_clear")) {
@@ -6691,16 +6741,22 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
                                     by_i->valuedouble <= 0x20000 &&
                                     by_i->valuedouble == (uint32_t)by_i->valuedouble);
     const uint32_t bytes = (by_i && bytes_ok) ? (uint32_t)by_i->valuedouble : 0;
+    cJSON *xb_i = args ? cJSON_GetObjectItemCaseSensitive(args, "x16Bank") : NULL;
+    const bool bank_ok = !xb_i || (cJSON_IsNumber(xb_i) && xb_i->valuedouble >= 0 &&
+                                   xb_i->valuedouble <= 255 &&
+                                   xb_i->valuedouble == (int)xb_i->valuedouble);
+    const int pin = (xb_i && bank_ok) ? (int)xb_i->valuedouble : DEBUG_BANK_ANY;
     cJSON *body = cJSON_CreateObject();
-    char dataId[32], desc[64];
-    bool known = false, vram = false;
-    if (name_i && cJSON_IsString(name_i) && bytes_ok) {
+    char dataId[48], desc[80];
+    bool known = false, vram = false, bank_refused = !bank_ok;
+    if (name_i && cJSON_IsString(name_i) && bytes_ok && bank_ok) {
         const char *name = name_i->valuestring;
         uint32_t vaddr = 0, vlen = 1, addr = 0, len = 1;
         uint16_t addr16 = 0, len16 = 1;
         if (dap_parse_vram_target(name, &vaddr, &vlen)) {
             if (bytes) vlen = bytes;
-            known = vlen <= 0x20000 - vaddr;
+            known = vlen <= 0x20000 - vaddr && !xb_i;
+            bank_refused = xb_i != NULL;
             vram  = true;
             if (vlen > 1) {
                 snprintf(dataId, sizeof dataId, "vram:%05X:%u", (unsigned)vaddr, (unsigned)vlen);
@@ -6718,14 +6774,24 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
             }
             if (bytes) len = bytes;
             known = len <= 0x10000 - addr;
-            // A CPU watch applies whichever bank is mapped.
-            const char *banks = addr + len > 0xA000 ? " in any bank" : "";
+            if (known && xb_i && !dap_watch_bank_fits(addr, len)) {
+                known = false;
+                bank_refused = true;
+            }
+            // Without a bank, a CPU watch applies whichever bank is mapped.
+            char banks[24] = "", suffix[16] = "";
+            if (pin != DEBUG_BANK_ANY) {
+                snprintf(banks, sizeof banks, " in bank $%02X", (unsigned)pin);
+                snprintf(suffix, sizeof suffix, "@%d", pin);
+            } else if (addr + len > 0xA000) {
+                snprintf(banks, sizeof banks, " in any bank");
+            }
             if (len > 1) {
-                snprintf(dataId, sizeof dataId, "%u:%u", (unsigned)addr, (unsigned)len);
+                snprintf(dataId, sizeof dataId, "%u:%u%s", (unsigned)addr, (unsigned)len, suffix);
                 snprintf(desc, sizeof desc, "$%04X-$%04X%s", (unsigned)addr,
                          (unsigned)(addr + len - 1), banks);
             } else {
-                snprintf(dataId, sizeof dataId, "%u", (unsigned)addr);
+                snprintf(dataId, sizeof dataId, "%u%s", (unsigned)addr, suffix);
                 snprintf(desc, sizeof desc, "$%04X%s", (unsigned)addr, banks);
             }
         }
@@ -6743,27 +6809,36 @@ static int handle_dap_data_breakpoint_info(int seq, cJSON *args) {
         cJSON_AddBoolToObject(body, "canPersist", false);
     } else {
         cJSON_AddNullToObject(body, "dataId");
-        cJSON_AddStringToObject(body, "description", "no data breakpoint is available for this");
+        cJSON_AddStringToObject(body, "description", bank_refused
+            ? DAP_WATCH_BANK_RANGE : "no data breakpoint is available for this");
     }
     send_dap_response(seq, "dataBreakpointInfo", true, body);
     return 0;
 }
 
-// A dataId as dataBreakpointInfo issues it: "addr", "addr:len", or either of
-// those after "vram:".
-static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uint32_t *len) {
+// A dataId as dataBreakpointInfo issues it: "addr" or "addr:len", with "@bank"
+// after a CPU range pinned to a bank, or either form after "vram:".
+static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uint32_t *len,
+                              int *x16Bank) {
+    *x16Bank = DEBUG_BANK_ANY;
     if (dap_has_prefix_i(s, "vram:")) {
         *space = DEBUG_WP_SPACE_VRAM;
         return dap_parse_vram_target(s, addr, len);
     }
-    const char *colon = strchr(s, ':');
-    uint32_t a, l = 1;
-    if (!dap_strict_num(s, colon ? colon : s + strlen(s), &a) || a > 0xFFFF) return false;
-    if (colon && (!dap_strict_num(colon + 1, colon + strlen(colon), &l) || l == 0 || l > 0x10000 - a))
+    const char *pin = strchr(s, '@');
+    const char *end = pin ? pin : s + strlen(s);
+    const char *colon = (const char *)memchr(s, ':', (size_t)(end - s));
+    uint32_t a, l = 1, b = 0;
+    if (!dap_strict_num(s, colon ? colon : end, &a) || a > 0xFFFF) return false;
+    if (colon && (!dap_strict_num(colon + 1, end, &l) || l == 0 || l > 0x10000 - a))
+        return false;
+    if (pin && (!dap_strict_num(pin + 1, pin + strlen(pin), &b) || b > 0xFF ||
+                !dap_watch_bank_fits(a, l)))
         return false;
     *space = DEBUG_WP_SPACE_CPU;
     *addr  = a;
     *len   = l;
+    if (pin) *x16Bank = (int)b;
     return true;
 }
 
@@ -6771,9 +6846,9 @@ static bool dap_parse_data_id(const char *s, uint8_t *space, uint32_t *addr, uin
 // and filter, so one that differs from this request would be reported armed
 // while doing something else, and changing it would alter that owner's watch.
 static const char *dap_arm_watch(uint8_t space, uint8_t access, bool exclude_fetch, uint32_t addr,
-                                 uint32_t len, bool has_value, int op, uint8_t value,
+                                 uint32_t len, int x16Bank, bool has_value, int op, uint8_t value,
                                  dbg_cond_t *expr, uint32_t ignore, debug_owner_t owner) {
-    const debug_wp_spec_t spec = { space, addr, len, DEBUG_BANK_ANY, has_value, op, value,
+    const debug_wp_spec_t spec = { space, addr, len, x16Bank, has_value, op, value,
                                    access, exclude_fetch, ignore, expr };
     const debug_add_result_t added = debug_wp_add_ex(&spec, owner);
     if (added != DEBUG_ADD_CREATED) dbg_cond_free(expr);   // the core kept none of it
@@ -6823,6 +6898,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint8_t  access = DEBUG_WP_ACCESS_WRITE;
         uint32_t addr = 0, len = 1;
+        int x16 = DEBUG_BANK_ANY;
         bool has_value = false;
         int op = 0;
         uint32_t val = 0;
@@ -6837,7 +6913,7 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
             access = 0;
         }
 
-        if (!id || !cJSON_IsString(id) || !dap_parse_data_id(id->valuestring, &space, &addr, &len))
+        if (!id || !cJSON_IsString(id) || !dap_parse_data_id(id->valuestring, &space, &addr, &len, &x16))
             why = "not a dataId from dataBreakpointInfo";
         else if (!access)
             why = "accessType must be read, write or readWrite";
@@ -6858,18 +6934,18 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
         if (!why && hc && hc->valuestring[0]) dap_parse_hit(hc->valuestring, &hit_at);
         if (!why)
             // A data breakpoint is on data, so bytes fetched as code do not count.
-            why = dap_arm_watch(space, access, true, addr, len, has_value, op, (uint8_t)val, expr,
-                                hit_at - 1, DEBUG_OWNER_DAP_SOURCE);
+            why = dap_arm_watch(space, access, true, addr, len, x16, has_value, op, (uint8_t)val,
+                                expr, hit_at - 1, DEBUG_OWNER_DAP_SOURCE);
         else
             dbg_cond_free(expr);
 
         if (!why) {
-            const int at = debug_wp_find(space, addr, DEBUG_BANK_ANY);
+            const int at = debug_wp_find(space, addr, x16);
             const struct watchpoint *w = debug_wp_at(at);
             for (int k = 0; w && k < num_previous; k++) {
                 const struct watchpoint *p = &previous[k];
-                if (p->space == w->space && p->addr == w->addr && p->len == w->len &&
-                    p->access == w->access && p->has_value == w->has_value &&
+                if (p->space == w->space && p->addr == w->addr && p->x16Bank == w->x16Bank &&
+                    p->len == w->len && p->access == w->access && p->has_value == w->has_value &&
                     (!p->has_value || (p->op == w->op && p->value == w->value)) &&
                     !strcmp(previous_expr[k], w->expr ? dbg_cond_text((const dbg_cond_t *)w->expr) : "") &&
                     p->hits > w->hits) {
@@ -6881,11 +6957,13 @@ static int handle_dap_set_data_breakpoints(int seq, cJSON *args) {
             data_bps[num_data_bps].id    = bp_id;
             data_bps[num_data_bps].space = space;
             data_bps[num_data_bps].addr  = addr;
+            data_bps[num_data_bps].x16Bank = x16;
             num_data_bps++;
             cJSON_AddNumberToObject(rb, "id", bp_id);
         }
         cJSON_AddBoolToObject(rb, "verified", why == NULL);
         if (why) cJSON_AddStringToObject(rb, "message", why);
+        else     dap_add_bank_message(rb, x16);
         cJSON_AddItemToArray(arr, rb);
     }
     cJSON_AddItemToObject(body, "breakpoints", arr);
@@ -7364,11 +7442,13 @@ static bool mcp_bp_key(cJSON *args, const char *cond, struct breakpoint *bp,
     return true;
 }
 
-// A watch covers one CPU address range in every bank, or one range of VRAM.
+// A watch covers one CPU address range, in one bank or all of them, or one range
+// of VRAM.
 static bool mcp_watch_range(cJSON *args, uint8_t *space, uint32_t *addr, uint32_t *len,
-                            char *why, size_t whyn) {
+                            int *x16Bank, char *why, size_t whyn) {
     cJSON *ad = cJSON_GetObjectItemCaseSensitive(args, "address");
     cJSON *ln = cJSON_GetObjectItemCaseSensitive(args, "length");
+    *x16Bank = DEBUG_BANK_ANY;
     if (ad && cJSON_IsString(ad) && dap_has_prefix_i(ad->valuestring, "vram:")) {
         bool is_vram = false;
         uint32_t a = 0;
@@ -7392,22 +7472,33 @@ static bool mcp_watch_range(cJSON *args, uint8_t *space, uint32_t *addr, uint32_
     }
     struct breakpoint bp;
     if (!ad || !cJSON_IsString(ad) || !dap_parse_instruction_ref(ad->valuestring, 0, &bp) ||
-        bp.bank != 0 || bp.x16Bank != DEBUG_BANK_ANY) {
-        snprintf(why, whyn, "a write watch takes a 16-bit CPU address, e.g. $0400");
+        bp.bank != 0) {
+        snprintf(why, whyn, "a watch takes a 16-bit CPU address, e.g. $0400 or 03:A000");
         return false;
     }
-    if (cJSON_HasObjectItem(args, "bank")) {
-        snprintf(why, whyn, "a write watch covers every bank, so it takes no 'bank'");
-        return false;
+    int want = bp.x16Bank;
+    cJSON *xb = cJSON_GetObjectItemCaseSensitive(args, "bank");
+    if (xb) {
+        const int b = (int)xb->valuedouble;
+        if (want != DEBUG_BANK_ANY && want != b) {
+            snprintf(why, whyn, "'bank' disagrees with the bank in the address");
+            return false;
+        }
+        want = b;
     }
     const int l = ln ? (int)ln->valuedouble : 1;
     if (l < 1 || bp.pc + l > 0x10000) {
         snprintf(why, whyn, "the watched range runs past $FFFF");
         return false;
     }
-    *space = DEBUG_WP_SPACE_CPU;
-    *addr  = bp.pc;
-    *len   = (uint32_t)l;
+    if (want != DEBUG_BANK_ANY && !dap_watch_bank_fits((uint32_t)bp.pc, (uint32_t)l)) {
+        snprintf(why, whyn, DAP_WATCH_BANK_RANGE);
+        return false;
+    }
+    *space   = DEBUG_WP_SPACE_CPU;
+    *addr    = bp.pc;
+    *len     = (uint32_t)l;
+    *x16Bank = want;
     return true;
 }
 
@@ -7474,10 +7565,10 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
         uint32_t val = 0;
-        int op = 0;
+        int op = 0, x16 = DEBUG_BANK_ANY;
         bool has_value = false;
         dbg_cond_t *expr = NULL;
-        if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) {
+        if (!mcp_watch_range(args, &space, &addr, &len, &x16, why, sizeof why)) {
             send_dap_error_response(seq, cmd, why);
             return 0;
         }
@@ -7494,23 +7585,26 @@ static int handle_mcp_set_breakpoint(int seq, cJSON *args) {
         cJSON *xf = cJSON_GetObjectItemCaseSensitive(args, "excludeFetch");
         // Setting a watch this client alone holds and has disabled arms it again,
         // as it does for an exec breakpoint.
-        const int held = debug_wp_find(space, addr, DEBUG_BANK_ANY);
+        const int held = debug_wp_find(space, addr, x16);
         const bool rearm = held >= 0 && !debug_wp_at(held)->active &&
                            debug_wp_at(held)->owners == (uint16_t)(1u << DEBUG_OWNER_MCP);
         if (rearm) debug_wp_set_active_at(held, true);
         const char *refused = dap_arm_watch(space, access, !(xf && cJSON_IsFalse(xf)), addr, len,
-                                            has_value, op, (uint8_t)val, expr, 0, DEBUG_OWNER_MCP);
+                                            x16, has_value, op, (uint8_t)val, expr, 0,
+                                            DEBUG_OWNER_MCP);
         if (refused) {
             if (rearm) debug_wp_set_active_at(held, false);
             send_dap_error_response(seq, cmd, refused);
             return 0;
         }
         const bool vram = space == DEBUG_WP_SPACE_VRAM;
-        snprintf(where, sizeof where, vram ? "$%05X" : "$%04X", (unsigned)addr);
+        if (vram) snprintf(where, sizeof where, "$%05X", (unsigned)addr);
+        else      dap_fmt_bp(where, sizeof where, (int)addr, 0, x16);
         body = cJSON_CreateObject();
         cJSON_AddStringToObject(body, "kind", cJSON_GetObjectItemCaseSensitive(args, "kind")->valuestring);
         cJSON_AddStringToObject(body, "space", vram ? "vram" : "cpu");
         cJSON_AddStringToObject(body, "address", where);
+        if (x16 != DEBUG_BANK_ANY) cJSON_AddNumberToObject(body, "bank", x16);
         cJSON_AddNumberToObject(body, "length", len);
         send_dap_response(seq, cmd, true, body);
         return 0;
@@ -7636,9 +7730,10 @@ static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
     if (access) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
+        int x16 = DEBUG_BANK_ANY;
         const char *refused = NULL;
-        if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) refused = why;
-        const int idx = refused ? -1 : debug_wp_find(space, addr, DEBUG_BANK_ANY);
+        if (!mcp_watch_range(args, &space, &addr, &len, &x16, why, sizeof why)) refused = why;
+        const int idx = refused ? -1 : debug_wp_find(space, addr, x16);
         const struct watchpoint *w = idx >= 0 ? debug_wp_at(idx) : NULL;
         if (!refused && (!w || !(w->owners & mine))) refused = "MCP has no watch at this address";
         if (!refused && w->access != access) refused = "the watch at this address is of a different kind";
@@ -7650,7 +7745,8 @@ static int handle_mcp_enable_breakpoint(int seq, cJSON *args) {
         }
         debug_wp_set_active_at(idx, on);
         const bool vram = space == DEBUG_WP_SPACE_VRAM;
-        snprintf(where, sizeof where, vram ? "$%05X" : "$%04X", (unsigned)addr);
+        if (vram) snprintf(where, sizeof where, "$%05X", (unsigned)addr);
+        else      dap_fmt_bp(where, sizeof where, (int)addr, 0, x16);
         cJSON_AddStringToObject(body, "kind", cJSON_GetObjectItemCaseSensitive(args, "kind")->valuestring);
         cJSON_AddStringToObject(body, "space", vram ? "vram" : "cpu");
     } else {
@@ -7685,20 +7781,21 @@ static int handle_mcp_remove_breakpoint(int seq, cJSON *args) {
     if (access) {
         uint8_t  space = DEBUG_WP_SPACE_CPU;
         uint32_t addr = 0, len = 1;
-        if (!mcp_watch_range(args, &space, &addr, &len, why, sizeof why)) {
+        int x16 = DEBUG_BANK_ANY;
+        if (!mcp_watch_range(args, &space, &addr, &len, &x16, why, sizeof why)) {
             send_dap_error_response(seq, cmd, why);
             return 0;
         }
-        if (!debug_wp_has_owner_ex(space, addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP)) {
+        if (!debug_wp_has_owner_ex(space, addr, x16, DEBUG_OWNER_MCP)) {
             send_dap_error_response(seq, cmd, "MCP has no watch at this address");
             return 0;
         }
-        if (debug_wp_at(debug_wp_find(space, addr, DEBUG_BANK_ANY))->access != access) {
+        if (debug_wp_at(debug_wp_find(space, addr, x16))->access != access) {
             send_dap_error_response(seq, cmd, "the watch at this address is of a different kind");
             return 0;
         }
-        debug_wp_remove_ex(space, addr, DEBUG_BANK_ANY, DEBUG_OWNER_MCP);
-        still_armed = debug_wp_find(space, addr, DEBUG_BANK_ANY) >= 0;
+        debug_wp_remove_ex(space, addr, x16, DEBUG_OWNER_MCP);
+        still_armed = debug_wp_find(space, addr, x16) >= 0;
     } else {
         struct breakpoint bp;
         if (!mcp_bp_key(args, "", &bp, why, sizeof why)) {
@@ -10456,9 +10553,10 @@ void debug_server_notify_stopped(const char *reason) {
                                                                          : DEBUG_WP_ACCESS_WRITE;
             for (int i = 0; i < num_data_bps; i++) {
                 if (data_bps[i].space == space &&
-                    debug_wp_has_owner_ex(space, data_bps[i].addr, DEBUG_BANK_ANY, DEBUG_OWNER_DAP_SOURCE) &&
-                    debug_wp_fires_on_ex(space, access, stop.fetch, data_bps[i].addr, DEBUG_BANK_ANY,
-                                         stop.address, stop.value))
+                    debug_wp_has_owner_ex(space, data_bps[i].addr, data_bps[i].x16Bank,
+                                          DEBUG_OWNER_DAP_SOURCE) &&
+                    debug_wp_fires_on_ex(space, access, stop.fetch, data_bps[i].addr,
+                                         data_bps[i].x16Bank, stop.address, stop.value))
                     cJSON_AddItemToArray(hit_ids, cJSON_CreateNumber(data_bps[i].id));
             }
         }

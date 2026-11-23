@@ -658,6 +658,26 @@ def test_breakpoints():
                                                      "condition": "== 1"})):
             case(f"set_breakpoint refuses {label}", is_error(m.call("set_breakpoint", **args)))
 
+        for label, args in (("across windows", {"address": 0xBFFF, "kind": "write", "length": 2, "bank": 1}),
+                            ("a disagreeing bank", {"address": "03:A000", "kind": "write", "bank": 4}),
+                            ("a bank on VRAM", {"address": "vram:1000", "space": "vram", "kind": "write", "bank": 1})):
+            case(f"a pinned watch refuses {label}", is_error(m.call("set_breakpoint", **args)))
+        m.call("pause")
+        d = data(m.call("set_breakpoint", address=0xA000, kind="write", bank=3))
+        case("a watch takes a bank", d.get("address") == "03:A000" and d.get("bank") == 3, str(d))
+        d = data(m.call("set_breakpoint", address="04:A000", kind="write"))
+        case("and the bank in the address", d.get("address") == "04:A000" and d.get("bank") == 4, str(d))
+        wps = data(m.call("list_breakpoints")).get("watchpoints", [])
+        case("both are listed", sorted(w.get("x16Bank") for w in wps if w.get("addr") == 0xA000) == [3, 4], str(wps))
+        case("each is removed by its bank", data(m.call("remove_breakpoint", address="04:A000", kind="write")).get("removed") is True)
+        m.call("write_memory", address=0x0810, hex="8D00A0A90385008D00A080FE")
+        m.call("set_registers", pc=0x0810, ramBank=2)
+        last = data(m.call("get_status")).get("stopId")
+        m.call("continue")
+        d = data(m.call("wait_for_stop", sinceStopId=last))
+        case("a pinned watch skips another bank and stops in its own", d.get("pc") == 0x081A, str(d))
+        case("the bank is removed by key", data(m.call("remove_breakpoint", address=0xA000, kind="write", bank=3)).get("removed") is True)
+
     with Mcp(["-bp", "0950"]) as m:
         m.init()
         time.sleep(0.3)
@@ -1977,8 +1997,9 @@ def test_symbols():
             case("an exec breakpoint is pinned to it",
                  any(b.get("pc", b.get("addr")) == 0xA000 and b.get("x16Bank") == 3 for b in bps), str(bps))
             m.call("remove_breakpoint", address="banked")
-            case("a watch on a banked symbol is refused",
-                 is_error(m.call("set_breakpoint", address="banked", kind="write")))
+            d = data(m.call("set_breakpoint", address="banked", kind="write"))
+            case("a watch on a banked symbol is pinned to it", d.get("bank") == 3, str(d))
+            m.call("remove_breakpoint", address="banked", kind="write")
 
             # Breakpoints by name fire.
             m.call("write_memory", address=0x0810, hex="EAEA80FE")

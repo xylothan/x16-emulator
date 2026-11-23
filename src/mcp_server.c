@@ -1352,16 +1352,8 @@ static cJSON *breakpoint_call(const char *command, cJSON *args) {
     if (!arg_int(args, "bank", -1, 0, 255, &bank, err, sizeof err) ||
         !arg_int(args, "length", 1, 1, 0x20000, &length, err, sizeof err))
         return tool_fail(err);
-    // An exec breakpoint on a banked symbol belongs to that bank. A watch covers
-    // every bank, so it would also stop on whatever shares the address.
-    if (sym_bank >= 0 && bank < 0) {
-        if (ki && strcmp(ki->valuestring, "exec")) {
-            snprintf(err, sizeof err, "that symbol is in bank %d, and a watch covers every bank: "
-                                      "give its address to watch it in all of them", sym_bank);
-            return tool_fail(err);
-        }
-        bank = sym_bank;
-    }
+    // A banked symbol belongs to its bank, for a breakpoint or a watch.
+    if (sym_bank >= 0 && bank < 0) bank = sym_bank;
     cJSON *co = args ? cJSON_GetObjectItemCaseSensitive(args, "condition") : NULL;
     cJSON *hi = args ? cJSON_GetObjectItemCaseSensitive(args, "hitCondition") : NULL;
     if ((co && !cJSON_IsString(co)) || (hi && !cJSON_IsString(hi)))
@@ -2087,8 +2079,9 @@ static const mcp_tool_t tools[] = {
       "'file' and 'line' set an exec breakpoint on a source line, and a line with code in "
       "several places is refused until 'bank' picks one. "
       "A read watch ignores "
-      "bytes fetched as instructions unless excludeFetch is false. For exec, 'bank' pins a RAM or ROM bank, "
-      "'condition' is an expression in the language of evaluate, e.g. "
+      "bytes fetched as instructions unless excludeFetch is false. 'bank' pins a RAM or ROM bank; "
+      "a watch without one covers every bank, and a pinned watch stays inside $A000-$BFFF or "
+      "$C000-$FFFF. For exec, 'condition' is an expression in the language of evaluate, e.g. "
       "\"A == 1 && byte[$1234] != 0\" or \"rambank == 2 && X > 3\", and hitCondition \"N\" "
       "stops from the Nth hit on. For a watch, 'condition' is \"== $05\" on one byte, or an "
       "expression that can also use val, addr, is_read and is_write, where PC is the "
