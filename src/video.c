@@ -1587,17 +1587,21 @@ render_sprite_line(const uint16_t y)
 		int16_t       eff_sx      = (props->hflip ? (props->sprite_width - 1) : 0);
 		const int16_t eff_sx_incr = props->hflip ? -1 : 1;
 
-		const uint8_t *bitmap_data = video_ram + props->sprite_address + (eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
+		// line_addr is 15 bits of 32-bit words (sprite_renderer.v:247), so a row
+		// running past the top of VRAM continues from address 0, even mid-row.
+		const uint32_t row_address = props->sprite_address + ((uint32_t)eff_sy << (props->sprite_width_log2 - (1 - props->color_mode)));
 
 		uint8_t unpacked_sprite_line[64];
 		const uint16_t width = (props->sprite_width<64? props->sprite_width : 64);
 		const uint8_t vram_fetch_mask = ((2 - props->color_mode) << 2) - 1;
 		if (props->color_mode == 0) {
 			// 4bpp
-			expand_4bpp_data(unpacked_sprite_line, bitmap_data, width);
+			uint8_t packed_sprite_line[32];
+			video_space_read_range(packed_sprite_line, row_address, width / 2);
+			expand_4bpp_data(unpacked_sprite_line, packed_sprite_line, width);
 		} else {
 			// 8bpp
-			memcpy(unpacked_sprite_line, bitmap_data, width);
+			video_space_read_range(unpacked_sprite_line, row_address, width);
 		}
 
 		// The line renderer's own clock, running from STATE_IDLE's single clock
