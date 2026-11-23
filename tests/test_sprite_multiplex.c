@@ -349,9 +349,76 @@ test_how_many_sprites_fit_on_one_line(void)
 	         "every slot is accounted for as drawn or dropped");
 }
 
+#define SPRITE_ADDR_MAX 0x1FFE0u
+#define SPRITE_GFX_PROBE 0x6000u
+#define WRAP_TARGET_X 100
+#define WRAP_TARGET_Y 100
+
+static void
+set_collision_mask(int slot, int z)
+{
+	video_space_write(ADDR_SPRDATA + (uint32_t)slot * 8 + 6, (uint8_t)(0x10 | ((z & 3) << 2)));
+}
+
+// Reads one pixel of slot 0 through VERA's collision flags (ISR bits 4-7),
+// using an 8x8 probe whose only opaque pixel is its first.
+static bool
+target_pixel_is_opaque(int sx, int sy)
+{
+	for (uint32_t i = 0; i < 8 * 4; i++) {
+		video_space_write(SPRITE_GFX_PROBE + i, 0);
+	}
+	video_space_write(SPRITE_GFX_PROBE, 0x10);
+	write_sprite(1, SPRITE_GFX_PROBE, WRAP_TARGET_X + sx, WRAP_TARGET_Y + sy, 1);
+	set_collision_mask(1, 1);
+
+	check(step_one_frame(), "the beam reaches a frame boundary");
+	check(step_one_frame(), "a full frame is rendered");
+
+	uint8_t  ien, isr;
+	uint16_t irq_line;
+	video_get_irq_state(&ien, &isr, &irq_line);
+	return (isr & 0xf0) != 0;
+}
+
+static void
+check_pixel_source(int wcode, int hcode, int mode, int sx, int sy, uint32_t source,
+                   const char *what)
+{
+	for (int opaque = 0; opaque < 2; opaque++) {
+		setup();
+		for (uint32_t a = 0; a < 0x1000; a++) {
+			video_space_write(a, 0);
+		}
+		for (uint32_t a = SPRITE_ADDR_MAX; a < 0x20000; a++) {
+			video_space_write(a, 0);
+		}
+		video_space_write(source, opaque ? 0xff : 0x00);
+		write_sprite_sized(0, SPRITE_ADDR_MAX, WRAP_TARGET_X, WRAP_TARGET_Y, 1, wcode, hcode, mode);
+		set_collision_mask(0, 1);
+		check_eq(target_pixel_is_opaque(sx, sy), opaque != 0, what);
+	}
+}
+
+// sprite_renderer.v:247 line_addr is 15 bits of 32-bit words.
+// main_ram.v:7,24-25 decodes all 15 as 32K words.
+static void
+test_a_sprite_row_wraps_at_the_top_of_vram(void)
+{
+	check_pixel_source(3, 3, 1, 31, 0, 0x1FFFFu, "64x64 8bpp row 0 px 31 is $1FFFF");
+	check_pixel_source(3, 3, 1, 32, 0, 0x00000u, "64x64 8bpp row 0 px 32 is $00000");
+	check_pixel_source(3, 3, 1, 63, 0, 0x0001Fu, "64x64 8bpp row 0 px 63 is $0001F");
+	check_pixel_source(3, 3, 1, 0, 1, 0x00020u, "64x64 8bpp row 1 px 0 is $00020");
+	check_pixel_source(3, 3, 1, 63, 63, 0x00FDFu, "64x64 8bpp row 63 px 63 is $00FDF");
+	check_pixel_source(1, 1, 0, 0, 3, 0x1FFF8u, "16x16 4bpp row 3 px 0 is $1FFF8");
+	check_pixel_source(1, 1, 0, 0, 4, 0x00000u, "16x16 4bpp row 4 px 0 is $00000");
+	check_pixel_source(1, 1, 0, 15, 4, 0x00007u, "16x16 4bpp row 4 px 15 is $00007");
+}
+
 int
 main(void)
 {
+	test_a_sprite_row_wraps_at_the_top_of_vram();
 	test_a_slot_rewritten_mid_frame_yields_two_effective_sprites();
 	test_a_transparent_sprite_is_not_an_effective_sprite();
 	test_the_budget_is_charged_on_the_lines_that_did_the_work();
