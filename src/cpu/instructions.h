@@ -382,7 +382,7 @@ static void jsl() {
     push16_long(ret);
     regs.pc = ea & 0xFFFF;
     regs.k = ea >> 16;
-    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL, ea, sp0, ret);
+    if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL_LONG, ea, sp0, ret);
 }
 
 static void lda() {

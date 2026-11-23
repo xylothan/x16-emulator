@@ -1659,7 +1659,9 @@ which only changes how the stop is reported. COP has no filter.
 
 Breakpoints belong to whoever set them: removing one leaves it armed if an editor or the command
 line also holds it. `enable_breakpoint` turns one on or off and keeps its condition and hit count.
-The flag is shared per address, so it is refused where anyone else holds that address.
+For a breakpoint it changes only this client's claim: the address stops while any holder has it on,
+and `stillArmed` says so. A watch has one flag per address, so there it is refused where anyone else
+holds that address.
 
 `set_breakpoint` `dump` makes an exec breakpoint write to a host file on each hit instead of
 stopping: a 4-byte hit index, then each region. The file must be new and inside `-fsroot`, or the

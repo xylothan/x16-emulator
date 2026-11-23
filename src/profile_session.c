@@ -250,6 +250,7 @@ flow_hook(int kind, uint32_t pc, uint16_t sp, uint16_t ret)
 	(void)ret;
 	switch (kind) {
 		case CPU_FLOW_CALL:
+		case CPU_FLOW_CALL_LONG:
 			cct_call(perf_hist_key(through_jmp_stubs((uint16_t)pc), memory_get_ram_bank(),
 			                       memory_get_rom_bank()),
 			         sp);
@@ -292,10 +293,10 @@ arm(uint32_t mask)
 		if (!cct_ready)
 			cct_ready = cct_init(TREE_NODES);
 		ok = cct_ready && ok;
+		ok = ok && cpu_flow_listen(flow_hook);
 		if (ok) {
 			cct_reset();
 			perf_hist_tree = true;
-			cpu_flow_hook  = flow_hook;
 		}
 	}
 	if (mask & CAP_REC_WATERFALL) {
@@ -337,7 +338,7 @@ disarm(uint32_t mask)
 		cct_switch_hook      = NULL;
 	}
 	if (mask & CAP_REC_TREE) {
-		cpu_flow_hook  = NULL;
+		cpu_flow_unlisten(flow_hook);
 		perf_hist_tree = false;
 	}
 	if (mask & CAP_REC_HIST)

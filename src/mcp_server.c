@@ -2140,8 +2140,10 @@ static const mcp_tool_t tools[] = {
       TOOL_CONTROL, tool_remove_breakpoint },
     { "enable_breakpoint",
       "Turn a breakpoint or watch this client set on or off, by 'address' or by 'file' and "
-      "'line', keeping its condition and hit count. The flag is shared per address, so this is "
-      "refused where another client or the command line also holds it.",
+      "'line', keeping its condition and hit count. For a breakpoint this changes only this "
+      "client's claim: the address stops while any holder has it on, and stillArmed says so. "
+      "A watch has one flag per address, so this is refused where another client or the "
+      "command line also holds it.",
       "{\"type\":\"object\",\"properties\":{"
       ADDRESS_ARG ","
       "\"enabled\":{\"type\":\"boolean\"},"

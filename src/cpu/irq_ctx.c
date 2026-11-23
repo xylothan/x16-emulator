@@ -9,6 +9,57 @@
 cpu_flow_hook_fn cpu_flow_hook = NULL;
 cpu_irq_line_hook_fn cpu_irq_line_hook = NULL;
 
+static cpu_flow_hook_fn flow_listeners[CPU_FLOW_LISTENER_MAX];
+static int              flow_listener_count;
+
+static void
+flow_dispatch(int kind, uint32_t pc, uint16_t sp, uint16_t ret)
+{
+	for (int i = 0; i < flow_listener_count; i++)
+		flow_listeners[i](kind, pc, sp, ret);
+}
+
+static void
+flow_hook_update(void)
+{
+	if (flow_listener_count == 0)
+		cpu_flow_hook = NULL;
+	else if (flow_listener_count == 1)
+		cpu_flow_hook = flow_listeners[0];
+	else
+		cpu_flow_hook = flow_dispatch;
+}
+
+bool
+cpu_flow_listen(cpu_flow_hook_fn fn)
+{
+	if (!fn)
+		return false;
+	for (int i = 0; i < flow_listener_count; i++) {
+		if (flow_listeners[i] == fn)
+			return true;
+	}
+	if (flow_listener_count == CPU_FLOW_LISTENER_MAX)
+		return false;
+	flow_listeners[flow_listener_count++] = fn;
+	flow_hook_update();
+	return true;
+}
+
+void
+cpu_flow_unlisten(cpu_flow_hook_fn fn)
+{
+	for (int i = 0; i < flow_listener_count; i++) {
+		if (flow_listeners[i] != fn)
+			continue;
+		for (int j = i + 1; j < flow_listener_count; j++)
+			flow_listeners[j - 1] = flow_listeners[j];
+		flow_listener_count--;
+		flow_hook_update();
+		return;
+	}
+}
+
 // Past CPU_IRQ_CTX_MAX (see irq_ctx.h) the depth still counts, but there is no
 // room to record which stack pointer each of those entries had. A return can
 // therefore only take them off one at a time, since it has nothing to match
