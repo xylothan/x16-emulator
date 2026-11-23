@@ -48,6 +48,8 @@
 #include <cjson/cJSON.h>
 #include "x16_hash.h"
 #include "savestate.h"
+#include "input_log.h"
+#include "input_log_host.h"
 #include "dbg_load.h"
 #include "export_paths.h"
 #include "host_write_path.h"
@@ -2881,6 +2883,7 @@ static int handle_dap_evaluate(int seq, cJSON *args) {
         num_instr_bps = 0;
         snprintf(result, sizeof(result), "all breakpoints cleared");
     } else if (strcmp(expr, "reset") == 0) {
+        input_log_end("machine reset");
         machine_reset();
         snprintf(result, sizeof(result), "CPU reset");
     } else if ((expr[0] == '$' || expr[0] == '0') && dap_parse_eval_addr(expr, &peek_addr)) {
@@ -3474,7 +3477,7 @@ static void dap_add_hash_of(cJSON *body, const void *data, size_t len) {
     dap_add_hex64(body, "hash", savestate_hash(data, len));
 }
 
-static void dap_add_state_hash(cJSON *body) {
+bool debug_server_machine_hash(uint64_t *out) {
     // Kept between calls: a client asking for the hash every frame should not
     // cost an allocation of the whole machine each time.
     static ss_writer w;
@@ -3486,10 +3489,19 @@ static void dap_add_state_hash(cJSON *body) {
     ss_writer_rewind(&w);
     savestate_write(&w);
     if (w.failed) {
-        cJSON_AddNullToObject(body, "hash");
-        return;
+        return false;
     }
-    dap_add_hash_of(body, w.data, w.len);
+    *out = savestate_hash(w.data, w.len);
+    return true;
+}
+
+static void dap_add_state_hash(cJSON *body) {
+    uint64_t h;
+    if (debug_server_machine_hash(&h)) {
+        dap_add_hex64(body, "hash", h);
+    } else {
+        cJSON_AddNullToObject(body, "hash");
+    }
 }
 
 static bool dap_arg_true(cJSON *args, const char *name) {
@@ -9652,9 +9664,117 @@ static int handle_dap_cancel(int seq, cJSON *args) {
     return 1;
 }
 
+// ─── x16/inputLog: record what the host feeds the machine, and replay it ──
+//
+// action: "start" (paused at a frame boundary), "stop", "replay" (paused where
+// the recording began, usually after x16/loadState), or "status" (default).
+
+static const char *input_log_mode_name(input_log_mode_t m) {
+    return m == INPUT_LOG_RECORDING ? "recording" : m == INPUT_LOG_REPLAYING ? "replaying" : "idle";
+}
+
+static const char *input_log_result_name(input_replay_result_t r) {
+    switch (r) {
+        case INPUT_REPLAY_RUNNING:    return "running";
+        case INPUT_REPLAY_VERIFIED:   return "verified";
+        case INPUT_REPLAY_UNVERIFIED: return "unverified";
+        case INPUT_REPLAY_MISMATCH:   return "mismatch";
+        case INPUT_REPLAY_DIVERGED:   return "diverged";
+        case INPUT_REPLAY_CANCELLED:  return "cancelled";
+        default:                      return "none";
+    }
+}
+
+extern bool has_serial;
+
+static int handle_x16_input_log(int seq, cJSON *args) {
+    static const char cmd[] = "x16/inputLog";
+    cJSON *a = args ? cJSON_GetObjectItemCaseSensitive(args, "action") : NULL;
+    const char *action = cJSON_IsString(a) ? a->valuestring : "status";
+
+    if (!strcmp(action, "start")) {
+        if (step.pending || !dap_at_frame_boundary()) {
+            send_dap_error_response(seq, cmd, "the machine must be paused at a frame boundary");
+            return 0;
+        }
+        if (has_serial || has_midi_card) {
+            send_dap_error_response(seq, cmd, "a machine with -serial or -midicard cannot be replayed");
+            return 0;
+        }
+        if (!input_log_host_start()) {
+            send_dap_error_response(seq, cmd, "a recording or replay is already running");
+            return 0;
+        }
+    } else if (!strcmp(action, "stop")) {
+        input_log_end("stopped");
+    } else if (!strcmp(action, "replay")) {
+        if (step.pending || !DEBUGIsPaused()) {
+            send_dap_error_response(seq, cmd, "the machine must be paused");
+            return 0;
+        }
+        if (!input_log_replay_start()) {
+            send_dap_error_response(seq, cmd,
+                                    "needs a finished recording and the machine where it began");
+            return 0;
+        }
+    } else if (strcmp(action, "status")) {
+        send_dap_error_response(seq, cmd, "'action' must be start, stop, replay or status");
+        return 0;
+    }
+
+    input_log_status_t s;
+    input_log_get_status(&s);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "mode", input_log_mode_name(s.mode));
+    cJSON_AddBoolToObject(body, "hasRecording", s.has_recording);
+    cJSON_AddNumberToObject(body, "events", s.events);
+    cJSON_AddNumberToObject(body, "applied", s.applied);
+    cJSON_AddNumberToObject(body, "cycle", (double)s.cycle);
+    cJSON_AddNumberToObject(body, "endCycle", (double)s.end_cycle);
+    cJSON_AddBoolToObject(body, "endHashValid", s.end_hash_valid);
+    cJSON_AddStringToObject(body, "replay", input_log_result_name(s.result));
+    if (s.end_reason) cJSON_AddStringToObject(body, "endReason", s.end_reason);
+    if (s.result == INPUT_REPLAY_DIVERGED) {
+        cJSON_AddNumberToObject(body, "divergedEventCycle", (double)s.diverged_event_cycle);
+        cJSON_AddNumberToObject(body, "divergedAtCycle", (double)s.diverged_at_cycle);
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
+// These change the machine in ways the log does not hold, so they end a
+// recording before they run, and cancel a replay.
+static void input_log_gate_edits(const char *cmd) {
+    static const char *const edits[] = {
+        "writeMemory", "setVariable", "setExpression", "goto", "restart",
+        "x16/loadPrg", "x16/loadState", "x16/interrupt",
+    };
+    if (input_log_mode == INPUT_LOG_IDLE) return;
+    for (size_t i = 0; i < sizeof edits / sizeof edits[0]; i++) {
+        if (!strcmp(cmd, edits[i])) {
+            input_log_end(edits[i]);
+            return;
+        }
+    }
+}
+
+// A replay owns the inputs, so a request to change them is refused, not lost.
+static bool input_log_refuses(const char *cmd, cJSON *args) {
+    if (input_log_mode != INPUT_LOG_REPLAYING) return false;
+    return !strcmp(cmd, "x16/sendKey") || !strcmp(cmd, "x16/type") || !strcmp(cmd, "x16/mouse") ||
+           !strcmp(cmd, "x16/joystick") ||
+           (!strcmp(cmd, "x16/step") && args && cJSON_GetObjectItemCaseSensitive(args, "joysticks"));
+}
+
 // Run one request, whoever it came from. Returns 1 if execution mode was changed.
 static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     int result = 0;
+
+    if (input_log_refuses(cmd, args)) {
+        send_dap_error_response(seq, cmd, "an input replay is running");
+        return 0;
+    }
+    input_log_gate_edits(cmd);
 
     // A stop that has already happened is answered as that, whatever this
     // request goes on to do.
@@ -9711,6 +9831,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/runTo"))     result = handle_x16_run_to(seq, args);
     else if (!strcmp(cmd, "x16/saveState")) result = handle_x16_save_state(seq, args);
     else if (!strcmp(cmd, "x16/loadState")) result = handle_x16_load_state(seq, args);
+    else if (!strcmp(cmd, "x16/inputLog")) result = handle_x16_input_log(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);
@@ -9950,6 +10071,10 @@ static void dap_refresh_end(void) {
 }
 
 static void dap_release_session_state(void) {
+    // A replay blocks host input, so it cannot outlive the client that began it.
+    if (input_log_mode == INPUT_LOG_REPLAYING) {
+        input_log_end("debug session ended");
+    }
     dap_release_breakpoints();
     dap_line_base = 1;
     dap_col_base  = 1;

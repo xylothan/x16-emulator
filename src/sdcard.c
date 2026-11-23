@@ -19,6 +19,7 @@
 #include "io_trace.h"
 #include "files.h"
 #include "savestate.h"
+#include "input_log.h"
 
 //#define VERBOSE 1
 
@@ -598,8 +599,16 @@ sdcard_handle(uint8_t inbyte)
 							io_trace_event(IO_DEV_SDCARD, "ERROR write lba=%u out of range", lba);
 						}
 					} else {
-						x16seek(sdcard_file, (Sint64)lba * 512, XSEEK_SET);
-						int bytes_written = x16write(sdcard_file, rxbuf + 1, 1, 512);
+						// A state does not hold the image, so a write ends what can
+						// be replayed, and a replay reaching it leaves the image alone.
+						if (input_log_is_recording()) {
+							input_log_end_unverified("SD card write");
+						}
+						int bytes_written = 512;
+						if (input_log_mode != INPUT_LOG_REPLAYING) {
+							x16seek(sdcard_file, (Sint64)lba * 512, XSEEK_SET);
+							bytes_written = x16write(sdcard_file, rxbuf + 1, 1, 512);
+						}
 						if (bytes_written != 512) {
 							printf("Warning: short write!\n");
 						}

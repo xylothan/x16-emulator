@@ -4,6 +4,7 @@
 #include <SDL.h>
 #include <stdio.h>
 #include "io_trace.h"
+#include "input_log.h"
 
 struct joystick_info {
 	int                 instance_id;
@@ -117,13 +118,38 @@ static uint16_t Joystick_slot_shift[NUM_JOYSTICKS] = {0xffff, 0xffff, 0xffff, 0x
 static bool Joystick_latch = false;
 uint8_t Joystick_data  = 0;
 
+// During an input replay, what the host controllers were doing when recorded.
+// Host controllers are configuration, outside a save state, so this stands in
+// for them rather than going through the virtual pads, which are saved.
+static bool     phys_replay_active = false;
+static bool     phys_replay_bound[NUM_JOYSTICKS];
+static uint16_t phys_replay_mask[NUM_JOYSTICKS];
+
+static bool     phys_logged_bound[NUM_JOYSTICKS];
+static uint16_t phys_logged_mask[NUM_JOYSTICKS];
+
+static uint16_t
+host_slot_mask(int slot)
+{
+	if (Joystick_slots[slot] >= 0) {
+		struct joystick_info *joy = find_joystick_controller(Joystick_slots[slot]);
+		if (joy != NULL) {
+			return joy->button_mask;
+		}
+	}
+	return 0xffff;
+}
+
 // Whether anything at all is driving this slot. A slot with no source keeps the
 // original behaviour of reporting 1s (released) forever rather than clocking a
 // shift register, so no existing configuration changes behaviour.
 static bool
 slot_has_source(int slot)
 {
-	return Joystick_virtual_enabled[slot] || Joystick_slots[slot] >= 0;
+	if (Joystick_virtual_enabled[slot]) {
+		return true;
+	}
+	return phys_replay_active ? phys_replay_bound[slot] : Joystick_slots[slot] >= 0;
 }
 
 // The button state the slot should latch: the virtual joystick when one is
@@ -134,15 +160,44 @@ slot_button_mask(int slot)
 	if (Joystick_virtual_enabled[slot]) {
 		return Joystick_virtual_mask[slot];
 	}
+	if (phys_replay_active) {
+		return phys_replay_bound[slot] ? phys_replay_mask[slot] : 0xffff;
+	}
+	return host_slot_mask(slot);
+}
 
-	if (Joystick_slots[slot] >= 0) {
-		struct joystick_info *joy = find_joystick_controller(Joystick_slots[slot]);
-		if (joy != NULL) {
-			return joy->button_mask;
+void
+joystick_log_host_state(bool all)
+{
+	if (!input_log_is_recording()) {
+		return;
+	}
+	for (int i = 0; i < NUM_JOYSTICKS; ++i) {
+		const bool     bound = Joystick_slots[i] >= 0;
+		const uint16_t mask  = host_slot_mask(i);
+		if (all || bound != phys_logged_bound[i] || mask != phys_logged_mask[i]) {
+			phys_logged_bound[i] = bound;
+			phys_logged_mask[i]  = mask;
+			input_log_note(INPUT_EV_JOY_PHYS, (uint8_t)i, mask, bound);
 		}
 	}
+}
 
-	return 0xffff;
+void
+joystick_replay_host(int slot, bool bound, uint16_t mask)
+{
+	if (slot < 0 || slot >= NUM_JOYSTICKS) {
+		return;
+	}
+	phys_replay_active      = true;
+	phys_replay_bound[slot] = bound;
+	phys_replay_mask[slot]  = mask;
+}
+
+void
+joystick_replay_end(void)
+{
+	phys_replay_active = false;
 }
 
 // -deterministic / -nohostjoy: physical controllers are never opened, so only
@@ -224,6 +279,7 @@ joystick_add(int index)
 		new_info.button_mask = 0xffff;
 		add_joystick_controller(&new_info);
 	}
+	joystick_log_host_state(false);
 }
 
 void
@@ -243,6 +299,7 @@ joystick_remove(int instance_id)
 		SDL_GameControllerClose(controller);
 		remove_joystick_controller(instance_id);
 	}
+	joystick_log_host_state(false);
 }
 
 void
@@ -252,6 +309,7 @@ joystick_button_down(int instance_id, uint8_t button)
 	if (joy != NULL) {
 		joy->button_mask &= ~(button_map[button]);
 	}
+	joystick_log_host_state(false);
 }
 
 void
@@ -261,6 +319,7 @@ joystick_button_up(int instance_id, uint8_t button)
 	if (joy != NULL) {
 		joy->button_mask |= button_map[button];
 	}
+	joystick_log_host_state(false);
 }
 
 static void
@@ -318,8 +377,11 @@ joystick_set_clock(bool value)
 void
 joystick_set_virtual(int slot, uint16_t button_mask)
 {
-	if (slot < 0 || slot >= NUM_JOYSTICKS) {
+	if (slot < 0 || slot >= NUM_JOYSTICKS || input_log_host_blocked()) {
 		return;
+	}
+	if (input_log_is_recording()) {
+		input_log_note(INPUT_EV_JOY_SET, (uint8_t)slot, button_mask, 0);
 	}
 
 	Joystick_virtual_mask[slot]    = button_mask;
@@ -332,8 +394,11 @@ joystick_set_virtual(int slot, uint16_t button_mask)
 void
 joystick_clear_virtual(int slot)
 {
-	if (slot < 0 || slot >= NUM_JOYSTICKS) {
+	if (slot < 0 || slot >= NUM_JOYSTICKS || input_log_host_blocked()) {
 		return;
+	}
+	if (input_log_is_recording()) {
+		input_log_note(INPUT_EV_JOY_CLEAR, (uint8_t)slot, 0, 0);
 	}
 
 	Joystick_virtual_mask[slot]    = 0xffff;

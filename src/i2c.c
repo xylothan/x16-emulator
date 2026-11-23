@@ -9,6 +9,7 @@
 #include "smc.h"
 #include "rtc.h"
 #include "io_trace.h"
+#include "input_log.h"
 
 #define LOG_LEVEL 0
 
@@ -224,6 +225,8 @@ uint8_t kbd_tail=0;
  * Adds value to the keyboard ring buffer; the value is discarded if the buffer is full
  **/
 void i2c_kbd_buffer_add(uint8_t value) {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_KBD, value, 0, 0);
 	uint8_t next = (kbd_head + 1) & (KBD_SIZE - 1);		//Next available index
     if (next != kbd_tail) {								//next = tail => buffer full
     	kbd_buffer[kbd_head] = value;					//Set new value
@@ -356,6 +359,8 @@ mouse_send(int x, int y, int b, uint8_t w)
 void
 mouse_send_state(void)
 {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_MOUSE_SEND, 0, 0, 0);
 	do {
 		int send_diff_x = mouse_diff_x > 255 ? 255 : (mouse_diff_x < -256 ? -256 : mouse_diff_x);
 		int send_diff_y = mouse_diff_y > 255 ? 255 : (mouse_diff_y < -256 ? -256 : mouse_diff_y);
@@ -371,12 +376,16 @@ mouse_send_state(void)
 void
 mouse_button_down(int num)
 {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_MOUSE_DOWN, (uint8_t)num, 0, 0);
 	buttons |= 1 << num;
 }
 
 void
 mouse_button_up(int num)
 {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_MOUSE_UP, (uint8_t)num, 0, 0);
 	buttons &= (1 << num) ^ 0xff;
 }
 
@@ -389,6 +398,8 @@ mouse_buttons(void)
 void
 mouse_move(int x, int y)
 {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_MOUSE_MOVE, 0, x, y);
 	mouse_diff_x += x;
 	mouse_diff_y -= y;
 }
@@ -402,6 +413,8 @@ mouse_read(uint8_t reg)
 void 
 mouse_set_wheel(int8_t y)
 {
+	if (input_log_host_blocked()) return;
+	if (input_log_is_recording()) input_log_note(INPUT_EV_MOUSE_WHEEL, 0, y, 0);
 	if (mouse_device_id == 3 || mouse_device_id == 4) {
 		if (y < -7) {
 			wheel = 7;

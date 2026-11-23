@@ -70,6 +70,8 @@
 #include "git_rev.h"
 #include "savestate.h"
 #include "state_slots.h"
+#include "input_log.h"
+#include "input_log_host.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -422,7 +424,16 @@ machine_reset()
 void
 machine_nmi()
 {
+	input_log_end("triggered NMI");
 	nmi6502();
+}
+
+// One pasted character into the KERNAL's keyboard queue.
+void
+machine_paste_feed(uint8_t c)
+{
+	BRAM[KEYD - 0xa000 + BRAM[NDX - 0xa000]] = c;
+	BRAM[NDX - 0xa000]++;
 }
 
 void
@@ -2146,6 +2157,7 @@ main(int argc, char **argv)
 
 	// Here because video_init() can retire the graphical debugger.
 	c_frames_host_start(debugger_enabled || imgui_debugger_enabled);
+	input_log_host_init();
 
 	joystick_init();
 
@@ -2449,6 +2461,11 @@ handle_ieee_intercept()
 	}
 
 	if (handled) {
+		// Served by the host, so it cannot be replayed. Before the clock moves:
+		// a replay stops at this instruction and leaves the call to run live.
+		if (input_log_is_recording()) {
+			input_log_end_unverified("host filesystem call");
+		}
 		// Add the number CPU cycles equivalent to the amount of time that the operation actually took
 		// to prevent the emu from warping after a hostfs load
 		if (deterministic_mode) {
@@ -2575,7 +2592,9 @@ emulator_post_step(void)
 #if 0 // enable this for slow pasting
 	if (!(instruction_counter % 100000))
 #endif
-	while (pasting_bas && BRAM[NDX - 0xa000] < 10 && !(regs.status & 0x04)) {
+	INPUT_LOG_REPLAY(INPUT_SITE_POST);
+	while (pasting_bas && input_log_mode != INPUT_LOG_REPLAYING && BRAM[NDX - 0xa000] < 10 &&
+	       !(regs.status & 0x04)) {
 		uint32_t c;
 		int e = 0;
 
@@ -2589,8 +2608,10 @@ emulator_post_step(void)
 			c = iso8859_15_from_unicode(c);
 		}
 		if (c && !e) {
-			BRAM[KEYD - 0xa000 + BRAM[NDX - 0xa000]] = c;
-			BRAM[NDX - 0xa000]++;
+			if (input_log_is_recording()) {
+				input_log_note_at(INPUT_SITE_POST, INPUT_EV_PASTE, (uint8_t)c, 0, 0);
+			}
+			machine_paste_feed((uint8_t)c);
 		} else {
 			pasting_bas = false;
 			if (warp_pastes) machine_set_warp(warp_held);
@@ -2940,6 +2961,7 @@ emulator_step_during_move(void)
 		// nested window procedure. Check before the first instruction and every
 		// one after it, so a breakpointed instruction is never executed.
 		STATE_SLOTS_POLL();
+		INPUT_LOG_REPLAY(INPUT_SITE_TOP);
 		if ((debugger_enabled || debug_gate_ui)
 		    && DEBUGPollStatusNoPump(regs.pc) != 0) {
 			break;
@@ -3019,7 +3041,11 @@ emulator_step_during_move(void)
 		host_prof_close_frame();
 		profile_session_frame_end();
 		debug_gate_refresh();
+		input_log_tick();
+		input_log_set_site(INPUT_SITE_FRAME);
+		INPUT_LOG_REPLAY(INPUT_SITE_FRAME);
 		input_tick();
+		input_log_set_site(INPUT_SITE_TOP);
 		debug_server_frame_end();
 		state_slots_frame_end();
 	}
@@ -3067,6 +3093,7 @@ emulator_loop(void *param)
 		// here, before the debugger's poll, which is where an x16/step stops.
 		STATE_SLOTS_POLL();
 		if (debugger_enabled || debug_gate_ui || debug_gate_dap) {
+			INPUT_LOG_REPLAY(INPUT_SITE_TOP);
 			int dbgCmd = DEBUGPollStatus(regs.pc);
 			if (dbgCmd > 0) continue;
 			if (dbgCmd < 0) break;
@@ -3253,6 +3280,9 @@ emulator_loop(void *param)
 				nvram_dirty = false;
 			}
 
+			input_log_tick();
+			input_log_set_site(INPUT_SITE_FRAME);
+			INPUT_LOG_REPLAY(INPUT_SITE_FRAME);
 			host_prof_begin(HP_EVENTS);
 			const bool keep_going = video_update();
 			host_prof_end(HP_EVENTS);
@@ -3273,6 +3303,7 @@ emulator_loop(void *param)
 			profile_session_frame_end();
 			debug_gate_refresh();
 			input_tick();
+			input_log_set_site(INPUT_SITE_TOP);
 			debug_server_frame_end();
 			state_slots_frame_end();
 			if (!bench_tick() || !capture_cli_tick()) {

@@ -15,6 +15,7 @@
 #include "glue.h"
 #include "debugger.h"
 #include "debug_server.h"
+#include "input_log.h"
 #ifdef HAS_IMGUI
 #include "smc.h" // smc_requested_reset (Ctrl+Shift+F5 restart)
 #include "dbg_load.h" // dbg_load_note_debugger, when the UI fails to open
@@ -3086,6 +3087,7 @@ video_imgui_debug_key(SDL_Keysym ks)
 	switch (ks.scancode) {
 		case SDL_SCANCODE_F5:
 			if (ctrl && shift) {
+				input_log_end("machine reset");
 				smc_requested_reset = true;      // Ctrl+Shift+F5 = restart
 			} else if (DEBUGIsPaused()) {
 				DEBUGContinue();                 // F5 = continue
@@ -3271,7 +3273,7 @@ video_host_command(SDL_Keysym ks)
 {
 	switch (ks.sym) {
 		case SDLK_s:         machine_dump("user keyboard request"); return true;
-		case SDLK_r:         machine_reset(); return true;
+		case SDLK_r:         input_log_end("machine reset"); machine_reset(); return true;
 		case SDLK_BACKSPACE: machine_nmi(); return true;
 		case SDLK_v:         machine_paste(SDL_GetClipboardText(), true); return true;
 		case SDLK_f:
@@ -4843,6 +4845,7 @@ stop6502(uint16_t address, uint8_t bank) {
 			sprintf(error_message, "Encountered stop instruction at address $%04X. CPU cannot continue.", address);
 		}
 		if (SDL_ShowMessageBox(&msg_box, &return_btn) == 0 && return_btn == 0) {
+			input_log_end("machine reset");
 			machine_reset();
 		};
 	}

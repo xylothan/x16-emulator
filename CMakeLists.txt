@@ -360,6 +360,8 @@ set(X16_SOURCES
     src/mem_search.c
     src/cpu/irq_ctx.c
     src/javascript_interface.c
+    src/input_log.c
+    src/input_log_host.c
     src/joystick.c
     src/render_backend.c
     src/render_sdl.c
@@ -779,6 +781,10 @@ x16_add_test(call_stack
 x16_add_test(c_frames
     SOURCES tests/test_c_frames.c src/c_frames.c)
 
+# The clock, machine hash and devices are hooks, so it links alone.
+x16_add_test(input_log
+    SOURCES tests/test_input_log.c src/input_log.c)
+
 # The search reads memory through a callback, so it links alone too.
 x16_add_test(mem_search
     SOURCES tests/test_mem_search.c src/mem_search.c)
@@ -909,7 +915,7 @@ x16_add_test(vera_psg
 set(VERA_VIDEO_TEST_SOURCES
     src/video.c src/sprite_trace.c src/vera_bandwidth.c src/vera_pcm.c
     src/vera_psg.c src/vera_spi.c src/render_backend.c src/render_sdl.c src/host_prof.c
-    src/export_paths.c src/hostkey.c)
+    src/export_paths.c src/hostkey.c src/input_log.c)
 
 x16_add_test(vera_video NEEDS_SDL
     SOURCES tests/test_vera_video.c tests/support/video_fixture.c tests/support/harness.c
@@ -1149,7 +1155,7 @@ x16_add_test(via_timers NEEDS_SDL
 # its own.
 x16_add_test(joystick NEEDS_SDL
     SOURCES tests/test_joystick.c tests/support/harness.c
-            src/joystick.c src/io_trace.c)
+            src/joystick.c src/io_trace.c src/input_log.c)
 
 # joystick.c enumerates controllers through SDL, so unlike the NEEDS_SDL tests
 # that only want the headers, this one links the library. The test never calls

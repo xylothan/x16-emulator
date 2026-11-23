@@ -16,6 +16,7 @@
 #include "../profile_capture.h" // capture mode: the debugger goes quiet while it records
 #include "../profile_session.h" // profile_session_sync_names
 #include "../state_slots.h"     // State menu: save-state slots
+#include "../input_log.h"       // System menu: these end an input recording
 #include "../video.h"           // video_host_key_name, for the shortcut labels
 
 #include <time.h>
@@ -865,10 +866,12 @@ debug_ui_draw_control_bar(void)
     // SMC reset flag (safe, == Ctrl-R). IRQ/NMI are edge-triggered.
     if (ImGui::BeginMenu("System")) {
         if (ImGui::MenuItem("Reset", "Ctrl+Shift+F5")) {
+            input_log_end("machine reset");
             smc_requested_reset = true;
         }
         ImGui::SetItemTooltip("Reset the machine, as the SMC would. Breakpoints are kept.");
         if (ImGui::MenuItem("Trigger IRQ")) {
+            input_log_end("triggered IRQ");
             irq6502();
         }
         if (ImGui::MenuItem("Trigger NMI")) {

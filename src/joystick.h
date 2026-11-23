@@ -60,6 +60,13 @@ void joystick_set_virtual(int slot, uint16_t button_mask);
 void joystick_clear_virtual(int slot);
 bool joystick_virtual_active(int slot);
 
+// ─── Input log ───────────────────────────────────────────────────────────────
+// Logs what host controllers are holding, every slot or only those that changed.
+void joystick_log_host_state(bool all);
+// A replay stands in for the host controllers until joystick_replay_end().
+void joystick_replay_host(int slot, bool bound, uint16_t mask);
+void joystick_replay_end(void);
+
 // ─── Debugger accessor ───────────────────────────────────────────────────────
 // Side-effect-free snapshot of joystick state. Safe to call every frame from
 // the debugger while the emulation is running.
