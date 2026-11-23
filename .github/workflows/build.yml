@@ -213,15 +213,16 @@ jobs:
   # The same suite under MSVC, with the runtime and dependencies the Windows
   # packages use. Compiler-specific breaks in a test build fail here.
   windows-unit-tests:
-    runs-on: windows-2022
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: ./.github/actions/msvc-cmake
       - name: Configure
         run: >
-          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake -B build -A x64
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
           -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
@@ -334,18 +335,18 @@ jobs:
   windows:
     name: windows (${{ matrix.arch }}${{ matrix.suffix }})
     needs: [version, README]
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     strategy:
       # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, platform: x64,   triplet: x64-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win64 }
-          - { arch: x86_64, platform: x64,   triplet: x64-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win64-midi }
-          - { arch: i686,   platform: Win32, triplet: x86-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win32 }
-          - { arch: i686,   platform: Win32, triplet: x86-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win32-midi }
-          - { arch: arm64,  platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
-          - { arch: arm64,  platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
+          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win64 }
+          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win64-midi }
+          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win32 }
+          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win32-midi }
+          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
+          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -356,9 +357,10 @@ jobs:
         with:
           release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/msvc-cmake
       - name: Configure
-        # The generator has to be named explicitly: without it CMake falls back
-        # to "NMake Makefiles", which rejects -A. Dependencies come from the
+        # msvc-cmake selects the generator: without one CMake falls back to
+        # "NMake Makefiles", which rejects -A. Dependencies come from the
         # vcpkg preinstalled on the runner, driven by the vcpkg.json manifest
         # and the packaging triplets in vcpkg-triplets/.
         #
@@ -370,7 +372,7 @@ jobs:
         # FluidSynth is a manifest feature, so only the MIDI legs pay for
         # building it.
         run: >
-          cmake -B build -G "Visual Studio 17 2022" -A ${{ matrix.platform }}
+          cmake -B build -A ${{ matrix.platform }}
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
@@ -384,8 +386,7 @@ jobs:
         # The machine-version job's guard, on MSVC: these hashes must equal the
         # goldens whichever compiler recorded them, which is what lets a save
         # state cross toolchains. The 32-bit leg checks a 32-bit build too. The
-        # ARM64 legs are cross-built and cannot run here; the MIDI legs are the
-        # same machine.
+        # ARM64 legs skip it; the MIDI legs are the same machine.
         if: ${{ matrix.midi == 'OFF' && matrix.arch != 'arm64' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -435,7 +436,7 @@ jobs:
   windows-legacy:
     name: windows-legacy (${{ matrix.arch }})
     needs: [version, README]
-    runs-on: windows-2022
+    runs-on: windows-latest
     defaults:
       run:
         shell: msys2 {0}

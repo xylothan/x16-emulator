@@ -1,0 +1,23 @@
+name: Select Visual Studio CMake
+description: Puts the newest Visual Studio's CMake on PATH and selects its generator.
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      # The CMake on the runner's PATH can trail a new Visual Studio and lack its
+      # generator. The copy Visual Studio ships always has it.
+      run: |
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $path = & $vswhere -latest -prerelease -products * -property installationPath
+        $version = & $vswhere -latest -prerelease -products * -property installationVersion
+        if (-not $path) { throw 'No Visual Studio found on this runner' }
+        $major = ([version]$version).Major
+        $bin = Join-Path $path 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+        $cmake = Join-Path $bin 'cmake.exe'
+        if (-not (Test-Path $cmake)) { throw "Visual Studio $version has no bundled CMake" }
+        $generator = (& $cmake -E capabilities | ConvertFrom-Json).generators.name |
+          Where-Object { $_ -like "Visual Studio $major *" } | Select-Object -First 1
+        if (-not $generator) { throw "$cmake has no generator for Visual Studio $major" }
+        Add-Content $env:GITHUB_PATH $bin
+        Add-Content $env:GITHUB_ENV "CMAKE_GENERATOR=$generator"
+        Write-Host "Visual Studio $version, generator '$generator', $(& $cmake --version | Select-Object -First 1)"
