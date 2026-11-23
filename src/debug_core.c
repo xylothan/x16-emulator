@@ -147,8 +147,9 @@ debug_bp_from_ref(long ref, int explicit_bank, long offset, struct breakpoint *o
 	out->pc      = addr;
 	out->bank    = pbank;
 	out->x16Bank = x16bank;
-	out->owners  = 0;
-	out->enabled = false;
+	out->owners   = 0;
+	out->enabled  = false;
+	out->disabled = 0;
 	return true;
 }
 
@@ -168,6 +169,20 @@ owner_bit(debug_owner_t owner)
 	if (owner < 0 || owner >= DEBUG_OWNER_COUNT)
 		return 0;
 	return (uint16_t)(1u << (unsigned)owner);
+}
+
+// The owners whose claim on this entry is on.
+static uint16_t
+live_owners(const struct breakpoint *bp)
+{
+	return (uint16_t)(bp->owners & ~bp->disabled);
+}
+
+// `enabled` is what the hot path reads, so every change to the masks ends here.
+static void
+bp_refresh_enabled(struct breakpoint *bp)
+{
+	bp->enabled = live_owners(bp) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,10 +277,11 @@ debug_bp_add_for(struct breakpoint bp, debug_owner_t owner)
 	int idx = debug_bp_find(bp.pc, bp.bank, bp.x16Bank);
 	if (idx >= 0) {
 		breakPoints[idx].owners |= bit;
-		// Asking for a breakpoint is asking for it to be armed, so a disabled
-		// entry comes back. Otherwise a client that set one, disabled it and
-		// set it again would be quietly ignored.
-		breakPoints[idx].enabled = true;
+		// Asking for a breakpoint is asking for it to be armed, so this owner's
+		// claim comes back on. Otherwise a client that set one, disabled it and
+		// set it again would be quietly ignored. Nobody else's claim changes.
+		breakPoints[idx].disabled &= (uint16_t)~bit;
+		bp_refresh_enabled(&breakPoints[idx]);
 		return DEBUG_ADD_EXISTED;
 	}
 
@@ -279,8 +295,9 @@ debug_bp_add_for(struct breakpoint bp, debug_owner_t owner)
 		bpCapacity  = newCap;
 	}
 
-	bp.owners  = bit;
-	bp.enabled = true;
+	bp.owners   = bit;
+	bp.enabled  = true;
+	bp.disabled = 0;
 
 	breakPoints[numBreakpoints++] = bp;
 	bp_map_set(bp.pc);
@@ -298,8 +315,11 @@ debug_bp_remove_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner)
 
 	claim_release_for(&breakPoints[idx], bit);
 	breakPoints[idx].owners &= (uint16_t)~bit;
+	breakPoints[idx].disabled &= (uint16_t)~bit;
 	if (breakPoints[idx].owners == 0)
 		bp_erase(idx);
+	else
+		bp_refresh_enabled(&breakPoints[idx]);
 	return true;
 }
 
@@ -316,9 +336,12 @@ debug_bp_clear_owner(debug_owner_t owner)
 			continue;
 		claim_release_for(&breakPoints[i], bit);
 		breakPoints[i].owners &= (uint16_t)~bit;
+		breakPoints[i].disabled &= (uint16_t)~bit;
 		if (breakPoints[i].owners == 0) {
 			bp_erase(i);
 			disarmed++;
+		} else {
+			bp_refresh_enabled(&breakPoints[i]);
 		}
 	}
 	return disarmed;
@@ -357,7 +380,23 @@ debug_bp_set_enabled(int pc, uint8_t bank, int x16Bank, bool enabled)
 	int idx = debug_bp_find(pc, bank, x16Bank);
 	if (idx < 0)
 		return false;
-	breakPoints[idx].enabled = enabled;
+	breakPoints[idx].disabled = enabled ? 0 : breakPoints[idx].owners;
+	bp_refresh_enabled(&breakPoints[idx]);
+	return true;
+}
+
+bool
+debug_bp_set_enabled_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner, bool enabled)
+{
+	const uint16_t bit = owner_bit(owner);
+	const int      idx = debug_bp_find(pc, bank, x16Bank);
+	if (idx < 0 || !(breakPoints[idx].owners & bit))
+		return false;
+	if (enabled)
+		breakPoints[idx].disabled &= (uint16_t)~bit;
+	else
+		breakPoints[idx].disabled |= bit;
+	bp_refresh_enabled(&breakPoints[idx]);
 	return true;
 }
 
@@ -660,7 +699,8 @@ debug_bp_on_arrival(int pc, uint8_t bank)
 
 		c->hits++;
 		if (c->hits > c->ignore) {
-			const uint16_t owners = breakPoints[i].owners;
+			// A claim that is off neither stops, dumps nor logs.
+			const uint16_t owners = live_owners(&breakPoints[i]);
 			const uint16_t dumper = (c->dump ? c->dump->owner : 0) & owners;
 			const uint16_t logger = c->log_owners & owners;
 			if (dumper)

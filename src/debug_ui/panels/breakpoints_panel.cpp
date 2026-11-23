@@ -226,14 +226,14 @@ apply_log(const TrackedBP &t, const char *text)
 		snprintf(s_log_refused.why, sizeof s_log_refused.why, "%s", why);
 		return;
 	}
-	// A claim re-enables the entry, so one added here must not change that.
+	// A new claim starts on, so one added to a row that is off must not arm it.
 	if (!debug_bp_has_owner(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI)) {
 		struct breakpoint bp = {};
 		bp.pc      = t.pc;
 		bp.bank    = t.bank;
 		bp.x16Bank = t.x16Bank;
 		DEBUGAddBreakPoint(bp);
-		DEBUGSetBreakpointEnabled(t.pc, t.bank, t.x16Bank, t.enabled);
+		debug_bp_set_enabled_for(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI, t.enabled);
 	}
 	logpoint_set(t.pc, t.bank, t.x16Bank, DEBUG_OWNER_UI, text, why, sizeof why);
 }

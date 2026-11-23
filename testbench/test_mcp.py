@@ -3410,9 +3410,10 @@ def test_enable_breakpoint():
         r = m.call("enable_breakpoint", address=0x0950, enabled=False)
         case("another owner's breakpoint is refused", is_error(r), str(r)[:160])
         m.call("set_breakpoint", address=0x0950)
-        r = m.call("enable_breakpoint", address=0x0950, enabled=False)
-        case("a shared breakpoint is refused", is_error(r), str(r)[:160])
-        case("and stays enabled", bp_entry(m, 0x0950).get("enabled") is True)
+        d = data(m.call("enable_breakpoint", address=0x0950, enabled=False))
+        case("disabling a shared breakpoint turns off this client's claim",
+             d.get("enabled") is False and d.get("stillArmed") is True, str(d))
+        case("and the other owner keeps it enabled", bp_entry(m, 0x0950).get("enabled") is True)
 
         dap = Dap(port)
         dap.session()
@@ -3429,7 +3430,65 @@ def test_enable_breakpoint():
         dap.close()
 
 
-DUMP_REGIONS = [{"address": "$0A00", "length": 2}, {"address": "1000", "length": 3, "space": "vram"}]
+def test_enable_per_owner():
+    print("enable state per owner")
+    port = free_port()
+    with Mcp(["-debugport", str(port)]) as m:
+        m.init()
+        time.sleep(0.5)
+        plant_loop(m)
+        at = LOOP + 4
+        dap = Dap(port)
+        dap.session()
+
+        def dap_holds(*addresses):
+            dap.request("setInstructionBreakpoints",
+                        {"breakpoints": [{"instructionReference": hex(a)} for a in addresses]})
+
+        def rewind():
+            m.call("pause")
+            m.call("set_registers", pc=LOOP)
+
+        m.call("set_breakpoint", address=at)
+        m.call("enable_breakpoint", address=at, enabled=False)
+        dap_holds(at)
+        case("a second owner's claim is live", bp_entry(m, at).get("enabled") is True)
+        rewind()
+        case("and stops the machine", stops_at(m, at))
+
+        dap_holds()
+        e = bp_entry(m, at)
+        case("its removal restores the first owner's disabled state",
+             e.get("enabled") is False and e.get("owners") == ["mcp"], str(e))
+        rewind()
+        case("which does not stop", runs_on(m))
+
+        dap_holds(at)
+        d = data(m.call("enable_breakpoint", address=at, enabled=True))
+        case("a claim can be enabled beside another owner", d.get("enabled") is True, str(d))
+        d = data(m.call("enable_breakpoint", address=at, enabled=False))
+        case("and disabled beside a live one", d.get("stillArmed") is True, str(d))
+        rewind()
+        case("the live owner still stops", stops_at(m, at))
+
+        dap.close()
+        time.sleep(0.4)
+        e = bp_entry(m, at)
+        case("session end leaves the disabled claim off",
+             e.get("enabled") is False and e.get("owners") == ["mcp"], str(e))
+        rewind()
+        case("and it does not stop", runs_on(m))
+
+        rewind()
+        m.call("set_breakpoint", address=at)
+        case("the owner's own set arms it", bp_entry(m, at).get("enabled") is True)
+        case("and it stops", stops_at(m, at))
+        d = data(m.call("remove_breakpoint", address=at))
+        case("removal still works", d.get("removed") is True and d.get("stillArmed") is False, str(d))
+        case("and the entry is gone", bp_entry(m, at) == {})
+
+
+DUMP_REGIONS =[{"address": "$0A00", "length": 2}, {"address": "1000", "length": 3, "space": "vram"}]
 
 
 def plant_dump_data(m):
@@ -4945,7 +5004,7 @@ def main():
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
                  test_client_format, test_call_stack, test_sources, test_read_paths,
-                 test_perf_tools, test_device_stats, test_enable_breakpoint,
+                 test_perf_tools, test_device_stats, test_enable_breakpoint, test_enable_per_owner,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
                  test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,
                  test_refresh_events, test_readonly):

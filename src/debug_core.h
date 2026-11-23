@@ -72,15 +72,17 @@ typedef enum {
 // A breakpoint address. `bank` is the 65C816 program bank; `x16Bank` is the
 // bank selector described above. Breakpoints are identified by all three.
 //
-// `owners` and `enabled` are maintained by the core; a caller that builds one
-// of these to hand to debug_bp_add_for() should set only the three address
-// fields and leave the rest zeroed.
+// `owners`, `enabled` and `disabled` are maintained by the core; a caller that
+// builds one of these to hand to debug_bp_add_for() should set only the three
+// address fields and leave the rest zeroed.
 struct breakpoint {
 	int      pc;
 	uint8_t  bank;
 	int      x16Bank;
-	uint16_t owners;  // bitmask of debug_owner_t; never 0 for a live entry
-	bool     enabled; // a disabled breakpoint keeps its place, and its count
+	uint16_t owners;   // bitmask of debug_owner_t; never 0 for a live entry
+	bool     enabled;  // some owner's claim is on; an entry with none keeps its
+	                   // place and its count
+	uint16_t disabled; // the owners whose own claim is off; a subset of `owners`
 };
 
 // The live table. Read-only for everyone outside debug_core.c: everything that
@@ -167,8 +169,8 @@ typedef enum {
 } debug_add_result_t;
 
 // Add `owner`'s reference. Adding one that this owner already holds is
-// idempotent. A re-added breakpoint is re-enabled, since asking for a
-// breakpoint is a request for it to be armed.
+// idempotent. It turns on this owner's claim, since asking for a breakpoint is
+// a request for it to be armed, and leaves every other owner's as it was.
 debug_add_result_t debug_bp_add_for(struct breakpoint bp, debug_owner_t owner);
 
 // Drop `owner`'s reference. The entry itself only goes when the last owner
@@ -212,7 +214,20 @@ void debug_bp_clear_all(void);
 // themselves, which is the same mistake as reconstructing ownership from
 // outside: the breakpoint vanishes from the table, so every other view of it
 // loses its marker and its count.
+//
+// Each owner's claim is on or off by itself, and the address stops while any
+// claim is on. An owner that lets go takes its own state with it.
+
+// The human's switch, for every holder at once: the same reasoning as
+// debug_bp_delete(). A row that stayed ticked because a client also wanted it
+// would be a control that does nothing.
 bool debug_bp_set_enabled(int pc, uint8_t bank, int x16Bank, bool enabled);
+
+// Turn on or off only `owner`'s claim. Returns false if it holds none here.
+bool debug_bp_set_enabled_for(int pc, uint8_t bank, int x16Bank, debug_owner_t owner,
+                              bool enabled);
+
+// Whether any owner's claim here is on.
 bool debug_bp_is_enabled(int pc, uint8_t bank, int x16Bank);
 
 // ---- Read-only view --------------------------------------------------------
