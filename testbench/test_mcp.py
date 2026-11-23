@@ -2269,6 +2269,65 @@ def test_load_prg():
             case("a missing file is refused", is_error(m.call("load_prg", path=os.path.join(tmp, "no.prg"))))
 
 
+def test_source_fifo():
+    print("debug info naming a FIFO")
+    if not hasattr(os, "mkfifo"):
+        print("  skipped: no FIFOs on this platform")
+        return
+
+    def dbg(name):
+        return ('version\tmajor=2,minor=0\n'
+                'info\tcsym=0,file=2,lib=0,line=2,mod=1,scope=1,seg=1,span=2,sym=0,type=0\n'
+                'file\tid=0,name="gen.c",size=10,mtime=0x00000000,mod=0\n'
+                f'file\tid=1,name="{name}",size=10,mtime=0x00000000,mod=0\n'
+                'seg\tid=0,name="CODE",start=0x000A00,size=0x0010,addrsize=absolute,type=ro,oname="gen.prg"\n'
+                'span\tid=0,seg=0,start=0,size=8,type=0\n'
+                'span\tid=1,seg=0,start=8,size=8,type=0\n'
+                'line\tid=0,file=0,line=1,type=1,count=1,span=0\n'
+                'line\tid=1,file=1,line=1,span=1\n'
+                'mod\tid=0,name="gen.o",file=0\n')
+
+    # (label, name recorded in the .dbg, what sits at <dir>/gen.s, DAP offers it)
+    for label, recorded, kind, offered in (("FIFO at the recorded path", None, "fifo", False),
+                                           ("FIFO beside the .dbg", "elsewhere/gen.s", "fifo", False),
+                                           ("regular file", "elsewhere/gen.s", "file", True),
+                                           ("nothing", "elsewhere/gen.s", None, False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "gen.s")
+            if kind == "fifo":
+                try:
+                    os.mkfifo(target)
+                except OSError:
+                    print("  skipped: this filesystem has no FIFOs")
+                    return
+            elif kind == "file":
+                with open(target, "w") as f:
+                    f.write("; kept\n")
+            prg = os.path.join(tmp, "gen.prg")
+            with open(prg, "wb") as f:
+                f.write(struct.pack("<H", 0x0A00) + b"\xEA" * 16)
+            with open(os.path.join(tmp, "gen.dbg"), "w") as f:
+                f.write(dbg(recorded or target))
+
+            port = free_port()
+            with Mcp(["-debugport", str(port), "-fsroot", tmp]) as m:
+                m.init()
+                time.sleep(0.5)
+                m.call("pause")
+                d = data(m.result(m.start("load_prg", path=prg), timeout=8))
+                case(f"{label}: the load answers", d.get("debugInfo") is True, str(d))
+                if d.get("debugInfo") is not True:
+                    continue
+                dap = Dap(port)
+                dap.request("initialize", {"adapterID": "test", "linesStartAt1": True, "columnsStartAt1": True})
+                dap.request("attach", {})
+                dap.request("configurationDone")
+                shown = {s["name"] for s in dap.request("loadedSources")["body"]["sources"]}
+                dap.close()
+                case(f"{label}: offered is {offered}", shown == ({"gen.c", "gen.s"} if offered else {"gen.c"}),
+                     str(shown))
+
+
 def test_client_format():
     print("a DAP client's line and path format")
     with tempfile.TemporaryDirectory() as tmp:
@@ -5003,7 +5062,7 @@ def main():
                  test_http, test_lease, test_vision, test_vera_state, test_stop_details,
                  test_vram_watch, test_read_watch, test_symbols,
                  test_hash_memory, test_search_memory, test_dump_memory, test_warp, test_mouse, test_load_prg,
-                 test_client_format, test_call_stack, test_sources, test_read_paths,
+                 test_client_format, test_call_stack, test_sources, test_source_fifo, test_read_paths,
                  test_perf_tools, test_device_stats, test_enable_breakpoint, test_enable_per_owner,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
                  test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,

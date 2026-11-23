@@ -202,17 +202,23 @@ static inline uint8_t operand_read(uint32_t address, uint8_t bank) {
                                 : read6502((uint16_t)address, bank);
 }
 
+static uint16_t operand_read16(void) {
+    const uint8_t lo = operand_read(ea, bank_byte(ea));
+    const uint8_t hi = operand_read(ea+1, wrappedBankByte(ea));
+    return (uint16_t)(lo | (hi << 8));
+}
+
 static uint16_t getvalue(bool use16Bit) {
     if (addressing_is_acc) {
         return use16Bit ? regs.c : (uint16_t)regs.a;
     } else if (use16Bit) {
-        return ((uint16_t)operand_read(ea, bank_byte(ea)) | ((uint16_t)operand_read(ea+1, wrappedBankByte(ea)) << 8));
+        return operand_read16();
     }
     return operand_read(ea, bank_byte(ea));
 }
 
 static uint16_t MAYBE_UNUSED getvalue16() {
-    return((uint16_t)operand_read(ea, bank_byte(ea)) | ((uint16_t)operand_read(ea+1, wrappedBankByte(ea)) << 8));
+    return operand_read16();
 }
 
 static void putvalue(uint16_t saveval, bool use16Bit) {

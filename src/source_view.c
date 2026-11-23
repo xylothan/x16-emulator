@@ -2,6 +2,7 @@
 // native "Source" window. See source_view.h.
 
 #include "source_view.h"
+#include "host_regular_file.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -68,6 +69,10 @@ static const char *basename_ptr(const char *path)
 // Read an entire file into a NUL-terminated heap buffer. Returns NULL on failure.
 static char *read_whole_file(const char *path)
 {
+	// The name came from a .dbg, and a FIFO would block the fopen() below.
+	if (!host_regular_file_readable(path))
+		return NULL;
+
 	FILE *f;
 #ifdef _WIN32
 	if (fopen_s(&f, path, "rb") != 0 || !f)
@@ -256,20 +261,11 @@ void source_view_retry_missing(void)
 	cache_count = kept;
 }
 
-static bool file_exists(const char *path)
-{
-	FILE *f = fopen(path, "rb");
-	if (!f)
-		return false;
-	fclose(f);
-	return true;
-}
-
 bool source_view_can_find(const char *name)
 {
 	if (!name || !name[0])
 		return false;
-	if (file_exists(name))
+	if (host_regular_file_readable(name))
 		return true;
 	const char *base = basename_ptr(name);
 	for (int i = 0; i < search_path_count; i++) {
@@ -278,12 +274,12 @@ bool source_view_can_find(const char *name)
 		if (!p)
 			return false;
 		snprintf(p, need, "%s/%s", search_paths[i], base);
-		const bool ok = file_exists(p);
+		const bool ok = host_regular_file_readable(p);
 		free(p);
 		if (ok)
 			return true;
 	}
-	return file_exists(base);
+	return host_regular_file_readable(base);
 }
 
 bool source_view_candidate(int index, const char *name, char *out, size_t n)

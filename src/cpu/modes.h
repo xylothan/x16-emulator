@@ -65,7 +65,7 @@ static void _zp_long_with_offset(uint16_t offset) {
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
 
-    ea = (uint32_t)read6502(direct_page_add(eahelp), 0) | ((uint32_t)read6502(direct_page_add(eahelp + 1), 0) << 8) | ((uint32_t)read6502(direct_page_add(eahelp + 2), 0) << 16);
+    ea = read_long(direct_page_add(eahelp), direct_page_add(eahelp + 1), direct_page_add(eahelp + 2), 0);
     ea = mask_long_addr(ea + offset);
 
     if (regs.dp & 0x00FF) {
@@ -91,23 +91,23 @@ static void rel() { //relative for branch ops (8-bit immediate value, sign-exten
 }
 
 static void rel16() { //relative for PER and BRL (16-bit immediate value)
-    reladdr = (uint16_t)fetch6502(regs.pc, regs.k) | ((uint16_t)fetch6502(regs.pc+1, regs.k) << 8);
+    reladdr = fetch_word(regs.pc, regs.k);
     regs.pc += 2;
 }
 
 static void abso() { //absolute
-    ea = addr_with_db((uint16_t) fetch6502(regs.pc, regs.k) | ((uint16_t)fetch6502(regs.pc+1, regs.k) << 8));
+    ea = addr_with_db(fetch_word(regs.pc, regs.k));
     regs.pc += 2;
 }
 
 static void absl() { // absolute long
-    ea = (uint32_t) fetch6502(regs.pc, regs.k) | ((uint32_t)fetch6502(regs.pc+1, regs.k) << 8) | ((uint32_t)fetch6502(regs.pc+2, regs.k) << 16);
+    ea = fetch_long(regs.pc, regs.k);
     regs.pc += 3;
 }
 
 static void absx() { //absolute,X
     uint32_t startpage;
-    ea = addr_with_db((uint16_t)fetch6502(regs.pc, regs.k) | ((uint16_t)fetch6502(regs.pc+1, regs.k) << 8));
+    ea = addr_with_db(fetch_word(regs.pc, regs.k));
     startpage = ea & 0xFFFF00;
     ea = mask_long_addr(ea + regs.x);
 
@@ -124,7 +124,7 @@ static void absx() { //absolute,X
 }
 
 static void abslx() { // absolute long, X
-    ea = (uint32_t)fetch6502(regs.pc, regs.k) | ((uint32_t)fetch6502(regs.pc+1, regs.k) << 8) | ((uint32_t)fetch6502(regs.pc+2, regs.k) << 16);
+    ea = fetch_long(regs.pc, regs.k);
     ea = mask_long_addr(ea + regs.x);
 
     // No page-crossing penalty: a long address already names the bank, so
@@ -135,7 +135,7 @@ static void abslx() { // absolute long, X
 
 static void absy() { //absolute,Y
     uint32_t startpage;
-    ea = addr_with_db((uint16_t)fetch6502(regs.pc, regs.k) | ((uint16_t)fetch6502(regs.pc+1, regs.k) << 8));
+    ea = addr_with_db(fetch_word(regs.pc, regs.k));
     startpage = ea & 0xFFFF00;
     ea = mask_long_addr(ea + regs.y);
 
@@ -153,21 +153,21 @@ static void absy() { //absolute,Y
 
 static void ind() { //indirect - used for jmp, which assumes the pointer is in bank 0!
     uint16_t eahelp, eahelp2;
-    eahelp = (uint16_t)fetch6502(regs.pc, regs.k) | (uint16_t)((uint16_t)fetch6502(regs.pc+1, regs.k) << 8);
+    eahelp = fetch_word(regs.pc, regs.k);
     //
     //      The 6502 page boundary wraparound bug does not occur on a 65C02.
     //
     //eahelp2 = (eahelp & 0xFF00) | ((eahelp + 1) & 0x00FF); //replicate 6502 page-boundary wraparound bug
     eahelp2 = (eahelp+1) & 0xFFFF;
-    ea = (uint16_t)read6502(eahelp, 0) | ((uint16_t)read6502(eahelp2, 0) << 8);
+    ea = read_pair(eahelp, eahelp2, 0);
     regs.pc += 2;
 }
 
 static void aindl() { // [addr]    uint16_t eahelp, eahelp2;
     uint16_t eahelp, eahelp2;
-    eahelp = (uint16_t)fetch6502(regs.pc, regs.k) | (uint16_t)((uint16_t)fetch6502(regs.pc+1, regs.k) << 8);
+    eahelp = fetch_word(regs.pc, regs.k);
     eahelp2 = (eahelp+1) & 0xFFFF;
-    ea = (uint32_t)read6502(eahelp, 0) | ((uint32_t)read6502(eahelp2, 0) << 8) | ((uint16_t)read6502((eahelp2 + 1) & 0xFFFF, 0) << 16);
+    ea = read_long(eahelp, eahelp2, (eahelp2 + 1) & 0xFFFF, 0);
     regs.pc += 2;
 }
 
@@ -176,7 +176,7 @@ static void ind0() { // (zp)
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
     // The pointer lives in the direct page, which is always bank zero. The
     // address it holds is in the data bank.
-    ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8));
+    ea = addr_with_db(read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0));
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -190,7 +190,7 @@ static void indl0() { // [dp]
 static void indx() { // (indirect,X)
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k) + regs.x;
-    ea = addr_with_db((uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8));
+    ea = addr_with_db(read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0));
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -200,7 +200,7 @@ static void indx() { // (indirect,X)
 static void indy() { // (indirect),Y
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
-    uint16_t pointer = (uint16_t)read6502(direct_page_add(eahelp), 0) | ((uint16_t)read6502(direct_page_add(eahelp + 1), 0) << 8);
+    uint16_t pointer = read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0);
     // Indexing applies to the whole 24-bit address, so carrying past $FFFF
     // moves into the next bank rather than wrapping inside this one, and the
     // crossing costs the same cycle as one inside a bank.
@@ -223,7 +223,7 @@ static void indly() { // [dp],Y
 static void ind0p() { // (zp) used by PEI, which doesn't do wraparound calculations
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
-    ea = (uint16_t)read6502(regs.dp + eahelp, 0) | ((uint16_t)read6502(regs.dp + eahelp + 1, 0) << 8);
+    ea = read_pair(regs.dp + eahelp, regs.dp + eahelp + 1, 0);
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
@@ -248,7 +248,7 @@ static void sr() { // absolute,S
 static void sridy() { // (indirect,S),Y
     uint16_t eahelp;
     eahelp = regs.sp + (uint16_t)fetch6502(regs.pc++, regs.k);
-    uint16_t pointer = (uint16_t)read6502(eahelp, 0) | ((uint16_t)read6502(eahelp + 1, 0) << 8);
+    uint16_t pointer = read_pair(eahelp, eahelp + 1, 0);
     ea = mask_long_addr(addr_with_db(pointer) + (uint16_t)regs.y);
 
     // No page-crossing penalty: measured flat at seven cycles.
