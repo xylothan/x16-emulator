@@ -83,7 +83,6 @@ test_the_bank_registers_hold_and_report_a_bank(void)
 }
 
 // The other half of the same sentence: "Both settings default to 0 on RESET."
-// memory.c:325 writes the byte to RAM and the latch; memory.c:220 reads it back.
 static void
 test_a_reset_returns_both_banks_to_zero(void)
 {
@@ -96,14 +95,8 @@ test_a_reset_returns_both_banks_to_zero(void)
 	check_eq(memory_get_ram_bank(), 0, "a reset switches the machine to RAM bank 0");
 	check_eq(memory_get_rom_bank(), 0, "and to ROM bank 0");
 
-	check_divergent(read(RAM_BANK_REG) == 0,
-	                "$0000 reports bank 0 after a reset",
-	                "memory.c:110 clears the latch but the address reads RAM[0] "
-	                "(memory.c:220), which the reset leaves alone, so the byte reports the "
-	                "pre-reset bank while the machine is on bank 0");
-	check_divergent(read(ROM_BANK_REG) == 0,
-	                "$0001 reports bank 0 after a reset",
-	                "same cause as $0000: the register's RAM shadow survives the reset");
+	check_eq(read(RAM_BANK_REG), 0, "$0000 reports bank 0 after a reset");
+	check_eq(read(ROM_BANK_REG), 0, "$0001 reports bank 0 after a reset");
 }
 
 // Memory Map, the address table:

@@ -132,6 +132,8 @@ memory_reset()
 	// default banks are 0
 	memory_set_ram_bank(0);
 	memory_set_rom_bank(0);
+	RAM[0] = 0;
+	RAM[1] = 0;
 }
 
 void

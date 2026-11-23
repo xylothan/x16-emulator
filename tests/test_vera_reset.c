@@ -99,12 +99,7 @@ test_reset_stops_sprites_configured_before_it(void)
 	opaque_graphics();
 	enable_sprites();
 
-	check_divergent(collision_after_a_frame() == 0x00,
-	                "a reset stops sprites that were running before it",
-	                "video.c:339 clears sprite_data but never re-derives "
-	                "sprite_properties, whose only writers are the two "
-	                "video_space_write() paths at video.c:2396 and video.c:2425, so "
-	                "the renderer keeps drawing the pre-reset sprites");
+	check_eq(collision_after_a_frame(), 0x00, "a reset stops sprites that were running before it");
 }
 
 // ORACLE: none. Storing the byte already held is a no-op.
@@ -125,10 +120,8 @@ test_writing_a_byte_that_is_already_there_changes_nothing(void)
 	video_space_write(SPRITE_ATTR + 0 * 8 + ATTR_ZDEPTH, 0x00);
 	video_space_write(SPRITE_ATTR + 1 * 8 + ATTR_ZDEPTH, 0x00);
 
-	check_divergent(collision_after_a_frame() == before,
-	                "rewriting an attribute byte with its own value does not move the machine",
-	                "the write re-derives sprite_properties, which the reset did not, so "
-	                "storing a zero over a zero is what actually stops the sprites");
+	check_eq(collision_after_a_frame(), before,
+	         "rewriting an attribute byte with its own value does not move the machine");
 }
 
 // video.c:355 clears the accumulator, matching sprite_renderer.v:416.

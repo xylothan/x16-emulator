@@ -1143,6 +1143,27 @@ if(TARGET vera_layer_rows_test)
     endif()
 endif()
 
+# Accuracy vectors captured from released VERA bitstreams. The runner includes
+# video.c directly to reach VRAM and the framebuffer.
+set(VERA_ACCURACY_SOURCES ${VERA_VIDEO_TEST_SOURCES})
+list(REMOVE_ITEM VERA_ACCURACY_SOURCES src/video.c)
+x16_add_test(vera_accuracy NEEDS_SDL
+    SOURCES tests/accuracy/vera_accuracy.c tests/support/video_fixture.c
+            ${VERA_ACCURACY_SOURCES})
+
+if(TARGET vera_accuracy_test)
+    target_include_directories(vera_accuracy_test PRIVATE src/extern/include)
+    target_compile_definitions(vera_accuracy_test PRIVATE
+        VERA_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/accuracy/vera/49.0.6")
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_accuracy_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_accuracy_test PRIVATE m)
+    endif()
+    set_tests_properties(vera_accuracy PROPERTIES TIMEOUT 900)
+endif()
+
 # The 65C22's interrupt flags and enables. via.c pulls in memory.h, which
 # includes SDL.h, so it needs the headers -- but nothing here links SDL.
 x16_add_test(via_irq NEEDS_SDL

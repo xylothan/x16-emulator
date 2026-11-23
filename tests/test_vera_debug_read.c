@@ -20,10 +20,6 @@
 #define VERA_DATA1  0x04
 #define VERA_CTRL   0x05
 
-// Known mismatches: $9F29-$9F2C in DCSEL 2, 3, 5 and 6 (write-only or unmapped).
-// Stated as a number so the sweep fails if the set changes.
-#define KNOWN_MISMATCHES 13
-
 // Registers whose value changes between consecutive reads.
 // $9F23 and $9F24 are data ports: a real read advances the address.
 static bool
@@ -103,15 +99,7 @@ test_debug_and_real_reads_agree(void)
 		printf("      first: %s\n", first);
 	}
 
-	// Recorded exactly: this fails on growth and on unrecorded improvement alike.
-	check_eq(mismatches, KNOWN_MISMATCHES,
-	         "the set of registers that disagree is unchanged");
-
-	check_divergent(mismatches == 0,
-	                "every VERA register reads the same to the debugger as to the machine",
-	                "13 registers differ, all $9F29-$9F2C in banks where the register is "
-	                "write-only or unmapped: video.c:2690 sends a debug read to the stored "
-	                "composer byte, while a real read returns the version string");
+	check_eq(mismatches, 0, "every VERA register reads the same to the debugger as to the machine");
 }
 
 // Data ports are outside the sweep; with the address pinned the rule holds.
