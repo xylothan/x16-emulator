@@ -9,6 +9,8 @@
 
 bool keyframes_armed = false;
 
+#define THUMB_BYTES ((size_t)KEYFRAMES_THUMB_W * KEYFRAMES_THUMB_H * sizeof(uint32_t))
+
 static keyframes_hooks_t host;
 
 static keyframe_t entries[KEYFRAMES_MAX];
@@ -31,7 +33,7 @@ static void
 drop_oldest(void)
 {
 	free((void *)entries[head].data);
-	bytes -= entries[head].size;
+	bytes -= entries[head].size + (entries[head].thumb ? THUMB_BYTES : 0);
 	memset(&entries[head], 0, sizeof entries[head]);
 	head = (head + 1) % KEYFRAMES_MAX;
 	count--;
@@ -112,18 +114,24 @@ keyframes_capture(uint64_t cycle, uint32_t event_index)
 		note_gap(cycle, why[0] ? why : "the state could not be taken");
 		return false;
 	}
-	if (len > budget) {
+	const size_t thumb = host.thumbnail ? THUMB_BYTES : 0;
+	if (len + thumb > budget) {
 		note_gap(cycle, "the state is larger than the budget");
 		return false;
 	}
-	void *copy = malloc(len);
+	// The thumbnail sits after the state, on a word boundary.
+	const size_t at   = (len + 3) & ~(size_t)3;
+	uint8_t     *copy = malloc(at + thumb);
 	if (!copy) {
 		note_gap(cycle, "out of memory");
 		return false;
 	}
 	memcpy(copy, data, len);
+	if (thumb) {
+		host.thumbnail((uint32_t *)(copy + at));
+	}
 
-	while (count && (bytes + len > budget || count == KEYFRAMES_MAX)) {
+	while (count && (bytes + len + thumb > budget || count == KEYFRAMES_MAX)) {
 		drop_oldest();
 	}
 	keyframe_t *k  = &entries[(head + count) % KEYFRAMES_MAX];
@@ -132,8 +140,9 @@ keyframes_capture(uint64_t cycle, uint32_t event_index)
 	k->hash        = hash;
 	k->size        = len;
 	k->data        = copy;
+	k->thumb       = thumb ? (const uint32_t *)(copy + at) : NULL;
 	count++;
-	bytes += len;
+	bytes += len + thumb;
 	captured++;
 	since      = 0;
 	in_gap     = false;

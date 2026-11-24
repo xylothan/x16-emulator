@@ -2960,6 +2960,30 @@ video_save(SDL_RWops *f)
 	SDL_RWwrite(f, &sprite_data[0], sizeof(uint8_t), sizeof(sprite_data));
 }
 
+// The last finished frame, averaged down to w x h RGBA8888 words (0xAABBGGRR).
+// w and h divide the screen evenly.
+void
+video_thumbnail(uint32_t *out, int w, int h)
+{
+	const int sx = SCREEN_WIDTH / w;
+	const int sy = SCREEN_HEIGHT / h;
+	const int n  = sx * sy;
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			uint32_t r = 0, g = 0, b = 0;
+			for (int j = 0; j < sy; j++) {
+				const uint8_t *p = &framebuffer[((y * sy + j) * SCREEN_WIDTH + x * sx) * 4];
+				for (int i = 0; i < sx; i++, p += 4) {
+					b += p[0];
+					g += p[1];
+					r += p[2];
+				}
+			}
+			out[y * w + x] = 0xFF000000u | ((b / n) << 16) | ((g / n) << 8) | (r / n);
+		}
+	}
+}
+
 // Render the current framebuffer and present it. Deliberately does not touch the
 // SDL event queue, so it is safe to call from inside the OS modal move/resize
 // loop.

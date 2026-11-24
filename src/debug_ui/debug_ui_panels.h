@@ -45,4 +45,10 @@ struct DebugPanelRegistration {
     DebugPanelRegistration(const char *name, void (*render)(bool *p_open), bool open);
 };
 
+// Moves through the rewind history, run once the frame that asked has been
+// built. Run mid-frame, they would restore a keyframe under the panels still
+// to draw, which would show its position for one frame.
+enum class HistoryMove { None, StepBack, ReverseContinue, Jump };
+void debug_ui_queue_history_move(HistoryMove move, unsigned keyframe = 0);
+
 #endif // DEBUG_UI_PANELS_H

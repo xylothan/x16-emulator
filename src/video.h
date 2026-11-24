@@ -28,6 +28,7 @@ bool video_step(float mhz, float steps, bool midline);
 bool video_update(void);
 void video_present_no_input(void);
 void video_repaint_only(void);
+void video_thumbnail(uint32_t *out, int w, int h);
 // The ImGui debugger window, in builds configured with -DENABLE_IMGUI.
 // Both are always defined: without the UI, available() is false and the pump
 // reports "stay paused", so call sites need no #ifdef.
