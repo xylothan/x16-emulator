@@ -219,6 +219,24 @@ MUTATIONS = [
         "caught_by": ["vera_irq"],
     },
     {
+        "name": "VERA SCANLINE reads the beam line",
+        "file": "src/video.c",
+        # composer.v:126-127: SCANLINE is the composer's counter, a line ahead.
+        "find": "return prev >= 512 ? 511 : comp_line_counter(y) & 0x1FF;",
+        "into": "return prev >= 512 ? 511 : y & 0x1FF;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA line IRQ status sets on the line's first clock",
+        "file": "src/video.c",
+        # top.v:451-452: line_irq is registered before the status latch.
+        "find": "if (line_irq_pending && vga_scan_pos_x >= 2) {",
+        "into": "if (line_irq_pending) {",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
         "name": "VERA ISR write clears the collision bits",
         "file": "src/video.c",
         "find": "isr &= ~(value & 0x07);",

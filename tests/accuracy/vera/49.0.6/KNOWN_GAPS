@@ -1,1 +1,17 @@
 sprites_many.vec
+mid_border.vec
+mid_hscale.vec
+mid_hscroll.vec
+mid_hscroll_active.vec
+mid_layer_enable.vec
+mid_palette.vec
+mid_palette_active.vec
+mid_sprite_x.vec
+mid_sweep_hscroll.vec
+mid_sweep_palette.vec
+mid_sweep_vscroll.vec
+mid_vscale.vec
+mid_vscroll.vec
+mid_mapbase.vec
+mid_l1_hscroll.vec
+mid_border_active.vec
