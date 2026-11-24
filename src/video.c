@@ -3277,7 +3277,7 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 	SS_BLOCK(sprite_line_collisions);
 	SS_BLOCK(layer_line_enable);
 	if (r && version < 5) {
-		bool old_layer_line_enable[2], old_sprite_line_enable;
+		bool old_layer_line_enable[2] = {0}, old_sprite_line_enable = 0;
 		SS_BLOCK(old_layer_line_enable);
 		SS_BLOCK(old_sprite_line_enable);
 	}
@@ -3331,7 +3331,7 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 		if (w || version >= 5) {
 			SS_BLOCK(layer_lb);
 		} else {
-			uint8_t line_render_held, held_layer_line[2][2][SCREEN_WIDTH];
+			uint8_t line_render_held = 0, held_layer_line[2][2][SCREEN_WIDTH] = {{{0}}};
 			SS_BLOCK(line_render_held);
 			SS_BLOCK(held_layer_line);
 			memset(layer_lb, 0, sizeof(layer_lb));
