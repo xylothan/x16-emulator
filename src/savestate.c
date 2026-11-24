@@ -15,6 +15,7 @@
 #include "debug_server.h"
 #include "host_prof.h"
 #include "ieee.h"
+#include "input_log.h"
 #include "perf_budget.h"
 #include "perf_hist.h"
 #include "sdcard.h"
@@ -564,6 +565,9 @@ savestate_apply(const void *data, size_t len, bool allow_behaviour_change, char 
 		return false;
 	}
 
+	// Before the machine changes, so a recording's end hash is of what it recorded.
+	input_log_end("state loaded");
+
 	ss_reader r;
 	ss_reader_init(&r, data, len);
 	savestate_read(&r);
@@ -607,6 +611,12 @@ can_save(char *err, size_t err_len)
 		return false;
 	}
 	return true;
+}
+
+bool
+savestate_can_save(char *err, size_t err_len)
+{
+	return can_save(err, err_len);
 }
 
 // ─── Slots ───────────────────────────────────────────────────────────────────

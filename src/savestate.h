@@ -72,6 +72,9 @@ uint64_t savestate_hash(const void *data, size_t len);
 void savestate_mark_frame_boundary(void);
 bool savestate_at_frame_boundary(void);
 
+// Whether the machine can be saved now. False with a reason in err.
+bool savestate_can_save(char *err, size_t err_len);
+
 // ─── Named in-memory slots ───────────────────────────────────────────────────
 
 #define SAVESTATE_MAX_SLOTS     64

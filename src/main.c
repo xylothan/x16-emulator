@@ -72,6 +72,7 @@
 #include "state_slots.h"
 #include "input_log.h"
 #include "input_log_host.h"
+#include "keyframes_host.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -2158,6 +2159,7 @@ main(int argc, char **argv)
 	// Here because video_init() can retire the graphical debugger.
 	c_frames_host_start(debugger_enabled || imgui_debugger_enabled);
 	input_log_host_init();
+	keyframes_host_init();
 
 	joystick_init();
 

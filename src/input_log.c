@@ -29,6 +29,7 @@ static bool                  end_hash_valid;
 static const char           *end_reason;
 static input_replay_result_t result;
 static uint64_t              diverged_event, diverged_at;
+static uint32_t              generation;
 
 static uint64_t
 now(void)
@@ -124,6 +125,7 @@ input_log_start(void)
 	if (input_log_mode != INPUT_LOG_IDLE || !clock_now || !host.hash || !host.hash(&anchor_hash)) {
 		return false;
 	}
+	generation++;
 	count          = 0;
 	cursor         = 0;
 	acc            = 0;
@@ -171,6 +173,45 @@ input_log_replay_start(void)
 	result         = INPUT_REPLAY_RUNNING;
 	input_log_mode = INPUT_LOG_REPLAYING;
 	return true;
+}
+
+bool
+input_log_replay_from(uint32_t event_index, uint64_t cycle, uint64_t hash)
+{
+	uint64_t h;
+	if (input_log_mode != INPUT_LOG_IDLE || !has_recording || event_index > count || cycle > end_cycle ||
+	    !host.hash || !host.hash(&h) || h != hash) {
+		return false;
+	}
+	cursor         = event_index;
+	acc            = cycle;
+	seen           = *clock_now;
+	diverged_event = diverged_at = 0;
+	result         = INPUT_REPLAY_RUNNING;
+	input_log_mode = INPUT_LOG_REPLAYING;
+	if (host.apply) {
+		input_log_applying = true;
+		for (uint32_t i = 0; i < event_index; i++) {
+			if (events[i].kind == INPUT_EV_JOY_PHYS) {
+				host.apply(&events[i]);
+			}
+		}
+		input_log_applying = false;
+	}
+	return true;
+}
+
+void
+input_log_position(uint64_t *cycle, uint32_t *event_index)
+{
+	*cycle       = input_log_mode != INPUT_LOG_IDLE ? now() : end_cycle;
+	*event_index = count;
+}
+
+uint32_t
+input_log_generation(void)
+{
+	return generation;
 }
 
 void
