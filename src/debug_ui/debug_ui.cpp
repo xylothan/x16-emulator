@@ -1057,13 +1057,12 @@ debug_ui_draw_control_bar(void)
                           : why_not);
         snprintf(back_tip, sizeof back_tip, "Step Back\n%s",
                  can_back ? "Return to the previous instruction." : why_not);
-        char err[160];
         ImGui::SameLine();
         if (ctrl_button("##ReverseContinue", ctrl_icon::ReverseContinue, can_back, rev_tip))
-            DEBUGReverseContinue(err, sizeof err);
+            debug_ui_queue_history_move(HistoryMove::ReverseContinue);
         ImGui::SameLine();
         if (ctrl_button("##StepBack", ctrl_icon::StepBack, can_back, back_tip))
-            DEBUGStepBack(err, sizeof err);
+            debug_ui_queue_history_move(HistoryMove::StepBack);
     }
 
     ImGui::SameLine();
@@ -1253,6 +1252,7 @@ static const DebugPanelPlacement s_placement[] = {
     {"I/O",          DOCK_BOTTOM},
     {"Profile",      DOCK_BOTTOM},
     {"Log",          DOCK_BOTTOM},
+    {"History",      DOCK_BOTTOM},
 };
 
 // A representative, long-established window for each slot. Used to find the
@@ -1361,6 +1361,30 @@ debug_ui_build_default_layout(ImGuiID dockspace_id)
     }
 }
 
+static HistoryMove s_history_move     = HistoryMove::None;
+static unsigned    s_history_keyframe = 0;
+
+void
+debug_ui_queue_history_move(HistoryMove move, unsigned keyframe)
+{
+    s_history_move     = move;
+    s_history_keyframe = keyframe;
+}
+
+static void
+debug_ui_run_history_move(void)
+{
+    const HistoryMove move = s_history_move;
+    s_history_move         = HistoryMove::None;
+    char err[160];
+    switch (move) {
+        case HistoryMove::StepBack:        DEBUGStepBack(err, sizeof err); break;
+        case HistoryMove::ReverseContinue: DEBUGReverseContinue(err, sizeof err); break;
+        case HistoryMove::Jump:            DEBUGJumpToKeyframe(s_history_keyframe, err, sizeof err); break;
+        case HistoryMove::None:            break;
+    }
+}
+
 extern "C" bool
 debug_ui_render(void)
 {
@@ -1462,6 +1486,7 @@ debug_ui_render(void)
     }
 
     ImGui::Render();
+    debug_ui_run_history_move();
 
     // From here on it is turning the frame into GPU work and presenting it.
     // The caller has ui_build open; this nests inside it.

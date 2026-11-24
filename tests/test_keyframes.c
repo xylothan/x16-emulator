@@ -174,6 +174,46 @@ test_resume(void)
 	keyframes_stop();
 }
 
+static void
+fake_thumbnail(uint32_t *out)
+{
+	for (size_t i = 0; i < (size_t)KEYFRAMES_THUMB_W * KEYFRAMES_THUMB_H; i++) {
+		out[i] = 0xFF000000u | fake_byte;
+	}
+}
+
+static void
+test_thumbnail(void)
+{
+	static const keyframes_hooks_t with_thumb = {fake_capture, fake_thumbnail};
+	static const keyframes_hooks_t plain      = {fake_capture};
+	const size_t                   thumb      = (size_t)KEYFRAMES_THUMB_W * KEYFRAMES_THUMB_H * 4;
+	uint64_t                       c          = 0;
+	keyframes_init(&with_thumb);
+	fake_len = 101;
+	check(keyframes_start(1, 2 * (101 + thumb) + 50), "thumbnail: starts");
+	frames(1, &c);
+	const keyframe_t *k = keyframes_get(0);
+	check(k && k->thumb, "thumbnail: kept");
+	check(k && ((uintptr_t)k->thumb & 3) == 0, "thumbnail: word aligned");
+	check(k && k->thumb[0] == (0xFF000000u | 10) &&
+	          k->thumb[(size_t)KEYFRAMES_THUMB_W * KEYFRAMES_THUMB_H - 1] == (0xFF000000u | 10),
+	      "thumbnail: filled at capture");
+	check(k && ((const uint8_t *)k->data)[100] == 10, "thumbnail: state intact");
+	check(status().bytes == 101 + thumb, "thumbnail: counted in bytes");
+	frames(2, &c);
+	check(status().count == 2 && keyframes_get(0)->cycle == 20 && keyframes_get(0)->thumb[0] == (0xFF000000u | 20),
+	      "thumbnail: counted in budget");
+	keyframes_stop();
+	keyframes_clear();
+	keyframes_init(&plain);
+	fake_len = 100;
+	check(keyframes_start(1, 1000), "thumbnail: none without hook");
+	frames(1, &c);
+	check(keyframes_get(0)->thumb == NULL && status().bytes == 100, "thumbnail: none without hook kept");
+	keyframes_stop();
+}
+
 int
 main(void)
 {
@@ -186,6 +226,7 @@ main(void)
 	test_too_big();
 	test_stop_clear();
 	test_resume();
+	test_thumbnail();
 	keyframes_clear();
 	printf("%s\n", failures ? "FAILED" : "all passed");
 	return failures ? 1 : 0;

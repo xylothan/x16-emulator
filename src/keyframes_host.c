@@ -15,6 +15,7 @@
 #include "keyframes.h"
 #include "savestate.h"
 #include "timing.h"
+#include "video.h"
 
 #define REWIND_INTERVAL_FRAMES 30u
 #define REWIND_BUDGET_BYTES    ((size_t)64 * 1024 * 1024)
@@ -73,6 +74,12 @@ capture_state(const void **data, size_t *len, uint64_t *hash, char *why, size_t 
 }
 
 static void
+capture_thumbnail(uint32_t *out)
+{
+	video_thumbnail(out, KEYFRAMES_THUMB_W, KEYFRAMES_THUMB_H);
+}
+
+static void
 on_replay_finished(input_replay_result_t result)
 {
 	if (input_log_seeking || !rewound) {
@@ -93,7 +100,7 @@ on_replay_finished(input_replay_result_t result)
 void
 keyframes_host_init(void)
 {
-	static const keyframes_hooks_t hooks = {capture_state};
+	static const keyframes_hooks_t hooks = {capture_state, capture_thumbnail};
 	keyframes_init(&hooks);
 	input_log_set_finish_hook(on_replay_finished);
 }
@@ -392,6 +399,41 @@ bool
 keyframes_host_step_back(char *err, size_t err_len)
 {
 	return seek_begin(false, err, err_len);
+}
+
+bool
+keyframes_host_can_jump(void)
+{
+	return keyframes_host_usable() &&
+	       (input_log_is_recording() || (input_log_mode == INPUT_LOG_REPLAYING && rewound));
+}
+
+bool
+keyframes_host_jump(uint32_t index, char *err, size_t err_len)
+{
+	if (!keyframes_host_can_jump()) {
+		snprintf(err, err_len, "%s", rewind_on || keyframes_host_usable() ? "no history to jump in" : "rewind history is off");
+		return false;
+	}
+	if (!keyframes_get(index)) {
+		snprintf(err, err_len, "no keyframe %u", index);
+		return false;
+	}
+	if (input_log_is_recording()) {
+		keyframes_stop();
+	}
+	// Ended here, not by the restore, so that the finish hook leaves it be.
+	rewound = false;
+	input_log_end("jumped");
+	rewound = true;
+	// A keyframe at the recording's end finishes the replay at once, and the
+	// recording carries on from it.
+	if (seek_restore(index) || input_log_is_recording()) {
+		return true;
+	}
+	seek_fail();
+	snprintf(err, err_len, "the keyframe could not be restored");
+	return false;
 }
 
 bool

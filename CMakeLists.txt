@@ -434,6 +434,7 @@ if(USE_IMGUI)
         src/debug_ui/panels/breakpoints_panel.cpp
         src/debug_ui/panels/symbols_panel.cpp
         src/debug_ui/panels/callstack_panel.cpp
+        src/debug_ui/panels/history_panel.cpp
         src/debug_ui/panels/log_panel.cpp
         src/debug_ui/panels/psg_panel.cpp
         src/debug_ui/panels/fm_panel.cpp

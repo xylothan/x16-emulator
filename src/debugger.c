@@ -1098,6 +1098,23 @@ bool DEBUGReverseContinue(char *err, size_t err_len) {
 	return DEBUGSeekBack(true, err, err_len);
 }
 
+bool DEBUGJumpToKeyframe(uint32_t index, char *err, size_t err_len) {
+	if (currentMode != DMODE_STOP) {
+		snprintf(err, err_len, "the machine must be paused");
+		return false;
+	}
+	if (!keyframes_host_jump(index, err, err_len))
+		return false;
+	srcStepActive = false;
+	DEBUGClearStepBreakPoint();
+	resumeSkipPC = -1;
+	currentPC = regs.pc;
+	currentPCBank = regs.k;
+	currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+	DEBUGAnnounceStop("goto");
+	return true;
+}
+
 void DEBUGStepInto(void) {                            // F11 — single instruction
 	DEBUGArmResumeSkip();                               // step OFF a breakpoint, not into it again
 	currentMode = DMODE_STEP;                           // runs once, then DEBUGGetCurrentStatus stops us

@@ -9958,7 +9958,8 @@ static int handle_x16_input_log(int seq, cJSON *args) {
 // ─── x16/keyframes: a ring of states across one input recording ──────
 //
 // action: "start" (paused at a frame boundary; intervalFrames, budgetMB), "stop",
-// "replay" (index: restore that keyframe and replay on from it), or "status"
+// "replay" (index: restore that keyframe and replay on from it), "jump" (index:
+// the same within rewind history, recording on at its end), or "status"
 // (default; list: true adds each keyframe).
 
 static int handle_x16_keyframes(int seq, cJSON *args) {
@@ -10005,8 +10006,23 @@ static int handle_x16_keyframes(int seq, cJSON *args) {
         }
         DEBUGBreakToDebugger();
         DEBUGSetStopReason("restore");
+    } else if (!strcmp(action, "jump")) {
+        int index;
+        cJSON *ix = args ? cJSON_GetObjectItemCaseSensitive(args, "index") : NULL;
+        if (!ix || !dap_arg_range_int(args, "index", 0, (int)KEYFRAMES_MAX - 1, &index)) {
+            send_dap_error_response(seq, cmd, "'index' must be a keyframe number");
+            return 0;
+        }
+        if (step.pending) {
+            send_dap_error_response(seq, cmd, "the machine must be paused");
+            return 0;
+        }
+        if (!DEBUGJumpToKeyframe((uint32_t)index, err, sizeof err)) {
+            send_dap_error_response(seq, cmd, err);
+            return 0;
+        }
     } else if (strcmp(action, "status")) {
-        send_dap_error_response(seq, cmd, "'action' must be start, stop, enable, disable, replay or status");
+        send_dap_error_response(seq, cmd, "'action' must be start, stop, enable, disable, replay, jump or status");
         return 0;
     }
 

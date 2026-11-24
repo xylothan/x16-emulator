@@ -17,6 +17,8 @@ extern "C" {
 #define KEYFRAMES_MAX        4096u
 #define KEYFRAMES_MAX_GAPS   32u
 #define KEYFRAMES_REASON_LEN 96u
+#define KEYFRAMES_THUMB_W    160u
+#define KEYFRAMES_THUMB_H    120u
 
 typedef struct {
 	uint64_t    cycle;       // on the input log's clock
@@ -24,6 +26,8 @@ typedef struct {
 	uint64_t    hash;
 	size_t      size;
 	const void *data;
+	// KEYFRAMES_THUMB_W x KEYFRAMES_THUMB_H RGBA8888 words, or NULL.
+	const uint32_t *thumb;
 } keyframe_t;
 
 typedef struct {
@@ -36,6 +40,8 @@ typedef struct {
 typedef struct {
 	// The state stays valid until the next call. On false, why says the reason.
 	bool (*capture)(const void **data, size_t *len, uint64_t *hash, char *why, size_t why_len);
+	// Optional. The screen at the same moment, filled into a thumbnail.
+	void (*thumbnail)(uint32_t *out);
 } keyframes_hooks_t;
 
 typedef struct {
