@@ -333,6 +333,51 @@ void interrupt6502(enum InterruptType vector) {
     if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_IRQ_ENTER, regs.pc, sp0, (uint16_t)entered_vector);
 }
 
+// Opcodes that take the indexing cycle whether or not the index carries: stores
+// on both CPUs, INC and DEC abs,X on both, and the shifts abs,X on the 65C816.
+static inline bool index_cycle_is_unconditional(void) {
+    switch (opcode) {
+        case 0x91: case 0x99: case 0x9D: case 0x9E:
+        case 0xDE: case 0xFE:
+            return true;
+        case 0x1E: case 0x3E: case 0x5E: case 0x7E:
+            return regs.is65c816;
+        default:
+            return false;
+    }
+}
+
+// The indexing cycle. The 65C02 re-reads the last operand byte; the 65C816
+// presents the address before the carry, with VDA and VPA low.
+static inline void index_dummy(uint32_t base, uint16_t last_operand) {
+    const bool crossed = (base & 0xFFFF00) != (ea & 0xFFFF00);
+    if (!crossed && !index_16bit() && !index_cycle_is_unconditional()) {
+        return;
+    }
+    if (regs.is65c816) {
+        dummy6502((uint16_t)((base & 0xFF00) | (ea & 0x00FF)), bank_byte(base), false, 0);
+    } else {
+        dummy6502(last_operand, regs.k, false, 0);
+    }
+}
+
+// Direct page not on a page boundary costs a cycle at the operand byte.
+static inline void dp_low_dummy(void) {
+    if (regs.dp & 0x00FF) {
+        dummy6502((uint16_t)(regs.pc - 1), regs.k, false, 0);
+    }
+}
+
+// The cycle adding an index to a direct-page operand. The 65C02 reads the
+// unindexed zero-page address; the 65C816 repeats the operand address.
+static inline void dp_index_dummy(uint16_t operand) {
+    if (regs.is65c816) {
+        dummy6502((uint16_t)(regs.pc - 1), regs.k, false, 0);
+    } else {
+        dummy6502((uint16_t)(operand & 0xFF), 0, false, 0);
+    }
+}
+
 static uint32_t addr_with_db(uint16_t addr) {
     return mask_long_addr(as_bank_byte(regs.db) | addr);
 }

@@ -109,6 +109,20 @@ write6502(uint16_t address, uint8_t bank, uint8_t value)
 	}
 }
 
+// Recorded but not applied: a write here repeats the value already in memory.
+void
+dummy6502(uint16_t address, uint8_t bank, bool write, uint8_t value)
+{
+	uint32_t full = cpu_bus_address(address, bank);
+	if (write) {
+		if (cpu_bus_write_hook) {
+			cpu_bus_write_hook(full, value);
+		}
+	} else if (cpu_bus_read_hook) {
+		cpu_bus_read_hook(full, cpu_mem[full]);
+	}
+}
+
 // STP halts the CPU until reset. Counted rather than ignored so a test can tell
 // a halt from a stall.
 void

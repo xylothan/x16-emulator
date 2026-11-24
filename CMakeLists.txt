@@ -1218,6 +1218,12 @@ x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
             src/io_trace.c src/perf_budget.c)
 
+x16_add_test(cpu_dummy_cycles NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/accuracy/cpu_dummy_cycles.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c src/perf_budget.c)
+
 # The write half of the debugOn contract, which does not exist: pins what a
 # debugger's edit costs and disturbs, since nothing can tell it apart from a
 # store the program executed.

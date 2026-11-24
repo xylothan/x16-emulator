@@ -51,11 +51,15 @@ static void imm16() {
     regs.pc += 2;
 }
 
-static void _zp_with_offset(uint16_t offset) {
+static void _zp_with_offset(uint16_t offset, bool indexed) {
     uint16_t imm_value = (uint16_t) fetch6502((uint16_t)regs.pc++, regs.k);
 
     if (regs.dp & 0x00FF) {
         penaltyd = 1;
+    }
+    dp_low_dummy();
+    if (indexed) {
+        dp_index_dummy(imm_value);
     }
 
     ea = direct_page_add(imm_value + offset);
@@ -64,6 +68,7 @@ static void _zp_with_offset(uint16_t offset) {
 static void _zp_long_with_offset(uint16_t offset) {
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
+    dp_low_dummy();
 
     ea = read_long(direct_page_add(eahelp), direct_page_add(eahelp + 1), direct_page_add(eahelp + 2), 0);
     ea = mask_long_addr(ea + offset);
@@ -74,15 +79,15 @@ static void _zp_long_with_offset(uint16_t offset) {
 }
 
 static void zp() { //zero-page
-    _zp_with_offset(0);
+    _zp_with_offset(0, false);
 }
 
 static void zpx() { //zero-page,X
-    _zp_with_offset(regs.x);
+    _zp_with_offset(regs.x, true);
 }
 
 static void zpy() { //zero-page,Y
-    _zp_with_offset(regs.y);
+    _zp_with_offset(regs.y, true);
 }
 
 static void rel() { //relative for branch ops (8-bit immediate value, sign-extended)
@@ -119,6 +124,7 @@ static void absx() { //absolute,X
     if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
+    index_dummy(startpage, (uint16_t)(regs.pc + 1));
 
     regs.pc += 2;
 }
@@ -147,6 +153,7 @@ static void absy() { //absolute,Y
     if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
+    index_dummy(startpage, (uint16_t)(regs.pc + 1));
 
     regs.pc += 2;
 }
@@ -160,6 +167,10 @@ static void ind() { //indirect - used for jmp, which assumes the pointer is in b
     //eahelp2 = (eahelp & 0xFF00) | ((eahelp + 1) & 0x00FF); //replicate 6502 page-boundary wraparound bug
     eahelp2 = (eahelp+1) & 0xFFFF;
     ea = read_pair(eahelp, eahelp2, 0);
+    // The 65C02 spends a sixth cycle re-reading the pointer's high byte.
+    if (!regs.is65c816) {
+        dummy6502(eahelp2, 0, false, 0);
+    }
     regs.pc += 2;
 }
 
@@ -174,6 +185,7 @@ static void aindl() { // [addr]    uint16_t eahelp, eahelp2;
 static void ind0() { // (zp)
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
+    dp_low_dummy();
     // The pointer lives in the direct page, which is always bank zero. The
     // address it holds is in the data bank.
     ea = addr_with_db(read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0));
@@ -189,7 +201,10 @@ static void indl0() { // [dp]
 
 static void indx() { // (indirect,X)
     uint16_t eahelp;
-    eahelp = (uint16_t)fetch6502(regs.pc++, regs.k) + regs.x;
+    const uint16_t operand = (uint16_t)fetch6502(regs.pc++, regs.k);
+    dp_low_dummy();
+    dp_index_dummy(operand);
+    eahelp = operand + regs.x;
     ea = addr_with_db(read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0));
 
     if (regs.dp & 0x00FF) {
@@ -200,6 +215,7 @@ static void indx() { // (indirect,X)
 static void indy() { // (indirect),Y
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
+    dp_low_dummy();
     uint16_t pointer = read_pair(direct_page_add(eahelp), direct_page_add(eahelp + 1), 0);
     // Indexing applies to the whole 24-bit address, so carrying past $FFFF
     // moves into the next bank rather than wrapping inside this one, and the
@@ -214,6 +230,7 @@ static void indy() { // (indirect),Y
     if (index_16bit() || startpage != (ea & 0xFFFF00)) {
         penaltyaddr = 1;
     }
+    index_dummy(startpage, (uint16_t)(regs.pc - 1));
 }
 
 static void indly() { // [dp],Y
