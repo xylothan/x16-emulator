@@ -142,11 +142,34 @@ test_a_debug_read_still_moves_nothing(void)
 	check_eq(video_get_address(0), before + 1, "while a real read does");
 }
 
+// DCSEL=6 $9F29: a real read clears the FX accumulator, a debug read does not.
+static void
+test_a_debug_read_keeps_the_fx_accumulator(void)
+{
+	video_reset();
+	video_write(VERA_CTRL, 6 << 1);
+	for (uint8_t reg = 0x09; reg <= 0x0C; reg++) {
+		video_write(reg, (uint8_t)(0x11 * (reg - 0x08)));
+	}
+	video_write(VERA_CTRL, 2 << 1);
+	video_write(0x0C, 0x40);                 // accumulate
+	const uint32_t accumulated = video_get_fx_accum();
+	check(accumulated != 0, "the accumulator holds a value");
+
+	video_write(VERA_CTRL, 6 << 1);
+	video_read(0x09, true);
+	check_eq(video_get_fx_accum(), accumulated, "a debug read leaves it");
+
+	video_read(0x09, false);
+	check_eq(video_get_fx_accum(), 0u, "a real read clears it");
+}
+
 int
 main(void)
 {
 	test_debug_and_real_reads_agree();
 	test_data_ports_report_the_same_byte();
 	test_a_debug_read_still_moves_nothing();
+	test_a_debug_read_keeps_the_fx_accumulator();
 	return x16_test_summary("vera_debug_read");
 }
