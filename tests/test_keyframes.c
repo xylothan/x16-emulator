@@ -158,6 +158,22 @@ test_stop_clear(void)
 	keyframes_stop();
 }
 
+static void
+test_resume(void)
+{
+	uint64_t c = 100000;
+	check(keyframes_start(1, 1000), "resume: starts");
+	frames(2, &c);
+	keyframes_stop();
+	check(!status().armed, "resume: stopped");
+	keyframes_resume();
+	keyframes_status_t s = status();
+	check(s.armed && s.count == 2, "resume: arms and keeps states");
+	frames(1, &c);
+	check(status().count == 3, "resume: captures again");
+	keyframes_stop();
+}
+
 int
 main(void)
 {
@@ -169,6 +185,7 @@ main(void)
 	test_gap_limit();
 	test_too_big();
 	test_stop_clear();
+	test_resume();
 	keyframes_clear();
 	printf("%s\n", failures ? "FAILED" : "all passed");
 	return failures ? 1 : 0;

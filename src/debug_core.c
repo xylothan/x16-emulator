@@ -1004,6 +1004,7 @@ int debug_wp_armed_cpu_write = 0;
 int debug_wp_armed_cpu_read  = 0;
 int debug_wp_armed_vram      = 0;
 void (*debug_wp_changed)(void) = NULL;
+static bool wp_suspended = false;
 
 // Every function that changes the table ends here, so the counts the store
 // paths read cannot fall out of step with it.
@@ -1011,7 +1012,7 @@ static void
 wp_table_changed(void)
 {
 	int cpu_write = 0, cpu_read = 0, vram = 0;
-	for (int i = 0; i < numWatchpoints; i++) {
+	for (int i = 0; !wp_suspended && i < numWatchpoints; i++) {
 		if (!watchPoints[i].active)
 			continue;
 		if (watchPoints[i].space == DEBUG_WP_SPACE_VRAM) {
@@ -1028,6 +1029,13 @@ wp_table_changed(void)
 	debug_wp_armed_vram      = vram;
 	if (debug_wp_changed)
 		debug_wp_changed();
+}
+
+void
+debug_wp_suspend(bool on)
+{
+	wp_suspended = on;
+	wp_table_changed();
 }
 
 // VRAM has no banks, so its entries all carry DEBUG_BANK_ANY.

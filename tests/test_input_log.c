@@ -251,6 +251,62 @@ test_generation(void)
 	check(input_log_generation() == g + 1, "each recording has its own generation");
 }
 
+static int                   finish_calls;
+static input_replay_result_t finish_seen;
+
+static void
+fake_finish(input_replay_result_t r)
+{
+	finish_calls++;
+	finish_seen = r;
+}
+
+static void
+replay_to_end(uint64_t hash)
+{
+	begin_replay(5000);
+	at(5010, INPUT_SITE_FRAME);
+	at(5010, INPUT_SITE_POST);
+	at(5010, INPUT_SITE_TOP);
+	at(5020, INPUT_SITE_TOP);
+	fake_hash = hash;
+	at(5030, INPUT_SITE_TOP);
+}
+
+static void
+test_resume_recording(void)
+{
+	record_three();
+	check(!input_log_resume_recording(), "resume: refused before a replay");
+	begin_replay(5000);
+	check(!input_log_resume_recording(), "resume: refused during a replay");
+	input_log_end("cancelled");
+	check(!input_log_resume_recording(), "resume: refused after a cancelled replay");
+
+	record_three();
+	replay_to_end(3);
+	check(status().result == INPUT_REPLAY_MISMATCH, "resume: replay mismatched");
+	check(!input_log_resume_recording(), "resume: refused after a mismatch");
+
+	record_three();
+	const uint32_t g = input_log_generation();
+	finish_calls     = 0;
+	input_log_set_finish_hook(fake_finish);
+	replay_to_end(2);
+	input_log_set_finish_hook(NULL);
+	check(finish_calls == 1 && finish_seen == INPUT_REPLAY_VERIFIED, "finish hook gets the result");
+	check(input_log_resume_recording(), "resume: accepted after a verified replay");
+	check(status().mode == INPUT_LOG_RECORDING, "resume: records");
+	check(input_log_generation() == g, "resume: same generation");
+	fake_clock = 5040;
+	input_log_note(INPUT_EV_KBD, 0x43, 0, 0);
+	fake_clock = 5050;
+	fake_hash  = 4;
+	input_log_end("stopped");
+	input_log_status_t s = status();
+	check(s.events == 4 && s.end_cycle == 50, "resume: appends on the same clock");
+}
+
 int
 main(void)
 {
@@ -267,6 +323,7 @@ main(void)
 	test_refused_start_without_hash();
 	test_replay_from();
 	test_generation();
+	test_resume_recording();
 	printf("%s\n", failures ? "FAILED" : "all passed");
 	return failures ? 1 : 0;
 }

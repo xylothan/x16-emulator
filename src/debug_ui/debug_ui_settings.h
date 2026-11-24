@@ -32,6 +32,7 @@ struct DebugUiSettings {
     // --- Execution ----------------------------------------------------------
     bool follow_interrupts = false;  // stepping stops at a handler that fires
     bool break_on_interrupt = false; // stop on every interrupt entry
+    bool rewind_history = false;     // keep history so Step Back can work
 
     // --- Memory -------------------------------------------------------------
     bool  mem_highlight_changes = true;  // pulse bytes that changed
@@ -137,6 +138,9 @@ bool debug_ui_settings_is_open(void);
 // The page shown, saved in imgui.ini.
 void        debug_ui_settings_set_page(const char *page);
 const char *debug_ui_settings_page(void);
+
+// Rewind history on or off, saved as the preference.
+void debug_ui_set_rewind(bool on);
 
 // Note that a preference changed so it gets written back to imgui.ini. Panels
 // that expose the same toggle call this instead of pulling in imgui_internal.h.

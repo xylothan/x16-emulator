@@ -35,6 +35,9 @@ bool savestate_apply(const void *data, size_t len, bool allow_behaviour_change, 
 // persistent files (-nvram, cartridge NVRAM) are never written after that,
 // since they would record a history that did not happen.
 bool savestate_any_loaded(void);
+// As savestate_apply, for a state this process took of its own run: the
+// persistent files stay writable.
+bool savestate_apply_own(const void *data, size_t len, char *err, size_t err_len);
 
 // What a state names as its writer: "x16emu layout <L> machine <M> toolchain
 // <hash>". See savestate.c: another layout is refused; another machine version

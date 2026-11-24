@@ -11,6 +11,9 @@
 
 uint8_t input_log_mode     = INPUT_LOG_IDLE;
 bool    input_log_applying = false;
+bool    input_log_seeking  = false;
+
+static void (*finish_hook)(input_replay_result_t);
 
 static const uint32_t   *clock_now;
 static input_log_hooks_t host;
@@ -82,6 +85,9 @@ finish_replay(input_replay_result_t r, const char *reason)
 	}
 	if (host.replay_end) {
 		host.replay_end();
+	}
+	if (finish_hook) {
+		finish_hook(r);
 	}
 }
 
@@ -212,6 +218,28 @@ uint32_t
 input_log_generation(void)
 {
 	return generation;
+}
+
+bool
+input_log_resume_recording(void)
+{
+	if (input_log_mode != INPUT_LOG_IDLE || !has_recording || cursor != count ||
+	    (result != INPUT_REPLAY_VERIFIED && result != INPUT_REPLAY_UNVERIFIED)) {
+		return false;
+	}
+	now();
+	has_recording  = false;
+	end_hash_valid = false;
+	end_reason     = NULL;
+	result         = INPUT_REPLAY_NONE;
+	input_log_mode = INPUT_LOG_RECORDING;
+	return true;
+}
+
+void
+input_log_set_finish_hook(void (*hook)(input_replay_result_t result))
+{
+	finish_hook = hook;
 }
 
 void

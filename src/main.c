@@ -712,6 +712,8 @@ usage()
 	printf("\tStart the -prg/-bas program using RUN\n");
 	printf("-warp\n");
 	printf("\tEnable warp mode, run emulator as fast as possible.\n");
+	printf("-rewind\n");
+	printf("\tKeep rewind history, so the debugger can step back.\n");
 	printf("-hidden\n");
 	printf("\tCreate the emulator (and -imgui debugger) windows hidden.\n");
 	printf("\tEverything still runs and renders; nothing appears on screen,\n");
@@ -1190,6 +1192,10 @@ main(int argc, char **argv)
 			argc--;
 			argv++;
 			warp_mode = true;
+		} else if (!strcmp(argv[0], "-rewind")) {
+			argc--;
+			argv++;
+			keyframes_host_set_enabled(true);
 		} else if (!strcmp(argv[0], "-hidden")) {
 			argc--;
 			argv++;
@@ -2525,7 +2531,7 @@ emulator_post_step(void)
 			SDL_ShowCursor((mouse_grabbed || kernal_mouse_enabled) ? SDL_DISABLE : SDL_ENABLE);
 		}
 
-		if (echo_mode != ECHO_MODE_NONE && regs.pc == 0xffd2) {
+		if (echo_mode != ECHO_MODE_NONE && regs.pc == 0xffd2 && input_log_mode != INPUT_LOG_REPLAYING) {
 			uint8_t c = regs.a;
 			if (echo_mode == ECHO_MODE_COOKED) {
 				if (c == 0x0d) {
@@ -2946,7 +2952,7 @@ emulator_step_during_move(void)
 	// Already ahead of real time: do nothing at all. This is the common case
 	// now that a fast drag calls us on every mouse message, and it has to stay
 	// cheap -- no emulation, and no present either.
-	if (!warp_mode && timing_lead_us() > 0) {
+	if (!warp_mode && !input_log_seeking && timing_lead_us() > 0) {
 		return;
 	}
 
@@ -3273,7 +3279,8 @@ emulator_loop(void *param)
 
 		if (!headless && new_frame) {
 			// Never under -deterministic: instances sharing a path would race.
-			if (nvram_dirty && nvram_path && !deterministic_mode && !savestate_any_loaded()) {
+			if (nvram_dirty && nvram_path && !deterministic_mode && !savestate_any_loaded() &&
+			    input_log_mode != INPUT_LOG_REPLAYING) {
 				SDL_RWops *f = SDL_RWFromFile(nvram_path, "wb");
 				if (f) {
 					SDL_RWwrite(f, nvram, 1, sizeof(nvram));

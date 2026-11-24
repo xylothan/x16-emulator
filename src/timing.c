@@ -233,6 +233,14 @@ timing_lead_us()
 	return scaled_us(ticks) - sdlTicks * 1000LL;
 }
 
+static bool no_sleep = false;
+
+void
+timing_set_no_sleep(bool on)
+{
+	no_sleep = on;
+}
+
 static void
 timing_update_ex(bool may_sleep)
 {
@@ -256,7 +264,7 @@ timing_update_ex(bool may_sleep)
 		diff_time = scaled_emulated_us() - sdlTicks * 1000LL;
 	}
 
-	if (may_sleep && !warp_mode && diff_time > 0) {
+	if (may_sleep && !warp_mode && !no_sleep && diff_time > 0) {
 		// A slower target multiplies the per-frame surplus by native/target.
 		// At the machine's own clock that surplus is at most one frame, but at
 		// the slowest setting it is seconds, and sleeping it in a single call

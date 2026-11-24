@@ -10,7 +10,6 @@
 #include "debug_server.h"
 #include "debugger.h"
 #include "export_paths.h"
-#include "keyframes.h"
 #include "keyframes_host.h"
 #include "savestate.h"
 #include "timing.h"
@@ -262,7 +261,7 @@ state_slots_at_boundary(void)
 		save_now(pending_slot);
 	else if (what == REQ_LOAD)
 		load_now(pending_slot);
-	if (keyframes_armed) {
+	if (keyframes_host_active) {
 		keyframes_host_boundary();
 	}
 }

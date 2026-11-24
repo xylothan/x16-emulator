@@ -26,6 +26,7 @@
 #include "debug_server.h"
 #include "host_prof.h"
 #include "input_log.h"
+#include "keyframes_host.h"
 #include "dbg_info.h"
 #include "rendertext.h"
 
@@ -359,6 +360,22 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 
 	SDL_Event event;
 	if (currentPC < 0) currentPC = regs.pc;                                      // Initialise current PC displayed.
+
+	// A step back replays to its target: no stop, hit count, event or UI.
+	if (input_log_seeking) {
+		(void)cpu_irq_take_entered_kinds();
+		watchpointStopPending = false;
+		const keyframes_seek_t seek = keyframes_host_seek_poll();
+		if (seek == KEYFRAMES_SEEK_RUN) return 0;
+		if (seek == KEYFRAMES_SEEK_RESTART) return 1;
+		currentMode = DMODE_STOP;
+		currentPC = regs.pc;
+		currentPCBank = regs.k;
+		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
+		resumeSkipPC = -1;
+		DEBUGAnnounceStop(seek == KEYFRAMES_SEEK_LANDED ? "step" : "pause");
+		return 1;
+	}
 
 	// Interrupt following. cpu_irq_take_entered_flag() is true exactly once per
 	// interrupt entry, and at this point the PC is already the handler's first
@@ -736,6 +753,8 @@ void DEBUGBreakToDebugger(void) {
 bool
 DEBUGBreakOnStp(uint16_t address, uint8_t bank, bool attached)
 {
+	if (input_log_seeking)
+		return true;
 	const bool armed = (debug_stop_filters() & DEBUG_STOP_STP) != 0;
 	if (!armed && !attached)
 		return false;
@@ -1041,6 +1060,20 @@ void DEBUGContinue(void) {
 	// can see them: this can reach the socket, and a peer that has stopped
 	// reading is dropped from inside it.
 	debug_server_note_resumed();
+}
+
+bool DEBUGStepBack(char *err, size_t err_len) {
+	if (currentMode != DMODE_STOP) {
+		snprintf(err, err_len, "the machine must be paused");
+		return false;
+	}
+	if (!keyframes_host_step_back(err, err_len))
+		return false;
+	srcStepActive = false;
+	DEBUGClearStepBreakPoint();
+	resumeSkipPC = -1;
+	currentMode = DMODE_STEP;
+	return true;
 }
 
 void DEBUGStepInto(void) {                              // F11 — single instruction

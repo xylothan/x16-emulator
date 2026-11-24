@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "savestate.h"
 #include "glue.h"
+#include "input_log.h"
 #include "vera_psg.h"
 #include "vera_pcm.h"
 #include "wav_recorder.h"
@@ -450,6 +451,7 @@ audio_render()
 	len = SDL_min(len_vera, len_ym);
 	len = SDL_min(len, len_fs);
 	const bool host_muted = (psg_debug_get_effective_mute_mask() | YM_debug_get_effective_mute_mask()) != 0;
+	const bool replaying  = input_log_seeking;
 	if (audio_dev > 0) SDL_LockAudioDevice(audio_dev);
 	for (int i = 0; i < len; i++) {
 		int32_t mix_l, mix_r;
@@ -467,6 +469,9 @@ audio_render()
 			out_l = limit_host_sample(host_l);
 			out_r = limit_host_sample(host_r);
 		}
+		if (replaying) {
+			out_l = out_r = 0;
+		}
 		buffer[wridx++] = out_l;
 		buffer[wridx++] = out_r;
 		if (limiter_amp < (1 << 16)) limiter_amp++;
@@ -474,12 +479,14 @@ audio_render()
 		ym_samp_pos_rd = (ym_samp_pos_rd + ym_samps_per_host_samps) & SAMP_POS_MASK_FRAC;
 		fs_samp_pos_rd = (fs_samp_pos_rd + fs_samps_per_host_samps) & SAMP_POS_MASK_FRAC;
 		if (wridx == buffer_size) {
-			wav_recorder_process(&buffer[wridx_old], (buffer_size - wridx_old) / 2);
+			if (!replaying) {
+				wav_recorder_process(&buffer[wridx_old], (buffer_size - wridx_old) / 2);
+			}
 			wridx = 0;
 			wridx_old = 0;
 		}
 	}
-	if ((wridx - wridx_old) > 0) {
+	if ((wridx - wridx_old) > 0 && !replaying) {
 		wav_recorder_process(&buffer[wridx_old], (wridx - wridx_old) / 2);
 	}
 	buffer_written += len * 2;

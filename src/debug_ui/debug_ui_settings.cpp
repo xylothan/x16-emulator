@@ -7,6 +7,7 @@
 #include "debug_info_page.h"
 #include "export_page.h"
 #include "source_folders.h"
+#include "../keyframes_host.h"
 #include "../perf_budget.h"
 #include "../source_view.h"
 #include "../state_slots.h"
@@ -50,6 +51,7 @@ fields(int *count)
         { "AutoSwitchSource",    &s.auto_switch_source,     nullptr, nullptr },
         { "FollowInterrupts",    &s.follow_interrupts,      nullptr, nullptr },
         { "BreakOnInterrupt",    &s.break_on_interrupt,     nullptr, nullptr },
+        { "RewindHistory",       &s.rewind_history,         nullptr, nullptr },
         { "MemHighlightChanges", &s.mem_highlight_changes,  nullptr, nullptr },
         { "AudioHoldOnPause",    &s.audio_hold_on_pause,    nullptr, nullptr },
         { "MemHighlightSeconds", nullptr, &s.mem_highlight_seconds, nullptr },
@@ -169,6 +171,9 @@ settings_apply_to_core()
     DebugUiSettings &s = debug_ui_settings();
     DEBUGSetFollowInterrupts(s.follow_interrupts);
     DEBUGSetBreakOnInterrupt(s.break_on_interrupt);
+    // Only ever turns it on here: -rewind is not undone by a saved "off".
+    if (s.rewind_history)
+        keyframes_host_set_enabled(true);
     // Saved source folders join -srcpath and the debug info's own folder.
     for (const std::string &dir : s.source_folders)
         source_view_add_path(dir.c_str());
@@ -239,6 +244,14 @@ settings_write_all(ImGuiContext *, ImGuiSettingsHandler *handler, ImGuiTextBuffe
 }
 
 } // namespace
+
+void
+debug_ui_set_rewind(bool on)
+{
+    debug_ui_settings().rewind_history = on;
+    keyframes_host_set_enabled(on);
+    debug_ui_settings_mark_dirty();
+}
 
 void
 debug_ui_settings_register(void)
@@ -336,6 +349,19 @@ page_stepping()
                       "free-running. Useful for catching the first entry to a handler.")) {
         DEBUGSetBreakOnInterrupt(s.break_on_interrupt);
     }
+    ImGui::Separator();
+    bool rewind = keyframes_host_enabled();
+    if (ImGui::Checkbox("Keep rewind history (Step Back)", &rewind))
+        debug_ui_set_rewind(rewind);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Records input and keeps a save state every 30 frames, up to 64 MB,\n"
+                          "so Step Back can return to earlier instructions. Costs about 0.4%%\n"
+                          "of emulation speed while on. Turning it off discards the history.\n\n"
+                          "History restarts after a reset, a state load, a memory edit, or\n"
+                          "host file or SD card activity.");
+    }
+    if (const char *why = keyframes_host_blocked())
+        ImGui::TextDisabled("Not recording: %s", why);
 }
 
 void
@@ -474,8 +500,8 @@ const Page PAGES[] = {
      page_appearance},
     {"General", "Navigation", "Keep the visible panel pointed at wherever execution stopped.",
      "switch disassembly source follow focus", page_navigation},
-    {"Debugging", "Stepping & interrupts", "What stepping and breaking do when an interrupt fires.",
-     "irq follow break step interrupt handler", page_stepping},
+    {"Debugging", "Stepping & interrupts", "What stepping and breaking do when an interrupt fires, and rewind history.",
+     "irq follow break step interrupt handler rewind reverse back history", page_stepping},
     {"Debugging", "Debug info", "Which .dbg files are loaded, and switching to another build's.",
      "dbg debug info symbols reload replace wrong build cc65", debug_info_draw_page},
     {"Debugging", "Source folders", "Where the debugger looks for the source files the debug info names.",

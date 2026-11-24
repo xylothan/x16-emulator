@@ -1136,6 +1136,7 @@ static int handle_dap_initialize(int seq, cJSON *args) {
     cJSON_AddBoolToObject(caps, "supportsDelayedStackTraceLoading", true);
     cJSON_AddBoolToObject(caps, "supportsSetVariable", true);
     cJSON_AddBoolToObject(caps, "supportsRestartRequest", true);
+    cJSON_AddBoolToObject(caps, "supportsStepBack", true);
     cJSON_AddBoolToObject(caps, "supportsTerminateRequest", true);
     cJSON_AddBoolToObject(caps, "supportsReadMemoryRequest", true);
     cJSON_AddBoolToObject(caps, "supportsWriteMemoryRequest", true);
@@ -2628,6 +2629,24 @@ static int handle_dap_step_out(int seq, cJSON *args) {
     DEBUGStepOut(caller_step_owner());
     send_dap_response(seq, "stepOut", true, NULL);
     return 1;
+}
+
+static int handle_dap_step_back(int seq, cJSON *args) {
+    (void)args;
+    char err[160];
+    if (!DEBUGStepBack(err, sizeof err)) {
+        send_dap_error_response(seq, "stepBack", err);
+        return 0;
+    }
+    note_request_resumes();
+    send_dap_response(seq, "stepBack", true, NULL);
+    return 1;
+}
+
+static int handle_dap_reverse_continue(int seq, cJSON *args) {
+    (void)args;
+    send_dap_error_response(seq, "reverseContinue", "reverse continue is not available yet; use stepBack");
+    return 0;
 }
 
 static int handle_dap_pause(int seq, cJSON *args) {
@@ -9960,8 +9979,9 @@ static int handle_x16_keyframes(int seq, cJSON *args) {
             return 0;
         }
     } else if (!strcmp(action, "stop")) {
-        if (keyframes_armed) input_log_end("stopped");
-        keyframes_host_sync();
+        keyframes_host_stop();
+    } else if (!strcmp(action, "enable") || !strcmp(action, "disable")) {
+        keyframes_host_set_enabled(!strcmp(action, "enable"));
     } else if (!strcmp(action, "replay")) {
         int index;
         cJSON *ix = args ? cJSON_GetObjectItemCaseSensitive(args, "index") : NULL;
@@ -9980,7 +10000,7 @@ static int handle_x16_keyframes(int seq, cJSON *args) {
         DEBUGBreakToDebugger();
         DEBUGSetStopReason("restore");
     } else if (strcmp(action, "status")) {
-        send_dap_error_response(seq, cmd, "'action' must be start, stop, replay or status");
+        send_dap_error_response(seq, cmd, "'action' must be start, stop, enable, disable, replay or status");
         return 0;
     }
 
@@ -9991,6 +10011,9 @@ static int handle_x16_keyframes(int seq, cJSON *args) {
     cJSON *body = cJSON_CreateObject();
     cJSON_AddBoolToObject(body, "armed", s.armed);
     cJSON_AddBoolToObject(body, "usable", keyframes_host_usable());
+    cJSON_AddBoolToObject(body, "rewindEnabled", keyframes_host_enabled());
+    cJSON_AddBoolToObject(body, "canStepBack", keyframes_host_can_step_back());
+    if (keyframes_host_blocked()) cJSON_AddStringToObject(body, "blocked", keyframes_host_blocked());
     cJSON_AddNumberToObject(body, "count", s.count);
     cJSON_AddNumberToObject(body, "bytes", (double)s.bytes);
     cJSON_AddNumberToObject(body, "budgetBytes", (double)s.budget);
@@ -10079,7 +10102,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     // on a running machine is refused, so it takes nothing over.
     if ((step.pending || run_to.pending) &&
         (!strcmp(cmd, "continue") || !strcmp(cmd, "next") || !strcmp(cmd, "stepIn") ||
-         !strcmp(cmd, "stepOut") || !strcmp(cmd, "restart") ||
+         !strcmp(cmd, "stepOut") || !strcmp(cmd, "stepBack") || !strcmp(cmd, "restart") ||
          (!strcmp(cmd, "goto") && currentMode == DMODE_STOP) ||
          !strcmp(cmd, "terminate"))) {
         step_finish("cancelled");
@@ -10105,6 +10128,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "next"))          result = handle_dap_next(seq, args);
     else if (!strcmp(cmd, "stepIn"))        result = handle_dap_step_in(seq, args);
     else if (!strcmp(cmd, "stepOut"))       result = handle_dap_step_out(seq, args);
+    else if (!strcmp(cmd, "stepBack"))      result = handle_dap_step_back(seq, args);
+    else if (!strcmp(cmd, "reverseContinue")) result = handle_dap_reverse_continue(seq, args);
     else if (!strcmp(cmd, "pause"))         result = handle_dap_pause(seq, args);
     else if (!strcmp(cmd, "cancel"))        result = handle_dap_cancel(seq, args);
     else if (!strcmp(cmd, "disconnect"))    result = handle_dap_disconnect(seq, args);
@@ -10238,7 +10263,7 @@ void debug_server_set_frontend(const dbg_frontend_t *f) {
 // breakpoint commands.
 static const char *const callable_commands[] = {
     "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
-    "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "restart",
+    "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "stepBack", "restart",
     "x16/step", "x16/runTo", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",

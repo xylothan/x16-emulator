@@ -70,6 +70,12 @@ keyframes_stop(void)
 	keyframes_armed = false;
 }
 
+void
+keyframes_resume(void)
+{
+	keyframes_armed = interval != 0 && budget != 0;
+}
+
 static void
 note_gap(uint64_t cycle, const char *why)
 {

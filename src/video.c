@@ -2928,6 +2928,9 @@ static void video_render_all_body(bool new_frame);
 static void
 video_render_all_ex(bool new_frame)
 {
+	if (input_log_seeking) {
+		return;
+	}
 	host_prof_begin(HP_PRESENT);
 	video_render_all_body(new_frame);
 	host_prof_end(HP_PRESENT);

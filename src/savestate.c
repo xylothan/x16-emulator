@@ -614,6 +614,15 @@ can_save(char *err, size_t err_len)
 }
 
 bool
+savestate_apply_own(const void *data, size_t len, char *err, size_t err_len)
+{
+	const bool was_loaded = loaded_any;
+	const bool ok         = savestate_apply(data, len, false, err, err_len);
+	loaded_any            = was_loaded;
+	return ok;
+}
+
+bool
 savestate_can_save(char *err, size_t err_len)
 {
 	return can_save(err, err_len);
