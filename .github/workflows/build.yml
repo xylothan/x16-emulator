@@ -46,7 +46,7 @@ jobs:
   #     the name means "the third check-in of the tenth" and can be worked out
   #     again later from the history alone.
   version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       # Only bump this if the first tag ends up cut against a different
       # upstream release; after that the tags themselves take over.
@@ -96,7 +96,7 @@ jobs:
           echo "Build identifier: $build"
   README:
     needs: [version]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -110,6 +110,9 @@ jobs:
       - name: Install md-to-pdf (npm)
         run: |
           npm i md-to-pdf
+      - name: Allow Chrome's sandbox
+        # Ubuntu 23.10+ blocks the unprivileged user namespaces it needs.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Create output directory
         run: |
           mkdir artifacts
@@ -141,14 +144,14 @@ jobs:
   # actually executes any code, so it runs unconditionally rather than hanging
   # off README like the platform builds do.
   unit-tests:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # buildtables.py generates cpu/tables.h and cpu/mnemonics.h; CMake looks
       # for a Python 3 interpreter unconditionally.
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       - name: Install Dependencies
         # SDL2 and zlib are found by find_package() at configure time, and
         # disasm.c pulls in SDL headers, so they are needed even though nothing
@@ -248,12 +251,12 @@ jobs:
   # it would catch incorrect behaviour; this is the half that does. Kept out of
   # unit-tests because it rebuilds once per mutation.
   mutation-tests:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -280,12 +283,12 @@ jobs:
   # the version must be bumped. The ROM is pinned, because the goldens depend on
   # it and the platform jobs take whatever x16-rom built last.
   machine-version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -551,7 +554,8 @@ jobs:
   linux:
     name: linux (${{ matrix.arch }})
     needs: [version, README]
-    runs-on: ubuntu-22.04
+    # arm-runner-action needs qemu-user-static, which Ubuntu 26.04 does not ship.
+    runs-on: ${{ matrix.emulated && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -563,7 +567,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       - name: Install Dependencies
         if: ${{ !matrix.emulated }}
         run: |
@@ -662,9 +666,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-15-intel and macos-15 (arm64) are both currently Sequoia.
+          # Intel has no free -latest label.
           - { arch: x86_64, runner: macos-15-intel, python: '3.9',  package: x16emu_macos_intel }
-          - { arch: arm64,  runner: macos-15,       python: '3.10', package: x16emu_macos_m1 }
+          - { arch: arm64,  runner: macos-latest,   python: '3.10', package: x16emu_macos_m1 }
     steps:
       - uses: actions/checkout@v4
       - name: Install Dependencies
@@ -785,7 +789,7 @@ jobs:
       - linux
       - macos
       - wasm
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       # The default token is read-only, and creating a release needs to write.
       contents: write
