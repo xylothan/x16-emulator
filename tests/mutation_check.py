@@ -222,8 +222,8 @@ MUTATIONS = [
         "name": "VERA SCANLINE reads the beam line",
         "file": "src/video.c",
         # composer.v:126-127: SCANLINE is the composer's counter, a line ahead.
-        "find": "comp_scanline(vga_scan_pos_y);",
-        "into": "vga_scan_pos_y;",
+        "find": "return prev >= 512 ? 511 : comp_line_counter(y) & 0x1FF;",
+        "into": "return prev >= 512 ? 511 : y & 0x1FF;",
         "count": 1,
         "caught_by": ["vera_accuracy"],
     },
