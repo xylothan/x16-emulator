@@ -1,0 +1,20 @@
+oracle vera 49.0.6 bitstream-sha256 9cc3e2419d08d09f814c671fd0923e853ee80ab31e5029467d92003b797e8648
+bus ctrl_roundtrip
+w 05 00
+r 05 00
+w 05 01
+r 05 01
+w 05 02
+r 05 02
+w 05 03
+r 05 03
+w 05 7e
+r 05 7e
+w 05 7f
+r 05 7f
+w 05 55
+r 05 55
+w 05 2a
+r 05 2a
+w 05 00
+e

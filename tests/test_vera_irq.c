@@ -383,12 +383,8 @@ test_clearing_the_status_leaves_the_nibble(void)
 	arm_two_sprites(0x70, 0xD0, 1);
 	step_frame();
 	video_write(VERA_ISR, 0xFF);
-	check_divergent((read_isr() & 0xF0) == 0x50,
-	                "a write of $FF acknowledges the latches without disturbing the nibble",
-	                "video.c:2910 clears all eight bits, but ISR bits 7:4 are "
-	                "sprite_renderer.v's frame_collision_mask_r, which the write at "
-	                "top.v:439-444 cannot reach; on the machine the nibble holds until "
-	                "the next vblank replaces it");
+	check_eq(read_isr() & 0xF0, 0x50,
+	         "a write of $FF acknowledges the latches without disturbing the nibble");
 }
 
 // sprite_renderer.v:326-328

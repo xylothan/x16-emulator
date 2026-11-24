@@ -129,7 +129,7 @@ test_banked_registers_do_not_alias(void)
 // top.v:210   default: rddata = `VERSION_BUILD;   // 8'd1
 //
 // Unmapped banks return the version string; DCSEL 3 maps none of the four.
-// Claims 49.0.6 (VERA_VERSION_* in video.c); the v48.0.1 registers report 48.0.1.
+// VERA 49.0.6 bitstream: DCSEL 63 reads 'V', 49, 0, 6.
 // See tests/check_vera_version.py.
 static void
 test_unmapped_banks_return_the_version(void)
@@ -137,34 +137,23 @@ test_unmapped_banks_return_the_version(void)
 	video_reset();
 	select_dcsel(3);
 
-	// Real reads, not debug reads: video.c:2690 diverts a debug read to the stored composer array.
 	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V',
 	         "an unmapped bank reports 'V' at the first address");
-	check_divergent(video_read(VERA_DC_1, false) == 48,
-	                "the major version at the second reads 48",
-	                "emulator claims 49 (VERA_VERSION_MAJOR, R49.0.6); no public RTL "
-	                "for 49 exists, so the oracle is still v48.0.1");
+	check_eq(video_read(VERA_DC_1, false), 49u, "the major version at the second");
 	check_eq(video_read(VERA_DC_2, false), 0u, "the minor version at the third");
 
-	check_divergent(video_read(VERA_DC_3, false) == 1,
-	                "the patch version at the fourth reads 1",
-	                "emulator claims 6 (VERA_VERSION_PATCH, R49.0.6); the RTL in tag "
-	                "v48.0.1 reports 48.0.1");
+	check_eq(video_read(VERA_DC_3, false), 6u, "the patch version at the fourth");
 }
 
-// video.c:2690   if (debugOn) return video_get_dc_value(i);
-//
-// Unmapped bank: CPU sees the version string, the debugger the composer bytes.
+// Unmapped bank: a debug read reports the version string, as a real read does.
 static void
-test_debug_and_real_reads_disagree_on_unmapped_banks(void)
+test_debug_and_real_reads_agree_on_unmapped_banks(void)
 {
 	video_reset();
 	select_dcsel(3);
 
-	check(video_read(VERA_DC_0, true) != video_read(VERA_DC_0, false),
-	      "a debug read of an unmapped bank does not match what the CPU sees");
-	check_eq(video_read(VERA_DC_0, true), 0u, "the debugger sees the stored composer byte");
-	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V', "while the CPU sees the version");
+	check_eq(video_read(VERA_DC_0, true), (uint32_t)'V', "the debugger sees the version");
+	check_eq(video_read(VERA_DC_0, false), (uint32_t)'V', "and so does the CPU");
 }
 
 // Reading the version needs no bank selected and leaves the selection alone.
@@ -189,7 +178,7 @@ main(void)
 	test_addrsel_and_dcsel_are_independent();
 	test_banked_registers_do_not_alias();
 	test_unmapped_banks_return_the_version();
-	test_debug_and_real_reads_disagree_on_unmapped_banks();
+	test_debug_and_real_reads_agree_on_unmapped_banks();
 	test_reading_the_version_leaves_the_bank_alone();
 	return x16_test_summary("vera_regbank");
 }

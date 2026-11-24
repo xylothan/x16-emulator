@@ -205,6 +205,15 @@ static uint8_t sprite_line_col[SCREEN_WIDTH];
 static uint8_t sprite_line_z[SCREEN_WIDTH];
 static uint8_t sprite_line_mask[SCREEN_WIDTH];
 static uint8_t sprite_line_collisions;
+
+// composer.v:157: no line is rendered once the scaled Y counter reaches 480.
+// top.v:731-739: the two line buffers swap on every scanline, blanking included.
+// composer.v:130: the sprite buffer is erased only below index 640.
+static uint8_t line_buf_sel;
+static uint8_t line_render_held;
+static uint8_t held_layer_line[2][2][SCREEN_WIDTH];
+static uint8_t sprite_edge_col[2][2];
+static uint8_t sprite_edge_z[2][2];
 static bool layer_line_enable[2];
 static bool old_layer_line_enable[2];
 static bool old_sprite_line_enable;
@@ -340,6 +349,7 @@ mousegrab_toggle() {
 // pre-reset machine while the registers read zero -- and a debug view
 // correlating the two would pair zeroed registers with stale geometry.
 static void video_reset_layer_pipeline(void);
+static void refresh_sprite_properties(const uint16_t sprite);
 
 void
 video_reset()
@@ -418,6 +428,15 @@ video_reset()
 
 	// init sprite data
 	memset(sprite_data, 0, sizeof(sprite_data));
+	for (uint16_t i = 0; i < 128; i++) {
+		refresh_sprite_properties(i);
+	}
+
+	line_buf_sel = 0;
+	line_render_held = 0;
+	memset(held_layer_line, 0, sizeof(held_layer_line));
+	memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
+	memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
 
 	// copy palette
 	memcpy(palette, default_palette, sizeof(palette));
@@ -1634,6 +1653,19 @@ render_sprite_line(const uint16_t y)
 
 			const uint16_t line_x = props->sprite_x + sx;
 			if (line_x >= SCREEN_WIDTH) {
+				// sprite_renderer.v:319-323; no collision at 640+ (:327).
+				if (line_x < SCREEN_WIDTH + 2) {
+					uint8_t edge_col = unpacked_sprite_line[eff_sx];
+					const uint8_t e  = line_x - SCREEN_WIDTH;
+					if (edge_col > 0 && (props->sprite_zdepth > sprite_edge_z[line_buf_sel][e] ||
+					                     sprite_edge_col[line_buf_sel][e] == 0)) {
+						if (edge_col < 16) {
+							edge_col += props->palette_offset;
+						}
+						sprite_edge_col[line_buf_sel][e] = edge_col;
+						sprite_edge_z[line_buf_sel][e]   = props->sprite_zdepth;
+					}
+				}
 				eff_sx += eff_sx_incr;
 				continue;
 			}
@@ -1883,9 +1915,9 @@ render_layer_line_tile(uint8_t layer, uint16_t y)
 		int xx = eff_x & props->tilew_max;
 		if (hflip) {
 			xx          = xx ^ (props->tilew_max);
-			color_shift = 0;
+			color_shift = (eff_x & max_pixels_per_byte) * props->bits_per_pixel;
 		} else {
-			color_shift = props->first_color_pos;
+			color_shift = props->first_color_pos - (eff_x & max_pixels_per_byte) * props->bits_per_pixel;
 		}
 
 		// additional bytes to reach the correct column of the tile
@@ -1958,13 +1990,13 @@ render_layer_line_bitmap(uint8_t layer, uint16_t y)
 	const struct video_layer_properties *props = &prev_layer_properties[1][layer];
 //	const struct video_layer_properties *props0 = &prev_layer_properties[0][layer];
 
-	int yy = y % props->tileh;
+	int yy = y;
 	// additional bytes to reach the correct line of the tile
 	uint32_t y_add = (yy * props->tilew * props->bits_per_pixel) >> 3;
 
 	// Render tile line.
 	for (int x = 0; x < SCREEN_WIDTH; x++) {
-		int xx = x % props->tilew;
+		int xx = x;
 
 		// extract all information from the map
 		uint8_t palette_offset = reg_layer[layer][4] & 0xf;
@@ -1972,7 +2004,7 @@ render_layer_line_bitmap(uint8_t layer, uint16_t y)
 		// additional bytes to reach the correct column of the tile
 		uint16_t x_add = (xx * props->bits_per_pixel) >> 3;
 		uint32_t tile_offset = y_add + x_add;
-		uint8_t s = video_space_read(props->tile_base + tile_offset);
+		uint8_t s = video_space_read((props->tile_base + tile_offset) & 0x1ffff);
 
 		// convert tile byte to indexed color
 		uint8_t col_index = (s >> (props->first_color_pos - ((xx & props->color_fields_max) << props->color_depth))) & props->color_mask;
@@ -2187,6 +2219,7 @@ render_line(uint16_t y, float scan_pos_x)
 		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
 		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
 
+		line_render_held = 0;
 		if ((dc_video & 3) > 1) { // 480i or 240p
 			if ((y >> 1) == 0) {
 				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
@@ -2196,8 +2229,12 @@ render_line(uint16_t y, float scan_pos_x)
 		} else {
 			if (y == 0) {
 				eff_y_fp = 0;
-			} else if ( (y >= vstart) && (y < vstop) ) {
-				eff_y_fp += (prev_reg_composer[1][2] << 9);
+			} else if ( (y > vstart) && (y < vstop) ) {
+				if ((eff_y_fp >> 16) < 480) {
+					eff_y_fp += (prev_reg_composer[1][2] << 9);
+				} else {
+					line_render_held = 1;
+				}
 			}
 		}
 	}
@@ -2231,7 +2268,7 @@ render_line(uint16_t y, float scan_pos_x)
 	uint16_t hstop = reg_composer[5] << 2;
 
 	uint16_t eff_y = (eff_y_fp >> 16);
-	if (eff_y >= 480) eff_y = 480 - (y & 1);
+	if ((dc_video & 3) > 1 && eff_y >= 480) eff_y = 480 - (y & 1);
 
 	layer_line_enable[0] = dc_video & 0x10;
 	layer_line_enable[1] = dc_video & 0x20;
@@ -2249,21 +2286,16 @@ render_line(uint16_t y, float scan_pos_x)
 			old_layer_line_enable[layer] = layer_line_enable[layer];
 	}
 
-	// clear sprite_line if sprites get disabled
-	if (!sprite_line_enable && old_sprite_line_enable) {
-		for (uint16_t i = s_pos_x_p; i < SCREEN_WIDTH; i++) {
-			sprite_line_col[i] = 0;
-			sprite_line_z[i] = 0;
-			sprite_line_mask[i] = 0;
-		}
-	}
-
 	if (s_pos_x_p == 0)
 		old_sprite_line_enable = sprite_line_enable;
 
-
-
-	if (sprite_line_enable) {
+	// sprite_renderer.v takes no enable: DC_VIDEO gates only the composer
+	// (composer.v:195-199). composer.v:130 erases each buffer after display, so
+	// a held line has no sprites below index 640.
+	if (line_render_held) {
+		memset(sprite_line_col, 0, SCREEN_WIDTH);
+		memset(sprite_line_z, 0, SCREEN_WIDTH);
+	} else {
 		render_sprite_line(eff_y);
 	}
 
@@ -2343,6 +2375,13 @@ render_line(uint16_t y, float scan_pos_x)
 		}
 	}
 
+	if (line_render_held) {
+		for (uint8_t l = 0; l < 2; l++) {
+			if (layer_line_enable[l]) {
+				memcpy(layer_line[l], held_layer_line[line_buf_sel][l], SCREEN_WIDTH);
+			}
+		}
+	} else {
 	if (layer_line_enable[0]) {
 		if (prev_layer_properties[1][0].text_mode) {
 			render_layer_line_text(0, eff_y);
@@ -2360,6 +2399,11 @@ render_line(uint16_t y, float scan_pos_x)
 		} else {
 			render_layer_line_tile(1, eff_y);
 		}
+	}
+	// A step is below 2, so the last two rendered lines are at 476 or later.
+	if (eff_y >= 476) {
+		memcpy(held_layer_line[line_buf_sel], layer_line, sizeof(layer_line));
+	}
 	}
 
 	// If video output is enabled, calculate color indices for line.
@@ -2381,8 +2425,16 @@ render_line(uint16_t y, float scan_pos_x)
 			const uint32_t scale = reg_composer[1];
 			for (uint16_t x = MAX(hstart, s_pos_x_p); x < hstop && x < s_pos_x; ++x) {
 				uint16_t eff_x = eff_x_fp >> 16;
-				col_line[x] = (eff_x < SCREEN_WIDTH) ? calculate_line_col_index(sprite_line_z[eff_x], sprite_line_col[eff_x], layer_line[0][eff_x], layer_line[1][eff_x]) : 0;
-				eff_x_fp += (scale << 9);
+				if (eff_x < SCREEN_WIDTH) {
+					col_line[x] = calculate_line_col_index(sprite_line_enable ? sprite_line_z[eff_x] : 0, sprite_line_col[eff_x], layer_line[0][eff_x], layer_line[1][eff_x]);
+					// composer.v:178 holds the counter once it reaches 640.
+					eff_x_fp += (scale << 9);
+				} else if (sprite_line_enable && eff_x < SCREEN_WIDTH + 2) {
+					const uint8_t e = eff_x - SCREEN_WIDTH;
+					col_line[x] = calculate_line_col_index(sprite_edge_z[line_buf_sel][e], sprite_edge_col[line_buf_sel][e], 0, 0);
+				} else {
+					col_line[x] = 0;
+				}
 			}
 			for (uint16_t x = hstop; x < s_pos_x; ++x) {
 				col_line[x] = border_color;
@@ -2448,6 +2500,7 @@ video_step(float mhz, float steps, bool midline)
 		vga_scan_pos_x -= VGA_SCAN_WIDTH;
 		if (!ntsc_mode) {
 			render_line(vga_scan_pos_y - VGA_Y_OFFSET, VGA_SCAN_WIDTH);
+			line_buf_sel ^= 1;
 		}
 		vga_scan_pos_y++;
 		if (vga_scan_pos_y == SCAN_HEIGHT) {
@@ -2711,7 +2764,7 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 	}
 }
 
-#define VERA_CHUNK_VERSION 2
+#define VERA_CHUNK_VERSION 3
 
 static void
 video_state_io(ss_writer *w, ss_reader *r, int version)
@@ -2787,6 +2840,19 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 	SS_BLOCK(y_prev);
 	SS_BLOCK(s_pos_x_p);
 	SS_BLOCK(eff_y_fp);
+	if (w || version >= 3) {
+		SS_BLOCK(line_buf_sel);
+		SS_BLOCK(line_render_held);
+		SS_BLOCK(held_layer_line);
+		SS_BLOCK(sprite_edge_col);
+		SS_BLOCK(sprite_edge_z);
+	} else {
+		line_buf_sel = 0;
+		line_render_held = 0;
+		memset(held_layer_line, 0, sizeof(held_layer_line));
+		memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
+		memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
+	}
 #undef SS_BLOCK
 
 	if (r && version < 2) {
@@ -4361,7 +4427,6 @@ static uint8_t video_read_inner(uint8_t reg, bool debugOn) {
 		case 0x0B:
 		case 0x0C: {
 			int i = reg - 0x09 + (io_dcsel << 2);
-			if (debugOn) return video_get_dc_value(i);
 			switch (i) {
 				case 0x00:
 				case 0x01:
@@ -4377,11 +4442,11 @@ static uint8_t video_read_inner(uint8_t reg, bool debugOn) {
 					return video_get_dc_value(i);
 					break;
 				case 0x18: // DCSEL=6, 0x9F29
-					fx_mult_accumulator = 0;
+					if (!debugOn) fx_mult_accumulator = 0;
 					// fall out of the switch
 					break;
 				case 0x19: // DCSEL=6, 0x9F2A
-					fx_accum_step();
+					if (!debugOn) fx_accum_step();
 					// fall out of the switch
 					break;
 				default:
@@ -4600,7 +4665,8 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 			ien = value & 0xF;
 			break;
 		case 0x07:
-			isr &= value ^ 0xff;
+			// top.v:439-444: a write clears only the three latched bits.
+			isr &= ~(value & 0x07);
 			break;
 		case 0x08:
 			irq_line = (irq_line & 0x100) | value;
@@ -4738,7 +4804,8 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 		case 0x12:
 		case 0x13:
 			video_step(MHZ, 0, true); // potential midline raster effect
-			reg_layer[0][reg - 0x0D] = value;
+			// top.v:393-401: scroll high bytes hold four bits.
+			reg_layer[0][reg - 0x0D] = (reg == 0x11 || reg == 0x13) ? (value & 0x0f) : value;
 			refresh_layer_properties(0);
 			break;
 
@@ -4750,7 +4817,7 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 		case 0x19:
 		case 0x1A:
 			video_step(MHZ, 0, true); // potential midline raster effect
-			reg_layer[1][reg - 0x14] = value;
+			reg_layer[1][reg - 0x14] = (reg == 0x18 || reg == 0x1A) ? (value & 0x0f) : value;
 			refresh_layer_properties(1);
 			break;
 

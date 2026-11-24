@@ -1,0 +1,35 @@
+oracle vera 49.0.6 bitstream-sha256 9cc3e2419d08d09f814c671fd0923e853ee80ab31e5029467d92003b797e8648
+bus two_ports_share_vram
+w 05 00
+w 00 40
+w 01 12
+w 02 10
+w 03 c0
+w 03 c1
+w 03 c2
+w 03 c3
+w 03 c4
+w 03 c5
+w 03 c6
+w 03 c7
+w 05 01
+w 00 40
+w 01 12
+w 02 10
+r 04 c0
+r 04 c1
+r 04 c2
+r 04 c3
+r 04 c4
+r 04 c5
+r 04 c6
+r 04 c7
+w 05 00
+w 00 40
+w 01 12
+w 02 00
+r 03 c0
+r 03 c0
+w 03 3c
+r 03 3c
+e

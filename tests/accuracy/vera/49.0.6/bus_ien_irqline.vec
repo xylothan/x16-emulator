@@ -1,0 +1,19 @@
+oracle vera 49.0.6 bitstream-sha256 9cc3e2419d08d09f814c671fd0923e853ee80ab31e5029467d92003b797e8648
+bus ien_irqline
+w 05 00
+w 06 00
+r 06 00 bf
+w 06 0f
+r 06 0f bf
+w 06 05
+r 06 05 bf
+w 06 0a
+r 06 0a bf
+w 06 80
+r 06 80 bf
+w 06 8f
+r 06 8f bf
+w 06 ff
+r 06 8f bf
+w 06 00
+e

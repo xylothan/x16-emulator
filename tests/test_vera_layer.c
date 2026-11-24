@@ -97,11 +97,8 @@ test_the_scroll_high_bytes_are_four_bits_wide(void)
 			check_eq(read_layer(layer, highs[i]), 0x0A, "the low four bits are stored");
 
 			write_layer(layer, highs[i], 0xFF);
-			check_divergent(read_layer(layer, highs[i]) == 0x0F,
-			                "the top four bits of a scroll high byte read as zero",
-			                "video.c:2733 and video.c:2741 return the stored byte whole; "
-			                "top.v:218 and top.v:220 read {4'b0, scroll[11:8]} and the write "
-			                "at top.v:393-401 takes only write_data[3:0]");
+			check_eq(read_layer(layer, highs[i]), 0x0F,
+			         "the top four bits of a scroll high byte read as zero");
 		}
 	}
 }
