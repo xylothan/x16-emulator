@@ -145,3 +145,6 @@ bus_timed_line_irq_blank_odd.vec
 bus_timed_scanline.vec
 bus_timed_scanline_blank.vec
 bus_timed_vsync_irq.vec
+bus_timed_line_irq_steady_even.vec
+bus_timed_line_irq_steady_odd.vec
+bus_timed_scanline_steady.vec

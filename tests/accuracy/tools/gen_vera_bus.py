@@ -253,15 +253,26 @@ def timed_scanline_blank():
     return s
 
 
-def line_irq_window(lines):
+def line_irq_window(lines, frames=1):
     s = S()
     s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
-    s.v()
+    for _ in range(frames):
+        s.v()
     for line in lines:
         s.at(at_pos(line - 1, 100))
         set_irqline(s, line, 0x02); s.w(7, 0x07)
         for x in range(200, 2 * LINE + 51, 50):
             s.at(at_pos(line - 1, x) - 1); s.pin()
+    return s
+
+
+def timed_scanline_steady():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v(); s.v()
+    for y in range(492, 525):
+        read_at(s, y, 400, 8); read_at(s, y, 413, 6)
+        read_at(s, y, 794, 8); read_at(s, y, 807, 6)
     return s
 
 
@@ -322,6 +333,9 @@ SCRIPTS = {
     "timed_scanline_blank": timed_scanline_blank,
     "timed_line_irq_blank_even": lambda: line_irq_window(range(494, 511, 2)),
     "timed_line_irq_blank_odd": lambda: line_irq_window(range(493, 512, 2)),
+    "timed_scanline_steady": timed_scanline_steady,
+    "timed_line_irq_steady_even": lambda: line_irq_window(range(494, 511, 2), 2),
+    "timed_line_irq_steady_odd": lambda: line_irq_window(range(493, 512, 2), 2),
 }
 
 
