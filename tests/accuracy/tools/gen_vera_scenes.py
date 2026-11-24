@@ -17,6 +17,21 @@ import tempfile
 import zlib
 
 WIDTH, HEIGHT = 640, 480
+# Same anchor as gen_vera_bus.py: T 0 is dot 4 of line 492.
+LINE, LINES, ANCHOR_Y, ANCHOR_X = 800, 525, 492, 4
+WRITE_LEAD = 8
+PIXEL_DIR = None
+SWEEP_X = tuple(range(0, 800, 25))
+HBLANK_X = (640, 700, 760, 780, 790, 794, 796, 797, 798, 799, 0, 1, 2, 4, 8, 16)
+ACTIVE_X = (40, 100, 161, 222, 300, 333, 400, 451, 500, 555, 600, 639)
+
+
+def at_pos(y, x):
+    return ((y - ANCHOR_Y) % LINES) * LINE + x - ANCHOR_X
+
+
+def mid_schedule(reg, xs, first=10, step=6, last=470, val=lambda k: (k * 37 + 5) & 255):
+    return [(y, xs[k % len(xs)], reg, val(k)) for k, y in enumerate(range(first, last, step))]
 VRAM_SIZE = 0x20000
 SEED_BASE = 0x49000000
 
@@ -158,6 +173,28 @@ def scenes():
     s["sprites_past_640_a"] = dict(l0=dict(depth=2, scroll=1), sprites=24, vs=0xC0, hs=0xC0, armed=1)
     s["sprites_past_640_b"] = dict(l0=dict(depth=2, scroll=1), sprites=24, vs=0xC0, hs=0xC0, armed=1, frame=2)
     s["sprites_past_640_c"] = dict(l0=dict(depth=2, scroll=1), sprites=24, vs=0xC0, hs=0xC0, armed=1, frame=3)
+    tiles = dict(depth=2, scroll=1, mw=1, mh=1)
+    s["mid_hscroll"] = dict(l0=tiles, mid=mid_schedule(0x10, HBLANK_X))
+    s["mid_vscroll"] = dict(l0=tiles, mid=mid_schedule(0x12, HBLANK_X))
+    s["mid_mapbase"] = dict(l0=tiles, mid=mid_schedule(0x0E, HBLANK_X))
+    s["mid_l1_hscroll"] = dict(l0=tiles, l1=dict(depth=1, scroll=1), mid=mid_schedule(0x17, HBLANK_X))
+    s["mid_vscale"] = dict(l0=tiles, mid=mid_schedule(0x0B, HBLANK_X, step=12, val=lambda k: 0x20 + (k * 29) % 0xD0))
+    s["mid_hscale"] = dict(l0=tiles, mid=mid_schedule(0x0A, HBLANK_X, step=12, val=lambda k: 0x20 + (k * 29) % 0xD0))
+    s["mid_layer_enable"] = dict(l0=tiles, sprites=8, z=[3],
+                                 mid=mid_schedule(0x09, HBLANK_X, val=lambda k: 0x01 | (0x10 if k % 2 else 0) | (0x40 if k % 3 else 0)))
+    s["mid_border"] = dict(l0=tiles, win=(0x10, 0x90, 0x10, 0xE0), mid=mid_schedule(0x0C, HBLANK_X))
+    s["mid_border_active"] = dict(l0=tiles, win=(0x10, 0x90, 0x10, 0xE0), midline=1,
+                                  mid=mid_schedule(0x0C, ACTIVE_X))
+    pal = [(9, 300, 0x00, 0x00), (9, 340, 0x01, 0xFA), (9, 380, 0x02, 0x01)]
+    s["mid_palette"] = dict(l0=tiles, border=0, mid=pal + mid_schedule(0x03, HBLANK_X))
+    s["mid_palette_active"] = dict(l0=tiles, border=0, midline=1, mid=pal + mid_schedule(0x03, ACTIVE_X))
+    s["mid_sweep_hscroll"] = dict(l0=tiles, mid=mid_schedule(0x10, SWEEP_X, step=4, val=lambda k: (k * 8 + 4) & 255))
+    s["mid_sweep_palette"] = dict(l0=tiles, border=0, mid=pal + mid_schedule(0x03, SWEEP_X, step=4))
+    s["mid_sweep_vscroll"] = dict(l0=tiles, mid=mid_schedule(0x12, SWEEP_X, step=4, val=lambda k: (k * 8 + 4) & 255))
+    s["mid_hscroll_active"] = dict(l0=tiles, midline=1, mid=mid_schedule(0x10, ACTIVE_X))
+    spr = [(524, 300, 0x00, 0x02), (524, 340, 0x01, 0xFC), (524, 380, 0x02, 0x01)]
+    s["mid_sprite_x"] = dict(l0=tiles, sprite_list=[(0x00, 0x00, 100, 0, 0, 0, 3 << 2, 0xF0)],
+                             mid=spr + mid_schedule(0x03, HBLANK_X, first=2, step=2, last=64, val=lambda k: (k * 41) & 255))
     return s
 
 
@@ -176,21 +213,41 @@ def run(item, vvp, out_dir, header):
     seed = SEED_BASE + index
     ops, final_ops = build_ops(seed, cfg)
     frame = cfg.get("frame", 1)
+    mid = cfg.get("mid", [])
+    if mid and frame != 1:
+        raise RuntimeError(f"{name}: mid-frame writes need frame 1")
     with tempfile.TemporaryDirectory() as tmp:
-        vram, opsf, frame_out = (os.path.join(tmp, n) for n in ("vram", "ops", "frame"))
+        vram, opsf, frame_out, midf, mido = (os.path.join(tmp, n) for n in ("vram", "ops", "frame", "mid", "mido"))
         with open(vram, "wb") as f:
             f.write(xorshift_vram(seed))
         with open(opsf, "w", newline="\n") as f:
             f.writelines(f"{a:x} {v:x}\n" for a, v in ops)
-        subprocess.run(["vvp", vvp, f"+vram={vram}", f"+ops={opsf}", f"+out={frame_out}",
-                        f"+frame={frame}", f"+final={final_ops}"], check=True, stdout=subprocess.DEVNULL, timeout=7200)
+        args = ["vvp", vvp, f"+vram={vram}", f"+ops={opsf}", f"+out={frame_out}",
+                f"+frame={frame}", f"+final={final_ops}"]
+        if mid:
+            with open(midf, "w", newline="\n") as f:
+                f.writelines(f"{at_pos(y, x) - WRITE_LEAD} {r:x} {v:x}\n" for y, x, r, v in mid)
+            args += [f"+mid={midf}", f"+midout={mido}"]
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, timeout=14400)
         with open(frame_out) as f:
             pixels = f.read().split()
+        stamps = open(mido).read().split() if mid else []
+    if len(stamps) != len(mid):
+        raise RuntimeError(f"{name}: logged {len(stamps)} of {len(mid)} mid-frame writes")
+    if PIXEL_DIR:
+        os.makedirs(PIXEL_DIR, exist_ok=True)
+        with open(os.path.join(PIXEL_DIR, f"{name}.pix"), "w") as f:
+            f.write(" ".join(pixels))
     if len(pixels) != WIDTH * HEIGHT:
         raise RuntimeError(f"{name}: captured {len(pixels)} pixels")
     with open(os.path.join(out_dir, f"{name}.vec"), "w", newline="\n") as f:
         f.write(header)
-        f.write(f"scene {name}\nseed {seed:08x}\nfinal {final_ops}\nframe {frame}\n")
+        f.write(f"scene {name}\nseed {seed:08x}\nfinal {final_ops}\n")
+        if cfg.get("midline"):
+            f.write("midline 1\n")
+        for (y, x, r, v), t in zip(mid, stamps):
+            f.write(f"mid {t} {r:02x} {v:02x}\n")
+        f.write(f"frame {frame}\n")
         f.write("ops " + "".join(f"{a:02x}{v:02x}" for a, v in ops) + "\n")
         f.write("crc " + " ".join(f"{c:08x}" for c in line_crcs(pixels)) + "\n")
     return name
@@ -204,7 +261,10 @@ def main():
     ap.add_argument("--sha256", required=True)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--pixels", help="also keep each captured frame here")
     a = ap.parse_args()
+    global PIXEL_DIR
+    PIXEL_DIR = a.pixels
     os.makedirs(a.out_dir, exist_ok=True)
     header = f"oracle vera {a.version} bitstream-sha256 {a.sha256}\n"
     all_scenes = list(scenes().items())

@@ -10,6 +10,13 @@
 
 #define MAX_LINE (1u << 20)
 
+// Timed ops carry T, clocks since the VSYNC rising edge, which is dot 4 of
+// line 492; emulator dot x is RTL dot x - 1. top.v:257-265: a write takes
+// effect 3 clocks after its strobe rises.
+#define ANCHOR_Y     492
+#define ANCHOR_X     5
+#define WRITE_DELAY  3
+
 static char line_buf_text[MAX_LINE];
 static uint32_t crc_table[256];
 
@@ -67,6 +74,13 @@ hex_byte(const char *s)
 	return (unsigned)strtoul(t, NULL, 16);
 }
 
+// Mid-frame writes: T as in bus vectors, applied WRITE_DELAY clocks after the strobe.
+#define MAX_MID 4096
+static long mid_t[MAX_MID];
+static uint8_t mid_r[MAX_MID], mid_v[MAX_MID];
+static int mid_n;
+static bool mid_line;
+
 static bool
 run_scene(FILE *f, const char *name, uint32_t seed, int frame, size_t final_ops)
 {
@@ -83,15 +97,35 @@ run_scene(FILE *f, const char *name, uint32_t seed, int frame, size_t final_ops)
 		video_write((uint8_t)hex_byte(ops + i * 4), (uint8_t)hex_byte(ops + i * 4 + 2));
 	}
 	step_frame();
-	// The final writes land just after VSYNC, in blanking.
-	while (vga_scan_pos_y != 493) {
-		video_step(25.0f, 1.0f, false);
-	}
-	for (size_t i = n - final_ops; i < n; i++) {
-		video_write((uint8_t)hex_byte(ops + i * 4), (uint8_t)hex_byte(ops + i * 4 + 2));
-	}
-	for (int i = 0; i <= frame; i++) {
-		step_frame();
+	if (mid_n || mid_line) {
+		while (vga_scan_pos_y != ANCHOR_Y || vga_scan_pos_x != ANCHOR_X) {
+			video_step(25.0f, 1.0f, false);
+		}
+		for (size_t i = n - final_ops; i < n; i++) {
+			video_write((uint8_t)hex_byte(ops + i * 4), (uint8_t)hex_byte(ops + i * 4 + 2));
+		}
+		long now = 0;
+		int frames = 0, k = 0;
+		while (frames <= frame) {
+			if (k < mid_n && now == mid_t[k] + WRITE_DELAY) {
+				video_write(mid_r[k], mid_v[k]);
+				k++;
+				continue;
+			}
+			frames += video_step(25.0f, 1.0f, mid_line);
+			now++;
+		}
+	} else {
+		// The final writes land just after VSYNC, in blanking.
+		while (vga_scan_pos_y != 493) {
+			video_step(25.0f, 1.0f, false);
+		}
+		for (size_t i = n - final_ops; i < n; i++) {
+			video_write((uint8_t)hex_byte(ops + i * 4), (uint8_t)hex_byte(ops + i * 4 + 2));
+		}
+		for (int i = 0; i <= frame; i++) {
+			step_frame();
+		}
 	}
 
 	if (!fgets(line_buf_text, MAX_LINE, f) || strncmp(line_buf_text, "crc ", 4) != 0) {
@@ -118,12 +152,6 @@ run_scene(FILE *f, const char *name, uint32_t seed, int frame, size_t final_ops)
 	return true;
 }
 
-// Timed ops carry T, clocks since the VSYNC rising edge, which is dot 4 of
-// line 492; emulator dot x is RTL dot x - 1. top.v:257-265: a write takes
-// effect 3 clocks after its strobe rises.
-#define ANCHOR_Y     492
-#define ANCHOR_X     5
-#define WRITE_DELAY  3
 
 static long bus_now;
 
@@ -238,8 +266,19 @@ run_file(const char *path, int *cases)
 			(*cases)++;
 		} else if (sscanf(line_buf_text, "seed %x", &seed) == 1) {
 		} else if (sscanf(line_buf_text, "final %u", &final_ops) == 1) {
+		} else if (strncmp(line_buf_text, "midline 1", 9) == 0) {
+			mid_line = true;
+		} else if (strncmp(line_buf_text, "mid ", 4) == 0) {
+			unsigned r, v;
+			if (mid_n < MAX_MID && sscanf(line_buf_text, "mid %ld %x %x", &mid_t[mid_n], &r, &v) == 3) {
+				mid_r[mid_n] = (uint8_t)r;
+				mid_v[mid_n] = (uint8_t)v;
+				mid_n++;
+			}
 		} else if (sscanf(line_buf_text, "frame %d", &frame) == 1) {
 			ok &= run_scene(f, name, seed, frame, final_ops);
+			mid_n = 0;
+			mid_line = false;
 		} else if (sscanf(line_buf_text, "bus %127s", name) == 1) {
 			(*cases)++;
 			ok &= run_bus(f, name);

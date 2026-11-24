@@ -7,8 +7,12 @@ or a published specification, never from the emulator.
 
 `vera/<version>/` holds one directory per release.
 
-- `scene` vectors render a static VGA frame and store one CRC-32 per line.
-- `bus` vectors replay register writes and check every read.
+- `scene` vectors render a VGA frame and store one CRC-32 per line. `mid` lines
+  are writes made while the frame is drawn.
+- `bus` vectors replay register writes and check every read. After a `v` line,
+  writes, reads and IRQ pin samples (`W`, `R`, `I`) carry T, the clock count
+  since the VSYNC pin last rose (dot 4 of line 492). A write takes effect 3
+  clocks after its strobe rises.
 - Each file names its oracle: VERA version and bitstream SHA-256.
 
 Vectors are captured through the package pins of a gate-level netlist decoded
@@ -37,7 +41,10 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 ## Not covered
 
 - NTSC, RGB, interlaced and 240p output
-- Mid-frame register changes and exact IRQ timing
+- Mid-frame layer, scale, border and palette writes (`mid_*` in `KNOWN_GAPS`).
+  Hardware fetches line y+1 during line y with live registers and looks up the
+  palette at scan-out, so a write inside a line splits a line.
+- Sprite collision IRQ timing
 - Sprite fetch limits under VRAM contention (`sprites_many` in `KNOWN_GAPS`)
 - Sprite buffer entries 640 and 641 when sprites are armed outside vertical blank
 - PSG, PCM and SPI
