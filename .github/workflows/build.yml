@@ -607,7 +607,7 @@ jobs:
           docker run --rm -i -e HOST_IDS="$(id -u):$(id -g)" -v "$PWD:/src" -w /src "$IMAGE" bash -euxo pipefail -s <<'EOF'
           # Debian 11 is past LTS; its security pool, and in time the main one,
           # live on archive.debian.org.
-          sed -i 's|security\.debian\.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list
+          sed -Ei 's#https?://[^ ]+/debian-security#http://archive.debian.org/debian-security#g' /etc/apt/sources.list
           if ! apt-get -o Acquire::Check-Valid-Until=false update; then
             sed -i 's|deb\.debian\.org|archive.debian.org|g' /etc/apt/sources.list
             apt-get -o Acquire::Check-Valid-Until=false update
