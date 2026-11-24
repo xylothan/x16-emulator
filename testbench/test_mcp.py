@@ -189,14 +189,14 @@ READING_TOOLS = {"get_status", "get_registers", "read_memory", "disassemble", "l
                  "get_vera_state", "lookup_symbol", "list_symbols", "hash_memory", "search_memory", "get_stack", "get_locals",
                  "get_audio_state", "get_io_state", "read_io_trace", "get_sprites", "get_palette", "get_tilemap",
                  "list_sources", "read_source", "source_location", "host_perf",
-                 "get_sdcard", "evaluate", "read_log"}
+                 "get_sdcard", "evaluate", "read_log", "get_history"}
 LOSING_TOOLS = {"reset", "set_registers", "write_memory", "save_state", "load_state",
                 "dump_memory", "load_prg", "perf_config", "perf_history", "profile_capture",
-                "sprite_mux_config"}
+                "sprite_mux_config", "keyframes", "set_rewind", "record_input"}
 MOVING_TOOLS = {"pause", "continue", "step", "run_frames", "run_to", "set_breakpoint", "remove_breakpoint",
                 "enable_breakpoint", "type_text", "send_key", "joystick", "load_symbols", "mouse",
                 "set_warp", "perf_stats", "sprite_mux_stats", "set_stop_on", "set_voice_mute",
-                "set_io_capture", "trigger_interrupt"}
+                "set_io_capture", "trigger_interrupt", "jump_to_keyframe"}
 
 
 def test_tools():
@@ -5527,6 +5527,112 @@ def test_refresh_events():
             dap.close()
 
 
+def hex_eq(a, b):
+    return a is not None and b is not None and int(str(a), 16) == int(str(b), 16)
+
+
+def replay_to_end(m, frames=200):
+    for _ in range(frames):
+        if data(m.call("get_history")).get("recording", {}).get("mode") != "replaying":
+            break
+        m.call("run_frames", frames=1)
+    return data(m.call("get_history")).get("recording", {})
+
+
+def test_history():
+    print("rewind history and input recordings")
+    with Mcp() as m:
+        m.init()
+        case("basic is up", wait_basic(m))
+        m.call("pause")
+        m.call("run_frames", frames=1)
+
+        d = data(m.call("get_history"))
+        case("rewind starts off", d.get("rewindEnabled") is False and d.get("canStepBack") is False, str(d)[:200])
+        case("get_history carries the recording", d.get("recording", {}).get("mode") == "idle", str(d)[:200])
+        r = m.call("step", mode="back")
+        case("step back needs rewind", is_error(r) and "rewind" in r["content"][0]["text"], str(r)[:160])
+
+        d = data(m.call("set_rewind", enabled=True))
+        case("set_rewind turns it on", d.get("rewindEnabled") is True, str(d)[:200])
+        m.call("joystick", port=1, buttons=["a"])
+        m.call("run_frames", frames=35)
+        m.call("joystick", port=1, release=True)
+        m.call("run_frames", frames=35)
+        d = data(m.call("get_history", list=True))
+        frames = d.get("keyframes", [])
+        case("keyframes were taken", d.get("count", 0) >= 2 and len(frames) == d.get("count"), str(d)[:200])
+        case("step back is possible", d.get("canStepBack") is True, str(d)[:200])
+        case("the recording runs under it", d.get("recording", {}).get("mode") == "recording", str(d)[:200])
+
+        m.call("step")
+        before = data(m.call("get_status")).get("cycles")
+        d = data(m.call("step", mode="back"))
+        back = data(m.call("get_status")).get("cycles")
+        case("step back stops", d.get("completed") is True, str(d)[:200])
+        case("step back goes earlier", back is not None and before is not None and back < before, f"{before} {back}")
+        m.call("step")
+        case("stepping forward returns to the same cycle", data(m.call("get_status")).get("cycles") == before)
+
+        d = data(m.call("jump_to_keyframe", index=0))
+        case("jump_to_keyframe moves", d.get("stopReason") == "goto", str(d)[:200])
+        h = data(m.call("run_frames", frames=30, hash=True)).get("hash")
+        case("the next keyframe is reached again", len(frames) > 1 and hex_eq(h, frames[1].get("hash")),
+             f"{h} {frames[1:2]}")
+        case("history is kept after a jump", data(m.call("get_history")).get("count", 0) >= len(frames))
+        for label, args in (("no index", {}), ("a negative index", {"index": -1}),
+                            ("an index past the ring", {"index": 4095}), ("a string", {"index": "0"})):
+            case(f"jump_to_keyframe refuses {label}", is_error(m.call("jump_to_keyframe", **args)))
+
+        d = data(m.call("set_rewind", enabled=False))
+        case("set_rewind turns it off", d.get("rewindEnabled") is False and d.get("count") == 0, str(d)[:200])
+        case("set_rewind needs enabled", is_error(m.call("set_rewind")))
+        case("set_rewind needs a boolean", is_error(m.call("set_rewind", enabled=1)))
+
+        m.call("run_frames", frames=1)
+        d = data(m.call("keyframes", action="start", intervalFrames=5, budgetMB=8))
+        case("keyframes start arms a ring", d.get("armed") is True and d.get("intervalFrames") == 5, str(d)[:200])
+        case("a ring is not rewind", d.get("rewindEnabled") is False, str(d)[:200])
+        m.call("run_frames", frames=22)
+        m.call("keyframes", action="stop")
+        frames = data(m.call("get_history", list=True)).get("keyframes", [])
+        case("the ring holds a keyframe per interval", len(frames) >= 4, str(frames)[:200])
+        d = data(m.call("keyframes", action="replay", index=1))
+        case("replay restores a keyframe", d.get("recording", {}).get("mode") == "replaying", str(d)[:200])
+        h = data(m.call("run_frames", frames=5, hash=True)).get("hash")
+        case("replay reaches the next keyframe", len(frames) > 2 and hex_eq(h, frames[2].get("hash")), str(h))
+        m.call("record_input", action="stop")
+        for label, args in (("no action", {}), ("an unknown action", {"action": "status"}),
+                            ("replay with no index", {"action": "replay"}),
+                            ("a bad interval", {"action": "start", "intervalFrames": 0}),
+                            ("a bad budget", {"action": "start", "budgetMB": 2048})):
+            case(f"keyframes refuses {label}", is_error(m.call("keyframes", **args)))
+
+        m.call("run_frames", frames=1)
+        m.call("save_state", slot="rec")
+        d = data(m.call("record_input", action="start"))
+        case("record_input starts", d.get("mode") == "recording", str(d)[:200])
+        m.call("joystick", port=1, buttons=["a"])
+        m.call("run_frames", frames=20)
+        m.call("joystick", port=1, release=True)
+        m.call("run_frames", frames=20)
+        d = data(m.call("record_input", action="stop"))
+        case("record_input stops with a recording", d.get("hasRecording") is True and d.get("events", 0) > 0,
+             str(d)[:200])
+        end = data(m.call("run_frames", frames=1, hash=True)).get("hash")
+        m.call("load_state", slot="rec")
+        d = data(m.call("record_input", action="replay"))
+        case("record_input replays", d.get("mode") == "replaying", str(d)[:200])
+        rec = replay_to_end(m)
+        case("the replay is verified", rec.get("replay") == "verified", str(rec))
+        case("and lands on the recorded machine", hex_eq(data(m.call("run_frames", frames=1, hash=True)).get("hash"), end))
+        for label, args in (("no action", {}), ("an unknown action", {"action": "status"})):
+            case(f"record_input refuses {label}", is_error(m.call("record_input", **args)))
+        m.call("continue")
+        case("record_input start needs a paused machine", is_error(m.call("record_input", action="start")))
+        case("get_history list must be a boolean", is_error(m.call("get_history", list=1)))
+
+
 def test_readonly():
     print("-mcp-readonly")
     port = free_port()
@@ -5586,7 +5692,7 @@ def main():
                  test_perf_tools, test_device_stats, test_enable_breakpoint, test_enable_per_owner,
                  test_dump_breakpoint, test_evaluate, test_logpoints, test_logpoint_determinism,
                  test_stop_on, test_run_to, test_audio, test_io, test_io_determinism, test_graphics,
-                 test_refresh_events, test_readonly):
+                 test_refresh_events, test_history, test_readonly):
         try:
             test()
         except Exception as ex:   # one broken case must not hide the others

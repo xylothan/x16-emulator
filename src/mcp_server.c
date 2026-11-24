@@ -32,6 +32,7 @@
 #include "debugger.h"
 #include "debug_core.h"
 #include "dbg_info.h"
+#include "keyframes.h"
 #include "perf_budget.h"
 #include "sdcard.h"
 #include "version.h"
@@ -1693,6 +1694,104 @@ static cJSON *tool_load_state(cJSON *args) {
     return state_call("x16/loadState", args, true);
 }
 
+// ─── Rewind history and input recordings ─────────────────────────────
+
+static bool arg_bool(cJSON *args, const char *name, char *err, size_t errn);
+
+// The keyframe ring's status, with the recording it belongs to as `recording`.
+static cJSON *history_reply(dbg_reply_t *r) {
+    if (!r->success) {
+        cJSON_Delete(r->body);
+        return tool_fail(r->message);
+    }
+    cJSON *body = r->body ? r->body : cJSON_CreateObject();
+    dbg_reply_t log;
+    debug_server_call("x16/inputLog", NULL, &log);
+    if (log.success && log.body) cJSON_AddItemToObject(body, "recording", log.body);
+    else                         cJSON_Delete(log.body);
+    return tool_ok(body, NULL);
+}
+
+static cJSON *keyframes_call(const char *action, int index, cJSON *extra) {
+    cJSON *call = extra ? extra : cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "action", action);
+    if (index >= 0) cJSON_AddNumberToObject(call, "index", index);
+    dbg_reply_t r;
+    debug_server_call("x16/keyframes", call, &r);
+    cJSON_Delete(call);
+    return history_reply(&r);
+}
+
+static cJSON *tool_get_history(cJSON *args) {
+    char err[160];
+    if (!arg_bool(args, "list", err, sizeof err)) return tool_fail(err);
+    cJSON *call = cJSON_CreateObject();
+    if (cJSON_IsTrue(args ? cJSON_GetObjectItemCaseSensitive(args, "list") : NULL))
+        cJSON_AddBoolToObject(call, "list", true);
+    return keyframes_call("status", -1, call);
+}
+
+static cJSON *tool_set_rewind(cJSON *args) {
+    cJSON *en = args ? cJSON_GetObjectItemCaseSensitive(args, "enabled") : NULL;
+    if (!en || !cJSON_IsBool(en)) return tool_fail("'enabled' is required: true or false");
+    return keyframes_call(cJSON_IsTrue(en) ? "enable" : "disable", -1, NULL);
+}
+
+static bool arg_keyframe(cJSON *args, int *index, char *err, size_t errn) {
+    if (!args || !cJSON_HasObjectItem(args, "index")) {
+        snprintf(err, errn, "'index' is required: a keyframe number from get_history");
+        return false;
+    }
+    return arg_int(args, "index", 0, 0, (int)KEYFRAMES_MAX - 1, index, err, errn);
+}
+
+static cJSON *tool_jump_to_keyframe(cJSON *args) {
+    char err[160];
+    int index;
+    if (!arg_keyframe(args, &index, err, sizeof err)) return tool_fail(err);
+    return keyframes_call("jump", index, NULL);
+}
+
+static cJSON *tool_keyframes(cJSON *args) {
+    char err[160];
+    cJSON *a = args ? cJSON_GetObjectItemCaseSensitive(args, "action") : NULL;
+    const char *action = cJSON_IsString(a) ? a->valuestring : "";
+    if (!strcmp(action, "start")) {
+        int interval, budget;
+        if (!arg_int(args, "intervalFrames", 30, 1, 3600, &interval, err, sizeof err) ||
+            !arg_int(args, "budgetMB", 64, 1, 1024, &budget, err, sizeof err))
+            return tool_fail(err);
+        cJSON *call = cJSON_CreateObject();
+        cJSON_AddNumberToObject(call, "intervalFrames", interval);
+        cJSON_AddNumberToObject(call, "budgetMB", budget);
+        return keyframes_call("start", -1, call);
+    }
+    if (!strcmp(action, "stop")) return keyframes_call("stop", -1, NULL);
+    if (!strcmp(action, "replay")) {
+        int index;
+        if (!arg_keyframe(args, &index, err, sizeof err)) return tool_fail(err);
+        return keyframes_call("replay", index, NULL);
+    }
+    return tool_fail("'action' must be \"start\", \"stop\" or \"replay\"");
+}
+
+static cJSON *tool_record_input(cJSON *args) {
+    cJSON *a = args ? cJSON_GetObjectItemCaseSensitive(args, "action") : NULL;
+    const char *action = cJSON_IsString(a) ? a->valuestring : "";
+    if (strcmp(action, "start") && strcmp(action, "stop") && strcmp(action, "replay"))
+        return tool_fail("'action' must be \"start\", \"stop\" or \"replay\"");
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "action", action);
+    dbg_reply_t r;
+    debug_server_call("x16/inputLog", call, &r);
+    cJSON_Delete(call);
+    if (!r.success) {
+        cJSON_Delete(r.body);
+        return tool_fail(r.message);
+    }
+    return tool_ok(r.body ? r.body : cJSON_CreateObject(), NULL);
+}
+
 static cJSON *tool_perf_stats(cJSON *args) {
     return tool_forward("x16/perfStats", args);
 }
@@ -1966,7 +2065,7 @@ static const mcp_tool_t tools[] = {
       "Step a paused machine and answer once it has stopped again. mode is into, over, "
       "out, back or reverse. back goes to the previous instruction; reverse runs back to "
       "the previous breakpoint or watchpoint hit, or the start of the history. Both need "
-      "rewind history on. "
+      "rewind history on: set_rewind. "
       "If it has not stopped by timeoutMs the result has completed: false and the "
       "machine keeps going: follow up with wait_for_stop.",
       "{\"type\":\"object\",\"properties\":{"
@@ -2455,6 +2554,49 @@ static const mcp_tool_t tools[] = {
       "{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"string\"}},"
       "\"required\":[\"slot\"],\"additionalProperties\":false}",
       TOOL_DESTRUCTIVE, tool_load_state },
+    { "get_history",
+      "Rewind history: whether it is on, whether step back can run, the keyframes held and "
+      "the cycles they span, gaps where none could be taken, and the input recording they "
+      "belong to as 'recording'. 'list' adds each keyframe's index, cycle and hash.",
+      "{\"type\":\"object\",\"properties\":{\"list\":{\"type\":\"boolean\",\"default\":false}},"
+      "\"additionalProperties\":false}",
+      TOOL_READ, tool_get_history },
+    { "set_rewind",
+      "Turn rewind history on or off, for step with mode back or reverse. On, it records "
+      "input and takes a keyframe every 30 frames from the next frame boundary the machine "
+      "runs to. Off drops the history held. One setting shared with every client and -rewind, "
+      "not put back when a session ends, and not saved as the Settings panel's preference.",
+      "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"}},"
+      "\"required\":[\"enabled\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_set_rewind },
+    { "jump_to_keyframe",
+      "Move a paused machine to a keyframe in rewind history, by its index from get_history "
+      "with list. Later history is kept, so step and run_frames go forward through it again.",
+      "{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\",\"minimum\":0}},"
+      "\"required\":[\"index\"],\"additionalProperties\":false}",
+      TOOL_CONTROL, tool_jump_to_keyframe },
+    { "keyframes",
+      "A keyframe ring over a new input recording, apart from rewind. start needs a machine "
+      "paused at a frame boundary and takes intervalFrames and budgetMB; the oldest keyframes "
+      "go when the budget is full. stop ends it. replay restores keyframe 'index' of a stopped "
+      "ring and replays the recording on from it, replacing the machine.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"action\":{\"type\":\"string\",\"enum\":[\"start\",\"stop\",\"replay\"]},"
+      "\"intervalFrames\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":3600,\"default\":30},"
+      "\"budgetMB\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024,\"default\":64},"
+      "\"index\":{\"type\":\"integer\",\"minimum\":0}"
+      "},\"required\":[\"action\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_keyframes },
+    { "record_input",
+      "Record what the host feeds the machine, and replay it. start needs a machine paused "
+      "at a frame boundary and replaces any earlier recording. stop ends a recording or "
+      "replay. replay needs a stopped recording and the machine where it began, usually "
+      "from load_state. Once a replay ends, 'replay' in get_history's 'recording' says "
+      "whether it reached the same machine: \"verified\" when it did.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"action\":{\"type\":\"string\",\"enum\":[\"start\",\"stop\",\"replay\"]}"
+      "},\"required\":[\"action\"],\"additionalProperties\":false}",
+      TOOL_DESTRUCTIVE, tool_record_input },
     { "perf_stats",
       "CPU budget and VERA bandwidth statistics. The first call turns collection on.",
       "{\"type\":\"object\",\"properties\":{"

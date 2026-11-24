@@ -10297,7 +10297,7 @@ static const char *const callable_commands[] = {
     "x16/sdcard", "x16/spriteMuxStats", "x16/spriteMuxConfig", "x16/readLog",
     "mcp/setStopOn", "x16/audio", "x16/setVoiceMute",
     "x16/io", "x16/ioTrace", "x16/ioCapture", "x16/interrupt",
-    "x16/sprites", "x16/palette", "x16/tilemap",
+    "x16/sprites", "x16/palette", "x16/tilemap", "x16/inputLog", "x16/keyframes",
 };
 
 int debug_server_call(const char *command, cJSON *args, dbg_reply_t *reply) {
