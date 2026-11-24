@@ -548,29 +548,32 @@ jobs:
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
-  # x86_64 builds natively on the runner. The two ARM legs cannot, so they are
-  # built inside a Raspberry Pi OS image under qemu, which is slow but is the
-  # only way to get a genuinely native ARM binary out of a GitHub runner.
+  # x86_64 builds on the runner itself. aarch64 builds natively on an arm64
+  # runner inside Debian 11, the release Raspberry Pi OS 2022-04-04 is built
+  # on, so the binary needs no newer glibc than those images. armhf cannot run
+  # on GitHub's arm64 machines, so it is built inside a Raspberry Pi OS image
+  # under qemu; arm-runner-action needs qemu-user-static, which Ubuntu 26.04
+  # does not ship, hence ubuntu-24.04 for that leg.
   linux:
     name: linux (${{ matrix.arch }})
     needs: [version]
-    # arm-runner-action needs qemu-user-static, which Ubuntu 26.04 does not ship.
-    runs-on: ${{ matrix.emulated && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64,  emulated: false, package: x16emu_linux-x86_64 }
-          - { arch: aarch64, emulated: true,  base_image: 'raspios_lite_arm64:2022-04-04', cpu: cortex-a53, package: x16emu_linux-aarch64 }
-          - { arch: armhf,   emulated: true,  base_image: 'raspios_lite:2022-04-04',       cpu: cortex-a7,  package: x16emu_linux-armhf }
+          - { arch: x86_64,  runner: ubuntu-latest,    package: x16emu_linux-x86_64 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, container: 'debian:bullseye', package: x16emu_linux-aarch64 }
+          - { arch: armhf,   runner: ubuntu-24.04,     emulated: true, base_image: 'raspios_lite:2022-04-04', cpu: cortex-a7, package: x16emu_linux-armhf }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
+        if: ${{ !matrix.container }}
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        if: ${{ !matrix.emulated }}
+        if: ${{ !matrix.emulated && !matrix.container }}
         uses: ./.github/actions/apt-install
         with:
           packages: build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
@@ -590,14 +593,37 @@ jobs:
         run: |
           cp latest_rom/*.h src/.
       - name: Build Emulator
-        if: ${{ !matrix.emulated }}
+        if: ${{ !matrix.emulated && !matrix.container }}
         run: |
           mkdir build
           cd build
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
           cmake --build .
+      - name: Build Emulator
+        if: ${{ matrix.container }}
+        env:
+          IMAGE: ${{ matrix.container }}
+        run: |
+          docker run --rm -i -e HOST_IDS="$(id -u):$(id -g)" -v "$PWD:/src" -w /src "$IMAGE" bash -euxo pipefail -s <<'EOF'
+          # Debian 11 is past LTS; its security pool, and in time the main one,
+          # live on archive.debian.org.
+          sed -i 's|security\.debian\.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list
+          if ! apt-get -o Acquire::Check-Valid-Until=false update; then
+            sed -i 's|deb\.debian\.org|archive.debian.org|g' /etc/apt/sources.list
+            apt-get -o Acquire::Check-Valid-Until=false update
+          fi
+          apt-get install -y --no-install-recommends build-essential cmake file git python3 \
+            libsdl2-dev libfluidsynth-dev libcjson-dev zlib1g-dev
+          git config --global --add safe.directory /src
+          cmake -B build -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
+          cmake --build build -j"$(nproc)"
+          mkdir emu_binaries
+          cp build/x16emu build/makecart emu_binaries/
+          file emu_binaries/*
+          chown -R "$HOST_IDS" build emu_binaries
+          EOF
       - name: Package Emulator
-        if: ${{ !matrix.emulated }}
+        if: ${{ !matrix.emulated && !matrix.container }}
         run: |
           mkdir emu_binaries
           cp build/x16emu emu_binaries/.
@@ -633,6 +659,10 @@ jobs:
         # arm-runner-action copies its artifacts back out owned by root.
         if: ${{ matrix.emulated }}
         run: sudo chown -R runner emu_binaries
+      - name: Report the newest glibc symbol required
+        run: |
+          v=$(readelf -W --dyn-syms emu_binaries/x16emu | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)
+          echo "::notice title=linux (${{ matrix.arch }}) glibc::x16emu needs $v"
       - uses: ./.github/actions/package-common
         with:
           build: ${{ needs.version.outputs.build }}
