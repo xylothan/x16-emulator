@@ -48,11 +48,10 @@ MUTATIONS = [
     },
     # No AUDIO_RATE fold mutation: top.v:481 stores raw; recorded as a divergence.
     {
-        "name": "VERA debug reads report a constant",
+        "name": "VERA debug read clears the FX accumulator",
         "file": "src/video.c",
-        # test_vera_debug_read.c records which registers the debugger reads differently.
-        "find": "if (debugOn) return video_get_dc_value(i);",
-        "into": "if (debugOn) return 0;",
+        "find": "if (!debugOn) fx_mult_accumulator = 0;",
+        "into": "fx_mult_accumulator = 0;",
         "count": 1,
         "caught_by": ["vera_debug_read"],
     },
@@ -132,8 +131,8 @@ MUTATIONS = [
         # top.v:441-443 clear a latch when the written bit is one:
         #   irq_status_vsync_next = irq_status_vsync_r & !write_data[0];
         # Inverting that acknowledges every pending source whenever a program clears one.
-        "find": "isr &= value ^ 0xff;",
-        "into": "isr &= value;",
+        "find": "isr &= ~(value & 0x07);",
+        "into": "isr &= ~(~value & 0x07);",
         "count": 1,
         "caught_by": ["vera_irq"],
     },
@@ -219,7 +218,14 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_irq"],
     },
-    # No mutation for ISR writes clearing bits 7:4: a divergence (video.c:2910).
+    {
+        "name": "VERA ISR write clears the collision bits",
+        "file": "src/video.c",
+        "find": "isr &= ~(value & 0x07);",
+        "into": "isr &= ~value;",
+        "count": 1,
+        "caught_by": ["vera_irq"],
+    },
     {
         "name": "direct-page cycle penalty is never cleared",
         "file": "src/cpu/fake6502.c",
@@ -436,12 +442,19 @@ MUTATIONS = [
         # top.v:222-228 gives layer 1 its own registers at 5'h14-5'h1A. One
         # bank behind both sets of addresses would leave the two layers sharing
         # a configuration.
-        "find": "reg_layer[1][reg - 0x14] = value;",
-        "into": "reg_layer[0][reg - 0x14] = value;",
+        "find": "reg_layer[1][reg - 0x14] = (reg == 0x18 || reg == 0x1A) ? (value & 0x0f) : value;",
+        "into": "reg_layer[0][reg - 0x14] = (reg == 0x18 || reg == 0x1A) ? (value & 0x0f) : value;",
         "count": 1,
         "caught_by": ["vera_layer"],
     },
-    # No mutation for scroll high bytes reading whole: recorded as a divergence.
+    {
+        "name": "VERA layer 0 scroll high bytes keep bits 7:4",
+        "file": "src/video.c",
+        "find": "reg_layer[0][reg - 0x0D] = (reg == 0x11 || reg == 0x13) ? (value & 0x0f) : value;",
+        "into": "reg_layer[0][reg - 0x0D] = value;",
+        "count": 1,
+        "caught_by": ["vera_layer"],
+    },
     {
         "name": "VERA layer row does not wrap at the layer height",
         "file": "src/video.c",
