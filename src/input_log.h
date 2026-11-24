@@ -111,7 +111,16 @@ void input_log_end(const char *reason);
 void input_log_end_unverified(const char *reason);
 // The machine must be where the recording began.
 bool input_log_replay_start(void);
+// Replays from a state partway through the recording, which must hash to hash:
+// event_index events were already in it at cycle. Host controller state from
+// before that point is applied first, since a state does not hold it.
+bool input_log_replay_from(uint32_t event_index, uint64_t cycle, uint64_t hash);
 void input_log_replay(input_site_t site);
+
+// Where a recording stands, for a state taken now.
+void input_log_position(uint64_t *cycle, uint32_t *event_index);
+// Changes with every recording started.
+uint32_t input_log_generation(void);
 
 void input_log_get_status(input_log_status_t *out);
 
