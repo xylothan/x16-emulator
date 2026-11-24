@@ -1,0 +1,58 @@
+name: Install apt packages
+description: >-
+  apt-get install without recommended packages, with short network timeouts
+  and retries, from a cache of the downloaded .debs.
+
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: setup
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        # Ubuntu 26.04's runner mirror serves some jobs at a crawl, for 10-45
+        # minutes, so the .debs are kept between runs; and recommends pull in
+        # soundfonts and Qt that nothing here uses.
+        archives="$RUNNER_TEMP/apt-archives"
+        mkdir -p "$archives/partial"
+        sudo tee /etc/apt/apt.conf.d/90ci > /dev/null <<EOF
+        APT::Install-Recommends "false";
+        APT::Keep-Downloaded-Packages "true";
+        Dir::Cache::Archives "$archives";
+        Acquire::Retries "5";
+        Acquire::http::Timeout "15";
+        Acquire::https::Timeout "15";
+        EOF
+        # The runner images delete downloaded packages after each install.
+        sudo rm -f /etc/apt/apt.conf.d/docker-clean
+        list="$(printf '%s\n' $PACKAGES | sort -u | tr '\n' ' ')"
+        echo "dir=$archives" >> "$GITHUB_OUTPUT"
+        prefix="apt-${ImageOS:-unknown}-$(uname -m)-$(printf '%s' "$list" | sha256sum | cut -c1-16)-"
+        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "key=$prefix${ImageVersion:-0}" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      with:
+        path: ${{ steps.setup.outputs.dir }}
+        key: ${{ steps.setup.outputs.key }}
+        restore-keys: ${{ steps.setup.outputs.prefix }}
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        ARCHIVES: ${{ steps.setup.outputs.dir }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # Word splitting is the point: PACKAGES is a list.
+        # shellcheck disable=SC2086
+        sudo apt-get install -y $PACKAGES
+        # apt runs as root; the cache is saved by the runner user.
+        sudo rm -rf "$ARCHIVES/partial" "$ARCHIVES/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$ARCHIVES"
+        du -sh "$ARCHIVES"

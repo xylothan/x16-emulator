@@ -47,6 +47,7 @@ jobs:
   #     again later from the history alone.
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       # Only bump this if the first tag ends up cut against a different
       # upstream release; after that the tags themselves take over.
@@ -97,16 +98,19 @@ jobs:
   README:
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make fonts-dejavu
-      - uses: actions/setup-node@v4
+        uses: ./.github/actions/apt-install
         with:
-          node-version: 18
+          packages: fonts-dejavu
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
       - name: Install md-to-pdf (npm)
         run: |
           npm i md-to-pdf
@@ -133,7 +137,7 @@ jobs:
           # status was checked, and every PDF shipped without any of it. Hence
           # the pipefail above.
           cat .gh/header_footer.md README.md RELEASES.md build_stamp.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: readme-pdf
           path: artifacts/*
@@ -145,20 +149,21 @@ jobs:
   # off README like the platform builds do.
   unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # buildtables.py generates cpu/tables.h and cpu/mnemonics.h; CMake looks
       # for a Python 3 interpreter unconditionally.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
         # SDL2 and zlib are found by find_package() at configure time, and
         # disasm.c pulls in SDL headers, so they are needed even though nothing
         # here links the emulator.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev iverilog
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev zlib1g-dev iverilog
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
@@ -209,58 +214,27 @@ jobs:
         # The baseline says how many cases pass; this says what the failures
         # look like.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: processor-tests-report
           path: pt-report-*.txt
           if-no-files-found: ignore
-  # The same suite under MSVC, with the runtime and dependencies the Windows
-  # packages use. Compiler-specific breaks in a test build fail here.
-  windows-unit-tests:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      - uses: ./.github/actions/msvc-cmake
-      - name: Configure
-        run: >
-          cmake -B build -A x64
-          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
-          -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-          -DBUILD_TESTS=ON
-          -DENABLE_LTO=OFF
-          -DENABLE_FLUIDSYNTH=OFF
-          -DENABLE_TRACE=OFF
-      - name: Fetch CPU test images
-        run: python tests/fetch_klaus.py
-      - name: Fetch VERA RTL
-        run: python tests/fetch_vera_rtl.py
-      - name: Build Tests
-        run: cmake --build build --config Release --target unit_tests
-      - name: Run Tests
-        env:
-          X16_KLAUS_REQUIRED: 1
-          X16_VERA_RTL_REQUIRED: 1
-        run: ctest --test-dir build -C Release --output-on-failure
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
   # it would catch incorrect behaviour; this is the half that does. Kept out of
   # unit-tests because it rebuilds once per mutation.
   mutation-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev zlib1g-dev
       - name: Configure
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Fetch CPU test images
@@ -284,15 +258,17 @@ jobs:
   # it and the platform jobs take whatever x16-rom built last.
   machine-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev libcjson-dev zlib1g-dev xvfb
+        # xauth is only a recommend of xvfb, and xvfb-run needs it.
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev libcjson-dev zlib1g-dev xvfb xauth
       - name: Fetch the pinned ROM
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -336,24 +312,36 @@ jobs:
   # the MIDI options at all, which is the honest thing to hand someone who did
   # not ask for MIDI. The 32-bit and ARM64 legs also catch pointer and size_t
   # assumptions that an x86_64-only build hides.
+  #
+  # Pull requests build the plain legs only; the -midi legs differ by one vcpkg
+  # feature and build on main and tags. The plain x86_64 leg also runs the unit
+  # suite under MSVC.
   windows:
-    name: windows (${{ matrix.arch }}${{ matrix.suffix }})
-    needs: [version, README]
+    name: windows (${{ matrix.arch }}${{ matrix.midi == 'ON' && '-midi' || '' }})
+    needs: [version]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MIDI_SUFFIX: ${{ matrix.midi == 'ON' && '-midi' || '' }}
+      VCPKG_FEATURES: ${{ matrix.midi == 'ON' && 'midi' || '' }}
     strategy:
       # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
+        arch: [x86_64, i686, arm64]
+        midi: ['OFF', 'ON']
+        exclude:
+          - midi: ${{ github.event_name == 'pull_request' && 'ON' || 'none' }}
+        # Only keys that every surviving combination matches: an include entry
+        # that matches nothing becomes a job of its own.
         include:
-          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win64 }
-          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win64-midi }
-          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win32 }
-          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win32-midi }
-          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
-          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
+          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   package: x16emu_win64 }
+          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   package: x16emu_win32 }
+          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, package: x16emu_win-arm64 }
+          - { arch: x86_64, midi: 'OFF', tests: true }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -362,6 +350,23 @@ jobs:
           release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/msvc-cmake
+      - name: Set up the vcpkg binary cache
+        # vcpkg rebuilds SDL2 (and FluidSynth) from source on every run without
+        # one. The image version is in the key because a new vcpkg tool can
+        # change the package hashes.
+        id: vcpkg-cache
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'vcpkg-cache'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Add-Content $env:GITHUB_ENV "VCPKG_BINARY_SOURCES=clear;files,$dir,readwrite"
+          Add-Content $env:GITHUB_OUTPUT "dir=$dir"
+          Add-Content $env:GITHUB_OUTPUT "image=$env:ImageOS-$env:ImageVersion"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.dir }}
+          key: vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_FEATURES }}-${{ steps.vcpkg-cache.outputs.image }}-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**') }}
+          restore-keys: |
+            vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_FEATURES }}-
       - name: Configure
         # msvc-cmake selects the generator: without one CMake falls back to
         # "NMake Makefiles", which rejects -A. Dependencies come from the
@@ -380,7 +385,7 @@ jobs:
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          -DVCPKG_MANIFEST_FEATURES=${{ matrix.features }}
+          -DVCPKG_MANIFEST_FEATURES=${{ env.VCPKG_FEATURES }}
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           -DENABLE_FLUIDSYNTH=${{ matrix.midi }}
           -DENABLE_TRACE=OFF
@@ -402,36 +407,51 @@ jobs:
           $h = (Get-FileHash pinned_rom/x/rom.bin -Algorithm SHA256).Hash.ToLower()
           if ($h -ne $env:GOLDEN_ROM_SHA256) { throw "the pinned ROM's SHA-256 is $h" }
           python testbench/test_machine_version.py build/Release/x16emu.exe pinned_rom/x/rom.bin
+      - name: Configure Tests
+        # Its own tree, configured as the unit suite expects: LTO, FluidSynth
+        # and trace off.
+        if: ${{ matrix.tests }}
+        run: >
+          cmake -B build-tests -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DBUILD_TESTS=ON
+          -DENABLE_LTO=OFF
+          -DENABLE_FLUIDSYNTH=OFF
+          -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        if: ${{ matrix.tests }}
+        run: python tests/fetch_klaus.py
+      - name: Fetch VERA RTL
+        if: ${{ matrix.tests }}
+        run: python tests/fetch_vera_rtl.py
+      - name: Build Tests
+        if: ${{ matrix.tests }}
+        run: cmake --build build-tests --config Release --target unit_tests
+      - name: Run Tests
+        if: ${{ matrix.tests }}
+        env:
+          X16_KLAUS_REQUIRED: 1
+          X16_VERA_RTL_REQUIRED: 1
+        run: ctest --test-dir build-tests -C Release --output-on-failure
       - name: Package Emulator
         run: |
           New-Item -ItemType Directory -Force emu_binaries | Out-Null
           Copy-Item build/Release/x16emu.exe   emu_binaries/
           Copy-Item build/Release/makecart.exe emu_binaries/
-          Copy-Item sdcard.img.zip             emu_binaries/
-          Copy-Item latest_rom/rom.bin         emu_binaries/
-          Copy-Item latest_rom/*.sym           emu_binaries/
           # This leg was built with FluidSynth compiled in; ship the DLL its
           # runtime loader looks for beside the executable.
           if ('${{ matrix.midi }}' -eq 'ON') {
             Copy-Item build/vcpkg_installed/${{ matrix.triplet }}/bin/libfluidsynth-3.dll emu_binaries/
           }
-          Get-ChildItem emu_binaries
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/package-common
         with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stamp build version
-        run: Set-Content -Path emu_binaries/BUILD_VERSION.txt -Value '${{ needs.version.outputs.build }}'
-      - uses: actions/upload-artifact@v4
+          build: ${{ needs.version.outputs.build }}
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.package }}
+          name: ${{ matrix.package }}${{ env.MIDI_SUFFIX }}
           path: emu_binaries/*
   # The original MinGW packages, kept because they are the only Windows builds
   # with -trace and because they are what long-time users already have. They
@@ -439,8 +459,9 @@ jobs:
   # the MSVC builds above exist to avoid.
   windows-legacy:
     name: windows-legacy (${{ matrix.arch }})
-    needs: [version, README]
+    needs: [version]
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
       run:
         shell: msys2 {0}
@@ -452,14 +473,14 @@ jobs:
           # FluidSynth. The MSVC jobs above still ship 32-bit Windows builds.
           - { arch: x86_64, msystem: MINGW64, prefix: x86_64, path_type: minimal, package: x16emu_win64-mingw }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
           update: true
           install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake mingw-w64-${{ matrix.prefix }}-ntldd
           path-type: ${{ matrix.path_type }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -472,8 +493,6 @@ jobs:
           cp latest_rom/*.h src/.
       - name: Build Emulator
         run: |
-          git reset --hard
-          git diff
           mkdir build
           cd build
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
@@ -485,7 +504,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir emu_binaries
-          cp sdcard.img.zip emu_binaries/.
           cp build/x16emu.exe build/makecart.exe emu_binaries/.
 
           # midi.c LoadLibrary()s fluidsynth instead of linking it, so it is
@@ -523,65 +541,49 @@ jobs:
           done
           rm -f found.txt dlls.txt
           file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/package-common
         with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        #
-        # Run from cmd rather than the MSYS2 shell so it does not depend on
-        # gh being visible inside MSYS2, which varies with path-type.
-        continue-on-error: true
-        shell: cmd
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stamp build version
-        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+          build: ${{ needs.version.outputs.build }}
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
-  # x86_64 builds natively on the runner. The two ARM legs cannot, so they are
-  # built inside a Raspberry Pi OS image under qemu, which is slow but is the
-  # only way to get a genuinely native ARM binary out of a GitHub runner.
+  # x86_64 builds on the runner itself. aarch64 builds natively on an arm64
+  # runner inside Debian 11, the release Raspberry Pi OS 2022-04-04 is built
+  # on, so the binary needs no newer glibc than those images. armhf cannot run
+  # on GitHub's arm64 machines, so it is built inside a Raspberry Pi OS image
+  # under qemu; arm-runner-action needs qemu-user-static, which Ubuntu 26.04
+  # does not ship, hence ubuntu-24.04 for that leg.
   linux:
     name: linux (${{ matrix.arch }})
-    needs: [version, README]
-    # arm-runner-action needs qemu-user-static, which Ubuntu 26.04 does not ship.
-    runs-on: ${{ matrix.emulated && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64,  emulated: false, package: x16emu_linux-x86_64 }
-          - { arch: aarch64, emulated: true,  base_image: 'raspios_lite_arm64:2022-04-04', cpu: cortex-a53, package: x16emu_linux-aarch64 }
-          - { arch: armhf,   emulated: true,  base_image: 'raspios_lite:2022-04-04',       cpu: cortex-a7,  package: x16emu_linux-armhf }
+          - { arch: x86_64,  runner: ubuntu-latest,    package: x16emu_linux-x86_64 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, container: 'debian:bullseye', package: x16emu_linux-aarch64 }
+          - { arch: armhf,   runner: ubuntu-24.04,     emulated: true, base_image: 'raspios_lite:2022-04-04', cpu: cortex-a7, package: x16emu_linux-armhf }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        if: ${{ !matrix.container }}
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        if: ${{ !matrix.emulated }}
-        run: |
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list~
-          sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
-          sudo apt-get update
-          sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
+        if: ${{ !matrix.emulated && !matrix.container }}
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
       - name: Install Dependencies
         # The emulated legs need only enough to run the ARM image; the build
         # dependencies are installed inside it.
         if: ${{ matrix.emulated }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential make qemu-user-static
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make qemu-user-static
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -591,19 +593,39 @@ jobs:
         run: |
           cp latest_rom/*.h src/.
       - name: Build Emulator
-        if: ${{ !matrix.emulated }}
+        if: ${{ !matrix.emulated && !matrix.container }}
         run: |
-          git reset --hard
-          git diff
           mkdir build
           cd build
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
           cmake --build .
+      - name: Build Emulator
+        if: ${{ matrix.container }}
+        env:
+          IMAGE: ${{ matrix.container }}
+        run: |
+          docker run --rm -i -e HOST_IDS="$(id -u):$(id -g)" -v "$PWD:/src" -w /src "$IMAGE" bash -euxo pipefail -s <<'EOF'
+          # Debian 11 is past LTS; its security pool, and in time the main one,
+          # live on archive.debian.org.
+          sed -Ei 's#https?://[^ ]+/debian-security#http://archive.debian.org/debian-security#g' /etc/apt/sources.list
+          if ! apt-get -o Acquire::Check-Valid-Until=false update; then
+            sed -i 's|deb\.debian\.org|archive.debian.org|g' /etc/apt/sources.list
+            apt-get -o Acquire::Check-Valid-Until=false update
+          fi
+          apt-get install -y --no-install-recommends build-essential cmake file git python3 \
+            libsdl2-dev libfluidsynth-dev libcjson-dev zlib1g-dev
+          git config --global --add safe.directory /src
+          cmake -B build -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
+          cmake --build build -j"$(nproc)"
+          mkdir emu_binaries
+          cp build/x16emu build/makecart emu_binaries/
+          file emu_binaries/*
+          chown -R "$HOST_IDS" build emu_binaries
+          EOF
       - name: Package Emulator
-        if: ${{ !matrix.emulated }}
+        if: ${{ !matrix.emulated && !matrix.container }}
         run: |
           mkdir emu_binaries
-          cp sdcard.img.zip emu_binaries/.
           cp build/x16emu emu_binaries/.
           cp build/makecart emu_binaries/.
           file emu_binaries/*
@@ -626,42 +648,33 @@ jobs:
             apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
-            git reset --hard
             cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
             cmake --build .
             cd ..
             mkdir emu_binaries
-            cp sdcard.img.zip emu_binaries/.
             cp build/x16emu emu_binaries/.
             cp build/makecart emu_binaries/.
             file emu_binaries/*
-      - name: Copy ROM
+      - name: Take ownership of the image's output
+        # arm-runner-action copies its artifacts back out owned by root.
+        if: ${{ matrix.emulated }}
+        run: sudo chown -R runner emu_binaries
+      - name: Report the newest glibc symbol required
         run: |
-          # arm-runner-action copies its artifacts back out owned by root.
-          sudo chown -R runner emu_binaries
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+          v=$(readelf -W --dyn-syms emu_binaries/x16emu | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)
+          echo "::notice title=linux (${{ matrix.arch }}) glibc::x16emu needs $v"
+      - uses: ./.github/actions/package-common
         with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stamp build version
-        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+          build: ${{ needs.version.outputs.build }}
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
   macos:
     name: macos (${{ matrix.arch }})
-    needs: [version, README]
+    needs: [version]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -670,11 +683,11 @@ jobs:
           - { arch: x86_64, runner: macos-15-intel, package: x16emu_macos_intel }
           - { arch: arm64,  runner: macos-latest,   package: x16emu_macos_m1 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dependencies
         run: |
           brew install make sdl2 fluid-synth # cmake is likely here or pulled in
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -694,40 +707,28 @@ jobs:
       - name: Package Emulator
         run: |
           mkdir emu_binaries
-          cp sdcard.img.zip emu_binaries/.
           cp build/x16emu emu_binaries/.
           cp build/makecart emu_binaries/.
           file emu_binaries/*
-      - name: Copy ROM
-        run: |
-          cp latest_rom/rom.bin emu_binaries/.
-          cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/package-common
         with:
-          name: readme-pdf
-          path: emu_binaries
-      - name: Fetch x16-docs PDFs
-        # The docs artifact lives in another repository and expires, so it is
-        # advisory only: never fail an emulator build because it is unavailable.
-        continue-on-error: true
-        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir emu_binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stamp build version
-        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+          build: ${{ needs.version.outputs.build }}
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
   wasm:
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make libsdl2-dev cmake
-      - uses: mymindstorm/setup-emsdk@v14
-      - uses: actions/setup-python@v5
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make libsdl2-dev cmake
+      - uses: mymindstorm/setup-emsdk@v16
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -752,9 +753,8 @@ jobs:
           mkdir emu_binaries/webassembly
           cp webassembly/styles.css webassembly/main.js webassembly/jszip.min.js emu_binaries/webassembly/
           file emu_binaries/*
-      - name: Stamp build version
-        run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+          printf '%s\n' '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
+      - uses: actions/upload-artifact@v7
         with:
           name: x16emu_wasm
           path: emu_binaries/*
@@ -773,23 +773,24 @@ jobs:
   # .../releases/download/dev/x16emu_win64-dev.zip is good forever. Which build
   # it actually is shows up in the release title and notes, in BUILD_VERSION.txt
   # inside every package, and on the last page of the bundled README.
+  #
+  # Every run assembles the zips, so a pull request shows exactly what would
+  # ship; only the Publish step is limited to tags and the default branch.
   publish:
-    if: >-
-      github.ref_type == 'tag' ||
-      github.ref_name == github.event.repository.default_branch
     needs:
       # Every build, not just the ones that produce assets: a red compile means
       # the tree is broken, and nothing broken should reach a release. The unit
       # tests gate it for the same reason.
       - version
+      - README
       - unit-tests
-      - windows-unit-tests
       - windows
       - windows-legacy
       - linux
       - macos
       - wasm
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       # The default token is read-only, and creating a release needs to write.
       contents: write
@@ -800,12 +801,29 @@ jobs:
       BUILD_VERSION: ${{ needs.version.outputs.build }}
     steps:
       - name: Collect the platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           # Everything the builds produced, but not the README PDF, which is
           # bundled inside each platform zip rather than published on its own.
           pattern: x16emu_*
+      - uses: actions/download-artifact@v8
+        with:
+          name: readme-pdf
+          path: extras
+      - name: Fetch x16-docs PDFs
+        # The docs artifact lives in another repository and expires, so it is
+        # advisory only: never fail a release because it is unavailable.
+        continue-on-error: true
+        run: gh run download -R X16Community/x16-docs -n x16-docs-pdf --dir extras
+      - name: Add the README and docs to each desktop package
+        run: |
+          set -euo pipefail
+          ls -l extras
+          for dir in dist/*/; do
+            [ "$dir" = dist/x16emu_wasm/ ] && continue
+            cp -r extras/. "$dir"
+          done
       - name: Zip each platform as <artifact>-<name>.zip
         run: |
           set -euo pipefail
@@ -814,8 +832,14 @@ jobs:
             name="${dir%/}"
             (cd "$name" && zip -qr "../${name}-${RELEASE_NAME}.zip" .)
           done
-          ls -l ./*.zip
+          for z in ./*.zip; do
+            echo "== $z"
+            unzip -Z1 "$z" | sort
+          done
       - name: Publish
+        if: >-
+          github.ref_type == 'tag' ||
+          github.ref_name == github.event.repository.default_branch
         run: |
           set -euo pipefail
 
