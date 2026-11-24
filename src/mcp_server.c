@@ -870,8 +870,9 @@ static cJSON *tool_step(cJSON *args) {
     const char *cmd = !strcmp(mode, "into") ? "stepIn"
                     : !strcmp(mode, "over") ? "next"
                     : !strcmp(mode, "out")  ? "stepOut"
-                    : !strcmp(mode, "back") ? "stepBack" : NULL;
-    if (!cmd) return tool_fail("'mode' must be \"into\", \"over\", \"out\" or \"back\"");
+                    : !strcmp(mode, "back") ? "stepBack"
+                    : !strcmp(mode, "reverse") ? "reverseContinue" : NULL;
+    if (!cmd) return tool_fail("'mode' must be \"into\", \"over\", \"out\", \"back\" or \"reverse\"");
     if (strcmp(gran, "instruction") && strcmp(gran, "line"))
         return tool_fail("'granularity' must be \"instruction\" or \"line\"");
     if (waiter.kind != WAIT_NONE) return tool_fail(busy_message);
@@ -1963,11 +1964,13 @@ static const mcp_tool_t tools[] = {
       NO_ARGS, TOOL_CONTROL, tool_continue },
     { "step",
       "Step a paused machine and answer once it has stopped again. mode is into, over, "
-      "out or back; back goes to the previous instruction and needs rewind history on. "
+      "out, back or reverse. back goes to the previous instruction; reverse runs back to "
+      "the previous breakpoint or watchpoint hit, or the start of the history. Both need "
+      "rewind history on. "
       "If it has not stopped by timeoutMs the result has completed: false and the "
       "machine keeps going: follow up with wait_for_stop.",
       "{\"type\":\"object\",\"properties\":{"
-      "\"mode\":{\"type\":\"string\",\"enum\":[\"into\",\"over\",\"out\",\"back\"],\"default\":\"into\"},"
+      "\"mode\":{\"type\":\"string\",\"enum\":[\"into\",\"over\",\"out\",\"back\",\"reverse\"],\"default\":\"into\"},"
       "\"granularity\":{\"type\":\"string\",\"enum\":[\"instruction\",\"line\"],\"default\":\"instruction\"},"
       TIMEOUT_ARG
       "},\"additionalProperties\":false}",

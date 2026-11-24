@@ -45,6 +45,7 @@ void DEBUGFreeUI();
 void DEBUGContinue(void);                   // resume free-run
 void DEBUGStepInto(void);                   // one instruction, then stop
 bool DEBUGStepBack(char *err, size_t err_len); // to the previous instruction
+bool DEBUGReverseContinue(char *err, size_t err_len); // to the previous breakpoint or watch hit
 
 // The step-over/step-out target lives outside the shared breakpoint table, so
 // it carries its own owner: a session tearing down must retract a step it

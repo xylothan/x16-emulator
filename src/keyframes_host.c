@@ -35,15 +35,19 @@ static char blocked[160] = "";
 typedef enum { SEEK_FIND, SEEK_LAND } seek_phase_t;
 
 static struct {
-	seek_phase_t phase;
-	uint32_t     index;
-	uint64_t     stop;
-	uint64_t     candidate;
-	bool         candidate_is_start;
-	bool         start_waiting;
-	uint16_t     pc;
-	uint8_t      k;
-	int          instructions;
+	seek_phase_t     phase;
+	bool             reverse; // to the previous breakpoint or watch hit
+	uint32_t         index;
+	uint64_t         now;     // where the machine stood
+	uint64_t         stop;    // end of the window from keyframe `index`
+	uint64_t         candidate;
+	bool             candidate_is_start;
+	bool             start_waiting;
+	keyframes_seek_t hit; // what the candidate is; RUN while a reverse pass has none
+	bool             was_waiting;
+	uint16_t         pc;
+	uint8_t          k;
+	int              instructions;
 } seek;
 
 static bool
@@ -304,23 +308,31 @@ seek_restore(uint32_t index)
 	}
 	// A seek can resume mid-pass, past the loop's own call at this position.
 	input_log_replay(INPUT_SITE_TOP);
+	(void)debug_wp_probe_take();
 	return input_log_mode == INPUT_LOG_REPLAYING;
 }
 
 static bool
-seek_find_from(uint32_t index)
+seek_find_from(uint32_t index, uint64_t stop)
 {
 	if (!seek_restore(index)) {
 		return false;
 	}
 	seek.phase              = SEEK_FIND;
 	seek.index              = index;
+	seek.stop               = stop;
 	seek.candidate          = keyframes_get(index)->cycle;
 	seek.candidate_is_start = true;
 	seek.start_waiting      = waiting != 0;
+	seek.was_waiting        = waiting != 0;
 	seek.pc                 = regs.pc;
 	seek.k                  = regs.k;
 	seek.instructions       = instruction_counter;
+	seek.hit                = KEYFRAMES_SEEK_RUN;
+	// No poll tests the position a pass starts from.
+	if (seek.reverse && !waiting && debug_bp_would_stop(regs.pc, regs.k)) {
+		seek.hit = KEYFRAMES_SEEK_HIT_BREAKPOINT;
+	}
 	return true;
 }
 
@@ -330,6 +342,7 @@ seek_finish(void)
 	input_log_seeking = false;
 	timing_set_no_sleep(false);
 	debug_wp_suspend(false);
+	debug_wp_probe(false);
 }
 
 static keyframes_seek_t
@@ -338,13 +351,13 @@ seek_fail(void)
 	seek_finish();
 	rewound = false;
 	input_log_end("rewind failed");
-	printf("Rewind: could not reach the previous instruction; history restarts here.\n");
+	printf("Rewind: the replay did not reach its target; history restarts here.\n");
 	fflush(stdout);
 	return KEYFRAMES_SEEK_FAILED;
 }
 
-bool
-keyframes_host_step_back(char *err, size_t err_len)
+static bool
+seek_begin(bool reverse, char *err, size_t err_len)
 {
 	uint32_t index;
 	uint64_t now_cycle;
@@ -354,20 +367,90 @@ keyframes_host_step_back(char *err, size_t err_len)
 	}
 	if (input_log_is_recording()) {
 		keyframes_stop();
-		input_log_end("stepped back");
+		input_log_end(reverse ? "reversed" : "stepped back");
 	}
-	seek.stop         = now_cycle;
+	seek.reverse      = reverse;
+	seek.now          = now_cycle;
 	input_log_seeking = true;
 	rewound           = true;
 	// Not warp: it skips part of line rendering, which is in the machine's state.
 	timing_set_no_sleep(true);
-	debug_wp_suspend(true);
-	if (!seek_find_from(index)) {
+	if (reverse) {
+		debug_wp_probe(true);
+	} else {
+		debug_wp_suspend(true);
+	}
+	if (!seek_find_from(index, now_cycle)) {
 		seek_fail();
 		snprintf(err, err_len, "the keyframe could not be restored");
 		return false;
 	}
 	return true;
+}
+
+bool
+keyframes_host_step_back(char *err, size_t err_len)
+{
+	return seek_begin(false, err, err_len);
+}
+
+bool
+keyframes_host_reverse_continue(char *err, size_t err_len)
+{
+	return seek_begin(true, err, err_len);
+}
+
+static keyframes_seek_t
+seek_land(uint64_t target, keyframes_seek_t landed)
+{
+	if (!seek_restore(seek.index)) {
+		return seek_fail();
+	}
+	seek.phase     = SEEK_LAND;
+	seek.candidate = target;
+	seek.hit       = landed;
+	if (keyframes_get(seek.index)->cycle == target) {
+		seek_finish();
+		return landed;
+	}
+	return KEYFRAMES_SEEK_RESTART;
+}
+
+// A watched access is placed where its instruction ends, as a forward stop is,
+// so one in the last instruction of a window is placed at the window's end.
+static void
+reverse_note(uint64_t t)
+{
+	const bool watched = debug_wp_probe_take();
+	const bool moved   = regs.pc != seek.pc || regs.k != seek.k || instruction_counter != seek.instructions ||
+	                   (seek.was_waiting && !waiting);
+	seek.pc           = regs.pc;
+	seek.k            = regs.k;
+	seek.instructions = instruction_counter;
+	seek.was_waiting  = waiting != 0;
+	if (t >= seek.now) {
+		return;
+	}
+	if (watched) {
+		seek.candidate = t;
+		seek.hit       = KEYFRAMES_SEEK_HIT_WATCH;
+	} else if (moved && t < seek.stop && !waiting && debug_bp_would_stop(regs.pc, regs.k)) {
+		seek.candidate = t;
+		seek.hit       = KEYFRAMES_SEEK_HIT_BREAKPOINT;
+	}
+}
+
+static keyframes_seek_t
+reverse_window_done(void)
+{
+	if (seek.hit != KEYFRAMES_SEEK_RUN) {
+		return seek_land(seek.candidate, seek.hit);
+	}
+	if (seek.index > 0) {
+		const uint64_t start = keyframes_get(seek.index)->cycle;
+		return seek_find_from(seek.index - 1, start) ? KEYFRAMES_SEEK_RESTART : seek_fail();
+	}
+	return seek_land(keyframes_get(0)->cycle, KEYFRAMES_SEEK_HISTORY_START);
 }
 
 keyframes_seek_t
@@ -395,7 +478,15 @@ keyframes_host_seek_poll(void)
 			return seek_fail();
 		}
 		seek_finish();
-		return KEYFRAMES_SEEK_LANDED;
+		return seek.hit;
+	}
+
+	if (seek.reverse) {
+		if (t > seek.stop) {
+			return seek_fail();
+		}
+		reverse_note(t);
+		return t < seek.stop ? KEYFRAMES_SEEK_RUN : reverse_window_done();
 	}
 
 	if (t < seek.stop) {
@@ -413,17 +504,7 @@ keyframes_host_seek_poll(void)
 	}
 	// A keyframe parked in WAI is not a position a step could have stopped at.
 	if (seek.candidate_is_start && seek.start_waiting && seek.index > 0) {
-		return seek_find_from(seek.index - 1) ? KEYFRAMES_SEEK_RESTART : seek_fail();
+		return seek_find_from(seek.index - 1, seek.stop) ? KEYFRAMES_SEEK_RESTART : seek_fail();
 	}
-	const uint64_t target = seek.candidate;
-	if (!seek_restore(seek.index)) {
-		return seek_fail();
-	}
-	seek.phase     = SEEK_LAND;
-	seek.candidate = target;
-	if (keyframes_get(seek.index)->cycle == target) {
-		seek_finish();
-		return KEYFRAMES_SEEK_LANDED;
-	}
-	return KEYFRAMES_SEEK_RESTART;
+	return seek_land(seek.candidate, KEYFRAMES_SEEK_LANDED);
 }

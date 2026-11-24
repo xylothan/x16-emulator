@@ -43,12 +43,19 @@ const char *keyframes_host_blocked(void);
 bool keyframes_host_can_step_back(void);
 // Begins a seek to the previous instruction. The machine must be paused.
 bool keyframes_host_step_back(char *err, size_t err_len);
+// Begins a seek to the latest earlier position where a breakpoint or watchpoint
+// would have stopped the machine, or else the oldest one held. Conditions apply;
+// hit and ignore counts do not, and logpoints do not stop.
+bool keyframes_host_reverse_continue(char *err, size_t err_len);
 
 typedef enum {
-	KEYFRAMES_SEEK_RUN,     // execute on
-	KEYFRAMES_SEEK_RESTART, // the machine was restored: back to the loop's top
-	KEYFRAMES_SEEK_LANDED,  // stop here
-	KEYFRAMES_SEEK_FAILED,  // stop here; the position is not the target
+	KEYFRAMES_SEEK_RUN,            // execute on
+	KEYFRAMES_SEEK_RESTART,        // the machine was restored: back to the loop's top
+	KEYFRAMES_SEEK_LANDED,         // stop here
+	KEYFRAMES_SEEK_HIT_BREAKPOINT, // stop here, on a breakpoint
+	KEYFRAMES_SEEK_HIT_WATCH,      // stop here, after a watched access
+	KEYFRAMES_SEEK_HISTORY_START,  // stop here, at the oldest position held
+	KEYFRAMES_SEEK_FAILED,         // stop here; the position is not the target
 } keyframes_seek_t;
 
 // Before each instruction during a seek.
