@@ -219,39 +219,6 @@ jobs:
           name: processor-tests-report
           path: pt-report-*.txt
           if-no-files-found: ignore
-  # The same suite under MSVC, with the runtime and dependencies the Windows
-  # packages use. Compiler-specific breaks in a test build fail here.
-  windows-unit-tests:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.x'
-      - uses: ./.github/actions/msvc-cmake
-      - name: Configure
-        run: >
-          cmake -B build -A x64
-          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
-          -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
-          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-          -DBUILD_TESTS=ON
-          -DENABLE_LTO=OFF
-          -DENABLE_FLUIDSYNTH=OFF
-          -DENABLE_TRACE=OFF
-      - name: Fetch CPU test images
-        run: python tests/fetch_klaus.py
-      - name: Fetch VERA RTL
-        run: python tests/fetch_vera_rtl.py
-      - name: Build Tests
-        run: cmake --build build --config Release --target unit_tests
-      - name: Run Tests
-        env:
-          X16_KLAUS_REQUIRED: 1
-          X16_VERA_RTL_REQUIRED: 1
-        run: ctest --test-dir build -C Release --output-on-failure
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
   # it would catch incorrect behaviour; this is the half that does. Kept out of
@@ -345,22 +312,33 @@ jobs:
   # the MIDI options at all, which is the honest thing to hand someone who did
   # not ask for MIDI. The 32-bit and ARM64 legs also catch pointer and size_t
   # assumptions that an x86_64-only build hides.
+  #
+  # Pull requests build the plain legs only; the -midi legs differ by one vcpkg
+  # feature and build on main and tags. The plain x86_64 leg also runs the unit
+  # suite under MSVC.
   windows:
-    name: windows (${{ matrix.arch }}${{ matrix.suffix }})
+    name: windows (${{ matrix.arch }}${{ matrix.midi == 'ON' && '-midi' || '' }})
     needs: [version, README]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      MIDI_SUFFIX: ${{ matrix.midi == 'ON' && '-midi' || '' }}
+      VCPKG_FEATURES: ${{ matrix.midi == 'ON' && 'midi' || '' }}
     strategy:
       # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
+        arch: [x86_64, i686, arm64]
+        midi: ['OFF', 'ON']
+        exclude:
+          - midi: ${{ github.event_name == 'pull_request' && 'ON' || 'none' }}
+        # Only keys that every surviving combination matches: an include entry
+        # that matches nothing becomes a job of its own.
         include:
-          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win64 }
-          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win64-midi }
-          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'OFF', features: '',     suffix: '',      package: x16emu_win32 }
-          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win32-midi }
-          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
-          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
+          - { arch: x86_64, runner: windows-latest, platform: x64,   triplet: x64-windows-x16emu,   package: x16emu_win64 }
+          - { arch: i686,   runner: windows-latest, platform: Win32, triplet: x86-windows-x16emu,   package: x16emu_win32 }
+          - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, package: x16emu_win-arm64 }
+          - { arch: x86_64, midi: 'OFF', tests: true }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -372,6 +350,23 @@ jobs:
           release: ${{ github.ref_type == 'tag' }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/msvc-cmake
+      - name: Set up the vcpkg binary cache
+        # vcpkg rebuilds SDL2 (and FluidSynth) from source on every run without
+        # one. The image version is in the key because a new vcpkg tool can
+        # change the package hashes.
+        id: vcpkg-cache
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'vcpkg-cache'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Add-Content $env:GITHUB_ENV "VCPKG_BINARY_SOURCES=clear;files,$dir,readwrite"
+          Add-Content $env:GITHUB_OUTPUT "dir=$dir"
+          Add-Content $env:GITHUB_OUTPUT "image=$env:ImageOS-$env:ImageVersion"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.dir }}
+          key: vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_FEATURES }}-${{ steps.vcpkg-cache.outputs.image }}-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**') }}
+          restore-keys: |
+            vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_FEATURES }}-
       - name: Configure
         # msvc-cmake selects the generator: without one CMake falls back to
         # "NMake Makefiles", which rejects -A. Dependencies come from the
@@ -390,7 +385,7 @@ jobs:
           "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          -DVCPKG_MANIFEST_FEATURES=${{ matrix.features }}
+          -DVCPKG_MANIFEST_FEATURES=${{ env.VCPKG_FEATURES }}
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           -DENABLE_FLUIDSYNTH=${{ matrix.midi }}
           -DENABLE_TRACE=OFF
@@ -412,6 +407,35 @@ jobs:
           $h = (Get-FileHash pinned_rom/x/rom.bin -Algorithm SHA256).Hash.ToLower()
           if ($h -ne $env:GOLDEN_ROM_SHA256) { throw "the pinned ROM's SHA-256 is $h" }
           python testbench/test_machine_version.py build/Release/x16emu.exe pinned_rom/x/rom.bin
+      - name: Configure Tests
+        # Its own tree, configured as the unit suite expects: LTO, FluidSynth
+        # and trace off.
+        if: ${{ matrix.tests }}
+        run: >
+          cmake -B build-tests -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/vcpkg-triplets"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-x16emu
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DBUILD_TESTS=ON
+          -DENABLE_LTO=OFF
+          -DENABLE_FLUIDSYNTH=OFF
+          -DENABLE_TRACE=OFF
+      - name: Fetch CPU test images
+        if: ${{ matrix.tests }}
+        run: python tests/fetch_klaus.py
+      - name: Fetch VERA RTL
+        if: ${{ matrix.tests }}
+        run: python tests/fetch_vera_rtl.py
+      - name: Build Tests
+        if: ${{ matrix.tests }}
+        run: cmake --build build-tests --config Release --target unit_tests
+      - name: Run Tests
+        if: ${{ matrix.tests }}
+        env:
+          X16_KLAUS_REQUIRED: 1
+          X16_VERA_RTL_REQUIRED: 1
+        run: ctest --test-dir build-tests -C Release --output-on-failure
       - name: Package Emulator
         run: |
           New-Item -ItemType Directory -Force emu_binaries | Out-Null
@@ -441,7 +465,7 @@ jobs:
         run: Set-Content -Path emu_binaries/BUILD_VERSION.txt -Value '${{ needs.version.outputs.build }}'
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.package }}
+          name: ${{ matrix.package }}${{ env.MIDI_SUFFIX }}
           path: emu_binaries/*
   # The original MinGW packages, kept because they are the only Windows builds
   # with -trace and because they are what long-time users already have. They
@@ -792,7 +816,6 @@ jobs:
       # tests gate it for the same reason.
       - version
       - unit-tests
-      - windows-unit-tests
       - windows
       - windows-legacy
       - linux
