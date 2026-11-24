@@ -2645,8 +2645,14 @@ static int handle_dap_step_back(int seq, cJSON *args) {
 
 static int handle_dap_reverse_continue(int seq, cJSON *args) {
     (void)args;
-    send_dap_error_response(seq, "reverseContinue", "reverse continue is not available yet; use stepBack");
-    return 0;
+    char err[160];
+    if (!DEBUGReverseContinue(err, sizeof err)) {
+        send_dap_error_response(seq, "reverseContinue", err);
+        return 0;
+    }
+    note_request_resumes();
+    send_dap_response(seq, "reverseContinue", true, NULL);
+    return 1;
 }
 
 static int handle_dap_pause(int seq, cJSON *args) {
@@ -10102,7 +10108,8 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     // on a running machine is refused, so it takes nothing over.
     if ((step.pending || run_to.pending) &&
         (!strcmp(cmd, "continue") || !strcmp(cmd, "next") || !strcmp(cmd, "stepIn") ||
-         !strcmp(cmd, "stepOut") || !strcmp(cmd, "stepBack") || !strcmp(cmd, "restart") ||
+         !strcmp(cmd, "stepOut") || !strcmp(cmd, "stepBack") || !strcmp(cmd, "reverseContinue") ||
+         !strcmp(cmd, "restart") ||
          (!strcmp(cmd, "goto") && currentMode == DMODE_STOP) ||
          !strcmp(cmd, "terminate"))) {
         step_finish("cancelled");
@@ -10263,8 +10270,8 @@ void debug_server_set_frontend(const dbg_frontend_t *f) {
 // breakpoint commands.
 static const char *const callable_commands[] = {
     "x16/status", "x16/registers", "readMemory", "writeMemory", "disassemble",
-    "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "stepBack", "restart",
-    "x16/step", "x16/runTo", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
+    "setVariable", "pause", "continue", "next", "stepIn", "stepOut", "stepBack", "reverseContinue",
+    "restart", "x16/step", "x16/runTo", "x16/listBreakpoints", "x16/type", "x16/sendKey", "x16/joystick",
     "x16/saveState", "x16/loadState", "x16/perfStats", "x16/screen", "x16/screenshot", "x16/vera",
     "mcp/setBreakpoint", "mcp/removeBreakpoint", "mcp/enableBreakpoint", "mcp/evaluate",
     "x16/loadSymbols", "x16/lookupSymbol", "x16/listSymbols", "x16/callStack", "x16/locals",
@@ -11022,6 +11029,9 @@ void debug_server_notify_stopped(const char *reason) {
         }
     } else if (!strcmp(reason, "step")) {
         cJSON_AddStringToObject(body, "reason", "step");
+    } else if (!strcmp(reason, "history start")) {
+        cJSON_AddStringToObject(body, "reason", "pause");
+        cJSON_AddStringToObject(body, "description", "Paused at the start of the recorded history");
     } else if (!strcmp(reason, "user")) {
         cJSON_AddStringToObject(body, "reason", "pause");
     } else {

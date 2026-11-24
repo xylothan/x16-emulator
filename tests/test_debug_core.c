@@ -2148,6 +2148,52 @@ main(void)
 		debug_wp_clear_all();
 	}
 
+	{
+		debug_wp_clear_all();
+		check(debug_wp_add(0x1234, 1, -1) == 0, "probe: adds a watchpoint");
+		debug_wp_probe(true);
+		check(debug_wp_armed_cpu_write == 1, "probe: stays armed");
+		check(!debug_wp_probe_take(), "probe: nothing yet");
+		check(!debug_wp_check_write(0x1234, 5), "probe: a match does not fire");
+		check(debug_wp_at(0)->hits == 0, "probe: a match does not count");
+		uint16_t addr  = 0;
+		uint8_t  value = 0;
+		check(debug_wp_last_hit(&addr, &value) && addr == 0x1234 && value == 5, "probe: the access is recorded");
+		check(debug_wp_probe_take(), "probe: the match is kept");
+		check(!debug_wp_probe_take(), "probe: taking clears it");
+		check(!debug_wp_check_write(0x1235, 5) && !debug_wp_probe_take(), "probe: a miss is not kept");
+		debug_wp_check_write(0x1234, 6);
+		debug_wp_probe(false);
+		check(!debug_wp_probe_take(), "probe: ending drops a kept match");
+		check(debug_wp_check_write(0x1234, 7) && debug_wp_at(0)->hits == 1, "probe: off fires and counts");
+		debug_wp_clear_all();
+	}
+
+	{
+		debug_bp_log_fire = log_fire;
+		memset(g_log_fired, 0, sizeof g_log_fired);
+		check(!debug_bp_would_stop(0x8000, 0), "would stop: not where none is");
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_MCP);
+		debug_bp_set_ignore(0x8000, 0, -1, 5);
+		check(debug_bp_would_stop(0x8000, 0), "would stop: ignore count not applied");
+		check(debug_bp_get_hits(0x8000, 0, -1) == 0, "would stop: counts nothing");
+		debug_bp_set_condition(0x8000, 0, -1, BPOPERAND_A, 0, BPCMP_EQ, 7);
+		regs.c = 1;
+		check(!debug_bp_would_stop(0x8000, 0), "would stop: condition false");
+		regs.c = 7;
+		check(debug_bp_would_stop(0x8000, 0), "would stop: condition true");
+		debug_bp_set_log(0x8000, 0, -1, DEBUG_OWNER_MCP, &g_log_token[0]);
+		check(!debug_bp_would_stop(0x8000, 0), "would stop: a logpoint alone does not");
+		check(g_log_fired[0] == 0, "would stop: fires no logpoint");
+		debug_bp_add_for(bp_at(0x8000, 0, -1), DEBUG_OWNER_DAP_SOURCE);
+		check(debug_bp_would_stop(0x8000, 0), "would stop: another owner's plain breakpoint does");
+		debug_bp_set_enabled(0x8000, 0, -1, false);
+		check(!debug_bp_would_stop(0x8000, 0), "would stop: not when disabled");
+		check(debug_bp_get_hits(0x8000, 0, -1) == 0 && g_log_fired[0] == 0, "would stop: still nothing counted");
+		reset_all();
+		debug_bp_log_fire = NULL;
+	}
+
 	debug_core_free();
 
 	if (failures) {

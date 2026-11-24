@@ -247,6 +247,9 @@ const struct breakpoint *debug_bp_at(int index);
 // the breakpoint, so that would burn through an ignore count while the machine
 // stands still. Use debug_bp_is_set() for the read-only question.
 bool debug_bp_on_arrival(int pc, uint8_t bank);
+// Whether debug_bp_on_arrival() would stop here past its ignore count, changing
+// nothing: no hit is counted, no dump written, no logpoint fired.
+bool debug_bp_would_stop(int pc, uint8_t bank);
 
 // One bit per 16-bit PC: set when ANY breakpoint entry has that PC, whatever its
 // bank, owner, enabled state or condition. A clear bit means no entry can match
@@ -501,6 +504,11 @@ extern int debug_wp_armed_vram;
 extern void (*debug_wp_changed)(void);
 // While suspended no watch fires or counts. The table is unchanged.
 void debug_wp_suspend(bool on);
+// While probing, a watch that matches counts nothing, ignores its ignore count
+// and the check answers false; debug_wp_probe_take() says whether one matched
+// since it was last asked. The last access is still recorded.
+void debug_wp_probe(bool on);
+bool debug_wp_probe_take(void);
 
 // A guest store landed in VRAM through data port `port`. True if a watch fires,
 // and recorded for debug_wp_last_access().

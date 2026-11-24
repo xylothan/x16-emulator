@@ -210,6 +210,7 @@ static const char *lastStopReason = "";
 // The access behind a watch stop. Taken at the store, while opcode_addr is still
 // the instruction that made it.
 static debug_stop_info_t lastStopAccess;
+static void recordWatchAccess(void);
 
 // The interrupt or trap behind an "exception" stop, and where in the run it
 // happened. Not every later stop records a reason, so a record counts only while
@@ -373,7 +374,17 @@ DEBUGGetCurrentStatusEx(bool allow_ui_pump)
 		currentPCBank = regs.k;
 		currentPCX16Bank = getCurrentBank(regs.pc, regs.k);
 		resumeSkipPC = -1;
-		DEBUGAnnounceStop(seek == KEYFRAMES_SEEK_LANDED ? "step" : "pause");
+		switch (seek) {
+			case KEYFRAMES_SEEK_LANDED:         DEBUGAnnounceStop("step"); break;
+			case KEYFRAMES_SEEK_HIT_BREAKPOINT: DEBUGAnnounceStop("breakpoint"); break;
+			case KEYFRAMES_SEEK_HIT_WATCH:
+				recordWatchAccess();
+				debug_wp_latch_stop();
+				DEBUGAnnounceStop("data breakpoint");
+				break;
+			case KEYFRAMES_SEEK_HISTORY_START:  DEBUGAnnounceStop("history start"); break;
+			default:                            DEBUGAnnounceStop("pause"); break;
+		}
 		return 1;
 	}
 
@@ -801,35 +812,38 @@ DEBUGBreakOnStp(uint16_t address, uint8_t bank, bool attached)
 // not -- and those are exactly the writes a stack watchpoint is set to catch.
 // Deferring the snapshot to the next status poll reports where the CPU
 // actually ended up.
+static void recordWatchAccess(void) {
+	uint8_t  space   = DEBUG_WP_SPACE_CPU;
+	uint32_t address = 0;
+	uint8_t  value   = 0;
+	int      port    = -1;
+	if (debug_wp_last_access(&space, &address, &value, &port)) {
+		const bool vram = space == DEBUG_WP_SPACE_VRAM;
+		uint8_t access = DEBUG_WP_ACCESS_WRITE;
+		bool    fetch  = false;
+		debug_wp_last_access_kind(&access, &fetch);
+		lastStopAccess.has_access     = true;
+		lastStopAccess.space          = vram ? DEBUG_STOP_SPACE_VRAM : DEBUG_STOP_SPACE_CPU;
+		lastStopAccess.access         = access == DEBUG_WP_ACCESS_READ ? DEBUG_STOP_ACCESS_READ
+		                                                               : DEBUG_STOP_ACCESS_WRITE;
+		lastStopAccess.fetch          = fetch;
+		lastStopAccess.address        = address;
+		lastStopAccess.x16Bank        = (!vram && bank_window_of((uint16_t)address))
+		                                    ? getCurrentBank((uint16_t)address, 0) : -1;
+		lastStopAccess.value          = value;
+		lastStopAccess.data_port      = (int8_t)port;
+		lastStopAccess.accessing_pc   = opcode_addr;
+		lastStopAccess.accessing_bank = bank_window_of(opcode_addr)
+		                                    ? getCurrentBank(opcode_addr, regs.k) : -1;
+	}
+}
+
 void DEBUGBreakOnWatchpoint(void) {
 	if (currentMode != DMODE_STOP) {
 		currentMode          = DMODE_STOP;
 		watchpointStopPending = true;
 		debug_wp_latch_stop();
-
-		uint8_t  space   = DEBUG_WP_SPACE_CPU;
-		uint32_t address = 0;
-		uint8_t  value   = 0;
-		int      port    = -1;
-		if (debug_wp_last_access(&space, &address, &value, &port)) {
-			const bool vram = space == DEBUG_WP_SPACE_VRAM;
-			uint8_t access = DEBUG_WP_ACCESS_WRITE;
-			bool    fetch  = false;
-			debug_wp_last_access_kind(&access, &fetch);
-			lastStopAccess.has_access     = true;
-			lastStopAccess.space          = vram ? DEBUG_STOP_SPACE_VRAM : DEBUG_STOP_SPACE_CPU;
-			lastStopAccess.access         = access == DEBUG_WP_ACCESS_READ ? DEBUG_STOP_ACCESS_READ
-			                                                               : DEBUG_STOP_ACCESS_WRITE;
-			lastStopAccess.fetch          = fetch;
-			lastStopAccess.address        = address;
-			lastStopAccess.x16Bank        = (!vram && bank_window_of((uint16_t)address))
-			                                    ? getCurrentBank((uint16_t)address, 0) : -1;
-			lastStopAccess.value          = value;
-			lastStopAccess.data_port      = (int8_t)port;
-			lastStopAccess.accessing_pc   = opcode_addr;
-			lastStopAccess.accessing_bank = bank_window_of(opcode_addr)
-			                                    ? getCurrentBank(opcode_addr, regs.k) : -1;
-		}
+		recordWatchAccess();
 	}
 }
 
@@ -1062,12 +1076,12 @@ void DEBUGContinue(void) {
 	debug_server_note_resumed();
 }
 
-bool DEBUGStepBack(char *err, size_t err_len) {
+static bool DEBUGSeekBack(bool reverse, char *err, size_t err_len) {
 	if (currentMode != DMODE_STOP) {
 		snprintf(err, err_len, "the machine must be paused");
 		return false;
 	}
-	if (!keyframes_host_step_back(err, err_len))
+	if (!(reverse ? keyframes_host_reverse_continue(err, err_len) : keyframes_host_step_back(err, err_len)))
 		return false;
 	srcStepActive = false;
 	DEBUGClearStepBreakPoint();
@@ -1076,7 +1090,15 @@ bool DEBUGStepBack(char *err, size_t err_len) {
 	return true;
 }
 
-void DEBUGStepInto(void) {                              // F11 — single instruction
+bool DEBUGStepBack(char *err, size_t err_len) {
+	return DEBUGSeekBack(false, err, err_len);
+}
+
+bool DEBUGReverseContinue(char *err, size_t err_len) {
+	return DEBUGSeekBack(true, err, err_len);
+}
+
+void DEBUGStepInto(void) {                            // F11 — single instruction
 	DEBUGArmResumeSkip();                               // step OFF a breakpoint, not into it again
 	currentMode = DMODE_STEP;                           // runs once, then DEBUGGetCurrentStatus stops us
 	currentPC = regs.pc;

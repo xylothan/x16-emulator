@@ -681,7 +681,7 @@ menubar_fixed_colored(const char *widest, ImVec4 color, const char *text)
 // and "why can't I click this?" is exactly the question worth answering. Plain
 // SetItemTooltip() would say nothing there, since ImGui does not consider a
 // disabled item hovered unless asked.
-enum class ctrl_icon { Continue, Pause, StepBack, StepInto, StepOver, StepOut };
+enum class ctrl_icon { Continue, Pause, ReverseContinue, StepBack, StepInto, StepOver, StepOut };
 
 static void
 draw_arrow_head(ImDrawList *dl, float x, float y, float dir_x, float dir_y, float size, ImU32 col)
@@ -709,6 +709,10 @@ draw_ctrl_icon(ImDrawList *dl, ctrl_icon icon, float cx, float cy, float h, bool
     case ctrl_icon::Continue:
         dl->AddTriangleFilled(ImVec2(cx - h * 0.24f, cy - h * 0.34f), ImVec2(cx + h * 0.32f, cy),
                               ImVec2(cx - h * 0.24f, cy + h * 0.34f), green);
+        break;
+    case ctrl_icon::ReverseContinue:
+        dl->AddTriangleFilled(ImVec2(cx + h * 0.24f, cy - h * 0.34f), ImVec2(cx + h * 0.24f, cy + h * 0.34f),
+                              ImVec2(cx - h * 0.32f, cy), green);
         break;
     case ctrl_icon::Pause:
         dl->AddRectFilled(ImVec2(cx - h * 0.26f, cy - h * 0.32f), ImVec2(cx - h * 0.07f, cy + h * 0.32f), blue);
@@ -1039,20 +1043,27 @@ debug_ui_draw_control_bar(void)
                     "Only while it is running."))
         DEBUGPause();
 
-    ImGui::SameLine();
     {
-        const char *back_tip = !keyframes_host_enabled()
-                                   ? "Step Back\n"
-                                     "Rewind history is off. Turn it on in\n"
+        const bool  can_back = paused && keyframes_host_can_step_back();
+        const char *why_not  = !keyframes_host_enabled()
+                                   ? "Rewind history is off. Turn it on in\n"
                                      "System > Settings > Stepping & interrupts."
-                               : !paused ? "Step Back\nOnly while the machine is halted."
-                               : keyframes_host_can_step_back()
-                                   ? "Step Back\nReturn to the previous instruction."
-                                   : "Step Back\nNo earlier history yet. Run the machine to build some.";
-        if (ctrl_button("##StepBack", ctrl_icon::StepBack, paused && keyframes_host_can_step_back(), back_tip)) {
-            char err[160];
+                               : !paused ? "Only while the machine is halted."
+                                         : "No earlier history yet. Run the machine to build some.";
+        char rev_tip[192], back_tip[160];
+        snprintf(rev_tip, sizeof rev_tip, "Reverse Continue\n%s",
+                 can_back ? "Run back to the previous breakpoint or watchpoint hit,\n"
+                            "or to the start of the recorded history."
+                          : why_not);
+        snprintf(back_tip, sizeof back_tip, "Step Back\n%s",
+                 can_back ? "Return to the previous instruction." : why_not);
+        char err[160];
+        ImGui::SameLine();
+        if (ctrl_button("##ReverseContinue", ctrl_icon::ReverseContinue, can_back, rev_tip))
+            DEBUGReverseContinue(err, sizeof err);
+        ImGui::SameLine();
+        if (ctrl_button("##StepBack", ctrl_icon::StepBack, can_back, back_tip))
             DEBUGStepBack(err, sizeof err);
-        }
     }
 
     ImGui::SameLine();

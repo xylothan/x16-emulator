@@ -746,6 +746,23 @@ debug_bp_on_arrival(int pc, uint8_t bank)
 	return stop;
 }
 
+bool
+debug_bp_would_stop(int pc, uint8_t bank)
+{
+	for (int i = 0; i < numBreakpoints; i++) {
+		if (!bp_matches(pc, bank, &breakPoints[i]))
+			continue;
+		const struct bp_cond *c = cond_find(breakPoints[i].pc, breakPoints[i].bank, breakPoints[i].x16Bank);
+		if (c && !cond_satisfied(c))
+			continue;
+		const uint16_t owners = live_owners(&breakPoints[i]);
+		const uint16_t quiet  = c ? (uint16_t)(((c->dump ? c->dump->owner : 0) | c->log_owners) & owners) : 0;
+		if (!quiet || (owners & (uint16_t)~quiet))
+			return true;
+	}
+	return false;
+}
+
 void
 debug_bp_set_condition(int pc, uint8_t bank, int x16Bank, int operand, uint16_t operand_addr,
                        int op, uint32_t value)
@@ -1545,6 +1562,8 @@ static int      wpLastHitPort  = -1;
 static uint8_t  wpLastHitAccess = DEBUG_WP_ACCESS_WRITE;
 static bool     wpLastHitFetch  = false;
 static uint32_t wpLastFired     = 0;   // numbers the checks that fired something
+static bool     wp_probing      = false;
+static bool     wp_probe_hit    = false;
 
 // An expression can read anything, so it is judged once, at the access. Asked
 // again after the stop, the registers would already have moved on.
@@ -1591,8 +1610,35 @@ wp_record_hit(uint8_t space, uint32_t addr, uint8_t value, int port, uint8_t acc
 static inline bool
 wp_count_hit(struct watchpoint *w)
 {
+	if (wp_probing)
+		return true;
 	w->hits++;
 	return w->hits > w->ignore;
+}
+
+// A probe keeps the match and answers no, so the caller does not stop.
+static bool
+wp_probe_answer(bool fired)
+{
+	if (!wp_probing)
+		return fired;
+	wp_probe_hit |= fired;
+	return false;
+}
+
+void
+debug_wp_probe(bool on)
+{
+	wp_probing   = on;
+	wp_probe_hit = false;
+}
+
+bool
+debug_wp_probe_take(void)
+{
+	const bool hit = wp_probe_hit;
+	wp_probe_hit   = false;
+	return hit;
 }
 
 // The whole table is walked rather than stopping at the first match, so that
@@ -1614,7 +1660,7 @@ debug_wp_check_write(uint16_t addr, uint8_t value)
 		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_CPU, addr, value, -1, DEBUG_WP_ACCESS_WRITE, false);
 	}
-	return fired;
+	return wp_probe_answer(fired);
 }
 
 bool
@@ -1635,7 +1681,7 @@ debug_wp_check_read(uint16_t addr, uint8_t value, bool fetch)
 		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_CPU, addr, value, -1, DEBUG_WP_ACCESS_READ, fetch);
 	}
-	return fired;
+	return wp_probe_answer(fired);
 }
 
 bool
@@ -1655,7 +1701,7 @@ debug_wp_check_vram(uint32_t addr, uint8_t value, int port)
 		wpLastFired = check;
 		wp_record_hit(DEBUG_WP_SPACE_VRAM, addr, value, port, DEBUG_WP_ACCESS_WRITE, false);
 	}
-	return fired;
+	return wp_probe_answer(fired);
 }
 
 bool
