@@ -51,6 +51,8 @@
 #include "savestate.h"
 #include "input_log.h"
 #include "input_log_host.h"
+#include "keyframes.h"
+#include "keyframes_host.h"
 #include "dbg_load.h"
 #include "export_paths.h"
 #include "host_write_path.h"
@@ -9928,6 +9930,112 @@ static int handle_x16_input_log(int seq, cJSON *args) {
     return 0;
 }
 
+// ─── x16/keyframes: a ring of states across one input recording ──────
+//
+// action: "start" (paused at a frame boundary; intervalFrames, budgetMB), "stop",
+// "replay" (index: restore that keyframe and replay on from it), or "status"
+// (default; list: true adds each keyframe).
+
+static int handle_x16_keyframes(int seq, cJSON *args) {
+    static const char cmd[] = "x16/keyframes";
+    cJSON *a = args ? cJSON_GetObjectItemCaseSensitive(args, "action") : NULL;
+    const char *action = cJSON_IsString(a) ? a->valuestring : "status";
+    char err[256];
+
+    keyframes_host_sync();
+    if (!strcmp(action, "start")) {
+        int interval, budget_mb;
+        if (!dap_arg_range_int(args, "intervalFrames", 1, 3600, &interval) ||
+            !dap_arg_range_int(args, "budgetMB", 1, 1024, &budget_mb)) {
+            send_dap_error_response(seq, cmd, "'intervalFrames' must be 1 to 3600, 'budgetMB' 1 to 1024");
+            return 0;
+        }
+        if (step.pending || !dap_at_frame_boundary()) {
+            send_dap_error_response(seq, cmd, "the machine must be paused at a frame boundary");
+            return 0;
+        }
+        if (!keyframes_host_start(interval ? (uint32_t)interval : 30,
+                                  (size_t)(budget_mb ? budget_mb : 64) * 1024 * 1024, err, sizeof err)) {
+            send_dap_error_response(seq, cmd, err);
+            return 0;
+        }
+    } else if (!strcmp(action, "stop")) {
+        if (keyframes_armed) input_log_end("stopped");
+        keyframes_host_sync();
+    } else if (!strcmp(action, "replay")) {
+        int index;
+        cJSON *ix = args ? cJSON_GetObjectItemCaseSensitive(args, "index") : NULL;
+        if (!ix || !dap_arg_range_int(args, "index", 0, (int)KEYFRAMES_MAX - 1, &index)) {
+            send_dap_error_response(seq, cmd, "'index' must be a keyframe number");
+            return 0;
+        }
+        if (step.pending || !DEBUGIsPaused()) {
+            send_dap_error_response(seq, cmd, "the machine must be paused");
+            return 0;
+        }
+        if (!keyframes_host_replay((uint32_t)index, err, sizeof err)) {
+            send_dap_error_response(seq, cmd, err);
+            return 0;
+        }
+        DEBUGBreakToDebugger();
+        DEBUGSetStopReason("restore");
+    } else if (strcmp(action, "status")) {
+        send_dap_error_response(seq, cmd, "'action' must be start, stop, replay or status");
+        return 0;
+    }
+
+    keyframes_status_t s;
+    keyframes_get_status(&s);
+    double mean_us, max_us;
+    keyframes_host_capture_cost(&mean_us, &max_us);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddBoolToObject(body, "armed", s.armed);
+    cJSON_AddBoolToObject(body, "usable", keyframes_host_usable());
+    cJSON_AddNumberToObject(body, "count", s.count);
+    cJSON_AddNumberToObject(body, "bytes", (double)s.bytes);
+    cJSON_AddNumberToObject(body, "budgetBytes", (double)s.budget);
+    cJSON_AddNumberToObject(body, "intervalFrames", s.interval);
+    cJSON_AddNumberToObject(body, "captured", (double)s.captured);
+    cJSON_AddNumberToObject(body, "evicted", (double)s.evicted);
+    cJSON_AddNumberToObject(body, "refusedFrames", (double)s.refused_frames);
+    cJSON_AddNumberToObject(body, "captureMeanUs", mean_us);
+    cJSON_AddNumberToObject(body, "captureMaxUs", max_us);
+    const keyframe_t *first = keyframes_get(0), *last = s.count ? keyframes_get(s.count - 1) : NULL;
+    if (first) cJSON_AddNumberToObject(body, "oldestCycle", (double)first->cycle);
+    if (last) cJSON_AddNumberToObject(body, "newestCycle", (double)last->cycle);
+    cJSON *gaps = cJSON_AddArrayToObject(body, "gaps");
+    for (uint32_t i = 0; i < s.gaps; i++) {
+        const keyframe_gap_t *g = keyframes_gap(i);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "firstCycle", (double)g->first_cycle);
+        cJSON_AddNumberToObject(o, "lastCycle", (double)g->last_cycle);
+        cJSON_AddNumberToObject(o, "frames", g->frames);
+        cJSON_AddStringToObject(o, "reason", g->reason);
+        cJSON_AddItemToArray(gaps, o);
+    }
+    cJSON_AddNumberToObject(body, "gapsDropped", s.gaps_dropped);
+    input_log_status_t log_status;
+    input_log_get_status(&log_status);
+    if (keyframes_host_usable() && !s.armed && log_status.end_reason) {
+        cJSON_AddStringToObject(body, "endReason", log_status.end_reason);
+    }
+    if (dap_arg_true(args, "list")) {
+        cJSON *list = cJSON_AddArrayToObject(body, "keyframes");
+        for (uint32_t i = 0; i < s.count; i++) {
+            const keyframe_t *k = keyframes_get(i);
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "index", i);
+            cJSON_AddNumberToObject(o, "cycle", (double)k->cycle);
+            cJSON_AddNumberToObject(o, "events", k->event_index);
+            cJSON_AddNumberToObject(o, "size", (double)k->size);
+            dap_add_hex64(o, "hash", k->hash);
+            cJSON_AddItemToArray(list, o);
+        }
+    }
+    send_dap_response(seq, cmd, true, body);
+    return 0;
+}
+
 // These change the machine in ways the log does not hold, so they end a
 // recording before they run, and cancel a replay.
 static void input_log_gate_edits(const char *cmd) {
@@ -10019,6 +10127,7 @@ static int dispatch_request(int seq, const char *cmd, cJSON *args) {
     else if (!strcmp(cmd, "x16/saveState")) result = handle_x16_save_state(seq, args);
     else if (!strcmp(cmd, "x16/loadState")) result = handle_x16_load_state(seq, args);
     else if (!strcmp(cmd, "x16/inputLog")) result = handle_x16_input_log(seq, args);
+    else if (!strcmp(cmd, "x16/keyframes")) result = handle_x16_keyframes(seq, args);
     else if (!strcmp(cmd, "x16/perfStats")) result = handle_x16_perf_stats(seq, args);
     else if (!strcmp(cmd, "x16/perfConfig")) result = handle_x16_perf_config(seq, args);
     else if (!strcmp(cmd, "x16/perfHist")) result = handle_x16_perf_hist(seq, args);

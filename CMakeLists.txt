@@ -364,6 +364,8 @@ set(X16_SOURCES
     src/javascript_interface.c
     src/input_log.c
     src/input_log_host.c
+    src/keyframes.c
+    src/keyframes_host.c
     src/joystick.c
     src/render_backend.c
     src/render_sdl.c
@@ -786,6 +788,10 @@ x16_add_test(c_frames
 # The clock, machine hash and devices are hooks, so it links alone.
 x16_add_test(input_log
     SOURCES tests/test_input_log.c src/input_log.c)
+
+# The machine state comes through a hook, so it links alone.
+x16_add_test(keyframes
+    SOURCES tests/test_keyframes.c src/keyframes.c)
 
 # Takes everything as arguments, so it links alone.
 x16_add_test(c_locals

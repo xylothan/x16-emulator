@@ -204,6 +204,53 @@ test_refused_start_without_hash(void)
 	hash_works = true;
 }
 
+static void
+test_replay_from(void)
+{
+	fake_clock = 100;
+	fake_hash  = 1;
+	check(input_log_start(), "recording starts");
+	input_log_note(INPUT_EV_JOY_PHYS, 0, 0xFFFE, 1);
+	fake_clock = 110;
+	input_log_note(INPUT_EV_KBD, 0x41, 0, 0);
+	fake_clock = 120;
+	uint64_t pos;
+	uint32_t idx;
+	input_log_position(&pos, &idx);
+	check(pos == 20 && idx == 2, "position is cycle and events so far");
+	input_log_note(INPUT_EV_KBD, 0x42, 0, 0);
+	fake_clock = 130;
+	fake_hash  = 2;
+	input_log_end("stopped");
+
+	fake_clock = 9000;
+	fake_hash  = 7;
+	check(!input_log_replay_from(idx, pos, 8), "replay from another state is refused");
+	check(!input_log_replay_from(4, pos, 7), "an index past the log is refused");
+	check(!input_log_replay_from(idx, 31, 7), "a cycle past the end is refused");
+	check(status().mode == INPUT_LOG_IDLE, "a refused replay stays idle");
+
+	seen_n = 0;
+	ends   = 0;
+	check(input_log_replay_from(idx, pos, 7), "replay starts partway");
+	check(seen_n == 1 && seen[0].kind == INPUT_EV_JOY_PHYS, "earlier controller state applied, nothing else");
+	at(9000, INPUT_SITE_TOP);
+	check(seen_n == 2 && seen[1].a == 0x42, "the next event applies at its time");
+	fake_hash = 2;
+	at(9010, INPUT_SITE_TOP);
+	check(status().result == INPUT_REPLAY_VERIFIED, "the end verifies");
+}
+
+static void
+test_generation(void)
+{
+	const uint32_t g = input_log_generation();
+	fake_hash        = 1;
+	check(input_log_start(), "recording starts");
+	input_log_end("stopped");
+	check(input_log_generation() == g + 1, "each recording has its own generation");
+}
+
 int
 main(void)
 {
@@ -218,6 +265,8 @@ main(void)
 	test_unverified();
 	test_cancel_and_idle_note();
 	test_refused_start_without_hash();
+	test_replay_from();
+	test_generation();
 	printf("%s\n", failures ? "FAILED" : "all passed");
 	return failures ? 1 : 0;
 }
