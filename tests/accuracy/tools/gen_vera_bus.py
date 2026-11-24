@@ -12,13 +12,23 @@ import os
 import subprocess
 import tempfile
 
-W, R, F = 0, 1, 2
+W, R, F, AT, PIN = 0, 1, 2, 3, 4
 IEN_MASK = 0xBF
+# tb_bus.v o[4], package pin 32: falls when IEN enables a pending VSYNC, rises on its ack.
+IRQ_PIN = 4
+# VSYNC status shows at 480:0 (top.v:454), line status at L:1, SCANLINE steps at 0 (composer.v:79-85).
+LINE, LINES, ANCHOR_Y, ANCHOR_X = 800, 525, 492, 4
+
+
+def at_pos(y, x):
+    """T of VGA line y, dot x, counted from the VSYNC rising edge."""
+    return ((y - ANCHOR_Y) % LINES) * LINE + x - ANCHOR_X
 
 
 class S:
     def __init__(self):
         self.ops = []
+        self.timed = False
 
     def w(self, r, v):
         self.ops.append((W, r, v & 255, 0xFF))
@@ -28,6 +38,16 @@ class S:
 
     def f(self):
         self.ops.append((F, 0, 0, 0xFF))
+
+    def v(self):
+        self.timed = True
+        self.f()
+
+    def at(self, t):
+        self.ops.append((AT, 0, t, 0xFF))
+
+    def pin(self):
+        self.ops.append((PIN, 0, 0, 0xFF))
 
 
 def dcsel_sweep():
@@ -159,6 +179,130 @@ def isr_latches():
     return s
 
 
+READ_LEAD = 5
+
+
+def read_at(s, y, x, r, mask=0xFF):
+    s.at(at_pos(y, x) - READ_LEAD); s.r(r, mask)
+
+
+def pins_around(s, y, before, after):
+    s.at(at_pos(y, -before) - 1)
+    for _ in range(before + after):
+        s.pin()
+
+
+def timed_scanline():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v(); s.w(7, 0x07)
+    for b in (512, 524, 0):
+        for i, x in enumerate(range(-26, 40, 13)):
+            read_at(s, b, x, 8 if i % 2 == 0 else 6)
+    for j in range(40):
+        read_at(s, 1 + j, -20 + j, 8)
+    for b in (256, 480, 491):
+        for i, x in enumerate(range(-26, 40, 13)):
+            read_at(s, b, x, 8 if i % 2 == 0 else 6)
+    return s
+
+
+def set_irqline(s, line, ien):
+    s.w(8, line); s.w(6, ((line >> 1) & 0x80) | ien)
+
+
+def timed_line_irq():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v()
+    for line in (500, 510, 511, 0, 1, 100, 255, 256, 300, 479, 480, 490):
+        s.at(at_pos(line - 1, 300))
+        set_irqline(s, line, 0x02); s.w(7, 0x07)
+        pins_around(s, line, 4, 10)
+        read_at(s, line, 60, 7, 0x07); read_at(s, line, 73, 8)
+        s.w(7, 0x02)
+        for _ in range(8):
+            s.pin()
+    return s
+
+
+def timed_irqline_race():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0x02); s.w(8, 0)
+    s.v(); s.w(7, 0x07)
+    for i, line in enumerate(range(102, 122)):
+        s.at(at_pos(line - 1, 785 + i) - 5)
+        s.w(8, line)
+        read_at(s, line, 40, 7, 0x07)
+        s.w(7, 0x02)
+    for i, line in enumerate(range(130, 140)):
+        s.at(at_pos(line, 100 + 40 * i))
+        s.w(8, line)
+        read_at(s, line, 700, 7, 0x07)
+        s.w(7, 0x02)
+    return s
+
+
+def timed_scanline_blank():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v()
+    for y in list(range(492, 525)) + list(range(0, 3)) + list(range(484, 492)):
+        read_at(s, y, 400, 8); read_at(s, y, 413, 6)
+        read_at(s, y, 794, 8); read_at(s, y, 807, 8)
+    return s
+
+
+def line_irq_window(lines):
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v()
+    for line in lines:
+        s.at(at_pos(line - 1, 100))
+        set_irqline(s, line, 0x02); s.w(7, 0x07)
+        for x in range(200, 2 * LINE + 51, 50):
+            s.at(at_pos(line - 1, x) - 1); s.pin()
+    return s
+
+
+def timed_vsync_irq():
+    s = S()
+    s.w(5, 0); s.w(9, 0x01); s.w(6, 0)
+    s.v(); s.w(7, 0x07)
+    s.at(at_pos(479, 600)); s.w(6, 0x01)
+    pins_around(s, 480, 4, 10)
+    read_at(s, 480, 60, 7, 0x07)
+    s.w(7, 0x01)
+    for _ in range(8):
+        s.pin()
+    s.at(at_pos(483, 0)); s.w(6, 0); set_irqline(s, 486, 0); s.w(7, 0x07)
+    s.at(at_pos(487, 100)); s.w(6, 0x02)
+    for _ in range(8):
+        s.pin()
+    s.w(6, 0)
+    for _ in range(8):
+        s.pin()
+    s.w(6, 0x02); s.w(7, 0x02)
+    for _ in range(8):
+        s.pin()
+    read_at(s, 488, 0, 7, 0x07)
+    return s
+
+
+def timed_irq_vstart():
+    s = S()
+    s.w(5, 2); s.w(9, 0x00); s.w(10, 0xA0); s.w(11, 0x0A); s.w(12, 0x64)
+    s.w(5, 0); s.w(9, 0x01); s.w(10, 0x40); s.w(11, 0x40); s.w(6, 0)
+    s.v()
+    for line in (0, 19, 20, 21, 100, 199, 200, 201, 479):
+        s.at(at_pos(line - 1, 300))
+        set_irqline(s, line, 0x02); s.w(7, 0x07)
+        pins_around(s, line, 2, 6)
+        read_at(s, line, 60, 7, 0x07); read_at(s, line, 73, 8)
+        s.w(7, 0x02)
+    return s
+
+
 SCRIPTS = {
     "dcsel_sweep": dcsel_sweep,
     "ctrl_roundtrip": ctrl_roundtrip,
@@ -170,35 +314,70 @@ SCRIPTS = {
     "isr_sprite_collision": isr_sprite_collision,
     "isr_sprites_disabled": isr_sprites_disabled,
     "isr_latches": isr_latches,
+    "timed_scanline": timed_scanline,
+    "timed_line_irq": timed_line_irq,
+    "timed_irqline_race": timed_irqline_race,
+    "timed_vsync_irq": timed_vsync_irq,
+    "timed_irq_vstart": timed_irq_vstart,
+    "timed_scanline_blank": timed_scanline_blank,
+    "timed_line_irq_blank_even": lambda: line_irq_window(range(494, 511, 2)),
+    "timed_line_irq_blank_odd": lambda: line_irq_window(range(493, 512, 2)),
 }
 
 
-def run(name, vvp, out_dir, header):
-    s = SCRIPTS[name]()
+def capture(name, s, vvp, cache):
+    script = "".join(f"{k} {r:x} {v:x}\n" for k, r, v, _ in s.ops)
+    if cache:
+        os.makedirs(cache, exist_ok=True)
+        cin, cout = os.path.join(cache, f"{name}.in"), os.path.join(cache, f"{name}.out")
+        if os.path.exists(cout) and os.path.exists(cin) and open(cin).read() == script:
+            return open(cout).read()
     with tempfile.TemporaryDirectory() as tmp:
         inp, out = os.path.join(tmp, "in"), os.path.join(tmp, "out")
         with open(inp, "w", newline="\n") as f:
-            f.writelines(f"{k} {r:x} {v:x}\n" for k, r, v, _ in s.ops)
+            f.write(script)
         subprocess.run(["vvp", vvp, f"+in={inp}", f"+out={out}"], check=True,
-                       stdout=subprocess.DEVNULL, timeout=7200)
-        with open(out) as f:
-            reads = f.read().split()
-    want = sum(1 for o in s.ops if o[0] == R)
-    if len(reads) != want or any("x" in v or "z" in v for v in reads):
+                       stdout=subprocess.DEVNULL, timeout=14400)
+        text = open(out).read()
+    if cache:
+        with open(cout, "w", newline="\n") as f:
+            f.write(text)
+        with open(cin, "w", newline="\n") as f:
+            f.write(script)
+    return text
+
+
+def run(name, vvp, out_dir, header, cache=None):
+    s = SCRIPTS[name]()
+    got = [ln.split() for ln in capture(name, s, vvp, cache).splitlines() if ln.strip()]
+    want = sum(1 for o in s.ops if o[0] in (W, R, PIN))
+    if len(got) != want or any("x" in t or "z" in t for ln in got for t in ln):
         raise RuntimeError(f"{name}: bad capture")
-    it = iter(reads)
+    if IRQ_PIN is None and any(o[0] == PIN for o in s.ops):
+        return f"{name} (captured; IRQ_PIN unset)"
+    it = iter(got)
+    timed = False
     with open(os.path.join(out_dir, f"bus_{name}.vec"), "w", newline="\n") as f:
         f.write(header)
         f.write(f"bus {name}\n")
         for k, r, v, m in s.ops:
-            if k == W:
-                f.write(f"w {r:02x} {v:02x}\n")
-            elif k == F:
-                f.write("f\n")
+            if k == AT:
+                continue
+            if k == F:
+                timed |= s.timed
+                f.write("v\n" if timed else "f\n")
+                continue
+            ln = next(it)
+            if k == PIN:
+                f.write(f"I {ln[1][7 - IRQ_PIN]} {ln[2]}\n")
+            elif k == W:
+                f.write(f"W {r:02x} {v:02x} {ln[1]}\n" if timed else f"w {r:02x} {v:02x}\n")
+            elif timed:
+                f.write(f"R {r:02x} {ln[0]} {m:02x} {ln[1]}\n")
             elif m == 0xFF:
-                f.write(f"r {r:02x} {next(it)}\n")
+                f.write(f"r {r:02x} {ln[0]}\n")
             else:
-                f.write(f"r {r:02x} {next(it)} {m:02x}\n")
+                f.write(f"r {r:02x} {ln[0]} {m:02x}\n")
         f.write("e\n")
     return name
 
@@ -210,11 +389,14 @@ def main():
     ap.add_argument("--version", required=True)
     ap.add_argument("--sha256", required=True)
     ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--only", nargs="*")
+    ap.add_argument("--cache", help="keep raw captures here and reuse them")
     a = ap.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
     header = f"oracle vera {a.version} bitstream-sha256 {a.sha256}\n"
+    names = [n for n in SCRIPTS if not a.only or n in a.only]
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        for name in ex.map(lambda n: run(n, a.vvp, a.out_dir, header), SCRIPTS):
+        for name in ex.map(lambda n: run(n, a.vvp, a.out_dir, header, a.cache), names):
             print("done", name, flush=True)
 
 

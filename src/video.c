@@ -173,6 +173,8 @@ static uint8_t ien;
 static uint8_t isr;
 
 static uint16_t irq_line;
+static uint8_t comp_first_frame;
+static uint8_t line_irq_pending;
 
 static uint8_t reg_layer[2][7];
 
@@ -460,6 +462,8 @@ video_reset()
 
 	vga_scan_pos_x = 0;
 	vga_scan_pos_y = 0;
+	comp_first_frame = 1;
+	line_irq_pending = 0;
 	ntsc_half_cnt = 0;
 	ntsc_scan_pos_y = 0;
 
@@ -2473,19 +2477,44 @@ render_line(uint16_t y, float scan_pos_x)
 }
 
 static void
+vsync_isr(void)
+{
+	if (sprite_line_collisions != 0) {
+		isr |= 4;
+	}
+	isr = (isr & 0xf) | sprite_line_collisions;
+	sprite_line_collisions = 0;
+	isr |= 1; // VSYNC IRQ
+}
+
+static void
 update_isr_and_coll(uint16_t y, uint16_t compare)
 {
 	if (y == SCREEN_HEIGHT) {
-		if (sprite_line_collisions != 0) {
-			isr |= 4;
-		}
-		isr = (isr & 0xf) | sprite_line_collisions;
-		sprite_line_collisions = 0;
-		isr |= 1; // VSYNC IRQ
+		vsync_isr();
 	}
 	if (y == compare) { // LINE IRQ
 		isr |= 2;
 	}
+}
+
+// composer.v:70-92: y_counter_r resets with the VGA counter, so it equals the
+// line until the first next_frame (end of line 523) and runs one ahead after.
+static uint16_t
+comp_line_counter(uint16_t y)
+{
+	if (comp_first_frame) {
+		return y;
+	}
+	return y == SCAN_HEIGHT - 1 ? 0 : y + 1;
+}
+
+// composer.v:126-127: y_counter_rr is the previous line's y_counter_r.
+static uint16_t
+comp_scanline(uint16_t y)
+{
+	const uint16_t prev = y == 0 ? 0 : comp_first_frame ? y - 1 : y;
+	return prev >= 512 ? 511 : comp_line_counter(y) & 0x1FF;
 }
 
 bool
@@ -2501,6 +2530,13 @@ video_step(float mhz, float steps, bool midline)
 		if (!ntsc_mode) {
 			render_line(vga_scan_pos_y - VGA_Y_OFFSET, VGA_SCAN_WIDTH);
 			line_buf_sel ^= 1;
+			// composer.v:99-104: compared at the line's last clock.
+			if (comp_line_counter(vga_scan_pos_y) == irq_line) {
+				line_irq_pending = 1;
+			}
+		}
+		if (vga_scan_pos_y == SCAN_HEIGHT - 2) {
+			comp_first_frame = 0;
 		}
 		vga_scan_pos_y++;
 		if (vga_scan_pos_y == SCAN_HEIGHT) {
@@ -2510,13 +2546,18 @@ video_step(float mhz, float steps, bool midline)
 				frame_count++;
 			}
 		}
-		if (!ntsc_mode) {
-			update_isr_and_coll(vga_scan_pos_y - VGA_Y_OFFSET, irq_line);
+		if (!ntsc_mode && vga_scan_pos_y - VGA_Y_OFFSET == SCREEN_HEIGHT) {
+			vsync_isr();
 		}
 	} else if (midline) {
 		if (!ntsc_mode) {
 			render_line(vga_scan_pos_y - VGA_Y_OFFSET, vga_scan_pos_x);
 		}
+	}
+	// top.v:451-452: line_irq is registered, so the status shows a clock later.
+	if (line_irq_pending && vga_scan_pos_x >= 2) {
+		line_irq_pending = 0;
+		isr |= 2;
 	}
 	ntsc_half_cnt += PIXEL_FREQ * steps / mhz;
 	if (ntsc_half_cnt > NTSC_HALF_SCAN_WIDTH) {
@@ -2764,7 +2805,7 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 	}
 }
 
-#define VERA_CHUNK_VERSION 3
+#define VERA_CHUNK_VERSION 4
 
 static void
 video_state_io(ss_writer *w, ss_reader *r, int version)
@@ -2852,6 +2893,13 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 		memset(held_layer_line, 0, sizeof(held_layer_line));
 		memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
 		memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
+	}
+	if (w || version >= 4) {
+		SS_BLOCK(comp_first_frame);
+		SS_BLOCK(line_irq_pending);
+	} else {
+		comp_first_frame = 0;
+		line_irq_pending = 0;
 	}
 #undef SS_BLOCK
 
@@ -4354,7 +4402,7 @@ static void check_not_writeonly(uint8_t reg) {
 
 static uint8_t video_read_inner(uint8_t reg, bool debugOn) {
 	bool ntsc_mode = reg_composer[0] & 2;
-	uint16_t scanline = ntsc_mode ? ntsc_scan_pos_y % SCAN_HEIGHT : vga_scan_pos_y;
+	uint16_t scanline = ntsc_mode ? ntsc_scan_pos_y % SCAN_HEIGHT : comp_scanline(vga_scan_pos_y);
 	if (scanline >= 512) scanline=511;
 
 	// A debug read is the debugger looking, not the program reading: it must

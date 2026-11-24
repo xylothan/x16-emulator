@@ -137,3 +137,11 @@ window.vec
 window_bm_past_480.vec
 window_past_480.vec
 window_scaled.vec
+bus_timed_irq_vstart.vec
+bus_timed_irqline_race.vec
+bus_timed_line_irq.vec
+bus_timed_line_irq_blank_even.vec
+bus_timed_line_irq_blank_odd.vec
+bus_timed_scanline.vec
+bus_timed_scanline_blank.vec
+bus_timed_vsync_irq.vec

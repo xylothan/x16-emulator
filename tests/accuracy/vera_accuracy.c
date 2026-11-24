@@ -118,6 +118,43 @@ run_scene(FILE *f, const char *name, uint32_t seed, int frame, size_t final_ops)
 	return true;
 }
 
+// Timed ops carry T, clocks since the VSYNC rising edge, which is dot 4 of
+// line 492; emulator dot x is RTL dot x - 1. top.v:257-265: a write takes
+// effect 3 clocks after its strobe rises.
+#define ANCHOR_Y     492
+#define ANCHOR_X     5
+#define WRITE_DELAY  3
+
+static long bus_now;
+
+static void
+step_dot(void)
+{
+	video_step(25.0f, 1.0f, false);
+	bus_now = (vga_scan_pos_y == ANCHOR_Y && vga_scan_pos_x == ANCHOR_X) ? 0 : bus_now + 1;
+}
+
+// T restarts at every VSYNC rising edge, as tb_bus.v counts it.
+static bool
+step_to(long t)
+{
+	for (long n = 0; bus_now != t; n++) {
+		if (n > 800L * 525) {
+			return false;
+		}
+		step_dot();
+	}
+	return true;
+}
+
+static void
+step_to_anchor(void)
+{
+	do {
+		step_dot();
+	} while (bus_now != 0);
+}
+
 static bool
 run_bus(FILE *f, const char *name)
 {
@@ -125,11 +162,45 @@ run_bus(FILE *f, const char *name)
 	video_reset();
 	while (fgets(line_buf_text, MAX_LINE, f)) {
 		unsigned r, v, m = 0xFF;
+		long t;
 		step++;
 		if (line_buf_text[0] == 'e') {
 			break;
 		} else if (line_buf_text[0] == 'f') {
 			step_frame();
+		} else if (line_buf_text[0] == 'v') {
+			step_to_anchor();
+		} else if (sscanf(line_buf_text, "W %x %x %ld", &r, &v, &t) == 3) {
+			if (!step_to(t + WRITE_DELAY)) {
+				printf("FAIL %s: step %d is out of order\n", name, step);
+				return false;
+			}
+			video_write((uint8_t)r, (uint8_t)v);
+		} else if (sscanf(line_buf_text, "R %x %x %x %ld", &r, &v, &m, &t) == 4) {
+			if (!step_to(t)) {
+				printf("FAIL %s: step %d is out of order\n", name, step);
+				return false;
+			}
+			const uint8_t got = video_read((uint8_t)r, false);
+			if ((got & m) != (v & m)) {
+				if (!bad) {
+					printf("FAIL %s: step %d T %ld reg $%02X read $%02X, expected $%02X (mask $%02X)\n",
+					       name, step, t, r, got, v, m);
+				}
+				bad++;
+			}
+		} else if (sscanf(line_buf_text, "I %u %ld", &v, &t) == 2) {
+			if (!step_to(t)) {
+				printf("FAIL %s: step %d is out of order\n", name, step);
+				return false;
+			}
+			const unsigned pin = video_get_irq_out() ? 0 : 1;
+			if (pin != v) {
+				if (!bad) {
+					printf("FAIL %s: step %d T %ld IRQ pin %u, expected %u\n", name, step, t, pin, v);
+				}
+				bad++;
+			}
 		} else if (sscanf(line_buf_text, "w %x %x", &r, &v) == 2) {
 			video_write((uint8_t)r, (uint8_t)v);
 		} else if (sscanf(line_buf_text, "r %x %x %x", &r, &v, &m) >= 2) {
