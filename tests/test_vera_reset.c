@@ -82,7 +82,11 @@ test_the_collision_channel_follows_the_attributes(void)
 	arm_colliding_sprites();
 	check_eq(collision_after_a_frame(), 0x50, "two armed sprites collide");
 
-	// Zero z-depth stops a sprite.
+	// Zero z-depth stops a sprite. Written in blanking: sprite_renderer.v:171-176
+	// reads a line's attributes during the line before it.
+	for (unsigned i = 0; i < 490; i++) {
+		video_step(25.0f, 801.0f, false);
+	}
 	place_sprite(1, 0xD0, 0);
 	check_eq(collision_after_a_frame(), 0x00, "and stop when one is given no z-depth");
 }

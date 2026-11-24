@@ -359,7 +359,12 @@ test_the_nibble_is_replaced_each_frame_while_the_latch_holds(void)
 	step_frame();
 	check_eq(read_isr() & 0xF0, 0x50, "a collision in the first frame");
 
-	// Remove the second sprite so the next frame collides with nothing.
+	// Remove the second sprite so the next frame collides with nothing. The
+	// write lands in blanking: sprite_renderer.v:171-176 reads a line's
+	// attributes during the line before it.
+	for (unsigned i = 0; i < 490; i++) {
+		step_line();
+	}
 	place_sprite(1, 0xD0, 0);
 	step_frame();
 
