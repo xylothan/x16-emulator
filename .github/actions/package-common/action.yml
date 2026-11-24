@@ -1,0 +1,33 @@
+name: Add common package files
+description: >-
+  Copies the SD card image, the ROM and its symbols into a package directory
+  and stamps it with the build identifier. The README and x16-docs PDFs are
+  added by publish.
+
+inputs:
+  dir:
+    description: Package directory; created if missing.
+    required: false
+    default: emu_binaries
+  build:
+    description: Build identifier for BUILD_VERSION.txt.
+    required: true
+  rom-dir:
+    description: Directory fetch-rom wrote to.
+    required: false
+    default: latest_rom
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PKG_DIR: ${{ inputs.dir }}
+        BUILD_VERSION: ${{ inputs.build }}
+        ROM_DIR: ${{ inputs.rom-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$PKG_DIR"
+        cp sdcard.img.zip "$ROM_DIR/rom.bin" "$ROM_DIR"/*.sym "$PKG_DIR/"
+        printf '%s\n' "$BUILD_VERSION" > "$PKG_DIR/BUILD_VERSION.txt"
+        ls -l "$PKG_DIR"

@@ -1,0 +1,30 @@
+name: Install apt packages
+description: >-
+  apt-get install without recommended packages, with short network timeouts
+  and retries.
+
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        # Ubuntu 26.04's runner mirror stalls on single requests for minutes,
+        # and recommends pull in soundfonts and Qt that nothing here uses.
+        sudo tee /etc/apt/apt.conf.d/90ci > /dev/null <<'EOF'
+        APT::Install-Recommends "false";
+        Acquire::Retries "5";
+        Acquire::http::Timeout "15";
+        Acquire::https::Timeout "15";
+        EOF
+        sudo apt-get update
+        # Word splitting is the point: PACKAGES is a list.
+        # shellcheck disable=SC2086
+        sudo apt-get install -y $PACKAGES

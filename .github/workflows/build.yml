@@ -47,6 +47,7 @@ jobs:
   #     again later from the history alone.
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       # Only bump this if the first tag ends up cut against a different
       # upstream release; after that the tags themselves take over.
@@ -97,16 +98,19 @@ jobs:
   README:
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make fonts-dejavu
-      - uses: actions/setup-node@v4
+        uses: ./.github/actions/apt-install
         with:
-          node-version: 18
+          packages: fonts-dejavu
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
       - name: Install md-to-pdf (npm)
         run: |
           npm i md-to-pdf
@@ -133,7 +137,7 @@ jobs:
           # status was checked, and every PDF shipped without any of it. Hence
           # the pipefail above.
           cat .gh/header_footer.md README.md RELEASES.md build_stamp.md | md-to-pdf --config-file .gh/config.js --stylesheet .gh/markdown.css > "artifacts/README.pdf"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: readme-pdf
           path: artifacts/*
@@ -145,20 +149,21 @@ jobs:
   # off README like the platform builds do.
   unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # buildtables.py generates cpu/tables.h and cpu/mnemonics.h; CMake looks
       # for a Python 3 interpreter unconditionally.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
         # SDL2 and zlib are found by find_package() at configure time, and
         # disasm.c pulls in SDL headers, so they are needed even though nothing
         # here links the emulator.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev iverilog
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev zlib1g-dev iverilog
       - name: Configure
         # LTO off: it buys nothing for three small binaries and costs link time.
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
@@ -209,7 +214,7 @@ jobs:
         # The baseline says how many cases pass; this says what the failures
         # look like.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: processor-tests-report
           path: pt-report-*.txt
@@ -218,9 +223,10 @@ jobs:
   # packages use. Compiler-specific breaks in a test build fail here.
   windows-unit-tests:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - uses: ./.github/actions/msvc-cmake
@@ -252,15 +258,16 @@ jobs:
   # unit-tests because it rebuilds once per mutation.
   mutation-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev zlib1g-dev
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev zlib1g-dev
       - name: Configure
         run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF
       - name: Fetch CPU test images
@@ -284,15 +291,17 @@ jobs:
   # it and the platform jobs take whatever x16-rom built last.
   machine-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev libcjson-dev zlib1g-dev xvfb
+        # xauth is only a recommend of xvfb, and xvfb-run needs it.
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev libcjson-dev zlib1g-dev xvfb xauth
       - name: Fetch the pinned ROM
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -340,6 +349,7 @@ jobs:
     name: windows (${{ matrix.arch }}${{ matrix.suffix }})
     needs: [version, README]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       # One combination failing should not hide the state of the others.
       fail-fast: false
@@ -352,8 +362,8 @@ jobs:
           - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'OFF', features: '',     suffix: '',      package: x16emu_win-arm64 }
           - { arch: arm64,  runner: windows-11-arm, platform: ARM64, triplet: arm64-windows-x16emu, midi: 'ON',  features: 'midi', suffix: '-midi', package: x16emu_win-arm64-midi }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -416,7 +426,7 @@ jobs:
             Copy-Item build/vcpkg_installed/${{ matrix.triplet }}/bin/libfluidsynth-3.dll emu_binaries/
           }
           Get-ChildItem emu_binaries
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: readme-pdf
           path: emu_binaries
@@ -429,7 +439,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Stamp build version
         run: Set-Content -Path emu_binaries/BUILD_VERSION.txt -Value '${{ needs.version.outputs.build }}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
@@ -441,6 +451,7 @@ jobs:
     name: windows-legacy (${{ matrix.arch }})
     needs: [version, README]
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
       run:
         shell: msys2 {0}
@@ -452,14 +463,14 @@ jobs:
           # FluidSynth. The MSVC jobs above still ship 32-bit Windows builds.
           - { arch: x86_64, msystem: MINGW64, prefix: x86_64, path_type: minimal, package: x16emu_win64-mingw }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
           update: true
           install: make git mingw-w64-${{ matrix.prefix }}-toolchain mingw-w64-${{ matrix.prefix }}-SDL2 mingw-w64-${{ matrix.prefix }}-fluidsynth mingw-w64-${{ matrix.prefix }}-cmake mingw-w64-${{ matrix.prefix }}-ntldd
           path-type: ${{ matrix.path_type }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -472,8 +483,6 @@ jobs:
           cp latest_rom/*.h src/.
       - name: Build Emulator
         run: |
-          git reset --hard
-          git diff
           mkdir build
           cd build
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
@@ -527,7 +536,7 @@ jobs:
         run: |
           cp latest_rom/rom.bin emu_binaries/.
           cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: readme-pdf
           path: emu_binaries
@@ -544,7 +553,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Stamp build version
         run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
@@ -556,6 +565,7 @@ jobs:
     needs: [version, README]
     # arm-runner-action needs qemu-user-static, which Ubuntu 26.04 does not ship.
     runs-on: ${{ matrix.emulated && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -564,24 +574,22 @@ jobs:
           - { arch: aarch64, emulated: true,  base_image: 'raspios_lite_arm64:2022-04-04', cpu: cortex-a53, package: x16emu_linux-aarch64 }
           - { arch: armhf,   emulated: true,  base_image: 'raspios_lite:2022-04-04',       cpu: cortex-a7,  package: x16emu_linux-armhf }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Install Dependencies
         if: ${{ !matrix.emulated }}
-        run: |
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list~
-          sudo sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list
-          sudo apt-get update
-          sudo apt-get install -y build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make libsdl2-dev libfluidsynth-dev libcjson-dev cmake
       - name: Install Dependencies
         # The emulated legs need only enough to run the ARM image; the build
         # dependencies are installed inside it.
         if: ${{ matrix.emulated }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential make qemu-user-static
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make qemu-user-static
       - name: Fetch ROM
         uses: ./.github/actions/fetch-rom
         with:
@@ -593,8 +601,6 @@ jobs:
       - name: Build Emulator
         if: ${{ !matrix.emulated }}
         run: |
-          git reset --hard
-          git diff
           mkdir build
           cd build
           cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
@@ -626,7 +632,6 @@ jobs:
             apt-get install -y build-essential make libsdl2-dev file git libfluidsynth-dev libcjson-dev cmake
             mkdir build
             cd build
-            git reset --hard
             cmake .. -DENABLE_FLUIDSYNTH=ON -DENABLE_TRACE=ON
             cmake --build .
             cd ..
@@ -641,7 +646,7 @@ jobs:
           sudo chown -R runner emu_binaries
           cp latest_rom/rom.bin emu_binaries/.
           cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: readme-pdf
           path: emu_binaries
@@ -654,7 +659,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Stamp build version
         run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
@@ -662,6 +667,7 @@ jobs:
     name: macos (${{ matrix.arch }})
     needs: [version, README]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -670,11 +676,11 @@ jobs:
           - { arch: x86_64, runner: macos-15-intel, package: x16emu_macos_intel }
           - { arch: arm64,  runner: macos-latest,   package: x16emu_macos_m1 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dependencies
         run: |
           brew install make sdl2 fluid-synth # cmake is likely here or pulled in
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -702,7 +708,7 @@ jobs:
         run: |
           cp latest_rom/rom.bin emu_binaries/.
           cp latest_rom/*.sym emu_binaries/.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: readme-pdf
           path: emu_binaries
@@ -715,19 +721,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Stamp build version
         run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}
           path: emu_binaries/*
   wasm:
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential make libsdl2-dev cmake
-      - uses: mymindstorm/setup-emsdk@v14
-      - uses: actions/setup-python@v5
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential make libsdl2-dev cmake
+      - uses: mymindstorm/setup-emsdk@v16
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Fetch ROM
@@ -754,7 +763,7 @@ jobs:
           file emu_binaries/*
       - name: Stamp build version
         run: echo '${{ needs.version.outputs.build }}' > emu_binaries/BUILD_VERSION.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: x16emu_wasm
           path: emu_binaries/*
@@ -790,6 +799,7 @@ jobs:
       - macos
       - wasm
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       # The default token is read-only, and creating a release needs to write.
       contents: write
@@ -800,7 +810,7 @@ jobs:
       BUILD_VERSION: ${{ needs.version.outputs.build }}
     steps:
       - name: Collect the platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           # Everything the builds produced, but not the README PDF, which is
