@@ -2,8 +2,8 @@
 //
 // ORACLE: SingleStepTests/65x02 wdc65c02/v1 and SingleStepTests/65816 v1, the
 // per-cycle bus traces in tests/pt/, for each opcode named below.
-// ORACLE: W65C816S datasheet, VDA and VPA pin description: both low is an
-// internal operation.
+// ORACLE: Commander X16 Developer Edition schematic Rev 1.1: U30 (74ACT138)
+// selects I/O from A5-A15 alone; CPU pin 39 (65C816 VDA) is not connected.
 
 #include "../support/fake_devices.h"
 #include "../support/harness.h"
@@ -48,11 +48,11 @@ static const bus_case cases[] = {
 	{ "65C02 SBC abs, D=1",       C02, { 0xED, 0x23, 0x9F }, 0x00, true,  2, 0 },
 	// $6C: pointer low, pointer high, pointer high.
 	{ "65C02 JMP (abs)",          C02, { 0x6C, 0x23, 0x9F }, 0x00, false, 3, 0 },
-	// $EE: the modify cycle has VDA and VPA low.
-	{ "65C816 E=1 INC abs",       C816_EMU,    { 0xEE, 0x23, 0x9F }, 0x00, false, 1, 1 },
-	{ "65C816 E=0 INC abs",       C816_NATIVE, { 0xEE, 0x23, 0x9F }, 0x00, false, 1, 1 },
-	// $BD: the uncarried address $9F23 has VDA and VPA low; the read is at $A023.
-	{ "65C816 LDA abs,X crossing", C816_EMU,   { 0xBD, 0x80, 0x9F }, 0xA3, false, 0, 0 },
+	// $EE: E=1 writes the old value in the modify cycle, E=0 reads.
+	{ "65C816 E=1 INC abs",       C816_EMU,    { 0xEE, 0x23, 0x9F }, 0x00, false, 1, 2 },
+	{ "65C816 E=0 INC abs",       C816_NATIVE, { 0xEE, 0x23, 0x9F }, 0x00, false, 2, 1 },
+	// $BD: the indexing cycle reads the uncarried address $9F23; the read is at $A023.
+	{ "65C816 LDA abs,X crossing", C816_EMU,   { 0xBD, 0x80, 0x9F }, 0xA3, false, 1, 0 },
 };
 
 static void
