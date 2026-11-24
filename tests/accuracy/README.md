@@ -41,9 +41,6 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 ## Not covered
 
 - NTSC, RGB, interlaced and 240p output
-- Mid-frame layer, scale, border and palette writes (`mid_*` in `KNOWN_GAPS`).
-  Hardware fetches line y+1 during line y with live registers and looks up the
-  palette at scan-out, so a write inside a line splits a line.
 - Sprite collision IRQ timing
 - Sprite fetch limits under VRAM contention (`sprites_many` in `KNOWN_GAPS`)
 - Sprite buffer entries 640 and 641 when sprites are armed outside vertical blank

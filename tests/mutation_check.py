@@ -237,6 +237,31 @@ MUTATIONS = [
         "caught_by": ["vera_accuracy"],
     },
     {
+        "name": "VERA palette write lands a pixel early",
+        "file": "src/video.c",
+        "find": "scan_out_to(write_dot());",
+        "into": "scan_out_to(write_dot() - 1);",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA layer 1 wins VRAM arbitration",
+        "file": "src/video.c",
+        # vram_if.v:133-158: interface 1 (layer 0) before interface 2 (layer 1).
+        "find": "s[1].ack = req1 && !req0;",
+        "into": "s[1].ack = req1;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA layer fetch ignores writes made during the line",
+        "file": "src/video.c",
+        "find": "layers_written |= e->reg <= FL_DC_VIDEO;",
+        "into": "layers_written |= false;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
         "name": "VERA ISR write clears the collision bits",
         "file": "src/video.c",
         "find": "isr &= ~(value & 0x07);",

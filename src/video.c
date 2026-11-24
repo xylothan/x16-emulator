@@ -185,24 +185,51 @@ static uint8_t reg_layer[2][7];
 // whole frame, which describes just one band of the screen.
 static uint8_t  line_reg_layer[SCREEN_HEIGHT][2][7];
 static uint16_t line_eff_y[SCREEN_HEIGHT];
-// The layer row each line actually displayed. Recorded rather than left for a
-// consumer to recompute from the registers: the renderers take the layout from
-// prev_layer_properties[1] but VSCROLL and the layer-height mask from [0]
-// (video.c: render_layer_line_text/tile via calc_layer_eff_y(props0, ...)), so
-// no single register generation describes the result. Storing the answer makes
-// the contract true instead of approximately true.
+// The layer row each line actually displayed, as fetched.
 static uint16_t line_layer_row[SCREEN_HEIGHT][2];
 static uint8_t  line_layer_enabled[SCREEN_HEIGHT];
 static bool     line_state_valid[SCREEN_HEIGHT];
-// The raw registers on the same two-stage delay the layer properties use, so
-// the history above can record the generation that actually rendered a line.
-static uint8_t  prev_reg_layer[2][2][7];
 
 #define COMPOSER_SLOTS 4*64
 static uint8_t reg_composer[COMPOSER_SLOTS];
-static uint8_t prev_reg_composer[2][COMPOSER_SLOTS];
 
-static uint8_t layer_line[2][SCREEN_WIDTH];
+// top.v:729-739, layer_renderer.v, sprite_renderer.v: line y+1's layer and
+// sprite buffers are built during line y from live registers, and composed
+// during line y+1. Here they are built when line y ends, from the registers as
+// it began plus the writes made during it, each at the dot it took effect.
+#define FETCH_LOG_MAX 128
+enum { FL_DC_VIDEO = 14, FL_VSCALE, FL_VSTART, FL_VSTOP, FL_COMP_N = 4 };
+typedef struct { uint16_t dot; uint8_t reg; uint8_t value; } fetch_write_t;
+typedef struct { uint16_t dot; uint8_t slot; uint8_t offset; uint8_t old; } sprite_write_t;
+static uint8_t        fetch_reg_layer[2][7];
+static uint8_t        fetch_reg_comp[FL_COMP_N]; // DC_VIDEO, VSCALE, VSTART, VSTOP
+static fetch_write_t  fetch_log[FETCH_LOG_MAX];
+static uint16_t       fetch_log_n;
+static bool           fetch_log_lost;
+static sprite_write_t sprite_log[FETCH_LOG_MAX];
+static uint16_t       sprite_log_n;
+#define FETCH_NONE 0xFFFF
+static uint16_t       fetched_y = FETCH_NONE;
+
+// layer_renderer.v, one clock at a time: the line renderer state machine and
+// the pixel renderer it feeds.
+enum { LR_WAIT_START, LR_FETCH_MAP, LR_WAIT_FETCH_MAP, LR_FETCH_TILE, LR_WAIT_FETCH_TILE, LR_RENDER };
+
+struct layer_fetch {
+	uint8_t  state, strobe, ack, render_start, busy, xcnt, word, htile;
+	uint8_t  render_mapdata, next_render_mapdata;
+	uint16_t bus_addr, ack_addr, bitmap_addr, lb_idx;
+	uint32_t map_data, tile_data, render_data;
+};
+
+// Where each layer renderer was when the last line ended. render_start
+// resets only the counters and the state (layer_renderer.v:319-325), so one
+// that had not finished carries into the next line.
+static struct layer_fetch layer_fsm[2];
+
+// top.v:729-739: two buffers per layer, swapped every scanline.
+static uint8_t layer_lb[2][2][SCREEN_WIDTH];
+#define layer_line (layer_lb[line_buf_sel])
 static uint8_t sprite_line_col[SCREEN_WIDTH];
 static uint8_t sprite_line_z[SCREEN_WIDTH];
 static uint8_t sprite_line_mask[SCREEN_WIDTH];
@@ -212,13 +239,9 @@ static uint8_t sprite_line_collisions;
 // top.v:731-739: the two line buffers swap on every scanline, blanking included.
 // composer.v:130: the sprite buffer is erased only below index 640.
 static uint8_t line_buf_sel;
-static uint8_t line_render_held;
-static uint8_t held_layer_line[2][2][SCREEN_WIDTH];
 static uint8_t sprite_edge_col[2][2];
 static uint8_t sprite_edge_z[2][2];
 static bool layer_line_enable[2];
-static bool old_layer_line_enable[2];
-static bool old_sprite_line_enable;
 static bool sprite_line_enable;
 
 ////////////////////////////////////////////////////////////
@@ -351,6 +374,7 @@ mousegrab_toggle() {
 // pre-reset machine while the registers read zero -- and a debug view
 // correlating the two would pair zeroed registers with stale geometry.
 static void video_reset_layer_pipeline(void);
+static uint16_t write_dot(void);
 static void refresh_sprite_properties(const uint16_t sprite);
 
 void
@@ -435,8 +459,9 @@ video_reset()
 	}
 
 	line_buf_sel = 0;
-	line_render_held = 0;
-	memset(held_layer_line, 0, sizeof(held_layer_line));
+	memset(layer_lb, 0, sizeof(layer_lb));
+	memcpy(fetch_reg_comp, (uint8_t[FL_COMP_N]){ reg_composer[0], reg_composer[2], reg_composer[6], reg_composer[7] },
+	       sizeof(fetch_reg_comp));
 	memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
 	memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
 
@@ -1189,7 +1214,8 @@ struct video_layer_properties
 
 #define NUM_LAYERS 2
 struct video_layer_properties layer_properties[NUM_LAYERS];
-struct video_layer_properties prev_layer_properties[2][NUM_LAYERS];
+// The layer properties as the line being fetched began.
+static struct video_layer_properties fetch_layer_properties[NUM_LAYERS];
 
 static int
 calc_layer_eff_x(const struct video_layer_properties *props, const int x)
@@ -1303,9 +1329,13 @@ video_reset_layer_pipeline(void)
 {
 	refresh_layer_properties(0);
 	refresh_layer_properties(1);
-	memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
-	memcpy(prev_layer_properties[1], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
-	memset(prev_reg_layer, 0, sizeof(prev_reg_layer));
+	memcpy(fetch_layer_properties, layer_properties, sizeof(fetch_layer_properties));
+	memcpy(fetch_reg_layer, reg_layer, sizeof(fetch_reg_layer));
+	fetch_log_n    = 0;
+	fetch_log_lost = false;
+	sprite_log_n   = 0;
+	fetched_y      = FETCH_NONE;
+	memset(layer_fsm, 0, sizeof(layer_fsm));
 }
 
 struct video_sprite_properties
@@ -1476,6 +1506,9 @@ sprite_attr_write(uint32_t address, uint8_t value)
 		sprite_trace_note_write(slot, offset, sprite_data[slot][offset], value,
 		                        sprite_trace_current_line(), sprite_trace_cpu_cycles);
 	}
+	if (sprite_log_n < FETCH_LOG_MAX) {
+		sprite_log[sprite_log_n++] = (sprite_write_t){ write_dot(), slot, offset, sprite_data[slot][offset] };
+	}
 	sprite_data[slot][offset] = value;
 	refresh_sprite_properties(slot);
 }
@@ -1531,6 +1564,13 @@ expand_4bpp_data(uint8_t *dst, const uint8_t *src, int dst_size)
 	}
 }
 
+// sprite_renderer.v:65-68, 171-176: slot i's attributes are read from the
+// clock after render_start, one slot per clock until a sprite is drawn. A
+// write through the data port reaches attribute RAM a clock after a register
+// write would.
+#define SPRITE_ATTR_DOT 1
+static const struct video_sprite_properties *sprite_props_at(int i, uint32_t d, struct video_sprite_properties *out);
+
 static void
 render_sprite_line(const uint16_t y)
 {
@@ -1585,7 +1625,9 @@ render_sprite_line(const uint16_t y)
 
 		const uint32_t t_before = t;
 		uint8_t        tflags   = SPRITE_TRACE_EVALUATED;
-		const struct video_sprite_properties *props = &sprite_properties[i];
+		struct video_sprite_properties        then;
+		const struct video_sprite_properties *props =
+			sprite_log_n ? sprite_props_at(i, SPRITE_ATTR_DOT + t, &then) : &sprite_properties[i];
 
 		const bool on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
 		                     y < props->sprite_y + props->sprite_height;
@@ -1773,11 +1815,11 @@ render_sprite_line(const uint16_t y)
 static void
 render_layer_line_text(uint8_t layer, uint16_t y)
 {
-	const struct video_layer_properties *props = &prev_layer_properties[1][layer];
-	const struct video_layer_properties *props0 = &prev_layer_properties[0][layer];
+	const struct video_layer_properties *props = &fetch_layer_properties[layer];
+	uint8_t *const out = layer_line[layer];
 
 	const uint8_t max_pixels_per_byte = (8 >> props->color_depth) - 1;
-	const int     eff_y               = calc_layer_eff_y(props0, y);
+	const int     eff_y               = calc_layer_eff_y(props, y);
 	const int     yy                  = eff_y & props->tileh_max;
 
 	// additional bytes to reach the correct line of the tile
@@ -1863,18 +1905,18 @@ render_layer_line_text(uint8_t layer, uint16_t y)
 		// convert tile byte to indexed color
 		const uint8_t col_index = (s >> color_shift) & 1;
 		--color_shift;
-		layer_line[layer][x] = col_index ? fg_color : bg_color;
+		out[x] = col_index ? fg_color : bg_color;
 	}
 }
 
 static void
 render_layer_line_tile(uint8_t layer, uint16_t y)
 {
-	const struct video_layer_properties *props = &prev_layer_properties[1][layer];
-	const struct video_layer_properties *props0 = &prev_layer_properties[0][layer];
+	const struct video_layer_properties *props = &fetch_layer_properties[layer];
+	uint8_t *const out = layer_line[layer];
 
 	const uint8_t max_pixels_per_byte = (8 >> props->color_depth) - 1;
-	const int     eff_y               = calc_layer_eff_y(props0, y);
+	const int     eff_y               = calc_layer_eff_y(props, y);
 	const uint8_t yy                  = eff_y & props->tileh_max;
 	const uint8_t yy_flip             = yy ^ props->tileh_max;
 	const uint32_t y_add              = (yy << ((props->tilew_log2 + props->color_depth - 3) & 31));
@@ -1983,7 +2025,7 @@ render_layer_line_tile(uint8_t layer, uint16_t y)
 				col_index |= 0x80;
 			}
 		}
-		layer_line[layer][x] = col_index;
+		out[x] = col_index;
 	}
 }
 
@@ -1991,8 +2033,8 @@ render_layer_line_tile(uint8_t layer, uint16_t y)
 static void
 render_layer_line_bitmap(uint8_t layer, uint16_t y)
 {
-	const struct video_layer_properties *props = &prev_layer_properties[1][layer];
-//	const struct video_layer_properties *props0 = &prev_layer_properties[0][layer];
+	const struct video_layer_properties *props = &fetch_layer_properties[layer];
+	uint8_t *const out = layer_line[layer];
 
 	int yy = y;
 	// additional bytes to reach the correct line of the tile
@@ -2003,7 +2045,7 @@ render_layer_line_bitmap(uint8_t layer, uint16_t y)
 		int xx = x;
 
 		// extract all information from the map
-		uint8_t palette_offset = reg_layer[layer][4] & 0xf;
+		uint8_t palette_offset = fetch_reg_layer[layer][4] & 0xf;
 
 		// additional bytes to reach the correct column of the tile
 		uint16_t x_add = (xx * props->bits_per_pixel) >> 3;
@@ -2020,7 +2062,7 @@ render_layer_line_bitmap(uint8_t layer, uint16_t y)
 				col_index |= 0x80;
 			}
 		}
-		layer_line[layer][x] = col_index;
+		out[x] = col_index;
 	}
 }
 
@@ -2049,8 +2091,8 @@ static uint8_t calculate_line_col_index(uint8_t spr_zindex, uint8_t spr_col_inde
 // without video.c, so it takes these rather than a pointer to something only
 // this file knows how to build.
 //
-// Read from prev_layer_properties[1], the same latched copy the renderers use,
-// so a raster split is followed rather than averaged away.
+// Read from the properties the line was fetched with, so a raster split is
+// followed rather than averaged away.
 //
 // `scrolled` is the one that is not a straight copy: the RTL starts the line
 // buffer at 0 - subtile_hscroll (layer_renderer.v:499-501), so a layer scrolled
@@ -2060,7 +2102,7 @@ static uint8_t calculate_line_col_index(uint8_t spr_zindex, uint8_t spr_col_inde
 static vera_bw_layer_t
 vera_bw_layer_of(uint8_t layer)
 {
-	const struct video_layer_properties *p = &prev_layer_properties[1][layer];
+	const struct video_layer_properties *p = &fetch_layer_properties[layer];
 	vera_bw_layer_t out;
 
 	out.enabled     = layer_line_enable[layer] != 0;
@@ -2187,6 +2229,529 @@ static uint32_t eff_x_fp; // 16.16 fixed point
 
 static uint8_t col_line[SCREEN_WIDTH];
 
+// The RTL dot at which a register written now takes effect. Emulator dot x is
+// RTL dot x - 1.
+static uint16_t
+write_dot(void)
+{
+	const int d = (int)vga_scan_pos_x - 1;
+	return d < 0 ? 0 : d >= VGA_SCAN_WIDTH ? VGA_SCAN_WIDTH - 1 : (uint16_t)d;
+}
+
+static void
+fetch_note(uint8_t reg, uint8_t value)
+{
+	if (fetch_log_n < FETCH_LOG_MAX) {
+		fetch_log[fetch_log_n++] = (fetch_write_t){ write_dot(), reg, value };
+	} else {
+		fetch_log_lost = true;
+	}
+}
+
+static uint32_t
+vram_word(uint16_t addr)
+{
+	const uint8_t *p = &video_ram[(uint32_t)(addr & 0x7FFF) << 2];
+	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+// A layer's registers decoded for one line, layer_renderer.v:39-124 and 190-199.
+struct layer_dec {
+	uint8_t  depth, bitmap, attr, map_w, map_h, tile_w, tile_h, map_base;
+	uint8_t  pix_m1, lines_m1, words_m1, hscroll_hi, hstile;
+	uint16_t tbase, hscroll, sli, vmap, bitmap_line_addr, lb_start;
+};
+
+static void
+layer_decode(const uint8_t *r, uint16_t line_idx, struct layer_dec *d)
+{
+	static const uint8_t ppw_m1[8][2] = { { 7, 15 }, { 7, 15 }, { 7, 7 }, { 3, 3 }, { 31, 31 }, { 15, 15 }, { 7, 7 }, { 3, 3 } };
+	d->depth           = r[0] & 3;
+	d->bitmap          = (r[0] >> 2) & 1;
+	d->attr            = (r[0] >> 3) & 1;
+	d->map_w           = (r[0] >> 4) & 3;
+	d->map_h           = r[0] >> 6;
+	d->map_base        = r[1];
+	d->tile_h          = (r[2] >> 1) & 1;
+	d->tile_w          = r[2] & 1;
+	d->tbase           = (uint16_t)(r[2] & 0xFC) << 7;
+	d->hscroll         = r[3] | (r[4] & 15) << 8;
+	d->hscroll_hi      = (uint8_t)(d->hscroll >> 8);
+	d->hstile          = (uint8_t)(d->tile_w ? d->hscroll >> 4 : d->hscroll >> 3);
+	const uint16_t vscroll = r[5] | (r[6] & 15) << 8;
+	const uint8_t  mode    = (uint8_t)(d->bitmap << 2 | d->depth);
+	d->pix_m1          = ppw_m1[mode][d->tile_w];
+	d->lines_m1        = mode == 0 ? (d->tile_w ? 1 : 3) : mode == 1 ? (d->tile_w ? 0 : 1) : 0;
+	d->words_m1        = mode == 2 ? d->tile_w : mode == 3 ? (d->tile_w ? 3 : 1) : 0;
+	d->sli             = (line_idx + vscroll) & 0xFFF;
+	d->vmap            = ((d->tile_h ? d->sli >> 4 : d->sli >> 3) & 0xFF) & ((32u << d->map_h) - 1);
+	const uint16_t mul5 = (line_idx * 5) & 0xFFF;
+	uint16_t       bm;
+	switch (d->depth) {
+		case 0:  bm = d->tile_w ? mul5 << 2 : mul5 << 1; break;
+		case 1:  bm = d->tile_w ? mul5 << 3 : mul5 << 2; break;
+		case 2:  bm = d->tile_w ? (mul5 & 0x7FF) << 4 : mul5 << 3; break;
+		default: bm = d->tile_w ? (mul5 & 0x3FF) << 5 : (mul5 & 0x7FF) << 4; break;
+	}
+	d->bitmap_line_addr = (d->tbase + bm) & 0x7FFF;
+	d->lb_start         = d->bitmap ? 0 : (uint16_t)(0 - (d->tile_w ? d->hscroll & 15 : d->hscroll & 7)) & 0x3FF;
+}
+
+// layer_renderer.v:80-124: the map entry the renderer is on.
+static uint16_t
+layer_map_idx(const struct layer_fetch *s, const struct layer_dec *d)
+{
+	const uint8_t shtile = (uint8_t)(s->htile + d->hstile);
+	return (uint16_t)(d->vmap << (5 + d->map_w) | (shtile & ((32u << d->map_w) - 1)));
+}
+
+static uint16_t
+layer_map_ent(const struct layer_fetch *s, const struct layer_dec *d)
+{
+	return (layer_map_idx(s, d) & 1) ? s->map_data >> 16 : s->map_data & 0xFFFF;
+}
+
+static uint8_t
+layer_vli(const struct layer_dec *d, uint16_t map_ent)
+{
+	const uint8_t vflip = d->depth ? (map_ent >> 11) & 1 : 0;
+	return (vflip ? ~d->sli : d->sli) & 15;
+}
+
+// layer_renderer.v:126-188
+static uint16_t
+layer_tile_addr(const struct layer_fetch *s, const struct layer_dec *d)
+{
+	const uint16_t map_ent = layer_map_ent(s, d);
+	const uint16_t tidx    = d->depth == 0 ? map_ent & 0xFF : map_ent & 0x3FF;
+	const uint8_t  hflip   = d->depth ? (map_ent >> 10) & 1 : 0;
+	const uint8_t  vli     = layer_vli(d, map_ent);
+	const uint8_t  hwc     = (hflip ? ~s->word : s->word) & 3;
+	uint16_t       ta;
+	switch (d->depth << 2 | d->tile_w << 1 | d->tile_h) {
+		case 0x0: ta = tidx << 1 | ((vli >> 2) & 1); break;
+		case 0x1: ta = tidx << 2 | ((vli >> 2) & 3); break;
+		case 0x2: ta = tidx << 2 | ((vli >> 1) & 3); break;
+		case 0x3: ta = tidx << 3 | ((vli >> 1) & 7); break;
+		case 0x4: ta = tidx << 2 | ((vli >> 1) & 3); break;
+		case 0x5: ta = tidx << 3 | ((vli >> 1) & 7); break;
+		case 0x6: ta = tidx << 3 | (vli & 7); break;
+		case 0x7: ta = tidx << 4 | vli; break;
+		case 0x8: ta = tidx << 3 | (vli & 7); break;
+		case 0x9: ta = tidx << 4 | vli; break;
+		case 0xA: ta = tidx << 4 | (vli & 7) << 1 | (hwc & 1); break;
+		case 0xB: ta = tidx << 5 | vli << 1 | (hwc & 1); break;
+		case 0xC: ta = tidx << 4 | (vli & 7) << 1 | (hwc & 1); break;
+		case 0xD: ta = tidx << 5 | vli << 1 | (hwc & 1); break;
+		case 0xE: ta = tidx << 5 | (vli & 7) << 2 | hwc; break;
+		default:  ta = (tidx & 0x1FF) << 6 | vli << 2 | hwc; break;
+	}
+	return (uint16_t)(d->tbase + ta);
+}
+
+static void
+layer_fetch_clock(struct layer_fetch *s, const struct layer_dec *d, bool start, uint8_t *lb)
+{
+	// Pixel renderer, layer_renderer.v:332-563.
+	const bool line_done = ((s->lb_idx >> 7) & 7) == 5;
+	uint8_t    xcnt_n    = s->xcnt;
+	uint8_t    busy_n    = s->busy;
+	uint16_t   lb_idx_n  = s->lb_idx;
+	if (!line_done && (s->busy || s->render_start)) {
+		if (s->xcnt == d->pix_m1) {
+			busy_n = 0;
+			xcnt_n = 0;
+		} else {
+			xcnt_n = (s->xcnt + 1) & 31;
+		}
+		if (s->render_start) {
+			xcnt_n = 1;
+			busy_n = 1;
+		}
+
+		const uint8_t  x   = s->xcnt;
+		const uint32_t rd  = s->render_data;
+		const uint8_t  rmd = s->render_mapdata;
+		const uint8_t  hx  = ((rmd & 4) ? ~x : x) & 15;
+		uint8_t        tmp;
+		switch (d->depth) {
+			case 0: {
+				const uint8_t bit = (rd >> ((x >> 3) * 8 + (7 - (x & 7)))) & 1;
+				tmp = d->bitmap ? bit : !d->attr ? (bit ? rmd & 15 : rmd >> 4) : (bit ? rmd : 0);
+				break;
+			}
+			case 1: {
+				const uint8_t h = hx & ((d->lines_m1 & 1) ? 7 : 15);
+				tmp = (rd >> ((h >> 2) * 8 + 6 - 2 * (h & 3))) & 3;
+				break;
+			}
+			case 2:
+				tmp = (rd >> (((hx & 7) >> 1) * 8 + ((hx & 1) ? 0 : 4))) & 15;
+				break;
+			default:
+				tmp = (rd >> ((hx & 3) * 8)) & 255;
+				break;
+		}
+		// layer_renderer.v:478-485 leaves 1bpp out; 49.0.6 offsets a 1bpp bitmap.
+		uint8_t col = tmp;
+		if ((d->depth != 0 || d->bitmap) && (tmp >> 4) == 0 && (tmp & 15) != 0) {
+			col = (uint8_t)((tmp & 15) | (((rmd >> 7) | d->attr) & 1) << 7 | (rmd & 0x70));
+		}
+		if (s->lb_idx < SCREEN_WIDTH) {
+			lb[s->lb_idx] = col;
+		}
+		lb_idx_n = (s->lb_idx + 1) & 0x3FF;
+	}
+	if (start) {
+		xcnt_n   = 0;
+		busy_n   = 0;
+		lb_idx_n = d->lb_start;
+	}
+
+	// Line renderer, layer_renderer.v:224-327.
+	const uint8_t state = s->state;
+	s->render_start     = 0;
+	switch (state) {
+		case LR_FETCH_MAP:
+			s->bus_addr = (uint16_t)(((uint16_t)d->map_base << 7) + (layer_map_idx(s, d) >> 1)) & 0x7FFF;
+			s->strobe   = 1;
+			s->state    = LR_WAIT_FETCH_MAP;
+			break;
+		case LR_WAIT_FETCH_MAP:
+			if (s->ack) {
+				s->map_data = vram_word(s->ack_addr);
+				s->strobe   = 0;
+				s->state    = LR_FETCH_TILE;
+			}
+			break;
+		case LR_FETCH_TILE:
+			s->bus_addr    = (d->bitmap ? s->bitmap_addr : layer_tile_addr(s, d)) & 0x7FFF;
+			s->bitmap_addr = (s->bitmap_addr + 1) & 0x7FFF;
+			s->strobe      = 1;
+			s->state       = LR_WAIT_FETCH_TILE;
+			break;
+		case LR_WAIT_FETCH_TILE:
+			if (s->ack) {
+				s->tile_data           = vram_word(s->ack_addr);
+				s->strobe              = 0;
+				s->next_render_mapdata = (uint8_t)(layer_map_ent(s, d) >> 8);
+				s->state               = LR_RENDER;
+			}
+			break;
+		case LR_RENDER:
+			if (!busy_n) {
+				const uint8_t vli = d->lines_m1 ? layer_vli(d, layer_map_ent(s, d)) : 0;
+				switch (d->lines_m1) {
+					case 1:  s->render_data = (vli & 1) ? s->tile_data >> 16 : s->tile_data & 0xFFFF; break;
+					case 3:  s->render_data = (s->tile_data >> ((vli & 3) * 8)) & 0xFF; break;
+					default: s->render_data = s->tile_data; break;
+				}
+				s->render_mapdata = d->bitmap ? (uint8_t)(d->hscroll_hi << 4) : s->next_render_mapdata;
+				s->render_start   = 1;
+				if (d->bitmap) {
+					s->state = LR_FETCH_TILE;
+				} else if (s->word == d->words_m1) {
+					const uint8_t shtile = (uint8_t)(s->htile + d->hstile);
+					s->word  = 0;
+					s->htile = s->htile + 1;
+					s->state = (shtile & 1) ? LR_FETCH_MAP : LR_FETCH_TILE;
+				} else {
+					s->word  = (s->word + 1) & 3;
+					s->state = LR_FETCH_TILE;
+				}
+			}
+			if (line_done) {
+				s->state = LR_WAIT_START;
+			}
+			break;
+		default:
+			break;
+	}
+	if (start) {
+		s->state       = d->bitmap ? LR_FETCH_TILE : LR_FETCH_MAP;
+		s->htile       = 0;
+		s->word        = 0;
+		s->bitmap_addr = d->bitmap_line_addr;
+	}
+	s->xcnt   = xcnt_n;
+	s->busy   = busy_n;
+	s->lb_idx = lb_idx_n;
+}
+
+// busy stays set past the end of the line until the next render_start
+// (layer_renderer.v:332-345).
+static bool
+layer_fsm_busy(const struct layer_fetch *s)
+{
+	return s->busy && ((s->lb_idx >> 7) & 7) != 5;
+}
+
+static bool
+layer_fsm_unfinished(const struct layer_fetch *s)
+{
+	if (s->ack || s->render_start || layer_fsm_busy(s)) {
+		return true;
+	}
+	// A request still waiting is granted and its answer dropped by the next
+	// render_start, as if there had been none.
+	return !(s->state == LR_WAIT_START && !s->strobe) &&
+	       !((s->state == LR_WAIT_FETCH_MAP || s->state == LR_WAIT_FETCH_TILE) && s->strobe);
+}
+
+// Clocking on changes nothing until the next render_start: 2 when the line is
+// done, 1 when a masked request stalls it until the layer is enabled.
+static int
+layer_fsm_idle(const struct layer_fetch *s, bool enabled)
+{
+	if (s->ack || s->render_start || layer_fsm_busy(s)) {
+		return 0;
+	}
+	if (s->state == LR_WAIT_START && !s->strobe) {
+		return 2;
+	}
+	return !enabled && s->strobe && (s->state == LR_WAIT_FETCH_MAP || s->state == LR_WAIT_FETCH_TILE);
+}
+
+// The renderer after a line it finished, or that a masked strobe kept waiting.
+static void
+layer_fsm_settle(struct layer_fetch *s, bool enabled)
+{
+	memset(s, 0, sizeof *s);
+	s->state  = enabled ? LR_WAIT_START : LR_WAIT_FETCH_MAP;
+	s->strobe = !enabled;
+}
+
+// Both layer renderers through the line, clock by clock, replaying the writes
+// made during it. render_start rises at dot 1 (composer.v:147-162) and the
+// next one ends the line.
+static void
+fetch_layers_timed(uint16_t line_idx)
+{
+	uint8_t r[2][7];
+	memcpy(r, fetch_reg_layer, sizeof r);
+	struct layer_dec d[2];
+	layer_decode(r[0], line_idx, &d[0]);
+	layer_decode(r[1], line_idx, &d[1]);
+	uint8_t             dc = fetch_reg_comp[0];
+	struct layer_fetch *s  = layer_fsm;
+	uint16_t            k  = 0;
+	for (int c = 0; c <= VGA_SCAN_WIDTH; c++) {
+		for (; k < fetch_log_n && fetch_log[k].dot <= c; k++) {
+			const fetch_write_t *e = &fetch_log[k];
+			if (e->reg < FL_DC_VIDEO) {
+				r[e->reg / 7][e->reg % 7] = e->value;
+				layer_decode(r[e->reg / 7], line_idx, &d[e->reg / 7]);
+			} else if (e->reg == FL_DC_VIDEO) {
+				dc = e->value;
+			}
+		}
+		if (c == 0) {
+			continue;
+		}
+		// Both renderers done, or stalled with nothing left that could enable
+		// them: the rest of the line changes nothing.
+		if (c > 1) {
+			const int i0 = layer_fsm_idle(&s[0], dc & 0x10), i1 = layer_fsm_idle(&s[1], dc & 0x20);
+			if (i0 && i1 && (k == fetch_log_n || i0 + i1 == 4)) {
+				break;
+			}
+		}
+		// vram_if.v:133-165, top.v:700-706: layer 0 wins over layer 1, a
+		// disabled layer's request is masked, and the ack follows a clock later.
+		// The read returns what was at the address the clock it was granted.
+		const bool     req0  = s[0].strobe && !s[0].ack && (dc & 0x10);
+		const bool     req1  = s[1].strobe && !s[1].ack && (dc & 0x20);
+		const uint16_t addr0 = s[0].bus_addr, addr1 = s[1].bus_addr;
+		// A pixel is written the clock after it is made (layer_renderer.v:546-563),
+		// and from dot 0 that is into the other buffer.
+		uint8_t(*lb)[SCREEN_WIDTH] = c >= VGA_SCAN_WIDTH - 1 ? layer_lb[line_buf_sel ^ 1] : layer_line;
+		layer_fetch_clock(&s[0], &d[0], c == 1, lb[0]);
+		layer_fetch_clock(&s[1], &d[1], c == 1, lb[1]);
+		s[0].ack = req0;
+		s[1].ack = req1 && !req0;
+		if (s[0].ack) s[0].ack_addr = addr0;
+		if (s[1].ack) s[1].ack_addr = addr1;
+	}
+}
+
+// Sprite attributes as slot i read them at dot d, undoing later writes.
+static const struct video_sprite_properties *
+sprite_props_at(int i, uint32_t d, struct video_sprite_properties *out)
+{
+	bool late = false;
+	for (uint16_t k = 0; k < sprite_log_n && !late; k++) {
+		late = sprite_log[k].slot == i && sprite_log[k].dot > d;
+	}
+	if (!late) {
+		return &sprite_properties[i];
+	}
+	uint8_t now[8];
+	memcpy(now, sprite_data[i], 8);
+	for (int k = sprite_log_n - 1; k >= 0; k--) {
+		if (sprite_log[k].slot == i && sprite_log[k].dot > d) {
+			sprite_data[i][sprite_log[k].offset] = sprite_log[k].old;
+		}
+	}
+	refresh_sprite_properties(i);
+	*out = sprite_properties[i];
+	memcpy(sprite_data[i], now, 8);
+	refresh_sprite_properties(i);
+	return out;
+}
+
+// Build display line y's layer and sprite buffers. Timed: at the end of the
+// line before it, from fetch_reg_* and the log. Otherwise from the registers
+// now.
+static void
+fetch_line(uint16_t y, bool timed)
+{
+	if (!timed) {
+		memcpy(fetch_reg_layer, reg_layer, sizeof(fetch_reg_layer));
+		memcpy(fetch_layer_properties, layer_properties, sizeof(fetch_layer_properties));
+		fetch_reg_comp[0] = reg_composer[0];
+		fetch_reg_comp[1] = reg_composer[2];
+		fetch_reg_comp[2] = reg_composer[6];
+		fetch_reg_comp[3] = reg_composer[7];
+		fetch_log_n    = 0;
+		fetch_log_lost = false;
+		sprite_log_n   = 0;
+	}
+	fetched_y = y;
+
+	// composer.v:147-162 steps the scaled line counter at dot 0.
+	uint8_t comp[FL_COMP_N];
+	memcpy(comp, fetch_reg_comp, sizeof comp);
+	bool layers_written = fetch_log_lost;
+	for (uint16_t k = 0; k < fetch_log_n; k++) {
+		const fetch_write_t *e = &fetch_log[k];
+		if (e->reg >= FL_DC_VIDEO && e->dot == 0) {
+			comp[e->reg - FL_DC_VIDEO] = e->value;
+		}
+		layers_written |= e->reg <= FL_DC_VIDEO;
+	}
+	const uint8_t  dc_video = comp[0];
+	const uint8_t  vscale   = comp[1];
+	const uint16_t vstart   = comp[2] << 1;
+	const uint16_t vstop    = comp[3] << 1;
+
+	bool held = false;
+	if ((dc_video & 3) > 1) { // 480i or 240p
+		if ((y >> 1) == 0) {
+			eff_y_fp = y * (vscale << 9);
+		} else if (((y & 0xfffe) >= vstart) && ((y & 0xfffe) < vstop)) {
+			eff_y_fp += (vscale << 10);
+		}
+	} else {
+		if (y == 0) {
+			eff_y_fp = 0;
+		} else if ((y > vstart) && (y < vstop)) {
+			if ((eff_y_fp >> 16) < 480) {
+				eff_y_fp += (vscale << 9);
+			} else {
+				held = true;
+			}
+		}
+	}
+
+	if ((dc_video & 8) && (dc_video & 3) > 1) { // progressive NTSC/RGB mode
+		y &= 0xfffe;
+	}
+
+	if (y < SCREEN_HEIGHT) {
+		uint16_t eff_y = (eff_y_fp >> 16);
+		if ((dc_video & 3) > 1 && eff_y >= 480) eff_y = 480 - (y & 1);
+
+		// sprite_renderer.v takes no enable: DC_VIDEO gates only the composer
+		// (composer.v:195-199). composer.v:130 erases each buffer after display, so
+		// a held line has no sprites below index 640.
+		if (held) {
+			memset(sprite_line_col, 0, SCREEN_WIDTH);
+			memset(sprite_line_z, 0, SCREEN_WIDTH);
+		} else {
+			render_sprite_line(eff_y);
+		}
+
+		// Charge this line's VERA fetch traffic. Deliberately ABOVE the warp
+		// guard below, unlike everything else here: under -warp the layers
+		// are skipped for 63 frames in 64, but VERA would not skip them. The
+		// count is modelled from the registers, so it costs a few arithmetic
+		// ops either way. Indexed by the DISPLAY line y, not by eff_y: the
+		// hardware fetches once per display line regardless of DC_VSCALE.
+		if (vera_bandwidth_active) {
+			const vera_bw_layer_t l0 = vera_bw_layer_of(0);
+			const vera_bw_layer_t l1 = vera_bw_layer_of(1);
+			vera_bandwidth_line(y, &l0, &l1);
+		}
+
+		if (!(warp_mode && (frame_count & 63))) {
+			// Snapshot what this line displayed, for debug views. After the
+			// warp guard, so it describes only lines that are really drawn.
+			// "Enabled" means the layer reached the screen on this line: outside
+			// the active window, or with output off, the composer ignores it.
+			const uint8_t out_mode       = dc_video & 3;
+			const bool    line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
+
+			memcpy(line_reg_layer[y], fetch_reg_layer, sizeof(line_reg_layer[y]));
+			line_eff_y[y]         = eff_y;
+			line_layer_enabled[y] = line_displayed
+				? (uint8_t)(((dc_video & 0x10) ? 1 : 0) | ((dc_video & 0x20) ? 2 : 0))
+				: 0;
+			for (uint8_t l = 0; l < 2; l++) {
+				// Bitmap mode has no scroll (VERA forces it to 0), so there the
+				// row is eff_y.
+				line_layer_row[y][l] = fetch_layer_properties[l].bitmap_mode
+					? eff_y
+					: (uint16_t)calc_layer_eff_y(&fetch_layer_properties[l], eff_y);
+			}
+			line_state_valid[y] = true;
+			// Progressive modes draw only the even line of each pair.
+			if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
+				line_state_valid[y + 1] = false;
+			}
+
+			// No render_start on a held line, so its buffers keep what was
+			// drawn into them two lines ago.
+			if (held) {
+				layer_fsm_settle(&layer_fsm[0], dc_video & 0x10);
+				layer_fsm_settle(&layer_fsm[1], dc_video & 0x20);
+			} else if (timed && !fetch_log_lost &&
+			           (layers_written || layer_fsm_unfinished(&layer_fsm[0]) ||
+			            layer_fsm_unfinished(&layer_fsm[1]))) {
+				fetch_layers_timed(eff_y);
+			} else {
+				for (uint8_t l = 0; l < 2; l++) {
+					layer_fsm_settle(&layer_fsm[l], dc_video & (0x10 << l));
+					if (!(dc_video & (0x10 << l))) {
+						continue;
+					}
+					if (fetch_layer_properties[l].text_mode) {
+						render_layer_line_text(l, eff_y);
+					} else if (fetch_layer_properties[l].bitmap_mode) {
+						render_layer_line_bitmap(l, eff_y);
+					} else {
+						render_layer_line_tile(l, eff_y);
+					}
+				}
+			}
+		}
+	} else {
+		// Blanking has no render_start: a renderer still busy finishes there.
+		layer_fsm_settle(&layer_fsm[0], dc_video & 0x10);
+		layer_fsm_settle(&layer_fsm[1], dc_video & 0x20);
+	}
+
+	memcpy(fetch_reg_layer, reg_layer, sizeof(fetch_reg_layer));
+	memcpy(fetch_layer_properties, layer_properties, sizeof(fetch_layer_properties));
+	fetch_reg_comp[0] = reg_composer[0];
+	fetch_reg_comp[1] = reg_composer[2];
+	fetch_reg_comp[2] = reg_composer[6];
+	fetch_reg_comp[3] = reg_composer[7];
+	fetch_log_n    = 0;
+	fetch_log_lost = false;
+	sprite_log_n   = 0;
+}
+
+// Compose line y up to pixel scan_pos_x, exclusive.
 static void
 render_line(uint16_t y, float scan_pos_x)
 {
@@ -2197,49 +2762,8 @@ render_line(uint16_t y, float scan_pos_x)
 	if (y != y_prev) {
 		y_prev = y;
 		s_pos_x_p = 0;
-
-		// Copy the composer array to 2-line history buffer
-		// so that the raster effects that happen on a delay take effect
-		// at exactly the right time
-
-		// This simulates different effects happening at render,
-		// render but delayed until the next line, or applied mid-line
-		// at scan-out
-
-		memcpy(prev_reg_composer[1], prev_reg_composer[0], sizeof(*reg_composer) * COMPOSER_SLOTS);
-		memcpy(prev_reg_composer[0], reg_composer, sizeof(*reg_composer) * COMPOSER_SLOTS);
-
-		// Same with the layer properties
-
-		memcpy(prev_layer_properties[1], prev_layer_properties[0], sizeof(*layer_properties) * NUM_LAYERS);
-		memcpy(prev_layer_properties[0], layer_properties, sizeof(*layer_properties) * NUM_LAYERS);
-
-		// The raw layer registers travel down the same two-stage pipeline, so
-		// the debug history can record what a line was actually rendered with.
-		// The renderers read prev_layer_properties[1], two generations behind
-		// live: snapshotting reg_layer directly would attribute a mid-frame
-		// register change to a line two scanlines before the one it affected,
-		// which is precisely the raster-split case this history exists for.
-		memcpy(prev_reg_layer[1], prev_reg_layer[0], sizeof(prev_reg_layer[0]));
-		memcpy(prev_reg_layer[0], reg_layer, sizeof(reg_layer));
-
-		line_render_held = 0;
-		if ((dc_video & 3) > 1) { // 480i or 240p
-			if ((y >> 1) == 0) {
-				eff_y_fp = y*(prev_reg_composer[1][2] << 9);
-			} else if ( ((y & 0xfffe) >= vstart) && ((y & 0xfffe) < vstop) ) {
-				eff_y_fp += (prev_reg_composer[1][2] << 10);
-			}
-		} else {
-			if (y == 0) {
-				eff_y_fp = 0;
-			} else if ( (y > vstart) && (y < vstop) ) {
-				if ((eff_y_fp >> 16) < 480) {
-					eff_y_fp += (prev_reg_composer[1][2] << 9);
-				} else {
-					line_render_held = 1;
-				}
-			}
+		if (fetched_y != y) {
+			fetch_line(y, false);
 		}
 	}
 
@@ -2256,9 +2780,15 @@ render_line(uint16_t y, float scan_pos_x)
 		return;
 	}
 
+	if (scan_pos_x < 0) {
+		scan_pos_x = 0;
+	}
 	uint16_t s_pos_x = round(scan_pos_x);
 	if (s_pos_x > SCREEN_WIDTH) {
 		s_pos_x = SCREEN_WIDTH;
+	}
+	if (s_pos_x <= s_pos_x_p) {
+		return;
 	}
 
 	if (s_pos_x_p == 0) {
@@ -2271,153 +2801,20 @@ render_line(uint16_t y, float scan_pos_x)
 	uint16_t hstart = reg_composer[4] << 2;
 	uint16_t hstop = reg_composer[5] << 2;
 
-	uint16_t eff_y = (eff_y_fp >> 16);
-	if ((dc_video & 3) > 1 && eff_y >= 480) eff_y = 480 - (y & 1);
-
 	layer_line_enable[0] = dc_video & 0x10;
 	layer_line_enable[1] = dc_video & 0x20;
 	sprite_line_enable   = dc_video & 0x40;
 
-
-	// clear layer_line if layer gets disabled
-	for (uint8_t layer = 0; layer < 2; layer++) {
-		if (!layer_line_enable[layer] && old_layer_line_enable[layer]) {
-			for (uint16_t i = s_pos_x_p; i < SCREEN_WIDTH; i++) {
-				layer_line[layer][i] = 0;
-			}
-		}
-		if (s_pos_x_p == 0)
-			old_layer_line_enable[layer] = layer_line_enable[layer];
-	}
-
-	if (s_pos_x_p == 0)
-		old_sprite_line_enable = sprite_line_enable;
-
-	// sprite_renderer.v takes no enable: DC_VIDEO gates only the composer
-	// (composer.v:195-199). composer.v:130 erases each buffer after display, so
-	// a held line has no sprites below index 640.
-	if (line_render_held) {
-		memset(sprite_line_col, 0, SCREEN_WIDTH);
-		memset(sprite_line_z, 0, SCREEN_WIDTH);
-	} else {
-		render_sprite_line(eff_y);
-	}
-
-	// Charge this line's VERA fetch traffic. Deliberately ABOVE the warp guard
-	// below, unlike everything else here.
-	//
-	// Under -warp the emulator skips the layer rendering for 63 frames in 64,
-	// but VERA would not: the guest's registers say what the chip fetches, and
-	// the chip does not know the host is in a hurry. Charging below the guard
-	// reported a warping machine as using no VRAM bandwidth at all, which is
-	// how this ended up here -- it is exactly the kind of thing only a test
-	// against a real running machine finds.
-	//
-	// Affordable precisely because the count is MODELLED from the registers
-	// rather than counted off the render_layer_line_* calls: it is a few
-	// arithmetic ops whether or not anything is drawn. See vera_bandwidth.h.
-	//
-	// Indexed by the DISPLAY line y, not by eff_y. eff_y is the source row
-	// after DC_VSCALE, so in a 320x240 mode it advances once per two display
-	// lines -- and the hardware fetches once per DISPLAY line regardless
-	// (composer.v raises line_render_start per scanline). Charging eff_y both
-	// halved the frame's totals and filed layer traffic under a different index
-	// from the CPU port traffic on the same physical scanline, which is what
-	// the peak-line figure is built out of.
-	if (vera_bandwidth_active) {
-		const vera_bw_layer_t l0 = vera_bw_layer_of(0);
-		const vera_bw_layer_t l1 = vera_bw_layer_of(1);
-		vera_bandwidth_line(y, &l0, &l1);
-	}
-
 	if (warp_mode && (frame_count & 63)) {
-		// sprites were needed for the collision IRQ, but we can skip
-		// everything else if we're in warp mode, most of the time
+		s_pos_x_p = s_pos_x;
 		return;
-	}
-
-	// Snapshot what this line actually displayed, for debug views. Placed after
-	// the warp guard above and immediately before the layer rendering, so it
-	// describes only lines that are really drawn: under -warp 63 frames in 64
-	// return early, and publishing there would hand the VERA panel state for
-	// scanlines whose pixels were never produced.
-	if (y < SCREEN_HEIGHT) {
-		// "Enabled" has to mean "this layer actually reached the screen on this
-		// line", not just "the layer bit is set in DC_VIDEO". Outside the
-		// active window the compositor fills the line with the border colour
-		// and ignores the layers entirely (see the border branch below), and
-		// with out_mode 0 there is no output at all. Publishing those lines as
-		// enabled let a border line win the panel's "first scanline to show
-		// this row wins" race against the active line that really displayed it,
-		// so a register change during the top border decoded the visible row
-		// with the wrong registers.
-		const bool line_displayed = (out_mode != 0) && (y >= vstart) && (y < vstop);
-
-		memcpy(line_reg_layer[y], prev_reg_layer[1], sizeof(line_reg_layer[y]));
-		line_eff_y[y]         = eff_y;
-		line_layer_enabled[y] = line_displayed
-			? (uint8_t)((layer_line_enable[0] ? 1 : 0) | (layer_line_enable[1] ? 2 : 0))
-			: 0;
-		for (uint8_t l = 0; l < 2; l++) {
-			// The row this line showed. Recorded rather than left for the panel
-			// to recompute, because the renderers take VSCROLL and the
-			// layer-height mask from generation [0] while the layout registers
-			// above come from [1] -- so recomputing from the snapshot alone is
-			// off by whatever the scroll changed mid-frame. Bitmap mode has no
-			// scroll (VERA forces it to 0), so there the row is eff_y.
-			line_layer_row[y][l] = prev_layer_properties[1][l].bitmap_mode
-				? eff_y
-				: (uint16_t)calc_layer_eff_y(&prev_layer_properties[0][l], eff_y);
-		}
-		line_state_valid[y] = true;
-		// Progressive modes draw only the even line of each pair, so the odd
-		// one was never rendered. Marked invalid rather than filled in: the
-		// contract is "what this scanline showed", and inventing a row for a
-		// line the beam never drew is how a debug view starts lying.
-		if ((dc_video & 8) && (dc_video & 3) > 1 && y + 1 < SCREEN_HEIGHT) {
-			line_state_valid[y + 1] = false;
-		}
-	}
-
-	if (line_render_held) {
-		for (uint8_t l = 0; l < 2; l++) {
-			if (layer_line_enable[l]) {
-				memcpy(layer_line[l], held_layer_line[line_buf_sel][l], SCREEN_WIDTH);
-			}
-		}
-	} else {
-	if (layer_line_enable[0]) {
-		if (prev_layer_properties[1][0].text_mode) {
-			render_layer_line_text(0, eff_y);
-		} else if (prev_layer_properties[1][0].bitmap_mode) {
-			render_layer_line_bitmap(0, eff_y);
-		} else {
-			render_layer_line_tile(0, eff_y);
-		}
-	}
-	if (layer_line_enable[1]) {
-		if (prev_layer_properties[1][1].text_mode) {
-			render_layer_line_text(1, eff_y);
-		} else if (prev_layer_properties[1][1].bitmap_mode) {
-			render_layer_line_bitmap(1, eff_y);
-		} else {
-			render_layer_line_tile(1, eff_y);
-		}
-	}
-	// A step is below 2, so the last two rendered lines are at 476 or later.
-	if (eff_y >= 476) {
-		memcpy(held_layer_line[line_buf_sel], layer_line, sizeof(layer_line));
-	}
 	}
 
 	// If video output is enabled, calculate color indices for line.
 	if (out_mode != 0) {
 		// Add border after if required.
 		if (y < vstart || y >= vstop) {
-			uint32_t border_fill = border_color;
-			border_fill = border_fill | (border_fill << 8);
-			border_fill = border_fill | (border_fill << 16);
-			memset(col_line, border_fill, SCREEN_WIDTH);
+			memset(col_line + s_pos_x_p, border_color, s_pos_x - s_pos_x_p);
 		} else {
 			hstart = hstart < 640 ? hstart : 640;
 			hstop = hstop < 640 ? hstop : 640;
@@ -2427,20 +2824,28 @@ render_line(uint16_t y, float scan_pos_x)
 			}
 
 			const uint32_t scale = reg_composer[1];
+			const uint8_t *l0 = layer_line[0];
+			const uint8_t *l1 = layer_line[1];
+			const bool     e0 = dc_video & 0x10, e1 = dc_video & 0x20, es = dc_video & 0x40;
+			const uint8_t  sel = line_buf_sel;
+			uint8_t       *out = col_line;
+			uint32_t       fx  = eff_x_fp;
 			for (uint16_t x = MAX(hstart, s_pos_x_p); x < hstop && x < s_pos_x; ++x) {
-				uint16_t eff_x = eff_x_fp >> 16;
+				uint16_t eff_x = fx >> 16;
 				if (eff_x < SCREEN_WIDTH) {
-					col_line[x] = calculate_line_col_index(sprite_line_enable ? sprite_line_z[eff_x] : 0, sprite_line_col[eff_x], layer_line[0][eff_x], layer_line[1][eff_x]);
+					out[x] = calculate_line_col_index(es ? sprite_line_z[eff_x] : 0, sprite_line_col[eff_x],
+					                                  e0 ? l0[eff_x] : 0, e1 ? l1[eff_x] : 0);
 					// composer.v:178 holds the counter once it reaches 640.
-					eff_x_fp += (scale << 9);
-				} else if (sprite_line_enable && eff_x < SCREEN_WIDTH + 2) {
+					fx += (scale << 9);
+				} else if (es && eff_x < SCREEN_WIDTH + 2) {
 					const uint8_t e = eff_x - SCREEN_WIDTH;
-					col_line[x] = calculate_line_col_index(sprite_edge_z[line_buf_sel][e], sprite_edge_col[line_buf_sel][e], 0, 0);
+					out[x] = calculate_line_col_index(sprite_edge_z[sel][e], sprite_edge_col[sel][e], 0, 0);
 				} else {
-					col_line[x] = 0;
+					out[x] = 0;
 				}
 			}
-			for (uint16_t x = hstop; x < s_pos_x; ++x) {
+			eff_x_fp = fx;
+			for (uint16_t x = MAX(hstop, s_pos_x_p); x < s_pos_x; ++x) {
 				col_line[x] = border_color;
 			}
 		}
@@ -2474,6 +2879,18 @@ render_line(uint16_t y, float scan_pos_x)
 	}
 
 	s_pos_x_p = s_pos_x;
+}
+
+// Compose the current line up to pixel x, exclusive: what the beam has shown
+// before a composer or palette write lands.
+static void
+scan_out_to(int x)
+{
+	if (reg_composer[0] & 2) {
+		video_step(MHZ, 0, true);
+		return;
+	}
+	render_line(vga_scan_pos_y - VGA_Y_OFFSET, (float)(x < 0 ? 0 : x));
 }
 
 static void
@@ -2549,9 +2966,14 @@ video_step(float mhz, float steps, bool midline)
 		if (!ntsc_mode && vga_scan_pos_y - VGA_Y_OFFSET == SCREEN_HEIGHT) {
 			vsync_isr();
 		}
+		if (!ntsc_mode) {
+			fetch_line(vga_scan_pos_y - VGA_Y_OFFSET, true);
+		}
 	} else if (midline) {
 		if (!ntsc_mode) {
-			render_line(vga_scan_pos_y - VGA_Y_OFFSET, vga_scan_pos_x);
+			// Pixel x is composed at dot x + 1, so only pixels below the
+			// current dot - 1 are final.
+			render_line(vga_scan_pos_y - VGA_Y_OFFSET, floorf(vga_scan_pos_x) - 2);
 		}
 	}
 	// top.v:451-452: line_irq is registered, so the status shows a clock later.
@@ -2805,7 +3227,19 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 	}
 }
 
-#define VERA_CHUNK_VERSION 4
+#define VERA_CHUNK_VERSION 5
+
+// Bytes only version 4 has (previous composer and layer registers, old line
+// enables, the held line) and bytes only version 5 has (fetch state). A chunk
+// of another length does not load, so version 5 pads to version 4's.
+enum {
+	VERA_V4_ONLY = 2 * COMPOSER_SLOTS + 2 * NUM_LAYERS * LAYER_IMAGE + 3 + 1 + 2 * 2 * SCREEN_WIDTH,
+	VERA_V5_ONLY = NUM_LAYERS * LAYER_IMAGE + 2 * 2 * SCREEN_WIDTH + 2 * 7 + FL_COMP_N + 1 + 2 + 2 * (10 + 2 * 4 + 4 * 3),
+	VERA_V5_PAD  = VERA_V4_ONLY - VERA_V5_ONLY,
+};
+_Static_assert(VERA_V5_PAD > 0, "the version 5 VERA chunk outgrew version 4's");
+_Static_assert(sizeof(bool) == 1 && sizeof(layer_lb) == 2 * 2 * SCREEN_WIDTH && sizeof(fetch_reg_layer) == 2 * 7 &&
+               sizeof(fetched_y) == 2, "VERA_V5_ONLY no longer counts the version 5 fields");
 
 static void
 video_state_io(ss_writer *w, ss_reader *r, int version)
@@ -2824,18 +3258,29 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 	SS_BLOCK(irq_line);
 	SS_BLOCK(reg_layer);
 	SS_BLOCK(reg_composer);
-	SS_BLOCK(prev_reg_composer);
+	if (r && version < 5) {
+		uint8_t prev_reg_composer[2][COMPOSER_SLOTS];
+		SS_BLOCK(prev_reg_composer);
+	}
 	props_io(w, r, layer_properties, sizeof layer_properties[0], NUM_LAYERS, LAYER_IMAGE, layer_image_v);
-	props_io(w, r, prev_layer_properties, sizeof prev_layer_properties[0][0], 2 * NUM_LAYERS, LAYER_IMAGE,
-	         layer_image_v);
+	if (w || version >= 5) {
+		props_io(w, r, fetch_layer_properties, sizeof fetch_layer_properties[0], NUM_LAYERS, LAYER_IMAGE,
+		         layer_image_v);
+	} else {
+		struct video_layer_properties prev[2][NUM_LAYERS];
+		props_io(w, r, prev, sizeof prev[0][0], 2 * NUM_LAYERS, LAYER_IMAGE, layer_image_v);
+	}
 	props_io(w, r, sprite_properties, sizeof sprite_properties[0], 128, SPRITE_IMAGE, sprite_image_v);
 	SS_BLOCK(sprite_line_col);
 	SS_BLOCK(sprite_line_z);
 	SS_BLOCK(sprite_line_mask);
 	SS_BLOCK(sprite_line_collisions);
 	SS_BLOCK(layer_line_enable);
-	SS_BLOCK(old_layer_line_enable);
-	SS_BLOCK(old_sprite_line_enable);
+	if (r && version < 5) {
+		bool old_layer_line_enable[2] = {0}, old_sprite_line_enable = 0;
+		SS_BLOCK(old_layer_line_enable);
+		SS_BLOCK(old_sprite_line_enable);
+	}
 	SS_BLOCK(sprite_line_enable);
 
 	SS_BLOCK(fx_addr1_mode);
@@ -2883,14 +3328,19 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 	SS_BLOCK(eff_y_fp);
 	if (w || version >= 3) {
 		SS_BLOCK(line_buf_sel);
-		SS_BLOCK(line_render_held);
-		SS_BLOCK(held_layer_line);
+		if (w || version >= 5) {
+			SS_BLOCK(layer_lb);
+		} else {
+			uint8_t line_render_held = 0, held_layer_line[2][2][SCREEN_WIDTH] = {{{0}}};
+			SS_BLOCK(line_render_held);
+			SS_BLOCK(held_layer_line);
+			memset(layer_lb, 0, sizeof(layer_lb));
+		}
 		SS_BLOCK(sprite_edge_col);
 		SS_BLOCK(sprite_edge_z);
 	} else {
 		line_buf_sel = 0;
-		line_render_held = 0;
-		memset(held_layer_line, 0, sizeof(held_layer_line));
+		memset(layer_lb, 0, sizeof(layer_lb));
 		memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
 		memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
 	}
@@ -2900,6 +3350,52 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 	} else {
 		comp_first_frame = 0;
 		line_irq_pending = 0;
+	}
+	if (w || version >= 5) {
+		SS_BLOCK(fetch_reg_layer);
+		SS_BLOCK(fetch_reg_comp);
+		if (w) {
+			ss_put_u8(w, fetch_log_lost || fetch_log_n || sprite_log_n);
+		} else {
+			fetch_log_lost = ss_get_u8(r) != 0;
+		}
+		SS_BLOCK(fetched_y);
+		for (int l = 0; l < 2; l++) {
+			struct layer_fetch *f = &layer_fsm[l];
+			uint8_t *b8[] = { &f->state, &f->strobe, &f->ack, &f->render_start, &f->busy, &f->xcnt, &f->word,
+			                  &f->htile, &f->render_mapdata, &f->next_render_mapdata };
+			uint16_t *b16[] = { &f->bus_addr, &f->ack_addr, &f->bitmap_addr, &f->lb_idx };
+			uint32_t *b32[] = { &f->map_data, &f->tile_data, &f->render_data };
+			for (size_t k = 0; k < sizeof b8 / sizeof b8[0]; k++) {
+				if (w) ss_put_u8(w, *b8[k]); else *b8[k] = ss_get_u8(r);
+			}
+			for (size_t k = 0; k < sizeof b16 / sizeof b16[0]; k++) {
+				if (w) ss_put_u16(w, *b16[k]); else *b16[k] = ss_get_u16(r);
+			}
+			for (size_t k = 0; k < sizeof b32 / sizeof b32[0]; k++) {
+				if (w) ss_put_u32(w, *b32[k]); else *b32[k] = ss_get_u32(r);
+			}
+		}
+		// The write logs are empty at a frame boundary, where states are saved.
+		// Pads the chunk to version 4's length, which a loader requires.
+		uint8_t pad[VERA_V5_PAD] = { 0 };
+		SS_BLOCK(pad);
+		if (r) {
+			fetch_log_n  = 0;
+			sprite_log_n = 0;
+		}
+	} else {
+		memcpy(fetch_reg_layer, reg_layer, sizeof(fetch_reg_layer));
+		memcpy(fetch_layer_properties, layer_properties, sizeof(fetch_layer_properties));
+		fetch_reg_comp[0] = reg_composer[0];
+		fetch_reg_comp[1] = reg_composer[2];
+		fetch_reg_comp[2] = reg_composer[6];
+		fetch_reg_comp[3] = reg_composer[7];
+		fetch_log_n    = 0;
+		fetch_log_lost = false;
+		sprite_log_n   = 0;
+		fetched_y      = FETCH_NONE;
+		memset(layer_fsm, 0, sizeof(layer_fsm));
 	}
 #undef SS_BLOCK
 
@@ -4645,6 +5141,10 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 			}
 
 			bool special = fx_special_addr(address);
+			if (address >= ADDR_PALETTE_START && address < ADDR_PALETTE_END) {
+				// The palette is read as each pixel leaves.
+				scan_out_to(write_dot());
+			}
 			uint8_t wrdata_to_use;
 			uint8_t ram_wrdata[4];
 			uint8_t nibble_mask[4];
@@ -4751,8 +5251,13 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 		case 0x0A:
 		case 0x0B:
 		case 0x0C: {
-			video_step(MHZ, 0, true); // potential midline raster effect
 			int i = reg - 0x09 + (io_dcsel << 2);
+			if (i < 8) {
+				// composer.v:189-201: the border and window are applied a
+				// clock before the pixel leaves; composer.v:172-187 steps the
+				// scaled X counter a clock later.
+				scan_out_to(write_dot() - (i == 1 ? 0 : 1));
+			}
 			if (i == 0) {
 				// if progressive mode field goes from 0 to 1
 				// or if mode goes from vga to something else with
@@ -4772,6 +5277,12 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 				video_palette.dirty = true;
 			} else {
 				reg_composer[i] = value;
+			}
+			switch (i) {
+				case 0: fetch_note(FL_DC_VIDEO, reg_composer[0]); break;
+				case 2: fetch_note(FL_VSCALE, value); break;
+				case 6: fetch_note(FL_VSTART, value); break;
+				case 7: fetch_note(FL_VSTOP, value); break;
 			}
 
 			switch (i) {
@@ -4878,9 +5389,9 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 		case 0x11:
 		case 0x12:
 		case 0x13:
-			video_step(MHZ, 0, true); // potential midline raster effect
 			// top.v:393-401: scroll high bytes hold four bits.
 			reg_layer[0][reg - 0x0D] = (reg == 0x11 || reg == 0x13) ? (value & 0x0f) : value;
+			fetch_note(reg - 0x0D, reg_layer[0][reg - 0x0D]);
 			refresh_layer_properties(0);
 			break;
 
@@ -4891,8 +5402,8 @@ static void video_write_inner(uint8_t reg, uint8_t value) {
 		case 0x18:
 		case 0x19:
 		case 0x1A:
-			video_step(MHZ, 0, true); // potential midline raster effect
 			reg_layer[1][reg - 0x14] = (reg == 0x18 || reg == 0x1A) ? (value & 0x0f) : value;
+			fetch_note(7 + reg - 0x14, reg_layer[1][reg - 0x14]);
 			refresh_layer_properties(1);
 			break;
 
