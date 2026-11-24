@@ -17,6 +17,7 @@
 #include "../profile_session.h" // profile_session_sync_names
 #include "../state_slots.h"     // State menu: save-state slots
 #include "../input_log.h"       // System menu: these end an input recording
+#include "../keyframes_host.h"  // Rewind toggle and Step Back
 #include "../video.h"           // video_host_key_name, for the shortcut labels
 
 #include <time.h>
@@ -680,12 +681,79 @@ menubar_fixed_colored(const char *widest, ImVec4 color, const char *text)
 // and "why can't I click this?" is exactly the question worth answering. Plain
 // SetItemTooltip() would say nothing there, since ImGui does not consider a
 // disabled item hovered unless asked.
-static bool
-ctrl_button(const char *label, bool enabled, const char *tip)
+enum class ctrl_icon { Continue, Pause, StepBack, StepInto, StepOver, StepOut };
+
+static void
+draw_arrow_head(ImDrawList *dl, float x, float y, float dir_x, float dir_y, float size, ImU32 col)
 {
+    const float base_x = x - dir_x * size;
+    const float base_y = y - dir_y * size;
+    const float half   = size * 0.75f;
+    dl->AddTriangleFilled(ImVec2(x, y), ImVec2(base_x - dir_y * half, base_y + dir_x * half),
+                          ImVec2(base_x + dir_y * half, base_y - dir_x * half), col);
+}
+
+static void
+draw_ctrl_icon(ImDrawList *dl, ctrl_icon icon, float cx, float cy, float h, bool enabled)
+{
+    const ImU32 disabled = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const ImU32 green    = enabled ? IM_COL32(89, 204, 102, 255) : disabled;
+    const ImU32 blue     = enabled ? IM_COL32(89, 166, 255, 255) : disabled;
+    const ImU32 dot      = enabled ? ImGui::GetColorU32(ImGuiCol_Text) : disabled;
+    const float thick    = (h * 0.10f < 1.5f) ? 1.5f : h * 0.10f;
+    const float head     = h * 0.20f;
+    const float dot_y    = cy + h * 0.32f;
+    const float dot_r    = h * 0.09f;
+
+    switch (icon) {
+    case ctrl_icon::Continue:
+        dl->AddTriangleFilled(ImVec2(cx - h * 0.24f, cy - h * 0.34f), ImVec2(cx + h * 0.32f, cy),
+                              ImVec2(cx - h * 0.24f, cy + h * 0.34f), green);
+        break;
+    case ctrl_icon::Pause:
+        dl->AddRectFilled(ImVec2(cx - h * 0.26f, cy - h * 0.32f), ImVec2(cx - h * 0.07f, cy + h * 0.32f), blue);
+        dl->AddRectFilled(ImVec2(cx + h * 0.07f, cy - h * 0.32f), ImVec2(cx + h * 0.26f, cy + h * 0.32f), blue);
+        break;
+    case ctrl_icon::StepInto:
+        dl->AddLine(ImVec2(cx, cy - h * 0.38f), ImVec2(cx, cy - h * 0.02f), blue, thick);
+        draw_arrow_head(dl, cx, cy + h * 0.16f, 0.0f, 1.0f, head, blue);
+        dl->AddCircleFilled(ImVec2(cx, dot_y), dot_r, dot);
+        break;
+    case ctrl_icon::StepOut:
+        dl->AddLine(ImVec2(cx, cy + h * 0.14f), ImVec2(cx, cy - h * 0.18f), blue, thick);
+        draw_arrow_head(dl, cx, cy - h * 0.38f, 0.0f, -1.0f, head, blue);
+        dl->AddCircleFilled(ImVec2(cx, dot_y), dot_r, dot);
+        break;
+    case ctrl_icon::StepOver:
+    case ctrl_icon::StepBack: {
+        const float side = icon == ctrl_icon::StepOver ? 1.0f : -1.0f;
+        const float r    = h * 0.30f;
+        const float ay   = cy - h * 0.02f;
+        if (side > 0.0f) {
+            dl->PathArcTo(ImVec2(cx, ay), r, IM_PI, IM_PI * 2.0f, 16);
+        } else {
+            dl->PathArcTo(ImVec2(cx, ay), r, IM_PI * 2.0f, IM_PI, 16);
+        }
+        dl->PathStroke(blue, 0, thick);
+        draw_arrow_head(dl, cx + side * r, ay + head, 0.0f, 1.0f, head, blue);
+        dl->AddCircleFilled(ImVec2(cx, dot_y), dot_r, dot);
+        break;
+    }
+    }
+}
+
+static bool
+ctrl_button(const char *id, ctrl_icon icon, bool enabled, const char *tip)
+{
+    const float h = ImGui::GetFrameHeight();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     ImGui::BeginDisabled(!enabled);
-    const bool clicked = ImGui::Button(label);
+    const bool clicked = ImGui::Button(id, ImVec2(h * 1.25f, h));
     ImGui::EndDisabled();
+    ImGui::PopStyleColor();
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    draw_ctrl_icon(ImGui::GetWindowDrawList(), icon, (min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f, h, enabled);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("%s", tip);
     }
@@ -958,28 +1026,44 @@ debug_ui_draw_control_bar(void)
     const bool running = DEBUGIsRunning();
     const bool paused  = DEBUGIsPaused();
 
-    if (ctrl_button("Continue", paused,
+    if (ctrl_button("##Continue", ctrl_icon::Continue, paused,
                     "Continue  (F5)\n"
                     "Run until the next breakpoint or pause.\n"
                     "Only while the machine is halted."))
         DEBUGContinue();
 
     ImGui::SameLine();
-    if (ctrl_button("Pause", running,
+    if (ctrl_button("##Pause", ctrl_icon::Pause, running,
                     "Pause  (Break key)\n"
                     "Halt the machine wherever it is.\n"
                     "Only while it is running."))
         DEBUGPause();
 
     ImGui::SameLine();
-    if (ctrl_button("Step Into", paused,
+    {
+        const char *back_tip = !keyframes_host_enabled()
+                                   ? "Step Back\n"
+                                     "Rewind history is off. Turn it on in\n"
+                                     "System > Settings > Stepping & interrupts."
+                               : !paused ? "Step Back\nOnly while the machine is halted."
+                               : keyframes_host_can_step_back()
+                                   ? "Step Back\nReturn to the previous instruction."
+                                   : "Step Back\nNo earlier history yet. Run the machine to build some.";
+        if (ctrl_button("##StepBack", ctrl_icon::StepBack, paused && keyframes_host_can_step_back(), back_tip)) {
+            char err[160];
+            DEBUGStepBack(err, sizeof err);
+        }
+    }
+
+    ImGui::SameLine();
+    if (ctrl_button("##StepInto", ctrl_icon::StepInto, paused,
                     "Step Into  (F11)\n"
                     "Execute one source line, entering any call. Without C debug\n"
                     "info, or with \"Step by line\" off, one instruction.\n"
                     "Only while the machine is halted."))
         DEBUGStepIntoAuto(DEBUG_OWNER_UI);
     ImGui::SameLine();
-    if (ctrl_button("Step Over", paused,
+    if (ctrl_button("##StepOver", ctrl_icon::StepOver, paused,
                     "Step Over  (F10)\n"
                     "Execute one source line, running any call to completion.\n"
                     "Without C debug info, or with \"Step by line\" off, one\n"
@@ -987,7 +1071,7 @@ debug_ui_draw_control_bar(void)
                     "Only while the machine is halted."))
         DEBUGStepOverAuto(DEBUG_OWNER_UI);
     ImGui::SameLine();
-    if (ctrl_button("Step Out", paused,
+    if (ctrl_button("##StepOut", ctrl_icon::StepOut, paused,
                     "Step Out  (Shift+F11)\n"
                     "Run until the current subroutine returns.\n"
                     "Only while the machine is halted."))

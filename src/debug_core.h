@@ -499,6 +499,8 @@ extern int debug_wp_armed_vram;
 // Called after any change to the table. NULL unless something needs to know;
 // debug_core cannot reach video.c itself, because its tests link without it.
 extern void (*debug_wp_changed)(void);
+// While suspended no watch fires or counts. The table is unchanged.
+void debug_wp_suspend(bool on);
 
 // A guest store landed in VRAM through data port `port`. True if a watch fires,
 // and recorded for debug_wp_last_access().

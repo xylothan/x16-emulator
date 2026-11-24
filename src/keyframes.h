@@ -59,6 +59,8 @@ void keyframes_init(const keyframes_hooks_t *hooks);
 bool keyframes_start(uint32_t interval_frames, size_t budget_bytes);
 // Disarms. What the ring holds stays.
 void keyframes_stop(void);
+// Arms again, keeping what the ring holds.
+void keyframes_resume(void);
 void keyframes_clear(void);
 
 // One frame boundary. Takes a state when one is due, and retries each frame

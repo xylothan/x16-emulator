@@ -11,6 +11,7 @@
 #include "input_log.h"
 #include "joystick.h"
 #include "cpu/fake6502.h"
+#include "cpu/irq_ctx.h"
 
 static void
 apply_event(const input_event_t *e)
@@ -29,10 +30,22 @@ apply_event(const input_event_t *e)
 	}
 }
 
+// The debugger's poll clears the entered flag, so it depends on where the hash
+// is taken in the loop. It does not affect how the machine runs.
+static bool
+verify_hash(uint64_t *out)
+{
+	const bool entered = cpu_irq_just_entered;
+	cpu_irq_just_entered = false;
+	const bool ok = debug_server_machine_hash(out);
+	cpu_irq_just_entered = entered;
+	return ok;
+}
+
 void
 input_log_host_init(void)
 {
-	static const input_log_hooks_t hooks = {apply_event, debug_server_machine_hash, joystick_replay_end};
+	static const input_log_hooks_t hooks = {apply_event, verify_hash, joystick_replay_end};
 	input_log_init(&clockticks6502, &hooks);
 }
 

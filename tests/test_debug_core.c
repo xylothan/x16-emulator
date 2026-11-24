@@ -2134,6 +2134,20 @@ main(void)
 		debug_stop_filter_set(DEBUG_OWNER_MCP, 0);
 	}
 
+	{
+		debug_wp_clear_all();
+		check(debug_wp_add(0x1234, 1, -1) == 0, "suspend: adds a watchpoint");
+		check(debug_wp_armed_cpu_write == 1, "suspend: armed before");
+		debug_wp_suspend(true);
+		check(debug_wp_armed_cpu_write == 0, "suspend: disarms");
+		check(debug_wp_count() == 1, "suspend: keeps the table");
+		check(debug_wp_add(0x2345, 1, -1) == 1, "suspend: accepts an edit");
+		check(debug_wp_armed_cpu_write == 0, "suspend: an edit does not rearm");
+		debug_wp_suspend(false);
+		check(debug_wp_armed_cpu_write == 2, "suspend: release rearms all");
+		debug_wp_clear_all();
+	}
+
 	debug_core_free();
 
 	if (failures) {

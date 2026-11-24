@@ -1,6 +1,7 @@
 #ifndef TIMING_H
 #define TIMING_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,6 +19,8 @@ void timing_init();
 extern const char *(*timing_title_note)(void);
 extern const char *(*timing_title_status)(void);
 void timing_refresh_title(void);
+// Frames are not paced while on.
+void timing_set_no_sleep(bool on);
 void timing_update();
 void timing_update_no_sleep();
 int64_t timing_lead_us();

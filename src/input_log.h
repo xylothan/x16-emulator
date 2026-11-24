@@ -82,6 +82,8 @@ typedef struct {
 
 extern uint8_t input_log_mode;
 extern bool    input_log_applying;
+// True while a rewind runs the machine to its target: nothing leaves the host.
+extern bool    input_log_seeking;
 
 static inline bool
 input_log_is_recording(void)
@@ -121,6 +123,11 @@ void input_log_replay(input_site_t site);
 void input_log_position(uint64_t *cycle, uint32_t *event_index);
 // Changes with every recording started.
 uint32_t input_log_generation(void);
+// After a replay reached the end of its recording: records on from there, in
+// the same generation.
+bool input_log_resume_recording(void);
+// Called whenever a replay finishes, after the replay_end hook.
+void input_log_set_finish_hook(void (*hook)(input_replay_result_t result));
 
 void input_log_get_status(input_log_status_t *out);
 
