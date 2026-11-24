@@ -143,6 +143,9 @@ extern uint8_t fetch6502(uint16_t address, uint8_t bank);
 // own operand bytes, which is what a read watch is often set to catch.
 static bool operand_is_immediate = false;
 extern void write6502(uint16_t address, uint8_t bank, uint8_t value);
+// A bus cycle whose data the CPU ignores. On the 65C816 these have VDA and VPA
+// low, so whether a device responds is the board's decision, not the core's.
+extern void dummy6502(uint16_t address, uint8_t bank, bool write, uint8_t value);
 extern void stop6502(uint16_t address, uint8_t bank);
 extern void vp6502();
 extern uint8_t memory_get_ram_bank();
@@ -233,6 +236,46 @@ static void putvalue(uint16_t saveval, bool use16Bit) {
         write6502(ea + 1, wrappedBankByte(ea), saveval >> 8);
     } else {
         write6502(ea, bank_byte(ea), (saveval & 0x00FF));
+    }
+}
+
+// The modify cycle of a read-modify-write, then the write.
+//   W65C02S: the operand address is read again.
+//   W65C816S, E=1: the unmodified value is written back, with VDA and VPA low.
+//   W65C816S, E=0: internal cycle at the last byte read; a 16-bit result is
+//   written high byte first.
+static void rmw_put(uint16_t saveval, bool use16Bit) {
+    if (addressing_is_acc) {
+        putvalue(saveval, use16Bit);
+        return;
+    }
+    if (!regs.is65c816) {
+        dummy6502((uint16_t)ea, bank_byte(ea), false, 0);
+    } else if (regs.e) {
+        dummy6502((uint16_t)ea, bank_byte(ea), true, (uint8_t)value);
+    } else if (use16Bit) {
+        dummy6502((uint16_t)(ea + 1), wrappedBankByte(ea), false, 0);
+    } else {
+        dummy6502((uint16_t)ea, bank_byte(ea), false, 0);
+    }
+    if (use16Bit) {
+        write6502((uint16_t)(ea + 1), wrappedBankByte(ea), saveval >> 8);
+        write6502((uint16_t)ea, bank_byte(ea), saveval & 0x00FF);
+    } else {
+        write6502((uint16_t)ea, bank_byte(ea), saveval & 0x00FF);
+    }
+}
+
+// The extra cycle of a 65C02 decimal ADC or SBC re-reads the operand address.
+// An immediate has none, and the bus shows its value as a zero-page address.
+static inline void decimal_dummy(void) {
+    if (regs.is65c816 || addressing_is_acc) {
+        return;
+    }
+    if (operand_is_immediate) {
+        dummy6502((uint16_t)(value & 0x00FF), 0, false, 0);
+    } else {
+        dummy6502((uint16_t)ea, bank_byte(ea), false, 0);
     }
 }
 

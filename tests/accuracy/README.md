@@ -27,6 +27,12 @@ Run with `vera_accuracy vera/<version>`.
 hardware that the emulator does not match yet. They report `DIVERGE`, and a gap
 that starts matching fails the run until it moves to `MANIFEST`.
 
+## CPU bus cycles
+
+`cpu_dummy_cycles` counts the accesses a device sees for each instruction form.
+Expected counts come from the SingleStepTests bus traces in `tests/pt/` and the
+W65C816S VDA and VPA pin description.
+
 ## Not covered
 
 - NTSC, RGB, interlaced and 240p output
@@ -35,5 +41,6 @@ that starts matching fails the run until it moves to `MANIFEST`.
 - Sprite buffer entries 640 and 641 when sprites are armed outside vertical blank
 - PSG, PCM and SPI
 - FPGA reconfiguration
-- 65C02 dummy bus cycles: a read-modify-write of a VERA data port reads it twice
-  on hardware and once in the emulator
+- CPU dummy cycles at the program counter or stack: implied, stack, branch and JSR
+- Whether the X16 board decodes 65C816 cycles with VDA and VPA low. They are
+  treated as internal and do not reach I/O

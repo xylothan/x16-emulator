@@ -264,6 +264,21 @@ fetch6502(uint16_t address, uint8_t bank) {
 	return value;
 }
 
+// A bus cycle whose data the CPU discards. Only the I/O page can notice one.
+// The 65C816 marks these cycles with VDA and VPA low, which the W65C816S
+// datasheet defines as an internal operation, so they do not reach a device.
+void
+dummy6502(uint16_t address, uint8_t bank, bool write, uint8_t value)
+{
+	(void)bank;
+	(void)write;
+	(void)value;
+	if (regs.is65c816 || address < 0x9f00 || address >= 0xa000) {
+		return;
+	}
+	(void)real_read6502(address, 0, false, USE_CURRENT_X16_BANK);
+}
+
 // Which device an I/O-page address belongs to, for the trace. Kept here rather
 // than in io_trace.c because the MIDI card's base address is configurable, so
 // only the dispatch below actually knows the map.

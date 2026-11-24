@@ -72,6 +72,7 @@ static void adc() {
             uint8_t ovresult = (tmp & 0x0F) | (tmpov & 0xF0);
             overflowcalc8((uint16_t)ovresult, (uint16_t)regs.a, value);
         }
+        decimal_dummy();
         clockticks6502 += (uint32_t)(!regs.is65c816);
     } else {
         if (memory_16bit()) {
@@ -118,7 +119,7 @@ static void asl() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void _do_branch(int condition) {
@@ -286,7 +287,7 @@ static void dec() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void dex() {
@@ -333,7 +334,7 @@ static void inc() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void inx() {
@@ -446,7 +447,7 @@ static void lsr() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void nop() {
@@ -570,7 +571,7 @@ static void rol() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void ror() {
@@ -587,7 +588,7 @@ static void ror() {
     zerocalc(result, memory_16bit());
     signcalc(result, memory_16bit());
 
-    putvalue(result, memory_16bit());
+    rmw_put(result, memory_16bit());
 }
 
 static void rti() {
@@ -726,6 +727,7 @@ static void sbc() {
             }
         }
 
+        decimal_dummy();
         clockticks6502 += (uint32_t)(!regs.is65c816);
     } else {
         if (memory_16bit()) {
