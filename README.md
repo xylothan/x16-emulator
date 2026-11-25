@@ -1573,10 +1573,18 @@ debugging it.
 | Performance | `perf_stats`, `perf_config`, `perf_history`, `host_perf`, `profile_capture` |
 | Devices | `get_io_state`, `read_io_trace`, `set_io_capture`, `trigger_interrupt`, `get_sdcard`, `sprite_mux_stats`, `sprite_mux_config` |
 | Other | `save_state`, `load_state` |
+| History | `get_history`, `set_rewind`, `jump_to_keyframe`, `keyframes`, `record_input` |
 
 `dump_memory` writes only inside `-fsroot`, or the dump folder when there is no `-fsroot`, and
 refuses a drive root. `load_prg` places a program's bytes and loads its `.dbg`. It does not run the
 program or update BASIC's pointers.
+
+`set_rewind` turns on the history that `step` with mode `back` or `reverse` and
+`jump_to_keyframe` move through, as `-rewind` does. It is one setting shared by every client and the
+panel, is not put back when a session ends, and does not change the Settings panel's saved
+preference. `get_history` reports it and the input recording under it. `record_input`
+(`x16/inputLog`) and `keyframes` (`x16/keyframes`) record and replay input, and a keyframe ring
+over it, apart from rewind.
 
 `evaluate` takes the expression language above and nothing else. It cannot assign, and the debug
 console's commands (`bp_clear`, `reset` and the rest) do not exist there. `$C000` is a number, so
