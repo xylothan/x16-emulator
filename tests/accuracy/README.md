@@ -41,9 +41,9 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 ## Not covered
 
 - NTSC, RGB, interlaced and 240p output
-- Sprite collision IRQ timing
-- Sprite fetch limits under VRAM contention (`sprites_many` in `KNOWN_GAPS`)
+- Sprite fetches delayed by CPU data port accesses
 - Sprite buffer entries 640 and 641 when sprites are armed outside vertical blank
+- Sprite buffer entries 640 and 641 under the pixel on the last render clock
 - PSG, PCM and SPI
 - FPGA reconfiguration
 - CPU dummy cycles at the program counter or stack: implied, stack, branch and JSR

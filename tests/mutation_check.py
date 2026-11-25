@@ -237,6 +237,60 @@ MUTATIONS = [
         "caught_by": ["vera_accuracy"],
     },
     {
+        "name": "VERA hidden sprite pixel writes its collision mask",
+        "file": "src/video.c",
+        # sprite_renderer.v:319: the mask goes in with the pixel, if it is drawn.
+        "find": "sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;",
+        "into": "sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;"
+                " sprite_line_mask[line_x] |= props->sprite_collision_mask;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA sprite fetch ignores layer requests",
+        "file": "src/video.c",
+        # vram_if.v:124-138: sprites are granted VRAM last.
+        "find": "while (rt < SPRITE_RENDER_TIME && taken[rt]) {",
+        "into": "while (rt < SPRITE_RENDER_TIME && taken[rt] && rt < 1) {",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA sprite fetch ack is combinational",
+        "file": "src/video.c",
+        # vram_if.v:142-146: the ack is registered.
+        "find": "\t\t\t\trt += 2;\n",
+        "into": "\t\t\t\trt += 1;\n",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA sprite pixel on the last render clock is drawn",
+        "file": "src/video.c",
+        "find": "const bool last = rt == SPRITE_RENDER_TIME;",
+        "into": "const bool last = rt == SPRITE_RENDER_TIME + 1;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA sprite pixel on the last render clock is dropped",
+        "file": "src/video.c",
+        # top.v:731-739: it is written into the buffer rendered next.
+        "find": "sprite_carry = (sprite_carry_t){ 1,",
+        "into": "sprite_carry = (sprite_carry_t){ 0,",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "VERA sprites drawn only on lines 0-479",
+        "file": "src/video.c",
+        # composer.v:147-162: render_start follows the window, not the display.
+        "find": "\tif (sprite_start) {\n",
+        "into": "\tif (sprite_start && y < SCREEN_HEIGHT) {\n",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
         "name": "VERA palette write lands a pixel early",
         "file": "src/video.c",
         "find": "scan_out_to(write_dot());",

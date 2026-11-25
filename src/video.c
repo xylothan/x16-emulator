@@ -174,6 +174,7 @@ static uint8_t isr;
 
 static uint16_t irq_line;
 static uint8_t comp_first_frame;
+static uint8_t comp_vstarted; // composer.v:139 vactive_started_r
 static uint8_t line_irq_pending;
 
 static uint8_t reg_layer[2][7];
@@ -241,6 +242,14 @@ static uint8_t sprite_line_collisions;
 static uint8_t line_buf_sel;
 static uint8_t sprite_edge_col[2][2];
 static uint8_t sprite_edge_z[2][2];
+static uint8_t sprite_edge_mask[2][2];
+
+// top.v:731-739, sprite_line_buffer.v: the buffers swap the clock after
+// next_line, which is render_time_done's clock. Its pixel reads the entry the
+// composer last addressed in the buffer just shown, and is written into that
+// buffer, which is the one rendered next.
+typedef struct { uint8_t on; uint16_t x; uint8_t col, z, mask; } sprite_carry_t;
+static sprite_carry_t sprite_carry;
 static bool layer_line_enable[2];
 static bool sprite_line_enable;
 
@@ -464,6 +473,9 @@ video_reset()
 	       sizeof(fetch_reg_comp));
 	memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
 	memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
+	memset(sprite_edge_mask, 0, sizeof(sprite_edge_mask));
+	memset(&sprite_carry, 0, sizeof(sprite_carry));
+	comp_vstarted = 0;
 
 	// copy palette
 	memcpy(palette, default_palette, sizeof(palette));
@@ -1570,6 +1582,66 @@ expand_4bpp_data(uint8_t *dst, const uint8_t *src, int dst_size)
 // write would.
 #define SPRITE_ATTR_DOT 1
 static const struct video_sprite_properties *sprite_props_at(int i, uint32_t d, struct video_sprite_properties *out);
+static const uint8_t *layer_bus_schedule(void);
+
+static void
+sprite_apply_carry(void)
+{
+	if (sprite_carry.on) {
+		sprite_line_col[sprite_carry.x]  = sprite_carry.col;
+		sprite_line_z[sprite_carry.x]    = sprite_carry.z;
+		sprite_line_mask[sprite_carry.x] = sprite_carry.mask;
+		sprite_carry.on = 0;
+	}
+}
+
+// composer.v:172-185: the read index the composer holds at the end of a line.
+static uint16_t
+composer_last_index(void)
+{
+	uint16_t hstart = reg_composer[4] << 2, hstop = reg_composer[5] << 2;
+	hstop = hstop < VGA_SCAN_WIDTH ? hstop : VGA_SCAN_WIDTH;
+	uint32_t r = 0;
+	for (uint16_t x = hstart; x < hstop && (r >> 7) < SCREEN_WIDTH; x++) {
+		r += reg_composer[1];
+	}
+	return (r >> 7) & 0x3FF;
+}
+
+// The pixel on render_time_done (top.v:731-739, sprite_line_buffer.v).
+static void
+sprite_last_pixel(uint16_t line_x, uint8_t col, const struct video_sprite_properties *props)
+{
+	if (col == 0) {
+		return;
+	}
+	const uint8_t  other = line_buf_sel ^ 1;
+	const uint16_t q     = composer_last_index();
+	uint8_t qcol = 0, qz = 0, qmask = 0;
+	if (q >= SCREEN_WIDTH && q < SCREEN_WIDTH + 2) {
+		qcol  = sprite_edge_col[other][q - SCREEN_WIDTH];
+		qz    = sprite_edge_z[other][q - SCREEN_WIDTH];
+		qmask = sprite_edge_mask[other][q - SCREEN_WIDTH];
+	}
+	if (line_x < SCREEN_WIDTH) {
+		sprite_line_collisions |= qmask & props->sprite_collision_mask;
+	}
+	if (!(props->sprite_zdepth > qz || qcol == 0) || line_x >= SCREEN_WIDTH + 2) {
+		return;
+	}
+	if (col < 16) {
+		col += props->palette_offset;
+	}
+	const uint8_t mask = qmask | props->sprite_collision_mask;
+	if (line_x >= SCREEN_WIDTH) {
+		const uint8_t e = line_x - SCREEN_WIDTH;
+		sprite_edge_col[other][e]  = col;
+		sprite_edge_z[other][e]    = props->sprite_zdepth;
+		sprite_edge_mask[other][e] = mask;
+	} else {
+		sprite_carry = (sprite_carry_t){ 1, line_x, col, props->sprite_zdepth, mask };
+	}
+}
 
 static void
 render_sprite_line(const uint16_t y)
@@ -1577,6 +1649,7 @@ render_sprite_line(const uint16_t y)
 	memset(sprite_line_col, 0, SCREEN_WIDTH);
 	memset(sprite_line_z, 0, SCREEN_WIDTH);
 	memset(sprite_line_mask, 0, SCREEN_WIDTH);
+	sprite_apply_carry();
 
 	// Timing follows sprite_renderer.v, which runs two state machines against
 	// one shared line timer:
@@ -1599,9 +1672,8 @@ render_sprite_line(const uint16_t y)
 	// That overlap is why `t` and `render_free_at` are tracked separately;
 	// charging all 128 lookups serially would drop sprites the hardware draws.
 	//
-	// Known divergence: STATE_WAIT_FETCH is charged one clock, its best case.
-	// Real VERA shares the VRAM bus with the layer renderers, so a contended
-	// fetch takes longer and slightly fewer sprites fit than modelled here.
+	// Known divergence: the CPU's data port outranks every renderer for VRAM
+	// (vram_if.v:124-127) and is not counted against sprite fetches here.
 	const bool trace = sprite_trace_active;
 	uint16_t   traced_evaluated = 0;
 	uint16_t   traced_drawn     = 0;
@@ -1612,9 +1684,12 @@ render_sprite_line(const uint16_t y)
 		sprite_trace_line_begin(y, sprite_trace_cpu_cycles);
 	}
 
-	uint32_t t              = 0; // render_time_r: clocks used on this line
-	uint32_t render_free_at = 0; // clock the line renderer returns to STATE_IDLE
+	// Clocks are render_time_r. Both machines act on SPRITE_RENDER_TIME, the
+	// clock render_time_done is high, and are DONE after it.
+	uint32_t t              = 0; // SF_FIND_SPRITE reaches slot i
+	uint32_t render_free_at = 0; // render_busy low (:432): STATE_IDLE, no start_render_r
 	int      stopped_at     = NUM_SPRITES; // first slot the line never reached
+	const uint8_t *taken    = NULL;
 
 	for (int i = 0; i < NUM_SPRITES; i++) {
 		if (t >= SPRITE_RENDER_TIME) {
@@ -1629,8 +1704,16 @@ render_sprite_line(const uint16_t y)
 		const struct video_sprite_properties *props =
 			sprite_log_n ? sprite_props_at(i, SPRITE_ATTR_DOT + t, &then) : &sprite_properties[i];
 
-		const bool on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
-		                     y < props->sprite_y + props->sprite_height;
+		bool on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
+		               y < props->sprite_y + props->sprite_height;
+
+		// :146-151: a slot waiting on render_busy is read again every clock.
+		while (on_line && sprite_log_n && t < render_free_at && t < SPRITE_RENDER_TIME) {
+			t++;
+			props   = sprite_props_at(i, SPRITE_ATTR_DOT + t, &then);
+			on_line = props->sprite_zdepth != 0 && y >= props->sprite_y &&
+			          y < props->sprite_y + props->sprite_height;
+		}
 
 		if (!on_line) {
 			t++; // one clock to step over the slot, overlapped with rendering
@@ -1644,8 +1727,6 @@ render_sprite_line(const uint16_t y)
 
 		tflags |= SPRITE_TRACE_ONSCREEN;
 
-		// SF_FIND_SPRITE holds here until the line renderer is idle, then takes
-		// two clocks to hand the sprite over (SF_FIND_SPRITE, SF_START_RENDER).
 		if (t < render_free_at) {
 			t = render_free_at;
 		}
@@ -1653,6 +1734,8 @@ render_sprite_line(const uint16_t y)
 			stopped_at = i;
 			break;
 		}
+		// SF_START_RENDER at t + 1, then STATE_IDLE takes start_render_r at
+		// t + 2 while the search moves on to the next slot.
 		t += 2;
 
 		const uint16_t eff_sy = props->vflip ? ((props->sprite_height - 1) - (y - props->sprite_y)) : (y - props->sprite_y);
@@ -1677,27 +1760,35 @@ render_sprite_line(const uint16_t y)
 			video_space_read_range(unpacked_sprite_line, row_address, width);
 		}
 
-		// The line renderer's own clock, running from STATE_IDLE's single clock
-		// into the fetch/render loop.
+		// The line renderer's clock. STATE_WAIT_FETCH raises its strobe at rt
+		// and is granted on the first clock no layer asks (vram_if.v:124-138);
+		// the ack is registered (:142-146), so STATE_RENDER starts two clocks
+		// after the grant and draws one pixel a clock. Pixels hanging off the
+		// side cost the same (:365-367).
 		uint32_t rt        = t + 1;
 		bool     truncated = false;
 		uint16_t sx        = 0;
 
 		for (; sx < props->sprite_width; ++sx) {
-			// one clock per fetched 32 bits
 			if (!(sx & vram_fetch_mask)) {
-				if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
-				rt++;
+				if (!taken) {
+					taken = layer_bus_schedule();
+				}
+				while (rt < SPRITE_RENDER_TIME && taken[rt]) {
+					rt++;
+				}
+				rt += 2;
 			}
-
-			// one clock per pixel, charged whether or not the pixel lands on
-			// screen: STATE_RENDER steps linebuf_idx_r past the edge just the
-			// same (sprite_renderer.v:317-319), so a sprite hanging off the
-			// side costs its full width.
-			if (rt >= SPRITE_RENDER_TIME) { truncated = true; break; }
+			if (rt > SPRITE_RENDER_TIME) { truncated = true; break; }
+			const bool last = rt == SPRITE_RENDER_TIME;
 			rt++;
 
 			const uint16_t line_x = props->sprite_x + sx;
+			if (last) {
+				sprite_last_pixel(line_x, unpacked_sprite_line[eff_sx], props);
+				truncated = true;
+				break;
+			}
 			if (line_x >= SCREEN_WIDTH) {
 				// sprite_renderer.v:319-323; no collision at 640+ (:327).
 				if (line_x < SCREEN_WIDTH + 2) {
@@ -1710,6 +1801,7 @@ render_sprite_line(const uint16_t y)
 						}
 						sprite_edge_col[line_buf_sel][e] = edge_col;
 						sprite_edge_z[line_buf_sel][e]   = props->sprite_zdepth;
+						sprite_edge_mask[line_buf_sel][e] |= props->sprite_collision_mask;
 					}
 				}
 				eff_sx += eff_sx_incr;
@@ -1720,9 +1812,10 @@ render_sprite_line(const uint16_t y)
 			eff_sx += eff_sx_incr;
 
 			// palette offset
+			// :319, :325-328: every opaque pixel tests the mask in the buffer,
+			// but only one that is drawn writes its own mask there.
 			if (col_index > 0) {
 				sprite_line_collisions |= sprite_line_mask[line_x] & props->sprite_collision_mask;
-				sprite_line_mask[line_x] |= props->sprite_collision_mask;
 
 				if (props->sprite_zdepth > sprite_line_z[line_x]) {
 					if (col_index < 16) {
@@ -1730,6 +1823,7 @@ render_sprite_line(const uint16_t y)
 					}
 					sprite_line_col[line_x] = col_index;
 					sprite_line_z[line_x] = props->sprite_zdepth;
+					sprite_line_mask[line_x] |= props->sprite_collision_mask;
 					tflags |= SPRITE_TRACE_DREW;
 				}
 			}
@@ -1754,7 +1848,7 @@ render_sprite_line(const uint16_t y)
 					traced_dropped++;
 				}
 				const uint32_t left = (uint32_t)(props->sprite_width - sx);
-				traced_tail = left + left / (vram_fetch_mask + 1u);
+				traced_tail = left + 2u * (left / (vram_fetch_mask + 1u));
 			}
 			sprite_trace_note_slot(y, (uint8_t)i, sprite_data[i],
 			                       (uint16_t)(rt - t_before), tflags);
@@ -1791,7 +1885,7 @@ render_sprite_line(const uint16_t y)
 			continue;
 		}
 		const uint16_t per_fetch = (uint16_t)((2 - p->color_mode) << 2);
-		demand += 3u + p->sprite_width + (uint32_t)(p->sprite_width / per_fetch);
+		demand += 3u + p->sprite_width + 2u * (uint32_t)(p->sprite_width / per_fetch);
 		traced_dropped++;
 		if (traced_cut_slot == SPRITE_TRACE_NO_LINE) {
 			traced_cut_slot = (uint16_t)i;
@@ -2523,9 +2617,11 @@ layer_fsm_settle(struct layer_fetch *s, bool enabled)
 
 // Both layer renderers through the line, clock by clock, replaying the writes
 // made during it. render_start rises at dot 1 (composer.v:147-162) and the
-// next one ends the line.
+// next one ends the line. taken[j] is set when a layer asks for VRAM at
+// render_time_r j, the clock after dot j + 1.
 static void
-fetch_layers_timed(uint16_t line_idx)
+layers_run(uint16_t line_idx, struct layer_fetch *s, uint8_t (*lb_this)[SCREEN_WIDTH],
+           uint8_t (*lb_next)[SCREEN_WIDTH], uint8_t *taken)
 {
 	uint8_t r[2][7];
 	memcpy(r, fetch_reg_layer, sizeof r);
@@ -2533,8 +2629,10 @@ fetch_layers_timed(uint16_t line_idx)
 	layer_decode(r[0], line_idx, &d[0]);
 	layer_decode(r[1], line_idx, &d[1]);
 	uint8_t             dc = fetch_reg_comp[0];
-	struct layer_fetch *s  = layer_fsm;
 	uint16_t            k  = 0;
+	if (taken) {
+		memset(taken, 0, SPRITE_RENDER_TIME + 1);
+	}
 	for (int c = 0; c <= VGA_SCAN_WIDTH; c++) {
 		for (; k < fetch_log_n && fetch_log[k].dot <= c; k++) {
 			const fetch_write_t *e = &fetch_log[k];
@@ -2562,9 +2660,13 @@ fetch_layers_timed(uint16_t line_idx)
 		const bool     req0  = s[0].strobe && !s[0].ack && (dc & 0x10);
 		const bool     req1  = s[1].strobe && !s[1].ack && (dc & 0x20);
 		const uint16_t addr0 = s[0].bus_addr, addr1 = s[1].bus_addr;
+		// Indexed by sprite_renderer.v's render_time_r, two clocks behind c.
+		if (taken && c >= 2 && c - 2 <= SPRITE_RENDER_TIME) {
+			taken[c - 2] = req0 || req1;
+		}
 		// A pixel is written the clock after it is made (layer_renderer.v:546-563),
 		// and from dot 0 that is into the other buffer.
-		uint8_t(*lb)[SCREEN_WIDTH] = c >= VGA_SCAN_WIDTH - 1 ? layer_lb[line_buf_sel ^ 1] : layer_line;
+		uint8_t(*lb)[SCREEN_WIDTH] = c >= VGA_SCAN_WIDTH - 1 ? lb_next : lb_this;
 		layer_fetch_clock(&s[0], &d[0], c == 1, lb[0]);
 		layer_fetch_clock(&s[1], &d[1], c == 1, lb[1]);
 		s[0].ack = req0;
@@ -2572,6 +2674,48 @@ fetch_layers_timed(uint16_t line_idx)
 		if (s[0].ack) s[0].ack_addr = addr0;
 		if (s[1].ack) s[1].ack_addr = addr1;
 	}
+}
+
+static void
+fetch_layers_timed(uint16_t line_idx)
+{
+	layers_run(line_idx, layer_fsm, layer_line, layer_lb[line_buf_sel ^ 1], NULL);
+}
+
+// The clocks of this line on which a layer holds VRAM, which the sprite
+// renderer, last in vram_if.v:124-138, waits out. Timing does not depend on
+// line_idx or on VRAM, so a line that starts settled, with no writes during
+// it and the layer registers of the last one, reuses its answer.
+static uint8_t layer_bus_taken[SPRITE_RENDER_TIME + 1];
+static uint8_t layer_bus_key[2 * 7 + 1];
+static bool    layer_bus_valid;
+
+static const uint8_t *
+layer_bus_schedule(void)
+{
+	uint8_t key[sizeof layer_bus_key];
+	memcpy(key, fetch_reg_layer, 2 * 7);
+	key[2 * 7] = fetch_reg_comp[0] & 0x30;
+	bool cacheable = fetch_log_n == 0 && !fetch_log_lost;
+	for (uint8_t l = 0; l < 2 && cacheable; l++) {
+		struct layer_fetch settled;
+		layer_fsm_settle(&settled, key[2 * 7] & (0x10 << l));
+		cacheable = memcmp(&settled, &layer_fsm[l], sizeof settled) == 0;
+	}
+	if (cacheable && layer_bus_valid && memcmp(key, layer_bus_key, sizeof key) == 0) {
+		return layer_bus_taken;
+	}
+	if (!(key[2 * 7]) && fetch_log_n == 0) {
+		memset(layer_bus_taken, 0, sizeof layer_bus_taken);
+	} else {
+		static uint8_t     scratch[2][2][SCREEN_WIDTH];
+		struct layer_fetch s[2];
+		memcpy(s, layer_fsm, sizeof s);
+		layers_run(0, s, scratch[0], scratch[1], layer_bus_taken);
+	}
+	layer_bus_valid = cacheable;
+	memcpy(layer_bus_key, key, sizeof key);
+	return layer_bus_taken;
 }
 
 // Sprite attributes as slot i read them at dot d, undoing later writes.
@@ -2634,14 +2778,19 @@ fetch_line(uint16_t y, bool timed)
 	const uint16_t vstart   = comp[2] << 1;
 	const uint16_t vstop    = comp[3] << 1;
 
-	bool held = false;
+	bool     held = false;
+	bool     sprite_start;
+	uint16_t sprite_y;
 	if ((dc_video & 3) > 1) { // 480i or 240p
 		if ((y >> 1) == 0) {
 			eff_y_fp = y * (vscale << 9);
 		} else if (((y & 0xfffe) >= vstart) && ((y & 0xfffe) < vstop)) {
 			eff_y_fp += (vscale << 10);
 		}
+		sprite_y     = eff_y_fp >> 16;
+		sprite_start = y < SCREEN_HEIGHT;
 	} else {
+		const uint16_t prev_y = eff_y_fp >> 16;
 		if (y == 0) {
 			eff_y_fp = 0;
 		} else if ((y > vstart) && (y < vstop)) {
@@ -2651,25 +2800,46 @@ fetch_line(uint16_t y, bool timed)
 				held = true;
 			}
 		}
+		// composer.v:147-166, a line ahead of the line shown: render_start on the
+		// first line at or past VSTART, then on each line after one inside the
+		// window while the scaled counter is below 480.
+		if (y == 0) {
+			comp_vstarted = 0;
+		}
+		sprite_y = eff_y_fp >> 16;
+		if (!comp_vstarted && y >= vstart) {
+			comp_vstarted = 1;
+			sprite_start  = true;
+			sprite_y      = 0;
+		} else if (y == vstop && y > vstart) {
+			sprite_start = prev_y < 480;
+			sprite_y     = (eff_y_fp + (vscale << 9)) >> 16;
+		} else {
+			sprite_start = y > vstart && y < vstop && !held;
+		}
 	}
 
 	if ((dc_video & 8) && (dc_video & 3) > 1) { // progressive NTSC/RGB mode
 		y &= 0xfffe;
 	}
+	if ((dc_video & 3) > 1 && sprite_y >= 480) {
+		sprite_y = 480 - (y & 1);
+	}
+
+	// sprite_renderer.v takes no enable: DC_VIDEO gates only the composer
+	// (composer.v:195-199). composer.v:130 erases each buffer after display, so
+	// a line without render_start has no sprites below index 640.
+	if (sprite_start) {
+		render_sprite_line(sprite_y);
+	} else {
+		memset(sprite_line_col, 0, SCREEN_WIDTH);
+		memset(sprite_line_z, 0, SCREEN_WIDTH);
+		sprite_apply_carry();
+	}
 
 	if (y < SCREEN_HEIGHT) {
 		uint16_t eff_y = (eff_y_fp >> 16);
 		if ((dc_video & 3) > 1 && eff_y >= 480) eff_y = 480 - (y & 1);
-
-		// sprite_renderer.v takes no enable: DC_VIDEO gates only the composer
-		// (composer.v:195-199). composer.v:130 erases each buffer after display, so
-		// a held line has no sprites below index 640.
-		if (held) {
-			memset(sprite_line_col, 0, SCREEN_WIDTH);
-			memset(sprite_line_z, 0, SCREEN_WIDTH);
-		} else {
-			render_sprite_line(eff_y);
-		}
 
 		// Charge this line's VERA fetch traffic. Deliberately ABOVE the warp
 		// guard below, unlike everything else here: under -warp the layers
@@ -2963,11 +3133,12 @@ video_step(float mhz, float steps, bool midline)
 				frame_count++;
 			}
 		}
-		if (!ntsc_mode && vga_scan_pos_y - VGA_Y_OFFSET == SCREEN_HEIGHT) {
-			vsync_isr();
-		}
+		// Line 480's sprites are drawn during line 479, before frame_done.
 		if (!ntsc_mode) {
 			fetch_line(vga_scan_pos_y - VGA_Y_OFFSET, true);
+		}
+		if (!ntsc_mode && vga_scan_pos_y - VGA_Y_OFFSET == SCREEN_HEIGHT) {
+			vsync_isr();
 		}
 	} else if (midline) {
 		if (!ntsc_mode) {
@@ -3227,7 +3398,7 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 	}
 }
 
-#define VERA_CHUNK_VERSION 5
+#define VERA_CHUNK_VERSION 6
 
 // Bytes only version 4 has (previous composer and layer registers, old line
 // enables, the held line) and bytes only version 5 has (fetch state). A chunk
@@ -3235,9 +3406,12 @@ props_io(ss_writer *w, ss_reader *r, void *structs, size_t struct_size, int n, s
 enum {
 	VERA_V4_ONLY = 2 * COMPOSER_SLOTS + 2 * NUM_LAYERS * LAYER_IMAGE + 3 + 1 + 2 * 2 * SCREEN_WIDTH,
 	VERA_V5_ONLY = NUM_LAYERS * LAYER_IMAGE + 2 * 2 * SCREEN_WIDTH + 2 * 7 + FL_COMP_N + 1 + 2 + 2 * (10 + 2 * 4 + 4 * 3),
+	VERA_V6_ONLY = 2 * 2 + 6 + 1,
 	VERA_V5_PAD  = VERA_V4_ONLY - VERA_V5_ONLY,
+	VERA_V6_PAD  = VERA_V5_PAD - VERA_V6_ONLY,
 };
-_Static_assert(VERA_V5_PAD > 0, "the version 5 VERA chunk outgrew version 4's");
+_Static_assert(VERA_V6_PAD > 0, "the version 6 VERA chunk outgrew version 4's");
+_Static_assert(sizeof(sprite_edge_mask) == 2 * 2, "VERA_V6_ONLY no longer counts the version 6 fields");
 _Static_assert(sizeof(bool) == 1 && sizeof(layer_lb) == 2 * 2 * SCREEN_WIDTH && sizeof(fetch_reg_layer) == 2 * 7 &&
                sizeof(fetched_y) == 2, "VERA_V5_ONLY no longer counts the version 5 fields");
 
@@ -3343,6 +3517,8 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 		memset(layer_lb, 0, sizeof(layer_lb));
 		memset(sprite_edge_col, 0, sizeof(sprite_edge_col));
 		memset(sprite_edge_z, 0, sizeof(sprite_edge_z));
+		memset(sprite_edge_mask, 0, sizeof(sprite_edge_mask));
+		memset(&sprite_carry, 0, sizeof(sprite_carry));
 	}
 	if (w || version >= 4) {
 		SS_BLOCK(comp_first_frame);
@@ -3378,8 +3554,23 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 		}
 		// The write logs are empty at a frame boundary, where states are saved.
 		// Pads the chunk to version 4's length, which a loader requires.
-		uint8_t pad[VERA_V5_PAD] = { 0 };
-		SS_BLOCK(pad);
+		if (w || version >= 6) {
+			SS_BLOCK(sprite_edge_mask);
+			uint8_t *b8[] = { &sprite_carry.on, &sprite_carry.col, &sprite_carry.z, &sprite_carry.mask };
+			for (size_t k = 0; k < sizeof b8 / sizeof b8[0]; k++) {
+				if (w) ss_put_u8(w, *b8[k]); else *b8[k] = ss_get_u8(r);
+			}
+			if (w) ss_put_u16(w, sprite_carry.x); else sprite_carry.x = ss_get_u16(r);
+			SS_BLOCK(comp_vstarted);
+			uint8_t pad[VERA_V6_PAD] = { 0 };
+			SS_BLOCK(pad);
+		} else {
+			memset(sprite_edge_mask, 0, sizeof(sprite_edge_mask));
+			memset(&sprite_carry, 0, sizeof(sprite_carry));
+			comp_vstarted = vga_scan_pos_y >= (reg_composer[6] << 1);
+			uint8_t pad[VERA_V5_PAD] = { 0 };
+			SS_BLOCK(pad);
+		}
 		if (r) {
 			fetch_log_n  = 0;
 			sprite_log_n = 0;
@@ -3396,6 +3587,9 @@ video_state_io(ss_writer *w, ss_reader *r, int version)
 		sprite_log_n   = 0;
 		fetched_y      = FETCH_NONE;
 		memset(layer_fsm, 0, sizeof(layer_fsm));
+		memset(sprite_edge_mask, 0, sizeof(sprite_edge_mask));
+		memset(&sprite_carry, 0, sizeof(sprite_carry));
+		comp_vstarted = vga_scan_pos_y >= (reg_composer[6] << 1);
 	}
 #undef SS_BLOCK
 

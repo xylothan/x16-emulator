@@ -69,7 +69,7 @@ def build_ops(seed, c):
             a = r.getrandbits(12)
             bpp = c.get("bpp", r.getrandbits(1))
             x = r.randrange(-64, 640) & 0x3FF
-            y = r.randrange(-64, 480) & 0x3FF
+            y = r.randrange(*c.get("band", (-64, 480))) & 0x3FF
             z = r.choice(c.get("z", [1, 2, 3]))
             fl = c.get("flipv", r.getrandbits(2)) if c.get("flip", True) else 0
             size = c.get("size")
@@ -195,6 +195,23 @@ def scenes():
     spr = [(524, 300, 0x00, 0x02), (524, 340, 0x01, 0xFC), (524, 380, 0x02, 0x01)]
     s["mid_sprite_x"] = dict(l0=tiles, sprite_list=[(0x00, 0x00, 100, 0, 0, 0, 3 << 2, 0xF0)],
                              mid=spr + mid_schedule(0x03, HBLANK_X, first=2, step=2, last=64, val=lambda k: (k * 41) & 255))
+    # Sprites packed into lines 150-313 run those lines out of render time
+    # (sprite_renderer.v:44) at a point set by VRAM contention (vram_if.v:124-138).
+    narrow = dict(sprites=128, band=(150, 250), hz=3, wz=0)
+    mixed = dict(sprites=128, band=(150, 250), hz=3)
+    s["budget_narrow_bpp0"] = dict(narrow, bpp=0)
+    s["budget_narrow_bpp1"] = dict(narrow, bpp=1)
+    s["budget_mixed"] = dict(mixed)
+    s["budget_wide"] = dict(sprites=128, band=(40, 440), wz=3)
+    layers = {f"tile_d{d}_w{8 << tw}": dict(l0=dict(depth=d, tw=tw, scroll=1)) for d in range(4) for tw in (0, 1)}
+    layers.update({f"bitmap_d{d}": dict(l0=dict(bitmap=1, depth=d)) for d in range(4)})
+    layers["l1_d2"] = dict(l1=dict(depth=2, scroll=1))
+    layers["layers"] = dict(l0=dict(depth=2, scroll=1), l1=dict(depth=1, scroll=1))
+    layers["layers_d3"] = dict(l0=dict(depth=3, scroll=1), l1=dict(bitmap=1, depth=3))
+    layers["scaled"] = dict(l0=dict(depth=2, scroll=1), hs=0x40, vs=0x40)
+    for name, cfg in layers.items():
+        s[f"budget_{name}_narrow"] = dict(narrow, **cfg)
+        s[f"budget_{name}_mixed"] = dict(mixed, **cfg)
     return s
 
 
