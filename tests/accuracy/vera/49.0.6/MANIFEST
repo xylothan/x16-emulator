@@ -232,3 +232,4 @@ bus_coll_vstop_r257.vec
 bus_coll_window_low.vec
 bus_coll_window_out.vec
 budget_scaled_mixed.vec
+bus_timed_collision.vec
