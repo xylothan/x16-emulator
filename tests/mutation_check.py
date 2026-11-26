@@ -6,11 +6,15 @@ that should care goes red. A mutation that survives means the test is not
 covering what it claims, or the code it changed does not matter.
 
     python tests/mutation_check.py --build-dir build
+    python tests/mutation_check.py --build-dir build --changed
+    python tests/mutation_check.py --build-dir build --only VIA --only "bus cycle"
 
+Each mutation rebuilds only the executables its caught_by tests run.
 Every mutation is reverted afterwards, including on failure or interrupt.
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -415,8 +419,8 @@ MUTATIONS = [
         "name": "a debug read of slow I/O costs cycles",
         "file": "src/memory.c",
         # The write path guards alike, so the pattern includes the read's continuation.
-        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
-        "into": "if (address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\treturn via1_read",
+        "find": "if (!debugOn && address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {",
+        "into": "if (address >= 0x9fa0) {\n\t\t// slow IO5-7 range\n\t\tclockticks6502 += 3;\n\t}\n\tif (address >= 0x9f00 && address < 0x9f10) {",
         "count": 1,
         "caught_by": ["debugon_contract"],
     },
@@ -697,8 +701,8 @@ MUTATIONS = [
         # W65C22S p17-18: ACR bit 6 clear is one-shot, "a single Interrupt Flag
         # each time the Timer is loaded"; set is free-run, where the flag is
         # raised at every zero with no reload.
-        "find": "if (!(acr & 0x40)) via->timer_running[0] = false;",
-        "into": "if (acr & 0x40) via->timer_running[0] = false;",
+        "find": "if (!(acr & 0x40)) {\n\t\t\t\tvia->timer_running[0] = false;",
+        "into": "if (acr & 0x40) {\n\t\t\t\tvia->timer_running[0] = false;",
         "count": 1,
         "caught_by": ["via_timers"],
     },
@@ -721,8 +725,8 @@ MUTATIONS = [
         # timer), or as a pulse counter for counting negative pulses on PB6. A
         # single control bit within ACR5 is used to select between these two
         # modes."
-        "find": "tclk = (acr & 0x20) ? via->pb6_pulse_counts : clocks;",
-        "into": "tclk = clocks;",
+        "find": "\tif (acr & 0x20) {\n\t\tn = via->pb6_pulse_counts;",
+        "into": "\tif (false) {\n\t\tn = via->pb6_pulse_counts;",
         "count": 1,
         "caught_by": ["via_timers"],
     },
@@ -731,10 +735,79 @@ MUTATIONS = [
         "file": "src/via.c",
         # W65C22S p19: T2 has no free-run mode, so its flag is raised once per
         # load. Leaving it armed turns a one-shot into a repeating interrupt.
-        "find": "\t\t\tifr |= 0x20;\n\t\t\tvia->timer_running[1] = false;",
-        "into": "\t\t\tifr |= 0x20;",
+        "find": "\t\tifr |= 0x20;\n\t\tvia->timer_running[1] = false;",
+        "into": "\t\tifr |= 0x20;",
         "count": 1,
         "caught_by": ["via_timers"],
+    },
+    {
+        "name": "VIA T1 decrements in its write cycle",
+        "file": "src/via.c",
+        # W65C22S Figure 2-3: the count is N in the cycle after the T1C-H write.
+        "find": "if (n && via->timer_loaded[0]) {",
+        "into": "if (false && via->timer_loaded[0]) {",
+        "count": 1,
+        "caught_by": ["via_timers", "via_accuracy"],
+    },
+    {
+        "name": "VIA T2 decrements in its write cycle",
+        "file": "src/via.c",
+        # W65C22S Figure 2-3, T2 COUNT.
+        "find": "if (n && via->timer_loaded[1]) {",
+        "into": "if (false && via->timer_loaded[1]) {",
+        "count": 1,
+        "caught_by": ["via_timers", "via_accuracy"],
+    },
+    {
+        "name": "VIA T1 times out a cycle early",
+        "file": "src/via.c",
+        # W65C22S Figure 2-3: FFFF follows 0, N+1.5 cycles after the write.
+        "find": "n -= cnt + 1;",
+        "into": "n -= cnt;",
+        "count": 1,
+        "caught_by": ["via_timers", "via_accuracy"],
+    },
+    {
+        "name": "VIA skips free-run periods of N+1 cycles",
+        "file": "src/via.c",
+        # W65C22S Figure 2-4: N+2 cycles per period.
+        "find": "const unsigned period = latch + 2;",
+        "into": "const unsigned period = latch + 1;",
+        "count": 1,
+        "caught_by": ["via_accuracy"],
+    },
+    {
+        "name": "VIA steps an access's cycles again at the instruction's end",
+        "file": "src/via.c",
+        "find": "via_step(via, clocks > via->consumed ? clocks - via->consumed : 0);",
+        "into": "via_step(via, clocks);",
+        "count": 1,
+        "caught_by": ["via_accuracy"],
+    },
+    {
+        "name": "a dummy bus cycle is not counted",
+        "file": "src/memory.c",
+        # SingleStepTests wdc65c02/v1 $EE: the write is cycle 5.
+        "find": "(void)real_read6502(address, 0, false, USE_CURRENT_X16_BANK);\n\t\t}\n\t}\n\tcpu_bus_index++;",
+        "into": "(void)real_read6502(address, 0, false, USE_CURRENT_X16_BANK);\n\t\t}\n\t}",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
+    {
+        "name": "an access's cycle counts from its own opcode",
+        "file": "src/memory.c",
+        "find": "return (unsigned)(clockticks6502 + cpu_bus_index - cpu_step_base);",
+        "into": "return (unsigned)cpu_bus_index;",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
+    {
+        "name": "a VIA read is not brought up to its cycle",
+        "file": "src/memory.c",
+        "find": "\t\tif (!debugOn) via1_catch_up(cpu_access_offset());\n\t\treturn via1_read",
+        "into": "\t\treturn via1_read",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
     },
     {
         "name": "banked RAM window is 4K instead of 8K",
@@ -794,8 +867,8 @@ MUTATIONS = [
         "name": "a program write to slow I/O is free",
         "file": "src/memory.c",
         # The other side of the same guard: an executed store still costs cycles.
-        "find": "\t\tif (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
-        "into": "\t\tif (false && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {\n\t\t\tvia1_write",
+        "find": "\t\tif (!debugOn && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {",
+        "into": "\t\tif (false && address >= 0x9fa0) {\n\t\t\t// slow IO5-7 range\n\t\t\tclockticks6502 += 3;\n\t\t}\n\t\tif (address >= 0x9f00 && address < 0x9f10) {",
         "count": 1,
         "caught_by": ["debug_write_path"],
     },
@@ -944,15 +1017,56 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, **kw)
 
 
-def build(build_dir, passes=1):
-    """Build the tests, optionally more than once.
+def test_targets(build_dir):
+    """Map each ctest name to the executable target it runs, from ctest itself.
+
+    A test whose command runs no <name>_test executable maps to None.
+    """
+    r = run([CTEST, "--test-dir", build_dir, "--show-only=json-v1"])
+    if r.returncode != 0:
+        return {}
+    try:
+        tests = json.loads(r.stdout).get("tests", [])
+    except ValueError:
+        return {}
+    out = {}
+    for t in tests:
+        target = None
+        for arg in t.get("command", []):
+            stem = Path(arg).stem
+            if stem.endswith("_test"):
+                target = stem
+        out[t["name"]] = target
+    return out
+
+
+def targets_for(names, known):
+    """The targets that build the named tests; the whole suite if any is unknown."""
+    found = [known.get(n) for n in names]
+    if not found or None in found:
+        return ["unit_tests"]
+    return sorted(set(found))
+
+
+def changed_files():
+    """Files that differ from origin/main, committed or not."""
+    out = set()
+    for cmd in (["git", "diff", "--name-only", "origin/main...HEAD"],
+                ["git", "diff", "--name-only", "HEAD"]):
+        r = run(cmd)
+        out |= {l.strip() for l in r.stdout.splitlines() if l.strip()}
+    return out
+
+
+def build(build_dir, passes=1, targets=("unit_tests",)):
+    """Build the given targets, optionally more than once.
 
     An .opcodes mutation regenerates src/cpu/tables.h during the build, and the
     objects that include it are only recompiled on the following pass.
     """
     out = ""
     for _ in range(passes):
-        r = run([CMAKE, "--build", build_dir, "--target", "unit_tests"])
+        r = run([CMAKE, "--build", build_dir, "--target", *targets])
         out += r.stdout + r.stderr
         if r.returncode != 0:
             return False, out
@@ -971,19 +1085,38 @@ def tests_fail(build_dir, names):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default="build")
-    ap.add_argument("--only", help="run just the mutation whose name contains this")
+    ap.add_argument("--only", action="append", default=[],
+                    help="run the mutations whose name contains this; repeatable")
+    ap.add_argument("--changed", action="store_true",
+                    help="run the mutations whose file differs from origin/main")
+    ap.add_argument("--list", action="store_true",
+                    help="print the selected mutations and their targets, then stop")
     args = ap.parse_args()
 
-    ok, out = build(args.build_dir)
+    changed = changed_files() if args.changed else None
+    selected = [m for m in MUTATIONS
+                if (not args.only or any(o in m["name"] for o in args.only))
+                and (changed is None or m["file"] in changed)]
+
+    known = test_targets(args.build_dir)
+    plan = [(m, targets_for(m["caught_by"], known)) for m in selected]
+    if args.list:
+        for m, t in plan:
+            print(f"{m['name']}\n      {m['file']} -> {' '.join(t)}")
+        print(f"\n{len(plan)} mutations")
+        return 0
+
+    every = sorted({t for _, ts in plan for t in ts}) or ["unit_tests"]
+    if "unit_tests" in every:
+        every = ["unit_tests"]
+    ok, out = build(args.build_dir, targets=every)
     if not ok:
         print("the tree does not build before any mutation:\n" + out[-2000:])
         return 2
 
     survived = []
     not_applicable = []
-    for m in MUTATIONS:
-        if args.only and args.only not in m["name"]:
-            continue
+    for m, targets in plan:
 
         # Without its fixture the test skips and looks like the mutation survived.
         need = m.get("requires")
@@ -1025,7 +1158,7 @@ def main():
                 for gen in gen_backups:
                     gen.unlink(missing_ok=True)
 
-            built, out = build(args.build_dir, passes=2)
+            built, out = build(args.build_dir, passes=2, targets=targets)
             if not built:
                 # A mutation that will not compile proves nothing; show enough to fix it.
                 first = next((l for l in out.splitlines()
@@ -1052,14 +1185,12 @@ def main():
                 saved.unlink(missing_ok=True)
 
     # Leave the tree built from clean source.
-    ok, _ = build(args.build_dir, passes=2)
+    ok, _ = build(args.build_dir, passes=2, targets=every)
     if not ok:
         print("the tree does not build after restoring the sources")
         return 2
 
-    total = len([m for m in MUTATIONS
-                 if not args.only or args.only in m["name"]])
-    total -= len(not_applicable)
+    total = len(plan) - len(not_applicable)
     print(f"\n{total - len(survived)}/{total} mutations caught")
     if not_applicable:
         print(f"{len(not_applicable)} not applicable here (missing fixtures)")
