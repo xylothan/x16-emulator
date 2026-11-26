@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1279,12 +1280,12 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, **kw)
 
 
-def test_targets(build_dir):
+def test_targets(build_dir, config):
     """Map each ctest name to the executable target it runs, from ctest itself.
 
     A test whose command runs no <name>_test executable maps to None.
     """
-    r = run([CTEST, "--test-dir", build_dir, "--show-only=json-v1"])
+    r = run([CTEST, "--test-dir", build_dir, "-C", config, "--show-only=json-v1"])
     if r.returncode != 0:
         return {}
     try:
@@ -1320,7 +1321,7 @@ def changed_files():
     return out
 
 
-def build(build_dir, passes=1, targets=("unit_tests",)):
+def build(build_dir, config, passes=1, targets=("unit_tests",)):
     """Build the given targets, optionally more than once.
 
     An .opcodes mutation regenerates src/cpu/tables.h during the build, and the
@@ -1328,25 +1329,50 @@ def build(build_dir, passes=1, targets=("unit_tests",)):
     """
     out = ""
     for _ in range(passes):
-        r = run([CMAKE, "--build", build_dir, "--target", *targets])
+        r = run([CMAKE, "--build", build_dir, "--config", config, "--target", *targets])
         out += r.stdout + r.stderr
         if r.returncode != 0:
             return False, out
     return True, out
 
 
-def tests_fail(build_dir, names):
-    """True if every named test reports failure."""
+def test_result(build_dir, config, name):
+    """'passed', 'failed' or 'not run', from ctest's JUnit report.
+
+    ctest's exit code is no use alone: a test it cannot find, or one with no
+    executable for this configuration, exits non-zero as "Not Run".
+    """
+    fd, report = tempfile.mkstemp(suffix=".xml")
+    os.close(fd)
+    try:
+        run([CTEST, "--test-dir", build_dir, "-C", config, "-R", f"^{name}$",
+             "--output-junit", report])
+        try:
+            cases = [c for c in ET.parse(report).getroot().iter("testcase")
+                     if c.get("name") == name]
+        except (ET.ParseError, OSError):
+            cases = []
+    finally:
+        os.unlink(report)
+    if len(cases) != 1:
+        return "not run"
+    return {"run": "passed", "fail": "failed"}.get(cases[0].get("status"), "not run")
+
+
+def tests_fail(build_dir, config, names):
+    """(caught, name): caught when every named test fails; else the first that did not."""
     for name in names:
-        r = run([CTEST, "--test-dir", build_dir, "-R", f"^{name}$"])
-        if r.returncode == 0:
-            return False, name
+        result = test_result(build_dir, config, name)
+        if result != "failed":
+            return False, f"{name} {result}"
     return True, None
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default="build")
+    ap.add_argument("--config", default="Debug",
+                    help="build configuration, for multi-config generators")
     ap.add_argument("--only", action="append", default=[],
                     help="run the mutations whose name contains this; repeatable")
     ap.add_argument("--changed", action="store_true",
@@ -1360,7 +1386,7 @@ def main():
                 if (not args.only or any(o in m["name"] for o in args.only))
                 and (changed is None or m["file"] in changed)]
 
-    known = test_targets(args.build_dir)
+    known = test_targets(args.build_dir, args.config)
     plan = [(m, targets_for(m["caught_by"], known)) for m in selected]
     if args.list:
         for m, t in plan:
@@ -1371,9 +1397,21 @@ def main():
     every = sorted({t for _, ts in plan for t in ts}) or ["unit_tests"]
     if "unit_tests" in every:
         every = ["unit_tests"]
-    ok, out = build(args.build_dir, targets=every)
+    ok, out = build(args.build_dir, args.config, targets=every)
     if not ok:
         print("the tree does not build before any mutation:\n" + out[-2000:])
+        return 2
+
+    # A test that fails, or does not run, on clean source catches every mutation.
+    baseline = sorted({n for m, _ in plan
+                       if not (m.get("requires") and not (ROOT / m["requires"]).exists())
+                       for n in m["caught_by"]})
+    broken = [(n, r) for n in baseline
+              if (r := test_result(args.build_dir, args.config, n)) != "passed"]
+    if broken:
+        print("these tests do not pass before any mutation:")
+        for n, r in broken:
+            print(f"  {n}: {r}")
         return 2
 
     survived = []
@@ -1420,7 +1458,7 @@ def main():
                 for gen in gen_backups:
                     gen.unlink(missing_ok=True)
 
-            built, out = build(args.build_dir, passes=2, targets=targets)
+            built, out = build(args.build_dir, args.config, passes=2, targets=targets)
             if not built:
                 # A mutation that will not compile proves nothing; show enough to fix it.
                 first = next((l for l in out.splitlines()
@@ -1429,12 +1467,12 @@ def main():
                 survived.append(m["name"] + " (did not compile)")
                 continue
 
-            caught, missed = tests_fail(args.build_dir, m["caught_by"])
+            caught, missed = tests_fail(args.build_dir, args.config, m["caught_by"])
             if caught:
                 print(f"caught  {m['name']}")
             else:
                 print(f"SURVIVED  {m['name']}\n"
-                      f"          {missed} still passed with this broken")
+                      f"          {missed} with this broken")
                 survived.append(m["name"])
         finally:
             shutil.copy2(backup, path)
@@ -1447,7 +1485,7 @@ def main():
                 saved.unlink(missing_ok=True)
 
     # Leave the tree built from clean source.
-    ok, _ = build(args.build_dir, passes=2, targets=every)
+    ok, _ = build(args.build_dir, args.config, passes=2, targets=every)
     if not ok:
         print("the tree does not build after restoring the sources")
         return 2
