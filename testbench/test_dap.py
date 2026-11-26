@@ -1610,6 +1610,27 @@ del bk_events[:]
 bk_req("pause", {"threadId": 1})
 bk_wait_stop(3)
 
+# 19a. x16/inputLog replay and a resume in one write.
+bk_step({"frames": 1})
+bk_req("x16/saveState", {"slot": "rp"})
+bk_req("x16/inputLog", {"action": "start"})
+bk_step({"frames": 3})
+rs = bk_req("x16/inputLog", {"action": "stop"}).get("body", {})
+bk_case("x16/inputLog records joystick snapshots at the start (%s events)" % rs.get("events"),
+        rs.get("hasRecording") is True and rs.get("events", 0) >= 4)
+bk_req("x16/loadState", {"slot": "rp"})
+s_r, s_s = bk_seq[0] + 1, bk_seq[0] + 2
+bk_seq[0] += 2
+bk.sendall(dap_frame(s_r, "x16/inputLog", {"action": "replay"}) + dap_frame(s_s, "x16/step", {"frames": 5}))
+rr = bk_collect(s_r, 5) or {}
+rn = bk_collect(s_s, 10) or {}
+st = bk_req("x16/inputLog", {"action": "status"}).get("body", {})
+bk_case("replay then x16/step in one write: the replay verifies (%s, applied %s of %s, diverged %s/%s)"
+        % (st.get("replay"), st.get("applied"), st.get("events"),
+           st.get("divergedEventCycle"), st.get("divergedAtCycle")),
+        rr.get("success") is True and rn.get("success") is True and st.get("replay") == "verified"
+        and st.get("applied") == st.get("events"))
+
 # 20. What the data port is charged with.
 #
 # The port is the part a program controls, and the debugger is NOT a program.
