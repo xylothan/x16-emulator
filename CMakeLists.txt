@@ -1175,6 +1175,16 @@ if(TARGET vera_accuracy_test)
     set_tests_properties(vera_accuracy PROPERTIES TIMEOUT 900)
 endif()
 
+# YM2151 bus vectors from Nuked-OPM, a model derived from the die.
+x16_add_test(ym_accuracy
+    SOURCES tests/accuracy/ym_accuracy.c src/ymglue.cpp src/extern/ymfm/src/ymfm_opm.cpp)
+
+if(TARGET ym_accuracy_test)
+    target_include_directories(ym_accuracy_test PRIVATE src/extern/ymfm/src)
+    target_compile_definitions(ym_accuracy_test PRIVATE
+        YM_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/accuracy/ym2151/nuked-opm")
+endif()
+
 # The 65C22's interrupt flags and enables. via.c pulls in memory.h, which
 # includes SDL.h, so it needs the headers -- but nothing here links SDL.
 x16_add_test(via_irq NEEDS_SDL

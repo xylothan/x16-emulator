@@ -1075,7 +1075,7 @@ void draw_register_range(const char *label, int first, int last)
 
 void draw_registers_tab()
 {
-    ImGui::TextDisabled("Shadowed registers show only writes the chip accepted; YM_write_reg drops writes while the chip is busy.");
+    ImGui::TextDisabled("Shadowed registers show writes as the chip took them; one replaced before its slot came round never shows.");
     ImGui::TextDisabled("Per-operator address layout is base + (slot << 3) + channel; slots are M1, M2, C1, C2. Raw $08 key-on bits are M1,C1,M2,C2, but live key masks are normalized.");
     if (ImGui::CollapsingHeader("$00-$1F system", ImGuiTreeNodeFlags_DefaultOpen)) draw_register_range("system_regs", 0x00, 0x1f);
     if (ImGui::CollapsingHeader("$20-$3F per channel", ImGuiTreeNodeFlags_DefaultOpen)) draw_register_range("channel_regs", 0x20, 0x3f);

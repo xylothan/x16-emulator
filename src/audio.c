@@ -424,6 +424,8 @@ audio_render()
 	if (len > 0) {
 		YM_stream_update((uint16_t *)&ym_buf[pos * 2], (uint16_t *)&ym_host_buf[pos * 2], len);
 	}
+	// The fraction is how far into the next sample the CPU is: 32 YM cycles.
+	YM_sync((uint8_t)((ym_samp_pos_hd & ((1u << SAMP_POS_FRAC_BITS) - 1)) >> (SAMP_POS_FRAC_BITS - 5)));
 
 	pos = (fs_samp_pos_wr + 1) & SAMP_POS_MASK;
 	len = ((fs_samp_pos_hd >> SAMP_POS_FRAC_BITS) - fs_samp_pos_wr) & SAMP_POS_MASK;

@@ -97,7 +97,7 @@ BEQ, BNE, BMI, BPL  = 0xF0, 0xD0, 0x30, 0x10
 BIT, AND_I, ORA_I   = 0x2C, 0x29, 0x09
 CLC, ADC_I, ADC_Z   = 0x18, 0x69, 0x65
 SEI, CLD, TAX, TXA  = 0x78, 0xD8, 0xAA, 0x8A
-STA_X               = 0x9D
+STA_X, NOP          = 0x9D, 0xEA
 
 def w(a): return ("W", a)
 def lda_sta(val, addr): return [LDA_I, val, STA, w(addr)]
@@ -172,7 +172,8 @@ YM = asm(0x1000, [SEI, CLD] + ym_setup() + [
     JMP, w("loop"),
     ("L", "ym_write"),                                       # A = register, X = value
     BIT, w(0x9F41), BMI, ("B", "ym_write"),
-    STA, w(0x9F40), STX, w(0x9F41), RTS,
+    # The chip reads its one bus latch two cycles (about 9 CPU clocks) after a write.
+    STA, w(0x9F40), NOP, NOP, STX, w(0x9F41), RTS,
 ])
 
 
