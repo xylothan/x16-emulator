@@ -1010,6 +1010,133 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
+    # YM2151 phase generator and LFO. Expected values: Nuked-OPM, tests/accuracy/ym2151.
+    {
+        "name": "YM2151 phase: PM's positive zero skips no gap note",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_pm.vec
+        "find": "if (sum < 0x2000 && (bitfield(sum, 6, 2) == 3 || carry))",
+        "into": "if (sum < 0x2000 && carry)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: PMS 6 does not skip the gap notes",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_pm.vec
+        "find": "amount = (mag + (mag >= 0x60 ? 0x20 : 0)) << 1;",
+        "into": "amount = mag << 1;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: PMS 7 does not skip the gap notes",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_pm.vec
+        "find": "s_spread[8] = { 0, 1, 2, 4, 5, 6, 8, 9 };",
+        "into": "s_spread[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: DT2 lands on gap notes",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_static.vec
+        "find": "s_step[3][4] = { { 0, 0, 0, 0 }, { 1, 1, 2, 2 }, { 2, 3, 3, 3 } };",
+        "into": "s_step[3][4] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 }, { 2, 2, 2, 2 } };",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: DT1 from the key code before PM and DT2",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_static.vec
+        "find": "std::min<uint32_t>(code >> 8, 0x1c)",
+        "into": "std::min<uint32_t>(cache.block_freq >> 8, 0x1c)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: the step is not cut to 17 bits",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_phase_static.vec
+        "find": "\tphase_step &= 0x1ffff;\n",
+        "into": "\n",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase: PM depth 0 still applies the latch",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_pm_gap_note.vec
+        "find": "(lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;",
+        "into": "bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: PM splits at operator 24",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_pm_split.vec
+        "find": "(opoffs >= 23) ? 8 : 0",
+        "into": "(opoffs >= 24) ? 8 : 0",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: AM splits at operator 17",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_lfo_am_split.vec
+        "find": "(m_opoffs >= 16) ? 16 : 0",
+        "into": "(m_opoffs >= 17) ? 16 : 0",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: square PM is 127 deep",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_square_pm_am.vec
+        "find": "\t\t\tvalue = 128;\n",
+        "into": "\t\t\tvalue = 127;\n",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: triangle steps by 1",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_triangle_am.vec
+        "find": "lfo.count += (waveform == 2) ? 2 : 1;",
+        "into": "lfo.count += 1;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: rate multiplier takes the low bits LSB first",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_rates.vec
+        "find": "bitfield(lfo_rate(), 3 - bit)",
+        "into": "bitfield(lfo_rate(), bit)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: a rate write in the tick's cycle reloads at once",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_reload.vec
+        "find": "m_lfo.window == 7 && m_write_cycle > LFO_RELOAD_CYCLE",
+        "into": "m_lfo.window == 7 && m_write_cycle > LFO_RELOAD_CYCLE + 1",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO: PM latched after the tick",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_saw_pm.vec
+        "find": "\t\tcase 7:\n\t\t\tlfo.pm = lfo_pm_value(waveform, lfo.count);\n",
+        "into": "\t\tcase 7:\n\t\t\tlfo.pm = lfo_pm_value(waveform, lfo.count + 1);\n",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
     {
         "name": "I2C STOP is only seen one bit into a byte",
         "file": "src/i2c.c",

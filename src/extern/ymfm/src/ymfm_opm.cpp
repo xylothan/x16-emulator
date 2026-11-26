@@ -48,7 +48,9 @@ opm_registers::opm_registers() :
 	m_noise_counter(0),
 	m_noise_state(0),
 	m_noise_lfo(0),
-	m_lfo_am(0)
+	m_lfo_am(0),
+	m_lfo{ 0, 32768, 0, 0, 0, 0, 0, 0, false },
+	m_write_cycle(0)
 {
 	// create the waveforms
 	for (uint32_t index = 0; index < WAVEFORM_LENGTH; index++)
@@ -90,6 +92,9 @@ void opm_registers::reset()
 	// enable output on both channels by default
 	m_regdata[0x20] = m_regdata[0x21] = m_regdata[0x22] = m_regdata[0x23] = 0xc0;
 	m_regdata[0x24] = m_regdata[0x25] = m_regdata[0x26] = m_regdata[0x27] = 0xc0;
+
+	m_lfo = lfo_state{ 0, 32768, 0, 0, 0, 0, 0, 0, false };
+	m_lfo_am = 0;
 }
 
 
@@ -153,6 +158,16 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 	else if (index != 0x1a)
 		m_regdata[index] = data;
 
+	// a frequency write reloads the counter; the window's reload tick is at
+	// cycle 28 of its last sample, and a write after cycle 27 reloads after it
+	if (index == 0x18)
+	{
+		if (m_lfo.window == 7 && m_write_cycle > LFO_RELOAD_CYCLE)
+			m_lfo.reload = true;
+		else
+			m_lfo.ticks = 1 << (15 - bitfield(data, 4, 4));
+	}
+
 	// handle writes to the key on index
 	if (index == 0x08)
 	{
@@ -161,6 +176,52 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 		return true;
 	}
 	return false;
+}
+
+
+//-------------------------------------------------
+//  lfo_am_value / lfo_pm_value - the LFO's AM
+//  value, and its PM value as sign (bit 7) and
+//  magnitude, from the counter and the depth
+//-------------------------------------------------
+
+uint8_t opm_registers::lfo_am_value(uint32_t waveform, uint32_t count) const
+{
+	uint32_t value;
+	switch (waveform)
+	{
+		case 1:  value = bitfield(count, 7) ? 0 : 255;                         break;
+		case 2:  value = bitfield(count, 8) ? (count & 255) : (count & 255) ^ 255;  break;
+		default: value = (count & 255) ^ 255;                                  break;
+	}
+	return (value * lfo_am_depth()) >> 7;
+}
+
+uint8_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count) const
+{
+	bool negative;
+	uint32_t value;
+	switch (waveform)
+	{
+		// full scale: the latch takes the depth itself
+		case 1:
+			negative = bitfield(count, 7);
+			value = 128;
+			break;
+
+		// up and down over each half of 512 counts
+		case 2:
+			negative = bitfield(count, 8);
+			value = bitfield(count, 7) ? (count & 127) ^ 127 : (count & 127);
+			break;
+
+		// the counter's low byte, in ones' complement
+		default:
+			negative = bitfield(count, 7);
+			value = negative ? (count & 127) ^ 127 : (count & 127);
+			break;
+	}
+	return (negative ? 0x80 : 0) | ((value * lfo_pm_depth()) >> 7);
 }
 
 
@@ -192,36 +253,66 @@ int32_t opm_registers::clock_noise_and_lfo()
 		}
 	}
 
-	// treat the rate as a 4.4 floating-point step value with implied
-	// leading 1; this matches exactly the frequencies in the application
-	// manual, though it might not be implemented exactly this way on chip
-	uint32_t rate = lfo_rate();
-	m_lfo_counter += (0x10 | bitfield(rate, 0, 4)) << bitfield(rate, 4, 4);
-
-	// bit 1 of the test register is officially undocumented but has been
-	// discovered to hold the LFO in reset while active
-	if (lfo_reset())
-		m_lfo_counter = 0;
-
-	// now pull out the non-fractional LFO value
-	uint32_t lfo = bitfield(m_lfo_counter, 22, 8);
-
-	// fill in the noise entry 1 ahead of our current position; this
-	// ensures the current value remains stable for a full LFO clock
-	// and effectively latches the running value when the LFO advances
+	// the noise waveform's counter takes noise bits at each step
 	uint32_t lfo_noise = bitfield(m_noise_lfsr, 17, 8);
-	m_lfo_waveform[3][(lfo + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
+	m_lfo_waveform[3][0] = lfo_noise | (lfo_noise << 8);
 
-	// fetch the AM/PM values based on the waveform; AM is unsigned and
-	// encoded in the low 8 bits, while PM signed and encoded in the upper
-	// 8 bits
-	int32_t ampm = m_lfo_waveform[lfo_waveform()][lfo];
+	uint32_t const waveform = lfo_waveform();
+	lfo_state &lfo = m_lfo;
+	switch (lfo.window)
+	{
+		// the steps the last window's tick asked for
+		case 0:
+			for (; lfo.steps != 0; lfo.steps--)
+			{
+				if (waveform == 3)
+					lfo.count = lfo_noise;
+				else
+					lfo.count += (waveform == 2) ? 2 : 1;
+			}
+			break;
 
-	// apply depth to the AM value and store for later
-	m_lfo_am = ((ampm & 0xff) * lfo_am_depth()) >> 7;
+		// AM from the stepped counter
+		case 1:
+			lfo.am_late = lfo_am_value(waveform, lfo.count);
+			break;
+		case 2:
+			m_lfo_am = lfo_am_value(waveform, lfo.count);
+			break;
 
-	// apply depth to the PM value and return it
-	return ((ampm >> 8) * int32_t(lfo_pm_depth())) >> 7;
+		// PM from the counter before the next steps
+		case 6:
+			lfo.pm_late = lfo_pm_value(waveform, lfo.count);
+			break;
+
+		// the reload tick: a step every 2^(15-hi) ticks, and a second one
+		// in lo of every 16 steps, from the lowest clear bit of a 4-bit
+		// counter, MSB of lo first
+		case 7:
+			lfo.pm = lfo_pm_value(waveform, lfo.count);
+			if (--lfo.ticks == 0)
+			{
+				lfo.ticks = 1 << (15 - bitfield(lfo_rate(), 4, 4));
+				lfo.steps = 1;
+				uint32_t bit = 0;
+				while (bit < 4 && bitfield(lfo.rate_steps, bit))
+					bit++;
+				if (bit < 4 && bitfield(lfo_rate(), 3 - bit))
+					lfo.steps = 2;
+				lfo.rate_steps = (lfo.rate_steps + 1) & 15;
+			}
+			if (lfo.reload)
+				lfo.ticks = 1 << (15 - bitfield(lfo_rate(), 4, 4));
+			lfo.reload = false;
+			break;
+	}
+	lfo.window = (lfo.window + 1) & 7;
+
+	// bit 1 of the test register holds the counter at zero
+	if (lfo_reset())
+		lfo.count = 0;
+
+	return lfo.pm | (lfo.pm_late << 8);
 }
 
 
@@ -246,7 +337,7 @@ uint32_t opm_registers::lfo_am_offset(uint32_t choffs) const
 	// raw LFO AM value on OPM is 0-FF, which is already a factor of 2
 	// larger than the OPN below, putting our staring point at 2x theirs;
 	// this works out since our minimum is 2x their maximum
-	return m_lfo_am << (am_sensitivity - 1);
+	return (m_lfo_am << (am_sensitivity - 1)) | ((m_lfo.am_late << (am_sensitivity - 1)) << 16);
 }
 
 
@@ -282,7 +373,7 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 
 	// phase step, or PHASE_STEP_DYNAMIC if PM is active; this depends on
 	// block_freq, detune, and multiple, so compute it after we've done those
-	if (lfo_pm_depth() == 0 || ch_lfo_pm_sens(choffs) == 0)
+	if (ch_lfo_pm_sens(choffs) == 0)
 		cache.phase_step = compute_phase_step(choffs, opoffs, cache, 0);
 	else
 		cache.phase_step = opdata_cache::PHASE_STEP_DYNAMIC;
@@ -305,39 +396,116 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 
 
 //-------------------------------------------------
+//  opm_apply_pm - move a 13-bit key code by the
+//  LFO's PM value at the given sensitivity
+//-------------------------------------------------
+
+static uint32_t opm_apply_pm(uint32_t code, int32_t lfo_raw_pm, uint32_t pms)
+{
+	// with no sensitivity the adder still runs, adding a positive zero
+	uint32_t mag = (pms != 0) ? (lfo_raw_pm & 0x7f) : 0;
+	bool negative = pms != 0 && (lfo_raw_pm & 0x80) != 0;
+
+	// sensitivities 1-5 take the top bits of the magnitude; 6 and 7 first
+	// spread its top three bits over the note encoding, skipping the
+	// gaps, then shift it up
+	uint32_t amount;
+	if (pms <= 5)
+		amount = (pms != 0) ? mag >> (6 - pms) : 0;
+	else if (pms == 6)
+		amount = (mag + (mag >= 0x60 ? 0x20 : 0)) << 1;
+	else
+	{
+		static const uint8_t s_spread[8] = { 0, 1, 2, 4, 5, 6, 8, 9 };
+		amount = ((s_spread[mag >> 4] << 4) | (mag & 15)) << 2;
+	}
+
+	// the sum steps over the missing fourth note of each group: up past
+	// it when the sum lands on it or carries out of a group, down past it
+	// when the difference borrows out of a group whose amount has room
+	if (!negative)
+	{
+		uint32_t sum = code + amount;
+		bool carry = (code & 0xff) + (amount & 0xff) >= 0x100;
+		if (sum < 0x2000 && (bitfield(sum, 6, 2) == 3 || carry))
+			sum += 0x40;
+		return (sum < 0x2000) ? sum : 0x1fbf;
+	}
+	if (amount > code)
+		return 0;
+	uint32_t diff = code - amount;
+	bool borrow = (code & 0xff) < (amount & 0xff);
+	if (borrow && bitfield(amount, 6, 2) != 3)
+		return (diff >= 0x40) ? diff - 0x40 : 0;
+	return diff;
+}
+
+
+//-------------------------------------------------
+//  opm_apply_dt2 - add DT2 to a 13-bit key code:
+//  whole notes, then a fraction whose carry is a
+//  further note, stepping over the missing fourth
+//  note of each group
+//-------------------------------------------------
+
+static uint32_t opm_apply_dt2(uint32_t code, uint32_t dt2)
+{
+	static const uint8_t s_groups[4] = { 0, 2, 2, 3 };
+	static const uint8_t s_notes[4] = { 0, 0, 1, 0 };
+	static const uint8_t s_fraction[4] = { 0, 0, 52, 32 };
+	if (dt2 == 0)
+		return code;
+
+	uint32_t fraction = bitfield(code, 0, 6) + s_fraction[dt2];
+	uint32_t notes = s_notes[dt2] + (fraction >> 6);
+	uint32_t kc = (code >> 6) + 4 * s_groups[dt2];
+
+	// raw steps for one and two notes from each place in the group
+	static const uint8_t s_step[3][4] = { { 0, 0, 0, 0 }, { 1, 1, 2, 2 }, { 2, 3, 3, 3 } };
+	kc += s_step[notes][kc & 3];
+	if (kc >= 0x80)
+		return 0x1fbf;
+	return (kc << 6) | (fraction & 0x3f);
+}
+
+
+//-------------------------------------------------
+//  opm_code_to_phase_step - phase step of a 13-bit
+//  key code; the missing notes give the chip's
+//  F-number table nearly nothing
+//-------------------------------------------------
+
+static uint32_t opm_code_to_phase_step(uint32_t code)
+{
+	if (bitfield(code, 6, 2) != 3)
+		return opm_key_code_to_phase_step(code, 0);
+	static const uint8_t s_gap_fnum[16] = { 0, 2, 4, 6, 4, 6, 8, 10, 9, 11, 13, 15, 15, 17, 19, 21 };
+	return (s_gap_fnum[bitfield(code, 0, 4)] << bitfield(code, 10, 3)) >> 2;
+}
+
+
+//-------------------------------------------------
 //  compute_phase_step - compute the phase step
 //-------------------------------------------------
 
 uint32_t opm_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opdata_cache const &cache, int32_t lfo_raw_pm)
 {
-	// OPM logic is rather unique here, due to extra detune
-	// and the use of key codes (not to be confused with keycode)
+	// PM, then DT2, move the key code itself, in the chip's own encoding:
+	// block, a 4-bit note whose values 3, 7, 11 and 15 are not notes, and a
+	// 6-bit fraction. lfo_raw_pm holds the PM latches for operators 0-22
+	// (bits 0-7) and 23-31 (bits 8-15), each a sign (bit 7) and magnitude.
+	// Behaviour follows the Nuked-OPM vectors.
+	uint32_t code = cache.block_freq;
+	// a depth of 0 holds PM at a positive zero as soon as it is written,
+	// whatever the latch still holds
+	uint32_t pm = (lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;
+	code = opm_apply_pm(code, pm, ch_lfo_pm_sens(choffs));
+	code = opm_apply_dt2(code, op_detune2(opoffs));
 
-	// start with coarse detune delta; table uses cents value from
-	// manual, converted into 1/64ths
-	static const int16_t s_detune2_delta[4] = { 0, (600*64+50)/100, (781*64+50)/100, (950*64+50)/100 };
-	int32_t delta = s_detune2_delta[op_detune2(opoffs)];
-
-	// add in the PM delta
-	uint32_t pm_sensitivity = ch_lfo_pm_sens(choffs);
-	if (pm_sensitivity != 0)
-	{
-		// raw PM value is -127..128 which is +/- 200 cents
-		// manual gives these magnitudes in cents:
-		//    0, +/-5, +/-10, +/-20, +/-50, +/-100, +/-400, +/-700
-		// this roughly corresponds to shifting the 200-cent value:
-		//    0  >> 5,  >> 4,  >> 3,  >> 2,  >> 1,   << 1,   << 2
-		if (pm_sensitivity < 6)
-			delta += lfo_raw_pm >> (6 - pm_sensitivity);
-		else
-			delta += uint32_t(lfo_raw_pm) << (pm_sensitivity - 5);
-	}
-
-	// apply delta and convert to a frequency number
-	uint32_t phase_step = opm_key_code_to_phase_step(cache.block_freq, delta);
-
-	// apply detune based on the keycode
-	phase_step += cache.detune;
+	// DT1 is chosen by the block and note group the code has reached
+	uint32_t phase_step = opm_code_to_phase_step(code);
+	phase_step += detune_adjustment(op_detune(opoffs), std::min<uint32_t>(code >> 8, 0x1c));
+	phase_step &= 0x1ffff;
 
 	// apply frequency multiplier (which is cached as an x.1 value)
 	return (phase_step * cache.multiple) >> 1;

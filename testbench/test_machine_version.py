@@ -446,21 +446,28 @@ def check_ids():
         # An older chunk version of another length (savestate_io.h ss_layout_unreadable).
         with open(base, "rb") as f:
             orig = f.read()
-        pos = 0
-        while orig[pos:pos + 4] != b"PSG ":
-            pos += 12 + int.from_bytes(orig[pos + 8:pos + 12], "little")
-        ver = int.from_bytes(orig[pos + 4:pos + 6], "little")
-        n   = int.from_bytes(orig[pos + 8:pos + 12], "little")
+        def chunk(tag):
+            pos = 0
+            while orig[pos:pos + 4] != tag:
+                pos += 12 + int.from_bytes(orig[pos + 8:pos + 12], "little")
+            return pos, int.from_bytes(orig[pos + 4:pos + 6], "little"), int.from_bytes(orig[pos + 8:pos + 12], "little")
 
-        def psg_as(version, drop):
+        def chunk_as(tag, version, drop):
+            """The state with chunk `tag` relabelled `version` and its last `drop` bytes cut."""
+            pos, _, n = chunk(tag)
             head = orig[pos:pos + 4] + version.to_bytes(2, "little") + orig[pos + 6:pos + 8] + (n - drop).to_bytes(4, "little")
-            p = os.path.join(WORK, "psg-variant.x16s")
+            p = os.path.join(WORK, "chunk-variant.x16s")
             with open(p, "wb") as f:
                 f.write(orig[:pos] + head + orig[pos + 12:pos + 12 + n - drop] + orig[pos + 12 + n:])
             try:
                 return d.req("x16/loadState", {"path": p, "hash": True}), None
             except RuntimeError as e:
                 return None, str(e)
+
+        def psg_as(version, drop):
+            return chunk_as(b"PSG ", version, drop)
+
+        _, ver, _ = chunk(b"PSG ")
 
         if ver == 2:
             # vera_psg.c psg_state_load: version 1 lacks the 4-byte DAC sum.
@@ -474,6 +481,15 @@ def check_ids():
             case("PSG chunk v1, 4 bytes shorter, loads (%s)" % (err or "ok"), r is not None)
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
+        _, ver, _ = chunk(b"YM  ")
+        if ver == 4:
+            # ymglue.cpp state_load: version 3 lacks the 12-byte LFO image.
+            r, err = chunk_as(b"YM  ", 3, 12)
+            case("YM chunk v3, 12 bytes shorter, loads (%s)" % (err or "ok"), r is not None)
+            r, err = chunk_as(b"YM  ", 4, 12)
+            case("YM chunk v4 12 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+        else:
+            case("YM chunk is v4 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

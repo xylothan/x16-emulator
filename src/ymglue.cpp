@@ -344,6 +344,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		void run(uint32_t n) {
 			m_bus.run(n,
 				[this](uint8_t a, uint8_t v) {
+					m_chip.engine().regs().set_write_cycle(m_bus.cycle);
 					m_chip.write_address(a);
 					m_chip.write_data(v);
 					m_regs[a] = v;
@@ -452,6 +453,44 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			return (regs.*ym_register_fields::lfo_waveform())[ym_register_fields::NOISE_WAVEFORM];
 		}
 
+		// The LFO's counters and latches, which ymfm's own state leaves out.
+		// A new field must reach lfo_to_image() and lfo_from_image().
+		static constexpr size_t LFO_IMAGE_SIZE = 12;
+		static_assert(sizeof(ymfm::opm_registers::lfo_state) == 12, "lfo_state changed: update its image");
+
+		void lfo_to_image(uint8_t img[LFO_IMAGE_SIZE]) {
+			const ymfm::opm_registers::lfo_state &lfo = m_chip.engine().regs().lfo();
+			img[0]  = (uint8_t)(lfo.count & 0xff);
+			img[1]  = (uint8_t)(lfo.count >> 8);
+			img[2]  = (uint8_t)(lfo.ticks & 0xff);
+			img[3]  = (uint8_t)(lfo.ticks >> 8);
+			img[4]  = lfo.rate_steps;
+			img[5]  = lfo.window;
+			img[6]  = lfo.pm;
+			img[7]  = lfo.pm_late;
+			img[8]  = lfo.am_late;
+			img[9]  = lfo.steps;
+			img[10] = lfo.reload ? 1 : 0;
+			img[11] = 0; // reserved
+		}
+
+		void lfo_from_image(const uint8_t img[LFO_IMAGE_SIZE]) {
+			ymfm::opm_registers::lfo_state &lfo = m_chip.engine().regs().lfo();
+			lfo.count      = (uint16_t)(img[0] | img[1] << 8);
+			lfo.ticks      = (uint16_t)(img[2] | img[3] << 8);
+			lfo.rate_steps = img[4];
+			lfo.window     = img[5] & 7;
+			lfo.pm         = img[6];
+			lfo.pm_late    = img[7];
+			lfo.am_late    = img[8];
+			lfo.steps      = img[9];
+			lfo.reload     = img[10] & 1;
+			// A count of 0 would never reach its next step.
+			if (lfo.ticks == 0) {
+				lfo.ticks = 1;
+			}
+		}
+
 		void state_save(ss_writer *w) {
 			ym_engine &eng = m_chip.engine();
 			const uint32_t active   = (eng.*ym_engine_fields::active());
@@ -479,6 +518,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t img[opm_bus::IMAGE_SIZE];
 			m_bus.to_image(img);
 			ss_put(w, img, sizeof img);
+			uint8_t lfo[LFO_IMAGE_SIZE];
+			lfo_to_image(lfo);
+			ss_put(w, lfo, sizeof lfo);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -506,6 +548,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (version >= 3) {
 				ss_get(r, img, sizeof img);
 			}
+			// Version 3 had no LFO image: the LFO starts over.
+			uint8_t lfo[LFO_IMAGE_SIZE] = {};
+			if (version >= 4) {
+				ss_get(r, lfo, sizeof lfo);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -524,6 +571,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				m_bus.from_image(img);
 			} else {
 				bus_from_v2(v2_timer);
+			}
+			if (version >= 4) {
+				lfo_from_image(lfo);
+			} else {
+				m_chip.engine().regs().lfo() = ymfm::opm_registers::lfo_state{};
+				m_chip.engine().regs().lfo().ticks = (uint16_t)(1u << (15 - (m_regs[0x18] >> 4)));
 			}
 
 			// Each operator caches values derived from the registers (phase
@@ -588,6 +641,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				scratch.m_chip.save_restore(restorer);
 			}
 			scratch.m_bus         = m_bus;
+			scratch.m_chip.engine().regs().lfo() = m_chip.engine().regs().lfo();
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -797,7 +851,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 3);
+		ss_begin(w, "YM  ", 4);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);
@@ -844,6 +898,21 @@ extern "C" {
 
 	void YM_debug_get_lfo_depths(uint8_t *am, uint8_t *pm) {
 		opm_iface.debug_lfo_depths(am, pm);
+	}
+
+	uint32_t YM_debug_phase_step(const struct ym_debug_phase *in) {
+		static ymfm::opm_registers regs;
+		uint32_t chan, opmask;
+		regs.reset();
+		regs.write(0x19, 0xff, chan, opmask);
+		regs.write(0x28, in->kc, chan, opmask);
+		regs.write(0x30, (uint8_t)(in->kf << 2), chan, opmask);
+		regs.write(0x38, (uint8_t)(in->pms << 4), chan, opmask);
+		regs.write(0x40, (uint8_t)(in->dt1 << 4 | in->mul), chan, opmask);
+		regs.write(0xc0, (uint8_t)(in->dt2 << 6), chan, opmask);
+		ymfm::opdata_cache cache;
+		regs.cache_operator_data(0, 0, cache);
+		return regs.compute_phase_step(0, 0, cache, in->pm);
 	}
 
 	bool YM_debug_is_busy() {

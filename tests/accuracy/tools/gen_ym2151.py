@@ -39,6 +39,9 @@ class S:
     def x(self, t0, t1):
         self._op(t0, "x %d %d" % (t0, t1))
 
+    def o(self, n0, n, side):
+        self._op(SAMPLE * n0, "o %d %d %s" % (n0, n, side))
+
     def text(self):
         return "\n".join(o[2] for o in sorted(self.ops)) + "\ne\n"
 
@@ -228,6 +231,182 @@ def irq_both():
     return s
 
 
+class V(S):
+    """Register writes in sequence, 80 cycles apart, from START."""
+
+    def __init__(self):
+        super().__init__()
+        self.t = START
+
+    def set(self, a, v):
+        self.reg(a, v, self.t)
+        self.t += 80
+
+    def wait(self, n):
+        self.t += SAMPLE * n
+
+    def out(self, n, side="R"):
+        """Output over the next n samples, which go on under later writes."""
+        n0 = -(-self.t // SAMPLE)
+        self.o(n0, n, side)
+        return n0
+
+    def until(self, n):
+        self.t = max(self.t, SAMPLE * n)
+
+    def channel(self, ch, kc, kf=0, con=7, fb=0, pms=0, ams=0, rl=3):
+        self.set(0x20 + ch, rl << 6 | fb << 3 | con)
+        self.set(0x28 + ch, kc)
+        self.set(0x30 + ch, kf << 2)
+        self.set(0x38 + ch, pms << 4 | ams)
+
+    def op(self, sl, dt1=0, mul=1, tl=0, am=0, dt2=0):
+        """An operator at full attack that holds its level until key-off."""
+        for a, v in ((0x40, dt1 << 4 | mul), (0x60, tl), (0x80, 0x1f),
+                     (0xa0, am << 7), (0xc0, dt2 << 6), (0xe0, 0x0f)):
+            self.set(a + sl, v)
+
+    def key(self, ch, ops):
+        """ops: bits for M1, C1, M2, C2. Output starts 8 samples on."""
+        self.set(0x08, ops << 3 | ch)
+        self.wait(8)
+
+    def rekey(self, ch, ops):
+        """Key-off and on again, which restarts the phase."""
+        self.set(0x08, ch)
+        self.wait(16)
+        self.key(ch, ops)
+
+    def lfo(self, rate, wave, amd=0, pmd=0):
+        self.set(0x1b, wave)
+        self.set(0x19, amd)
+        self.set(0x19, 0x80 | pmd)
+        self.set(0x18, rate)
+
+
+def phase_static():
+    """Phase steps without PM, at every key code."""
+    s = S()
+    for kc in range(128):
+        s._op(kc, "f %02x" % kc)
+    return s
+
+
+def phase_pm():
+    """Phase steps under every PM value: gap notes, the top and bottom of the range."""
+    s = S()
+    n = 0
+    for pms in range(8):
+        for kc in (0x00, 0x03, 0x1e, 0x3c, 0x3f, 0x4a, 0x7b, 0x7e, 0x7f):
+            s._op(n, "m %d %02x" % (pms, kc))
+            n += 1
+    return s
+
+
+def lfo_voice(wave, rate, amd, pmd, pms, ams, kc=0x4a, kf=0x21, dt1=3, dt2=1):
+    s = V()
+    s.lfo(rate, wave, amd, pmd)
+    s.channel(0, kc, kf, pms=pms, ams=ams)
+    s.op(0, dt1=dt1, dt2=dt2, am=1)
+    s.key(0, 1)
+    s.out(4096)
+    return s
+
+
+def lfo_rates():
+    """Rate changes over the low nibble's extra steps, on a saw PM."""
+    s = V()
+    s.lfo(0xf0, 0, 0, 0x7f)
+    s.channel(0, 0x4a, 0x21, pms=7)
+    s.op(0)
+    s.key(0, 1)
+    n0 = s.out(512 * 8)
+    for k, rate in enumerate((0xf1, 0xf5, 0xfa, 0xff, 0xe7, 0xd9, 0xfe, 0x83)):
+        s.until(n0 + 512 * k + 100)
+        s.set(0x18, rate)
+    return s
+
+
+def lfo_reload():
+    """$18 rewritten at every cycle around the LFO's tick."""
+    s = V()
+    s.lfo(0xf0, 0, 0, 0x7f)
+    s.channel(0, 0x4a, 0x21, pms=7)
+    s.op(0)
+    s.key(0, 1)
+    n0 = s.out(64 * 48)
+    t = SAMPLE * (n0 + 16)
+    for o in (0, 5, 31, 224, 240, 250, 251, 252, 253, 254, 255) * 4:
+        t += 2000
+        t = t - t % 256 + o
+        s.w(0, 0x18, t - 6)
+        s.w(1, 0xf0, t)
+    return s
+
+
+def lfo_pm_split():
+    """PM on the last slot to take it early (6's C1) and the first to take it late (7's C1)."""
+    s = V()
+    s.lfo(0xfc, 0, 0, 0x7f)
+    s.channel(6, 0x4a, 0x10, pms=7)
+    s.channel(7, 0x5d, 0x2b, pms=6)
+    s.op(22)
+    s.op(23)
+    s.key(6, 2)
+    s.key(7, 2)
+    s.out(4096)
+    return s
+
+
+def lfo_am_split():
+    """AM on the last slot to take it late (7's M2) and the first to take it early (0's C1)."""
+    s = V()
+    s.lfo(0xfc, 2, 0x7f, 0)
+    s.channel(7, 0x4a, ams=3)
+    s.channel(0, 0x5d, ams=3)
+    s.op(15, am=1)
+    s.op(16, am=1)
+    s.key(7, 4)
+    s.key(0, 2)
+    s.out(4096)
+    return s
+
+
+def pm_gap_note():
+    """A gap note under negative PM and DT2, and under PM of depth 0."""
+    s = V()
+    s.lfo(0xe8, 0, 0, 0x7f)
+    s.channel(0, 0x4b, 0x3f, pms=7)
+    s.op(0, dt1=6, dt2=2)
+    s.key(0, 1)
+    s.out(2048)
+    s.wait(2048 + 4)
+    s.set(0x19, 0x80)
+    s.rekey(0, 1)
+    s.out(1024)
+    return s
+
+
+def detune_voices():
+    """DT1, DT2, KF and MUL across the key codes, with no LFO."""
+    s = V()
+    s.channel(0, 0x00)
+    s.op(0)
+    for kc, kf, dt1, dt2, mul in (
+            (0x00, 0x00, 7, 0, 1), (0x0e, 0x3f, 3, 3, 15), (0x23, 0x15, 5, 2, 0), (0x37, 0x2a, 1, 1, 7),
+            (0x4a, 0x21, 6, 3, 3), (0x5b, 0x00, 2, 2, 12), (0x6e, 0x31, 4, 1, 1), (0x7b, 0x3f, 7, 3, 1),
+            (0x7e, 0x3f, 3, 3, 15), (0x7f, 0x3f, 2, 2, 9), (0x13, 0x08, 0, 3, 2), (0x47, 0x20, 1, 0, 1)):
+        s.set(0x28, kc)
+        s.set(0x30, kf << 2)
+        s.set(0x40, dt1 << 4 | mul)
+        s.set(0xc0, dt2 << 6)
+        s.rekey(0, 1)
+        s.out(256)
+        s.wait(256 + 4)
+        s.set(0x08, 0)
+    return s
+
+
 SCRIPTS = {
     "busy_phase": busy_phase,
     "address_no_busy": address_no_busy,
@@ -247,6 +426,18 @@ SCRIPTS = {
     "timer_reload": timer_reload,
     "timer_stop": timer_stop,
     "irq_both": irq_both,
+    "phase_static": phase_static,
+    "phase_pm": phase_pm,
+    "lfo_saw_pm": lambda: lfo_voice(0, 0xc4, 0, 0x7f, 7, 0),
+    "lfo_square_pm_am": lambda: lfo_voice(1, 0xb7, 0x7f, 0x55, 5, 3),
+    "lfo_triangle_am": lambda: lfo_voice(2, 0xd3, 0x7f, 0, 0, 3),
+    "lfo_triangle_pm": lambda: lfo_voice(2, 0xe1, 0, 0x6c, 6, 0, kc=0x3e, kf=0x3f, dt2=3),
+    "lfo_rates": lfo_rates,
+    "lfo_reload": lfo_reload,
+    "lfo_pm_split": lfo_pm_split,
+    "lfo_am_split": lfo_am_split,
+    "pm_gap_note": pm_gap_note,
+    "detune_voices": detune_voices,
 }
 
 

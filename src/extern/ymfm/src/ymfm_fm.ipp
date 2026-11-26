@@ -775,7 +775,7 @@ uint32_t fm_operator<RegisterType>::envelope_attenuation(uint32_t am_offset) con
 
 	// add in LFO AM modulation
 	if (m_regs.op_lfo_am_enable(m_opoffs))
-		result += am_offset;
+		result += RegisterType::LFO_AM_SPLIT ? bitfield(am_offset, (m_opoffs >= 16) ? 16 : 0, 16) : am_offset;
 
 	// add in total level and KSL from the cache
 	result += m_cache.total_level;

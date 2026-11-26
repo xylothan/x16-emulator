@@ -20,6 +20,9 @@
 static uint64_t samples;
 static uint64_t now;
 
+#define MAX_SAMPLES 65536
+static int16_t out[2][MAX_SAMPLES];
+
 static void
 run_to(uint64_t t)
 {
@@ -28,10 +31,70 @@ run_to(uint64_t t)
 		const uint64_t left = t / 32 - samples;
 		const uint32_t n = left > 64 ? 64 : (uint32_t)left;
 		YM_stream_update((uint16_t *)buf, (uint16_t *)host, n);
+		for (uint32_t k = 0; k < n && samples + k < MAX_SAMPLES; k++) {
+			out[0][samples + k] = buf[2 * k];
+			out[1][samples + k] = buf[2 * k + 1];
+		}
 		samples += n;
 	}
 	YM_sync((uint8_t)(t % 32));
 	now = t;
+}
+
+// CRC-32 over values of 4 bytes each, LSB first, as tb_opm prints it.
+static uint32_t
+crc(uint32_t c, uint32_t v)
+{
+	static uint32_t table[256];
+	if (table[1] == 0) {
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t k = i;
+			for (int j = 0; j < 8; j++) {
+				k = (k & 1) ? 0xedb88320u ^ (k >> 1) : k >> 1;
+			}
+			table[i] = k;
+		}
+	}
+	c = ~c;
+	for (int i = 0; i < 4; i++, v >>= 8) {
+		c = table[(c ^ v) & 0xff] ^ (c >> 8);
+	}
+	return ~c;
+}
+
+static uint32_t
+phase_step(unsigned kc, unsigned kf, unsigned dt1, unsigned dt2, unsigned mul, unsigned pms, unsigned pm)
+{
+	const struct ym_debug_phase in = { (uint8_t)kc, (uint8_t)kf, (uint8_t)dt1, (uint8_t)dt2, (uint8_t)mul, (uint8_t)pms, (uint8_t)pm };
+	return YM_debug_phase_step(&in) & 0xfffff;
+}
+
+// F: static phase steps over KF, DT1, DT2 and MUL.
+static uint32_t
+crc_static(unsigned kc)
+{
+	static const unsigned muls[4] = { 0, 1, 7, 15 };
+	uint32_t c = 0;
+	for (unsigned kf = 0; kf < 64; kf++)
+		for (unsigned dt1 = 0; dt1 < 8; dt1++)
+			for (unsigned dt2 = 0; dt2 < 4; dt2++)
+				for (unsigned m = 0; m < 4; m++)
+					c = crc(c, phase_step(kc, kf, dt1, dt2, muls[m], 0, 0));
+	return c;
+}
+
+// M: phase steps under every PM value.
+static uint32_t
+crc_pm(unsigned pms, unsigned kc)
+{
+	static const unsigned kfs[3] = { 0, 33, 63 }, dt1s[2] = { 0, 6 };
+	uint32_t c = 0;
+	for (unsigned pm = 0; pm < 256; pm++)
+		for (unsigned k = 0; k < 3; k++)
+			for (unsigned dt2 = 0; dt2 < 4; dt2++)
+				for (unsigned d = 0; d < 2; d++)
+					c = crc(c, phase_step(kc, kfs[k], dt1s[d], dt2, 1, pms, pm));
+	return c;
 }
 
 struct watch {
@@ -88,8 +151,9 @@ run_file(const char *dir, const char *name)
 	struct watch w = { 0 };
 	int n = 0, bad = 0;
 	while (!bad && fgets(line, sizeof line, f)) {
-		unsigned p, v, m, a, s, i;
+		unsigned p, v, m, a, s, i, c;
 		uint64_t t, t1;
+		char side;
 		n++;
 		if (sscanf(line, "W %u %x %" SCNu64, &p, &v, &t) == 3) {
 			bad = advance(&w, t, name, n);
@@ -118,6 +182,35 @@ run_file(const char *dir, const char *name)
 			w.s = s;
 			w.i = i;
 			bad = bad || check_now(&w, name, n);
+		} else if (sscanf(line, "F %x %x", &a, &c) == 2) {
+			if (crc_static(a) != c) {
+				printf("%s:%d: phase steps at KC %02x: crc %08x, expected %08x\n", name, n, a, crc_static(a), c);
+				bad = 1;
+			}
+		} else if (sscanf(line, "M %u %x %x", &p, &a, &c) == 3) {
+			if (crc_pm(p, a) != c) {
+				printf("%s:%d: PM phase steps at PMS %u KC %02x: crc %08x, expected %08x\n", name, n, p, a, crc_pm(p, a), c);
+				bad = 1;
+			}
+		} else if (sscanf(line, "O %" SCNu64 " %c %x", &t, &side, &c) == 3) {
+			if (t + 64 > MAX_SAMPLES) {
+				printf("%s:%d: sample %" PRIu64 " past the end of the buffer\n", name, n, t);
+				bad = 1;
+				break;
+			}
+			if (32 * (t + 64) > now) {
+				bad = advance(&w, 32 * (t + 64), name, n);
+			}
+			const int sd = side == 'L' ? 0 : 1;
+			uint32_t got = 0;
+			for (uint64_t k = t; k < t + 64; k++) {
+				got = crc(got, (uint16_t)out[sd][k]);
+			}
+			if (!bad && got != c) {
+				printf("%s:%d: samples %" PRIu64 "..%" PRIu64 " %c: crc %08x, expected %08x\n",
+				       name, n, t, t + 63, side, got, c);
+				bad = 1;
+			}
 		} else if (line[0] == 'e') {
 			if (w.open) {
 				bad = advance(&w, w.end + 1, name, n);
