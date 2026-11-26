@@ -785,8 +785,8 @@ MUTATIONS = [
         # A debugger's edit updates the machine and does nothing else, so it
         # spends no cycles -- the same reason a debug read spends none. Losing
         # the guard makes using the debugger change program timing.
-        "find": "\t\t\t// slow IO2 range\n\t\t\tif (!debugOn) {\n\t\t\t\tclockticks6502 += 3;\n\t\t\t}\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
-        "into": "\t\t\t// slow IO2 range\n\t\t\tclockticks6502 += 3;\n\t\t\tif ((address & 0x01) == 0) {   // YM reg (partially decoded)",
+        "find": "\t\t\t// slow IO2 range\n\t\t\tif (!debugOn) {\n\t\t\t\tclockticks6502 += 3;\n\t\t\t}\n\t\t\t// Both ports are partially decoded.",
+        "into": "\t\t\t// slow IO2 range\n\t\t\tclockticks6502 += 3;\n\t\t\t// Both ports are partially decoded.",
         "count": 1,
         "caught_by": ["debug_write_path"],
     },

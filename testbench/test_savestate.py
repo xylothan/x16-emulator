@@ -58,7 +58,7 @@ OPS = {
     ("ldx", "imm"): 0xA2, ("ldy", "imm"): 0xA0,
     ("sta", "zp"): 0x85, ("sta", "abs"): 0x8D, ("sta", "absx"): 0x9D,
     ("stz", "abs"): 0x9C,
-    ("inc", "zp"): 0xE6, ("inx", "imp"): 0xE8,
+    ("inc", "zp"): 0xE6, ("inx", "imp"): 0xE8, ("nop", "imp"): 0xEA,
     ("and", "imm"): 0x29, ("ora", "imm"): 0x09, ("eor", "zp"): 0x45, ("eor", "imm"): 0x49,
     ("adc", "zp"): 0x65, ("clc", "imp"): 0x18,
     ("cmp", "imm"): 0xC9, ("cpx", "imm"): 0xE0,
@@ -103,9 +103,10 @@ def assemble(org, lines):
 
 def ym_write(reg, val_mode, val, wait):
     # Wait for the YM2151 to finish its last write, then write one register.
+    # The chip reads its one latch two cycles (~9 CPU clocks) after a store.
     return [wait, ("bit", "abs", 0x9F41), ("bmi", "rel", wait),
             ("lda", "imm", reg), ("sta", "abs", 0x9F40),
-            ("lda", val_mode, val), ("sta", "abs", 0x9F41)]
+            ("lda", val_mode, val), ("nop", "imp"), ("nop", "imp"), ("sta", "abs", 0x9F41)]
 
 YM_SETUP = bytes([
     0x20, 0xEF, 0x28, 0x4A, 0x30, 0x00,                 # ch0: L+R, feedback 5, algorithm 7; note
@@ -163,7 +164,7 @@ PROGRAM_A, LBL = assemble(0x0400, [
     "yml", ("lda", "absx", "ymtab"), ("cmp", "imm", 0xFF), ("beq", "rel", "ymd"),
     "ymb", ("bit", "abs", 0x9F41), ("bmi", "rel", "ymb"),
            ("sta", "abs", 0x9F40), ("inx", "imp"),
-           ("lda", "absx", "ymtab"), ("sta", "abs", 0x9F41), ("inx", "imp"),
+           ("lda", "absx", "ymtab"), ("nop", "imp"), ("nop", "imp"), ("sta", "abs", 0x9F41), ("inx", "imp"),
            ("jmp", "abs", "yml"),
     "ymd",
     ("lda", "imm", 0x40), ("sta", "abs", 0x9F0E),                  # VIA1: no T1 interrupt
@@ -208,7 +209,7 @@ PROGRAM_A, LBL = assemble(0x0400, [
     ("lda", "imm", 0x08), ("sta", "abs", 0x9F40),
     ("lda", "zp", 0x37), ("and", "imm", 0x10), ("beq", "rel", "koff"),
     ("lda", "imm", 0x78),
-    "koff", ("sta", "abs", 0x9F41),                                # key on/off every 16 frames
+    "koff", ("nop", "imp"), ("sta", "abs", 0x9F41),                                # key on/off every 16 frames
     "out", ("jmp", "ind", OLDV),
     "sprtab", SPRITES,
     "psgtab", PSG,
@@ -232,7 +233,7 @@ PROGRAM_B, LBL_B = assemble(0x0600, [
            ("cpx", "imm", 0x0C), ("bne", "rel", "via"),            # $9F04-$9F0B: timers, SR, ACR
     "ywb", ("bit", "abs", 0x9F41), ("bmi", "rel", "ywb"),
     ("lda", "zp", 0x38), ("sta", "abs", 0x9F40),
-    ("eor", "imm", 0x55), ("sta", "abs", 0x9F41),                 # any YM register
+    ("eor", "imm", 0x55), ("nop", "imp"), ("nop", "imp"), ("sta", "abs", 0x9F41),                 # any YM register
     ("ldx", "imm", 0),
     "ram", ("txa", "imp"), ("eor", "zp", 0x38),
            ("sta", "absx", 0x0400), ("sta", "absx", 0x0500),

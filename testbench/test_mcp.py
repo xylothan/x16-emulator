@@ -4814,8 +4814,10 @@ def test_run_to():
 
 
 def ym_poke(reg, val):
-    """BIT $9F41 / BMI back, then write one YM2151 register."""
-    return "2C419F30FB" + "A9%02X8D409F" % reg + "A9%02X8D419F" % val
+    """NOPs, BIT $9F41 / BMI back, then write one YM2151 register. Busy rises
+    and the shared latch is read two chip cycles (~9 CPU clocks) after a
+    write, so each poll and store waits that long after the previous store."""
+    return "EAEAEA2C419F30FB" + "A9%02X8D409F" % reg + "A9%02XEAEA8D419F" % val
 
 
 def vera_poke(reg, val):
@@ -4829,7 +4831,8 @@ AUDIO_CODE = (
     vera_poke(0x3D, 0x11) * 4 +
     ym_poke(0x22, 0xEF) + ym_poke(0x2A, 0x4A) + ym_poke(0x32, 0x80) + ym_poke(0x3A, 0x52) +
     ym_poke(0x42, 0x35) + ym_poke(0x62, 0x10) + ym_poke(0x82, 0x9F) +
-    ym_poke(0x19, 0x45) + ym_poke(0x19, 0xA6) + ym_poke(0x08, 0x7A)
+    ym_poke(0x19, 0x45) + ym_poke(0x19, 0xA6) + ym_poke(0x08, 0x7A) +
+    "EAEAEA2C419F"   # let the chip take the last write before the state is read
 )
 
 
