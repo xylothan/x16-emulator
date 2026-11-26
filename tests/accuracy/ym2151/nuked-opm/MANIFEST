@@ -16,3 +16,15 @@ ym_timer_irq_enable.vec
 ym_timer_reload.vec
 ym_timer_stop.vec
 ym_irq_both.vec
+ym_phase_static.vec
+ym_phase_pm.vec
+ym_lfo_saw_pm.vec
+ym_lfo_square_pm_am.vec
+ym_lfo_triangle_am.vec
+ym_lfo_triangle_pm.vec
+ym_lfo_rates.vec
+ym_lfo_reload.vec
+ym_lfo_pm_split.vec
+ym_lfo_am_split.vec
+ym_pm_gap_note.vec
+ym_detune_voices.vec

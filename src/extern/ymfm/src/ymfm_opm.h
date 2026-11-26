@@ -117,6 +117,7 @@ public:
 	static constexpr uint32_t DEFAULT_PRESCALE = 2;
 	static constexpr uint32_t EG_CLOCK_DIVIDER = 3;
 	static constexpr uint32_t CSM_TRIGGER_MASK = ALL_CHANNELS;
+	static constexpr bool LFO_AM_SPLIT = true;
 	static constexpr uint32_t REG_MODE = 0x14;
 	static constexpr uint8_t STATUS_TIMERA = 0x01;
 	static constexpr uint8_t STATUS_TIMERB = 0x02;
@@ -159,8 +160,36 @@ public:
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
+	// the LFO as the chip runs it, after the Nuked-OPM vectors: a counter
+	// stepped by a reload counter and a rate multiplier, and AM and PM values
+	// latched once every 8 samples; the later operators of a sample take each
+	// new value a sample before the earlier ones
+	struct lfo_state
+	{
+		uint16_t count;      // waveform counter
+		uint16_t ticks;      // reload ticks left to the next step (1-32768)
+		uint8_t rate_steps;  // rate multiplier counter (4 bits)
+		uint8_t window;      // sample within the 8-sample window, from reset
+		uint8_t pm;          // PM latch for operators 0-22: sign (bit 7), magnitude
+		uint8_t pm_late;     // PM latch for operators 23-31
+		uint8_t am_late;     // AM latch for operators 16-31
+		uint8_t steps;       // steps due at the next window start
+		bool reload;         // a $18 write is due after this window's tick
+	};
+	lfo_state &lfo() { return m_lfo; }
+	lfo_state const &lfo() const { return m_lfo; }
+
+	// the cycle (0-31) within the coming sample at which the following
+	// register writes reach the chip
+	void set_write_cycle(uint32_t cycle) { m_write_cycle = cycle; }
+
 	// return the current noise state, gated by the noise clock
 	uint32_t noise_state() const { return m_noise_state; }
+
+	// LFO values from the counter
+	uint8_t lfo_am_value(uint32_t waveform, uint32_t count) const;
+	uint8_t lfo_pm_value(uint32_t waveform, uint32_t count) const;
+	static constexpr uint32_t LFO_RELOAD_CYCLE = 27;
 
 	// caching helpers
 	void cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata_cache &cache);
@@ -235,7 +264,9 @@ protected:
 	uint8_t m_noise_counter;              // noise counter
 	uint8_t m_noise_state;                // latched noise state
 	uint8_t m_noise_lfo;                  // latched LFO noise value
-	uint8_t m_lfo_am;                     // current LFO AM value
+	uint8_t m_lfo_am;                     // AM latch for operators 0-15
+	lfo_state m_lfo;                      // LFO counters and PM latch
+	uint32_t m_write_cycle;               // cycle of the writes being made
 	uint8_t m_regdata[REGISTERS];         // register data
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms

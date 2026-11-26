@@ -51,6 +51,15 @@ and is not in this repository.
 - `X T0 T1` watches status and IRQ over T0 to T1. `C S I T` lines give each
   change. The runner checks every cycle, then replays the file in batches of up
   to 64 samples.
+- `O N S C` is samples N to N+63 of DAC side S (L or R). Sample N is the one
+  the emulator generates Nth; Nuked-OPM's DAC puts it out 5 samples later.
+- `F KC C` holds the phase steps of one operator at key code KC, for every KF,
+  DT1 and DT2, and MUL 0, 1, 7 and 15. `M PMS KC C` holds them under every PM
+  value at sensitivity PMS. `Z PMS KC C` is the same under a PM depth of 0.
+- C is a CRC-32 of the values in order, 4 bytes each, LSB first.
+- Output blocks start 8 samples after the last key-on and end 4 samples before
+  the next key-on or write that changes the sound. `$18` writes are the
+  exception: the LFO vectors check them inside blocks.
 
 ```
 cc -O2 -I<nuked-opm> -o tb_opm tools/tb_opm.c <nuked-opm>/opm.c
@@ -113,8 +122,14 @@ does, and checks:
 - The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
 - SPI
 - FPGA reconfiguration
-- YM2151 sound output, CSM key-on, the test register ($01) and reads of the
-  address port
+- YM2151 CSM key-on, the test register ($01) and reads of the address port
+- YM2151 output when a register write or key-on lands: Nuked-OPM shows a
+  write's effect up to one sample sooner than the emulator, two for TL, and differs
+  on the first sample after key-on
+- YM2151 envelopes, noise, the noise LFO wave and output past the clamp
+- YM2151 left output: Nuked-OPM mixes slots 15 to 31 from one sample earlier
+  on the left (slot 31 on the right), so the vectors use the right side
+- YM2151 PM and AM depth writes while the LFO's value is being multiplied out
 - YM2151 and VERA accesses within an instruction: those devices see each
   access at the instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new

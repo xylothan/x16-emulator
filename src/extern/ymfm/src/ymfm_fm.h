@@ -115,12 +115,15 @@ public:
 	//        bool EG_HAS_REVERB: True if the chip has a faux reverb envelope stage (OPQ/OPZ)
 	//           bool EG_HAS_SSG: True if the chip has SSG envelope support (OPN)
 	//      bool MODULATOR_DELAY: True if the modulator is delayed by 1 sample (OPL pre-OPL3)
+	//        bool LFO_AM_SPLIT: True if lfo_am_offset() holds one value for operators
+	//                           0-15 (bits 0-15) and another for 16-31 (OPM)
 	//
 	static constexpr bool DYNAMIC_OPS = false;
 	static constexpr bool EG_HAS_DEPRESS = false;
 	static constexpr bool EG_HAS_REVERB = false;
 	static constexpr bool EG_HAS_SSG = false;
 	static constexpr bool MODULATOR_DELAY = false;
+	static constexpr bool LFO_AM_SPLIT = false;
 
 	// system-wide register defaults
 	uint32_t status_mask() const                     { return 0; } // OPL only

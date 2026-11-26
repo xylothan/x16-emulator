@@ -78,6 +78,14 @@ extern "C" {
 	// through $19, so the register shadow keeps only the later of the two.
 	void    YM_debug_get_lfo_depths(uint8_t *am, uint8_t *pm);
 
+	// Phase step of operator 0 (M1 of channel 0) on a chip of its own, set up
+	// from these fields; pmd is the PM depth (0-127) and pm the PM latch, a
+	// sign (bit 7) and magnitude.
+	struct ym_debug_phase {
+		uint8_t kc, kf, dt1, dt2, mul, pms, pmd, pm;
+	};
+	uint32_t YM_debug_phase_step(const struct ym_debug_phase *in);
+
 	// Host-output mute, one bit per channel (bit n = channel n). The chip runs
 	// every channel exactly as it would otherwise and they all stay in the mix
 	// the machine holds; muted ones are only left out of the mix sent to the
