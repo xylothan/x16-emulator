@@ -107,7 +107,8 @@ void via1_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA1, reg, value)
 void via2_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA2, reg, value); }
 void video_write(uint8_t reg, uint8_t value) { note_write(FAKE_VERA, reg, value); }
 void midi_serial_write(uint8_t reg, uint8_t value) { note_write(FAKE_MIDI, reg, value); }
-bool YM_write_reg(uint8_t reg, uint8_t value) { note_write(FAKE_YM, reg, value); return true; }
+bool YM_write(uint8_t port, uint8_t value) { note_write(FAKE_YM, port, value); return false; }
+void YM_set_lost_write_handler(void (*handler)(uint8_t reg, uint8_t val)) { (void)handler; }
 // x16/step's sound events (audio_events.c): never on here.
 bool audio_events_on = false;
 void audio_events_ym_write(uint8_t reg, uint8_t val) { (void)reg; (void)val; }

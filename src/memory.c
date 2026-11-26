@@ -40,6 +40,7 @@ static uint8_t addr_ym = 0;
 // Defined below, next to the I/O dispatch it belongs to; declared here because
 // memory_init() installs it.
 static void io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles);
+static void ym_lost_write(uint8_t reg, uint8_t val);
 
 bool randomizeRAM = false;
 // -seed: fill from a private PRNG instead of rand() seeded from the clock.
@@ -71,6 +72,7 @@ memory_init()
 	// links memory.c -- including the two unit tests that pair it with fake
 	// devices. Handing it a provider keeps that module dependency-free.
 	io_trace_set_context_provider(io_trace_cpu_context);
+	YM_set_lost_write_handler(ym_lost_write);
 
 	// Initialize RAM array
 	RAM = calloc(RAM_SIZE, sizeof(uint8_t));
@@ -205,6 +207,14 @@ static uint8_t x16_bank_of(uint16_t address) {
 	} else {
 		return memory_get_rom_bank();
 	}
+}
+
+// The chip noticed it as the slot scan ran, a few instructions after the
+// writes; the usual cause is a sound driver that does not wait for bit 7 of
+// $9F41 to clear.
+static void ym_lost_write(uint8_t reg, uint8_t val) {
+	printf("YM2151 lost a write: reg $%02X = $%02X was replaced before the chip took it, near PC %s\n",
+	       reg, val, format_addr(opcode_addr, regs.k, x16_bank_of(opcode_addr)));
 }
 
 static inline uint8_t
@@ -516,25 +526,22 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 			if (!debugOn) {
 				clockticks6502 += 3;
 			}
-			if ((address & 0x01) == 0) {   // YM reg (partially decoded)
+			// Both ports are partially decoded. audio_render() brings the
+			// chip up to now, so the write lands at its own cycle.
+			const uint8_t port = address & 0x01;
+			audio_render();
+			if (port == 0) {
 				addr_ym = value;
-			} else {                       // YM data (partially decoded)
-				audio_render();
-				const bool accepted = YM_write_reg(addr_ym, value);
-				if (accepted && audio_events_on && !debugOn) {
-					audio_events_ym_write(addr_ym, value); // x16/step "audio"
-				}
-				if (!accepted) {
-					// The chip drops it, as the real one would. Say where it came
-					// from: the usual cause is a sound driver that does not wait
-					// for bit 7 of $9F41 to clear before writing.
-					if (debugOn) {
-						printf("YM2151 write received while busy: reg $%02X = $%02X dropped (debugger write)\n", addr_ym, value);
-					} else {
-						printf("YM2151 write received while busy: reg $%02X = $%02X dropped at PC %s\n",
-						       addr_ym, value, format_addr(opcode_addr, regs.k, x16_bank_of(opcode_addr)));
-					}
-				}
+			}
+			if (YM_write(port, value)) {
+				// Both ports share one latch, which the chip reads two cycles
+				// (about 9 CPU clocks) after a write.
+				printf("YM2151 writes too close together: $%02X to the %s port at PC %s overwrites the previous byte\n",
+				       value, port ? "data" : "address",
+				       debugOn ? "(debugger write)" : format_addr(opcode_addr, regs.k, x16_bank_of(opcode_addr)));
+			}
+			if (port == 1 && audio_events_on && !debugOn) {
+				audio_events_ym_write(addr_ym, value); // x16/step "audio"
 			}
 		} else if (address >= 0x9fb0 && address < 0x9fc0) {
 			// emulator state

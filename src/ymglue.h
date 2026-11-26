@@ -12,12 +12,22 @@ extern "C" {
 	void YM_Create(int clock);
 	void YM_init(int sample_rate, int frame_rate);
 	// `output` receives the machine's mix of every channel, `host_output` the
-	// same without the muted ones.
+	// same without the muted ones. Each sample is the last of 32 interface
+	// cycles (two phiM clocks each).
 	void YM_stream_update(uint16_t* output, uint16_t* host_output, uint32_t numsamples);
-	// Returns false if the chip was busy and the write was dropped, as the
-	// real YM2151 does. The caller reports it, since it knows who wrote.
-	bool YM_write_reg(uint8_t reg, uint8_t val);
+	// Runs the interface to `cycle` (0-31) of the sample not yet generated,
+	// so that accesses land between the cycles where they fall.
+	void YM_sync(uint8_t cycle);
+	// Writes `val` to port 0 (address) or 1 (data). The chip takes no write
+	// while busy is checked: none is ever refused. Returns true when the byte
+	// overwrites one the chip had not read yet.
+	bool YM_write(uint8_t port, uint8_t val);
 	bool YM_irq(void);
+	// Power-on state, for tests.
+	void YM_reset(void);
+	// Called with each data write the chip loses: a new address, or new data,
+	// came before the slot scan reached its register.
+	void YM_set_lost_write_handler(void (*handler)(uint8_t reg, uint8_t val));
 
 	// ─── Debugger accessors ─────────────────────────────────────────────────
 	// Read-only views of the YM2151 for the ImGui debugger's FM panel. Called
