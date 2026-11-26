@@ -9930,6 +9930,9 @@ static int handle_x16_input_log(int seq, cJSON *args) {
                                     "needs a finished recording and the machine where it began");
             return 0;
         }
+        // The loop's own call for this position ran before this request was
+        // read, and a resume in the same poll would run on past it.
+        input_log_replay(INPUT_SITE_TOP);
     } else if (strcmp(action, "status")) {
         send_dap_error_response(seq, cmd, "'action' must be start, stop, replay or status");
         return 0;
