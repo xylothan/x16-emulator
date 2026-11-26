@@ -160,24 +160,21 @@ test_phase_is_held_at_zero_while_silent(void)
 //
 // A 16-bit Fibonacci LFSR, taps 1, 2, 4 and 15, shifting left, seeded to 1.
 //
-// Hardware steps it every system clock (psg.v:180-188).
-// Emulated once per voice, 16 per sample (vera_psg.c:105-109).
+// VERA 49.0.6 bitstream: it steps once per sample.
 static void
 test_noise_lfsr_sequence(void)
 {
 	psg_reset();
 	check_eq(psg_debug_get_noise_state(), 1u, "seeded to 1");
 
-	int16_t buf[8];
+	int16_t buf[2];
 	uint16_t expect = psg_debug_get_noise_state();
 	for (int sample = 0; sample < 8; sample++) {
-		for (int voice_step = 0; voice_step < PSG_NUM_CHANNELS; voice_step++) {
-			unsigned bit = ((expect >> 1) ^ (expect >> 2) ^ (expect >> 4) ^ (expect >> 15)) & 1;
-			expect = (uint16_t)((expect << 1) | bit);
-		}
+		unsigned bit = ((expect >> 1) ^ (expect >> 2) ^ (expect >> 4) ^ (expect >> 15)) & 1;
+		expect = (uint16_t)((expect << 1) | bit);
 		psg_render(buf, 1);
 		check_eq(psg_debug_get_noise_state(), expect,
-		         "the LFSR follows taps 1, 2, 4 and 15, once per voice");
+		         "the LFSR follows taps 1, 2, 4 and 15, once per sample");
 	}
 }
 

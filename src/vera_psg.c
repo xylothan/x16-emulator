@@ -48,6 +48,10 @@ static uint16_t volume_lut[64] = {
 
 static uint16_t noise_state;
 
+// The sum of the last sample, which the DAC takes at the start of the next.
+static int16_t dac_l, dac_r;
+static int16_t dac_hl, dac_hr; // the host mix, without muted voices
+
 // Debugger mute: one bit per voice. A muted voice still runs exactly as before
 // (phase, noise latch, level meter, its own scope trace) and stays in the mix
 // the machine holds, which save states carry; it is only left out of the
@@ -75,6 +79,7 @@ psg_reset(void)
 	memset(scope_buf, 0, sizeof(scope_buf));
 	scope_wridx = 0;
 	noise_state = 1;
+	dac_l = dac_r = dac_hl = dac_hr = 0;
 }
 
 void
@@ -114,20 +119,15 @@ render(int16_t *left, int16_t *right, int16_t *host_left, int16_t *host_right)
 
 	const bool capture = scope_armed > 0;
 
-	for (int i = 0; i < 16; i++) {
-		// In FPGA implementation, noise values are generated every system clock and
-		// the channel update is run sequentially. So, even if both two channels are
-		// fetching a noise value in the same sample, they should have different values
-		noise_state = (noise_state << 1) | (((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 4) ^ (noise_state >> 15)) & 1);
+	// VERA 49.0.6 bitstream: the noise LFSR (psg.v:128) steps once per sample,
+	// before the voices, so every voice that wraps in a sample latches the same bits.
+	noise_state = (noise_state << 1) | (((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 4) ^ (noise_state >> 15)) & 1);
 
+	for (int i = 0; i < 16; i++) {
 		struct channel *ch = &channels[i];
 
-		uint32_t new_phase = (ch->left || ch->right) ? ((ch->phase + ch->freq) & 0x1FFFF) : 0;
-		if ((ch->phase & 0x10000) && !(new_phase & 0x10000)) {
-			ch->noiseval = (noise_state >> 1) & 0x3F;
-		}
-		ch->phase = new_phase;
-
+		// psg.v:146-168: the signal is formed from the phase and noise as they
+		// were before this sample's update.
 		uint32_t v = 0;
 		switch (ch->waveform) {
 			case WF_PULSE: v = ((ch->phase >> 10) > ch->pw) ? 0 : 0x3F; break;
@@ -135,6 +135,12 @@ render(int16_t *left, int16_t *right, int16_t *host_left, int16_t *host_right)
 			case WF_TRIANGLE: v = ((ch->phase & 0x10000) ? (~(ch->phase >> 10) & 0x3F) : ((ch->phase >> 10) & 0x3F)) ^ ((ch->pw ^ 0x3f) & 0x3f); break;		
 			case WF_NOISE: v = ch->noiseval; break;
 		}
+
+		uint32_t new_phase = (ch->left || ch->right) ? ((ch->phase + ch->freq) & 0x1FFFF) : 0;
+		if ((ch->phase & 0x10000) && !(new_phase & 0x10000)) {
+			ch->noiseval = (noise_state >> 1) & 0x3F;
+		}
+		ch->phase = new_phase;
 		int16_t sv = (v ^ 0x20);
 		if (sv & 0x20) {
 			sv |= 0xFFC0;
@@ -168,10 +174,15 @@ render(int16_t *left, int16_t *right, int16_t *host_left, int16_t *host_right)
 		}
 	}
 
-	*left  = l;
-	*right = r;
-	*host_left  = hl;
-	*host_right = hr;
+	// psg.v:211-215, audio.v:94-104: the DAC takes the previous sample's sum.
+	*left  = dac_l;
+	*right = dac_r;
+	*host_left  = dac_hl;
+	*host_right = dac_hr;
+	dac_l  = l;
+	dac_r  = r;
+	dac_hl = hl;
+	dac_hr = hr;
 
 	if (capture) {
 		scope_buf[PSG_SCOPE_MIX_L][scope_wridx] = hl;
@@ -336,6 +347,7 @@ psg_debug_scope_predict(int16_t (*dest)[PSG_SCOPE_SAMPLES], unsigned num_samples
 	struct channel saved_channels[16];
 	memcpy(saved_channels, channels, sizeof(channels));
 	const uint16_t saved_noise = noise_state;
+	const int16_t saved_dac[4] = { dac_l, dac_r, dac_hl, dac_hr };
 	const unsigned saved_armed = scope_armed;
 	scope_armed = 0;
 
@@ -351,6 +363,10 @@ psg_debug_scope_predict(int16_t (*dest)[PSG_SCOPE_SAMPLES], unsigned num_samples
 
 	memcpy(channels, saved_channels, sizeof(channels));
 	noise_state = saved_noise;
+	dac_l  = saved_dac[0];
+	dac_r  = saved_dac[1];
+	dac_hl = saved_dac[2];
+	dac_hr = saved_dac[3];
 	scope_armed = saved_armed;
 	return n;
 }
@@ -364,7 +380,7 @@ psg_debug_scope_predict(int16_t (*dest)[PSG_SCOPE_SAMPLES], unsigned num_samples
 void
 psg_state_save(ss_writer *w)
 {
-	ss_begin(w, "PSG ", 1);
+	ss_begin(w, "PSG ", 2);
 	for (int i = 0; i < 16; i++) {
 		const struct channel *ch = &channels[i];
 		ss_put_u16(w, ch->freq);
@@ -378,13 +394,15 @@ psg_state_save(ss_writer *w)
 	}
 	ss_put(w, reg_shadow, sizeof reg_shadow);
 	ss_put_u16(w, noise_state);
+	ss_put_u16(w, (uint16_t)dac_l);
+	ss_put_u16(w, (uint16_t)dac_r);
 	ss_end(w);
 }
 
 void
 psg_state_load(ss_reader *r)
 {
-	ss_open(r, "PSG ");
+	const int version = ss_open(r, "PSG ");
 	for (int i = 0; i < 16; i++) {
 		struct channel *ch = &channels[i];
 		ch->freq     = ss_get_u16(r);
@@ -398,5 +416,10 @@ psg_state_load(ss_reader *r)
 	}
 	ss_get(r, reg_shadow, sizeof reg_shadow);
 	noise_state = ss_get_u16(r);
+	// Version 1 has no DAC sum; the first sample after loading is silent.
+	dac_l = version >= 2 ? (int16_t)ss_get_u16(r) : 0;
+	dac_r = version >= 2 ? (int16_t)ss_get_u16(r) : 0;
+	dac_hl = dac_l;
+	dac_hr = dac_r;
 	ss_close(r);
 }
