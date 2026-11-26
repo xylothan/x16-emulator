@@ -266,7 +266,8 @@ test_a_line_out_of_render_time_drops_the_rest(void)
 }
 
 // The search FSM advances one slot per clock (sprite_renderer.v:146-160).
-// Eight sprites low then high in the table; if the search overlaps, low costs less.
+// Six sprites low then high in the table; if the search overlaps, low costs less.
+// A 64-pixel 8bpp sprite takes 99 clocks (:340-404, vram_if.v:142-146).
 static void
 test_stepping_over_empty_slots_overlaps_with_drawing(void)
 {
@@ -274,7 +275,7 @@ test_stepping_over_empty_slots_overlaps_with_drawing(void)
 	sprite_trace_set_enabled(false);
 	check(sprite_trace_set_enabled(true), "tracing re-enables");
 
-	for (int n = 0; n < 8; n++) {
+	for (int n = 0; n < 6; n++) {
 		write_sprite_sized(n, SPRITE_GFX_BIG, n * 70, 100, 1, 3, 3, 1);
 	}
 	check(step_one_frame(), "the beam reaches a frame boundary");
@@ -287,14 +288,14 @@ test_stepping_over_empty_slots_overlaps_with_drawing(void)
 	}
 	const uint32_t low_demand = f->lines[120].demand;
 	const uint16_t low_drawn  = f->lines[120].drawn;
-	check(!f->lines[120].exhausted, "eight big sprites fit on a line");
-	check_eq(low_drawn, 8u, "all eight drew");
+	check(!f->lines[120].exhausted, "six big sprites fit on a line");
+	check_eq(low_drawn, 6u, "all six drew");
 
-	// Same eight sprites, now at the top of the slot table.
+	// Same six sprites, now at the top of the slot table.
 	setup();
 	sprite_trace_set_enabled(false);
 	check(sprite_trace_set_enabled(true), "tracing re-enables");
-	for (int n = 0; n < 8; n++) {
+	for (int n = 0; n < 6; n++) {
 		write_sprite_sized(120 + n, SPRITE_GFX_BIG, n * 70, 100, 1, 3, 3, 1);
 	}
 	check(step_one_frame(), "the beam reaches a frame boundary");
@@ -306,7 +307,7 @@ test_stepping_over_empty_slots_overlaps_with_drawing(void)
 		return;
 	}
 	const uint32_t high_demand = f->lines[120].demand;
-	check_eq(f->lines[120].drawn, 8u, "all eight still drew");
+	check_eq(f->lines[120].drawn, 6u, "all six still drew");
 	check(high_demand > low_demand,
 	      "the same sprites cost more when no drawing overlaps the search");
 }

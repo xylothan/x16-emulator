@@ -314,6 +314,90 @@ def timed_irq_vstart():
     return s
 
 
+# Sprite pixels: 0x0000-0x00FF opaque, 0x0100-0x01FF transparent, and from
+# 0x0200 16-byte rows opaque only in their first 8 bytes.
+OPAQUE, CLEAR, HALF = 0x0000, 0x0100, 0x0200
+
+
+def spr(i, x, y, z, mask, addr=OPAQUE, bpp=0, wz=0, hz=0, flip=0):
+    return (i, (addr >> 5) & 0xFF, (bpp << 7) | (addr >> 13), x & 0xFF, (x >> 8) & 3, y & 0xFF, (y >> 8) & 3,
+            (mask << 4) | (z << 2) | flip, (hz << 6) | (wz << 4))
+
+
+def sprite_scene(s, sprites, dcsel1=None, scale=None):
+    s.w(5, 0); s.w(0, 0); s.w(1, 0); s.w(2, 0x10)
+    for k in range(0x300):
+        s.w(3, 0xFF if k < 0x100 or (k >= 0x200 and k % 16 < 8) else 0)
+    for i, *attr in sprites:
+        s.w(0, (i * 8) & 0xFF); s.w(1, 0xFC | (i >> 5)); s.w(2, 0x11)
+        for v in attr:
+            s.w(3, v)
+    if dcsel1:
+        s.w(5, 2)
+        for r, v in zip((9, 10, 11, 12), dcsel1):
+            s.w(r, v)
+        s.w(5, 0)
+    if scale:
+        s.w(10, scale); s.w(11, scale)
+    s.w(9, 0x41)
+
+
+def collide(sprites, dcsel1=None, scale=None):
+    """ISR after two frames: bit 2 latches, bits 7:4 are the last frame's mask (top.v:179, 450)."""
+    def script():
+        s = S()
+        sprite_scene(s, sprites, dcsel1, scale)
+        s.f(); s.f()
+        s.r(7, 0xF7)
+        s.w(7, 0xFF); s.r(7, 0xF7)
+        return s
+    return script
+
+
+def collide_settled(sprites, dcsel1=None):
+    """collide(), counting only the third frame: the first runs while the scene is still being written."""
+    def script():
+        s = S()
+        sprite_scene(s, sprites, dcsel1)
+        s.f(); s.f()
+        s.w(7, 0xFF)
+        s.f()
+        s.r(7, 0xF7)
+        s.w(7, 0xFF); s.r(7, 0xF7)
+        return s
+    return script
+
+
+def on_row(r):
+    """Two sprites that share only row r."""
+    return [spr(0, 100, r - 7, 1, 0x1), spr(1, 100, r, 2, 0x1)]
+
+
+def last_clock(x9):
+    """Nine 64-pixel 4bpp sprites take 83 clocks each, so sprite 9's pixel 38 lands on
+    render_time_r 798 (sprite_renderer.v:44) and only it can reach sprite 8 at x=338."""
+    return collide([spr(i, 0, 100, 1, 0, wz=3) for i in range(8)]
+                   + [spr(8, 338, 100, 1, 0x1, wz=3), spr(9, x9, 100, 2, 0x1, wz=3)])
+
+
+def timed_collision():
+    s = S()
+    sprite_scene(s, [spr(0, 100, 100, 3, 0x9), spr(1, 104, 104, 1, 0x3)])
+    s.w(6, 0)
+    s.v(); s.w(7, 0x07); s.w(6, 0x04)
+    pins_around(s, 480, 3, 4)
+    read_at(s, 480, 8, 7, 0xF7)
+    s.w(7, 0x04); s.pin(); s.pin()
+    s.v(); s.w(6, 0); s.w(7, 0x07)
+    for x in range(-3, 4):
+        read_at(s, 480, x, 7, 0xF7)
+    s.v(); s.w(7, 0x07)
+    s.w(0, 0x0E); s.w(1, 0xFC); s.w(2, 0x01); s.w(3, 0)
+    for x in (-1, 0, 1, 2):
+        read_at(s, 480, x, 7, 0xF7)
+    return s
+
+
 SCRIPTS = {
     "dcsel_sweep": dcsel_sweep,
     "ctrl_roundtrip": ctrl_roundtrip,
@@ -336,6 +420,48 @@ SCRIPTS = {
     "timed_scanline_steady": timed_scanline_steady,
     "timed_line_irq_steady_even": lambda: line_irq_window(range(494, 511, 2), 2),
     "timed_line_irq_steady_odd": lambda: line_irq_window(range(493, 512, 2), 2),
+    # sprite_renderer.v:319, 326-328: a pixel adds its mask to the line buffer only if drawn.
+    "coll_hidden_behind": collide([spr(0, 100, 100, 3, 0x1), spr(1, 100, 100, 1, 0x2), spr(2, 100, 100, 1, 0x2)]),
+    "coll_hidden_equal_z": collide([spr(0, 100, 100, 2, 0x1), spr(1, 100, 100, 2, 0x2), spr(2, 100, 100, 2, 0x2)]),
+    "coll_behind_counts": collide([spr(0, 100, 100, 3, 0x3), spr(1, 100, 100, 1, 0x2)]),
+    "coll_drawn_part": collide([spr(0, 100, 100, 3, 0x1), spr(1, 104, 100, 1, 0x2), spr(2, 108, 100, 1, 0x2)]),
+    "coll_hidden_part": collide([spr(0, 100, 100, 3, 0x1), spr(1, 104, 100, 1, 0x2), spr(2, 100, 100, 1, 0x2)]),
+    "coll_transparent": collide([spr(0, 100, 100, 3, 0x1), spr(1, 100, 100, 1, 0x1, addr=CLEAR),
+                                 spr(2, 100, 100, 1, 0x1, addr=CLEAR)]),
+    "coll_mask_zero": collide([spr(0, 100, 100, 3, 0x0), spr(1, 100, 100, 1, 0xF), spr(2, 100, 100, 2, 0x0)]),
+    "coll_8bpp_hflip": collide([spr(0, 200, 50, 1, 0x4, HALF, bpp=1, wz=1, flip=1),
+                                spr(1, 208, 50, 2, 0xC, HALF, bpp=1, wz=1)]),
+    "coll_8bpp_noflip": collide([spr(0, 200, 50, 1, 0x4, HALF, bpp=1, wz=1),
+                                 spr(1, 208, 50, 2, 0xC, HALF, bpp=1, wz=1)]),
+    # composer.v:157-161 compares the scaled line before it steps.
+    "coll_line_480": collide([spr(0, 100, 473, 1, 0x1), spr(1, 100, 480, 2, 0x1)]),
+    "coll_line_479": collide([spr(0, 100, 472, 1, 0x1), spr(1, 100, 479, 2, 0x1)]),
+    # sprite_renderer.v:326-327: none at line buffer index 640 or past it.
+    "coll_at_640": collide([spr(0, 636, 100, 1, 0x1), spr(1, 640, 100, 2, 0x1)]),
+    "coll_before_640": collide([spr(0, 636, 100, 1, 0x1), spr(1, 638, 100, 2, 0x2), spr(2, 639, 100, 3, 0x2)]),
+    "coll_left_edge": collide([spr(0, -4, 100, 1, 0x1), spr(1, 0, 100, 2, 0x1)]),
+    "coll_off_left": collide([spr(0, -8, 100, 1, 0x1), spr(1, -8, 100, 2, 0x1), spr(2, 1016, 200, 3, 0x2),
+                              spr(3, -8, 200, 2, 0x2)]),
+    # composer.v:147-162: only lines given render_start are drawn, so only they collide.
+    "coll_below_vstop": collide([spr(0, 100, 400, 1, 0x1), spr(1, 100, 400, 2, 0x1)], dcsel1=(0, 0xA0, 0, 0x80)),
+    "coll_above_vstop": collide([spr(0, 100, 250, 1, 0x1), spr(1, 100, 250, 2, 0x1)], dcsel1=(0, 0xA0, 0, 0x80)),
+    "coll_window_low": collide([spr(0, 100, 220, 1, 0x1), spr(1, 100, 220, 2, 0x1)], dcsel1=(0, 0xA0, 0x80, 0xF0)),
+    "coll_window_out": collide([spr(0, 100, 240, 1, 0x1), spr(1, 100, 240, 2, 0x1)], dcsel1=(0, 0xA0, 0x80, 0xF0)),
+    "coll_empty_window_l0": collide([spr(0, 100, 0, 1, 0x1), spr(1, 100, 0, 2, 0x1)], dcsel1=(0, 0xA0, 0x80, 0x80)),
+    "coll_empty_window_l1": collide([spr(0, 100, 1, 1, 0x1), spr(1, 100, 1, 2, 0x1)], dcsel1=(0, 0xA0, 0x80, 0x80)),
+    # composer.v:150-161: VSTART 496, VSTOP 510 draws line indexes 0-14 in blanking.
+    "coll_vstart_blank_r0": collide_settled(on_row(0), dcsel1=(0, 0xA0, 0xF8, 0xFF)),
+    "coll_vstart_blank_r14": collide_settled(on_row(14), dcsel1=(0, 0xA0, 0xF8, 0xFF)),
+    "coll_vstart_blank_r15": collide_settled(on_row(15), dcsel1=(0, 0xA0, 0xF8, 0xFF)),
+    # composer.v:134, 157: the line at VSTOP is still drawn, though not shown.
+    "coll_vstop_r256": collide_settled(on_row(256), dcsel1=(0, 0xA0, 0, 0x80)),
+    "coll_vstop_r257": collide_settled(on_row(257), dcsel1=(0, 0xA0, 0, 0x80)),
+    "coll_vscale": collide([spr(0, 100, 250, 1, 0x1), spr(1, 100, 250, 2, 0x1)], scale=0x40),
+    "coll_vscale_in": collide([spr(0, 100, 230, 1, 0x1), spr(1, 100, 230, 2, 0x1)], scale=0x40),
+    "coll_clock_797": last_clock(301),
+    "coll_clock_798": last_clock(300),
+    "coll_clock_799": last_clock(299),
+    "timed_collision": timed_collision,
 }
 
 
