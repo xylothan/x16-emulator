@@ -536,4 +536,11 @@ void ym2151::generate(output_data *output, uint32_t numsamples)
 	}
 }
 
+
+//*********************************************************
+//  EXPLICIT INSTANTIATION
+//*********************************************************
+
+template class fm_engine_base<opm_registers>;
+
 }
