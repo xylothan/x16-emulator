@@ -16,16 +16,7 @@
 #define DEVICE_SMC 0x42
 #define DEVICE_RTC 0x6F
 
-#define STATE_START 0
-#define STATE_STOP -1
-
 i2c_port_t i2c_port;
-
-static int state = STATE_STOP;
-static bool read_mode = false;
-static uint8_t value = 0;
-static int count = 0;
-static uint8_t device;
 
 // Debug-only session counters; pure increments, no effect on emulation.
 static uint32_t i2c_debug_transactions_started   = 0;
@@ -39,179 +30,221 @@ uint8_t kbd_buffer[KBD_SIZE];						//Ring buffer for key codes
 #define MSE_SIZE 16
 uint8_t mse_buffer[MSE_SIZE];						//Ring buffer for mouse movement data
 
-void i2c_reset_state() {
-	state = STATE_STOP;
-	read_mode = false;
-	value = 0;
+// The bus, after MCP7940N DS20005010J Section 4.1.1 (bus characteristics): START
+// is SDA falling while SCL is high and STOP is SDA rising while SCL is high,
+// at any point; data is taken while SCL is high and changes while it is low.
+// A target drives its acknowledge and its data bits from the SCL falling edge
+// before the clock that carries them. After a NACK the bus is ignored until
+// the next START or STOP.
+
+typedef struct {
+	uint8_t address;
+	bool    (*start)(bool read);   // addressed: acknowledge?
+	bool    (*write)(uint8_t v);   // a byte from the controller: acknowledge?
+	uint8_t (*read)(void);         // the next byte for the controller
+	void    (*stop)(void);         // STOP, or a START that ends the transaction
+} i2c_target_t;
+
+static const i2c_target_t targets[] = {
+	{ DEVICE_SMC, smc_i2c_start, smc_i2c_write, smc_i2c_read, smc_i2c_stop },
+	{ DEVICE_RTC, rtc_i2c_start, rtc_i2c_write, rtc_i2c_read, rtc_i2c_stop },
+};
+
+enum {
+	BUS_IDLE,        // no transaction
+	BUS_RX,          // the controller sends bits
+	BUS_RX_DONE,     // eight bits in, the acknowledge goes out at SCL low
+	BUS_TARGET_ACK,  // the target drives its acknowledge
+	BUS_TX,          // the target sends bits
+	BUS_CTRL_ACK,    // the controller acknowledges the byte
+	BUS_IGNORE,      // not acknowledged: wait for START or STOP
+};
+
+static int bus = BUS_IDLE;
+static int bits;
+static uint8_t shift;
+static bool address_byte;
+static bool ack_out;
+static bool read_mode;
+static int count;
+static uint8_t device;
+static const i2c_target_t *target;
+static int last_scl = 1, last_sda = 1;
+
+static int
+sda_line(void)
+{
+	return i2c_port.data_in & i2c_port.data_out;
+}
+
+static void
+end_transaction(void)
+{
+	if (io_trace_wants(IO_DEV_I2C) && target && count > 0) {
+		const char *dname = (device == DEVICE_SMC) ? "SMC" : (device == DEVICE_RTC) ? "RTC" : "?";
+		io_trace_event(IO_DEV_I2C, "i2c STOP $%02X(%s) %s %d byte%s",
+			device, dname, read_mode ? "read" : "write", count, count == 1 ? "" : "s");
+	}
+	if (target) {
+		target->stop();
+	}
+	target = NULL;
 	count = 0;
-	smc_requested_reset = false;
-	i2c_mse_buffer_flush();
-	i2c_kbd_buffer_flush();
+	read_mode = false;
+	i2c_port.data_out = 1;
 }
 
 static void
-i2c_data(uint8_t device, uint8_t v) {
-	switch (device) {
-		case DEVICE_SMC:
-			smc_i2c_data(v);
-			break;
-		case DEVICE_RTC:
-			rtc_i2c_data(v);
-			break;
-		default:
-			break;
+bus_start(void)
+{
+	if (bus == BUS_IDLE) {
+		i2c_debug_transactions_started++;
 	}
-#if LOG_LEVEL >= 1
-	printf("I2C DATA($%02X) => $%02X\n", device, value);
-#endif
-}
-
-static uint8_t
-i2c_read(uint8_t device) {
-	uint8_t value;
-	switch (device) {
-		case DEVICE_SMC:
-			value = smc_read();
-			break;
-		case DEVICE_RTC:
-			value = rtc_read();
-			break;
-		default:
-			value = 0xff;
-			break;
-	}
-#if LOG_LEVEL >= 1
-	printf("I2C READ($%02X) = $%02X\n", device, value);
-#endif
-	return value;
+	end_transaction();
+	bus = BUS_RX;
+	bits = 0;
+	shift = 0;
+	address_byte = true;
 }
 
 static void
-i2c_write(uint8_t device) {
-	switch (device) {
-		case DEVICE_SMC:
-			smc_write();
-			break;
-		case DEVICE_RTC:
-			rtc_write();
-			break;
-			//        default:
-			// no-op
+bus_stop(void)
+{
+	end_transaction();
+	if (bus != BUS_IDLE) {
+		i2c_debug_transactions_completed++;
 	}
-#if LOG_LEVEL >= 1
-	printf("I2C WRITE $%02X\n", device);
-#endif
+	bus = BUS_IDLE;
+}
+
+static void
+byte_received(void)
+{
+	if (address_byte) {
+		device = shift >> 1;
+		read_mode = shift & 1;
+		target = NULL;
+		for (size_t i = 0; i < sizeof targets / sizeof targets[0]; i++) {
+			if (targets[i].address == device) {
+				target = &targets[i];
+			}
+		}
+		ack_out = target && target->start(read_mode);
+		if (!target && io_trace_wants(IO_DEV_I2C)) {
+			io_trace_event(IO_DEV_I2C, "i2c NACK $%02X unknown device", device);
+		}
+		address_byte = false;
+	} else {
+		ack_out = target->write(shift);
+		if (ack_out) {
+			count++;
+			i2c_debug_bytes_written++;
+		}
+	}
+}
+
+static void
+tx_byte(void)
+{
+	shift = target->read();
+	i2c_debug_bytes_read++;
+	count++;
+	bits = 0;
+	i2c_port.data_out = shift >> 7;
+	bus = BUS_TX;
+}
+
+static void
+scl_rising(int sda)
+{
+	switch (bus) {
+		case BUS_RX:
+			shift = (uint8_t)(shift << 1 | sda);
+			if (++bits == 8) {
+				byte_received();
+				bus = BUS_RX_DONE;
+			}
+			break;
+		case BUS_TX:
+			bits++;
+			break;
+		case BUS_CTRL_ACK:
+			ack_out = !sda;
+			break;
+	}
+}
+
+static void
+scl_falling(void)
+{
+	switch (bus) {
+		case BUS_RX_DONE:
+			i2c_port.data_out = ack_out ? 0 : 1;
+			bus = BUS_TARGET_ACK;
+			break;
+		case BUS_TARGET_ACK:
+			i2c_port.data_out = 1;
+			if (!ack_out) {
+				bus = BUS_IGNORE;
+			} else if (read_mode) {
+				tx_byte();
+			} else {
+				bus = BUS_RX;
+				bits = 0;
+				shift = 0;
+			}
+			break;
+		case BUS_TX:
+			if (bits < 8) {
+				i2c_port.data_out = (shift >> (7 - bits)) & 1;
+			} else {
+				i2c_port.data_out = 1;
+				bus = BUS_CTRL_ACK;
+			}
+			break;
+		case BUS_CTRL_ACK:
+			if (ack_out) {
+				tx_byte();
+			} else {
+				bus = BUS_IGNORE;
+			}
+			break;
+	}
 }
 
 void
 i2c_step()
 {
-	static i2c_port_t old_i2c_port;
-
-	if (old_i2c_port.clk_in != i2c_port.clk_in || old_i2c_port.data_in != i2c_port.data_in) {
-#if LOG_LEVEL >= 5
-		printf("I2C(%d) C:%d D:%d\n", state, i2c_port.clk_in, i2c_port.data_in);
-#endif
-		if (state == STATE_STOP && i2c_port.clk_in == 0 && i2c_port.data_in == 0) {
-#if LOG_LEVEL >= 2
-			printf("I2C START\n");
-#endif
-			state = STATE_START;
-			i2c_debug_transactions_started++;
-		}
-
-		if (state == 1 && i2c_port.clk_in == 1 &&i2c_port.data_in == 1 &&  old_i2c_port.data_in == 0) {
-#if LOG_LEVEL >= 2
-			printf("I2C STOP\n");
-#endif
-			if (io_trace_wants(IO_DEV_I2C) && count > 0) {
-				const char *dname = (device == DEVICE_SMC) ? "SMC" : (device == DEVICE_RTC) ? "RTC" : "?";
-				io_trace_event(IO_DEV_I2C, "i2c STOP $%02X(%s) %s %d byte%s",
-					device, dname, read_mode ? "read" : "write", count, count == 1 ? "" : "s");
-			}
-			state = STATE_STOP;
-			count = 0;
-			read_mode = false;
-			i2c_debug_transactions_completed++;
-		}
-
-		if (state != STATE_STOP && i2c_port.clk_in == 1 && old_i2c_port.clk_in == 0) {
-			i2c_port.data_out = 1;
-			if (state < 8) {
-				if (read_mode) {
-					if (state == 0) {
-						i2c_debug_bytes_read++;
-						value = i2c_read(device);
-					}
-					i2c_port.data_out = !!(value & 0x80);
-					value <<= 1;
-#if LOG_LEVEL >= 4
-					printf("I2C OUT#%d: %d\n", state, i2c_port.data_out);
-#endif
-					state++;
-				} else {
-#if LOG_LEVEL >= 4
-					printf("I2C BIT#%d: %d\n", state, i2c_port.data_in);
-#endif
-					value <<= 1;
-					value |= i2c_port.data_in;
-					state++;
-				}
-			} else { // state == 8
-				if (read_mode) {
-					bool nack = i2c_port.data_in;
-					if (nack) {
-#if LOG_LEVEL >= 3
-					printf("I2C OUT DONE (NACK)\n");
-#endif
-						count = 0;
-						read_mode = false;
-					} else {
-#if LOG_LEVEL >= 3
-					printf("I2C OUT DONE (ACK)\n");
-#endif
-					}
-				} else {
-					bool ack = true;
-					switch (count) {
-						case 0:
-							device = value >> 1;
-							read_mode = value & 1;
-							if (device != DEVICE_SMC && device != DEVICE_RTC) {
-								ack = false;
-							}
-							break;
-						case 1:
-							i2c_data(device, value);
-							break;
-						default:
-							i2c_data(device, value);
-							i2c_write(device);
-							break;
-					}
-					if (ack) {
-#if LOG_LEVEL >= 3
-						printf("I2C ACK(%d) $%02X\n", count, value);
-#endif
-							if (count > 0) i2c_debug_bytes_written++;
-							i2c_port.data_out = 0;
-							count++;
-					} else {
-#if LOG_LEVEL >= 3
-						printf("I2C NACK(%d) $%02X\n", count, value);
-#endif
-							if (io_trace_wants(IO_DEV_I2C) && count == 0) {
-								io_trace_event(IO_DEV_I2C, "i2c NACK $%02X unknown device", device);
-							}
-							count = 0;
-							read_mode = false;
-						}
-				}
-				state = STATE_START;
-			}
-		}
-		old_i2c_port = i2c_port;
+	const int scl = i2c_port.clk_in;
+	const int sda = sda_line();
+	if (scl == last_scl && sda == last_sda) {
+		return;
 	}
+	if (scl && last_scl) {
+		if (!sda) {
+			bus_start();
+		} else {
+			bus_stop();
+		}
+	} else if (scl) {
+		scl_rising(sda);
+	} else if (last_scl) {
+		scl_falling();
+	}
+	last_scl = scl;
+	last_sda = sda_line();
+}
+
+void i2c_reset_state() {
+	bus = BUS_IDLE;
+	target = NULL;
+	count = 0;
+	read_mode = false;
+	i2c_port.data_out = 1;
+	smc_requested_reset = false;
+	smc_reset();
+	i2c_mse_buffer_flush();
+	i2c_kbd_buffer_flush();
 }
 
 
@@ -454,9 +487,9 @@ mouse_set_device_id(uint8_t d) {
 void
 i2c_debug_get_state(i2c_debug_state_t *out)
 {
-	out->state    = state;
+	out->state    = bus == BUS_IDLE ? -1 : bits;
 	out->read_mode = read_mode;
-	out->value    = value;
+	out->value    = shift;
 	out->count    = count;
 	out->device   = device;
 
@@ -484,19 +517,26 @@ i2c_debug_get_state(i2c_debug_state_t *out)
 //
 // The bus state machine and its lines, the keyboard and mouse queues the SMC
 // serves, and the mouse's accumulated movement. The debug counters are left.
+// Version 1 held another bus state machine; it loads with the bus idle.
 
 void
 i2c_state_save(ss_writer *w)
 {
-	ss_begin(w, "I2C ", 1);
+	ss_begin(w, "I2C ", 2);
 	ss_put_u32(w, (uint32_t)i2c_port.clk_in);
 	ss_put_u32(w, (uint32_t)i2c_port.data_in);
 	ss_put_u32(w, (uint32_t)i2c_port.data_out);
-	ss_put_u32(w, (uint32_t)state);
+	ss_put_u8(w, (uint8_t)bus);
+	ss_put_u8(w, (uint8_t)bits);
+	ss_put_u8(w, shift);
+	ss_put_bool(w, address_byte);
+	ss_put_bool(w, ack_out);
 	ss_put_bool(w, read_mode);
-	ss_put_u8(w, value);
 	ss_put_u32(w, (uint32_t)count);
 	ss_put_u8(w, device);
+	ss_put_bool(w, target != NULL);
+	ss_put_u8(w, (uint8_t)last_scl);
+	ss_put_u8(w, (uint8_t)last_sda);
 	ss_put(w, kbd_buffer, sizeof kbd_buffer);
 	ss_put_u8(w, kbd_head);
 	ss_put_u8(w, kbd_tail);
@@ -514,15 +554,49 @@ i2c_state_save(ss_writer *w)
 void
 i2c_state_load(ss_reader *r)
 {
-	ss_open(r, "I2C ");
+	const int version = ss_open(r, "I2C ");
 	i2c_port.clk_in   = (int)ss_get_u32(r);
 	i2c_port.data_in  = (int)ss_get_u32(r);
 	i2c_port.data_out = (int)ss_get_u32(r);
-	state     = (int)ss_get_u32(r);
-	read_mode = ss_get_bool(r);
-	value     = ss_get_u8(r);
-	count     = (int)ss_get_u32(r);
-	device    = ss_get_u8(r);
+	target = NULL;
+	if (version < 2) {
+		(void)ss_get_u32(r);
+		(void)ss_get_bool(r);
+		(void)ss_get_u8(r);
+		(void)ss_get_u32(r);
+		(void)ss_get_u8(r);
+		bus = BUS_IDLE;
+		bits = 0;
+		shift = 0;
+		address_byte = false;
+		ack_out = false;
+		read_mode = false;
+		count = 0;
+		i2c_port.data_out = 1;
+		last_scl = i2c_port.clk_in;
+		last_sda = sda_line();
+	} else {
+		bus          = ss_get_u8(r);
+		bits         = ss_get_u8(r);
+		shift        = ss_get_u8(r);
+		address_byte = ss_get_bool(r);
+		ack_out      = ss_get_bool(r);
+		read_mode    = ss_get_bool(r);
+		count        = (int)ss_get_u32(r);
+		device       = ss_get_u8(r);
+		const bool active = ss_get_bool(r);
+		last_scl     = ss_get_u8(r) & 1;
+		last_sda     = ss_get_u8(r) & 1;
+		if (bus > BUS_IGNORE || bits > 8) {
+			bus = BUS_IDLE;
+			bits = 0;
+		}
+		for (size_t i = 0; active && i < sizeof targets / sizeof targets[0]; i++) {
+			if (targets[i].address == device) {
+				target = &targets[i];
+			}
+		}
+	}
 	ss_get(r, kbd_buffer, sizeof kbd_buffer);
 	kbd_head = ss_get_u8(r);
 	kbd_tail = ss_get_u8(r);

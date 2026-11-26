@@ -1010,6 +1010,141 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
+    {
+        "name": "I2C STOP is only seen one bit into a byte",
+        "file": "src/i2c.c",
+        # DS20005010J 4.1.1.3: SDA rising while SCL is high, at any point.
+        "find": "\t\t} else {\n\t\t\tbus_stop();",
+        "into": "\t\t} else if (bus == BUS_RX && bits == 1) {\n\t\t\tbus_stop();",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "I2C repeated START is ignored",
+        "file": "src/i2c.c",
+        # DS20005010J 4.1.1.2, 6.1.4.
+        "find": "\tend_transaction();\n\tbus = BUS_RX;",
+        "into": "\tif (bus != BUS_IDLE && bus != BUS_IGNORE) return;\n\tend_transaction();\n\tbus = BUS_RX;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC VBATEN is taken from bit 5",
+        "file": "src/rtc.c",
+        # DS20005010J Register 5-4: VBATEN is bit 3.
+        "find": "0xff, 0x7f, 0x7f, 0x0f,",
+        "into": "0xff, 0x7f, 0x7f, 0x27,",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC pointer does not advance on a read",
+        "file": "src/rtc.c",
+        # DS20005010J 6.1.3, 6.1.5.
+        "find": "const uint8_t v = reg_read(pointer);\n\tadvance();",
+        "into": "const uint8_t v = reg_read(pointer);",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC SRAM pointer does not wrap to 0x20",
+        "file": "src/rtc.c",
+        # DS20005010J 6.1.5: 0x5F rolls over to 0x20.
+        "find": "pointer = pointer == 0x5f ? 0x20 : pointer + 1;",
+        "into": "pointer = pointer == 0x5f ? 0x5f : pointer + 1;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC register pointer runs on into SRAM",
+        "file": "src/rtc.c",
+        # DS20005010J 6.1.2: 0x1F rolls over to 0x00.
+        "find": "pointer = (pointer + 1) & 0x1f;",
+        "into": "pointer = pointer + 1;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC alarm flag is not set again while matching",
+        "file": "src/rtc.c",
+        # DS20005010J 5.4 note 1.
+        "find": "rtcc[a] = v & writable[a];\n\talarms();",
+        "into": "rtcc[a] = v & writable[a];",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC 12-hour clock shows 0 for 12",
+        "file": "src/rtc.c",
+        # DS20005010J Register 5-3.
+        "find": "const int h = v % 12 ? v % 12 : 12;",
+        "into": "const int h = v % 12;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "RTC LPYR is not reported",
+        "file": "src/rtc.c",
+        # DS20005010J Register 5-6.
+        "find": "return v | (leap_year() ? LPYR : 0);",
+        "into": "return v;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC acts on a write before STOP",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 smc_wire.cpp: I2C_Receive runs from the START/STOP interrupt.
+        "find": "\t\trx[rx_len++] = v;\n\t\treturn true;",
+        "into": "\t\trx[rx_len++] = v;\n\t\tif (rx_len >= 2) smc_receive();\n\t\treturn true;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC acts on a write of the command byte alone",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 x16-smc.ino I2C_Receive: fewer than two bytes return early.
+        "find": "if (ct < 2) {\n\t\treturn;",
+        "into": "if (ct < 1) {\n\t\treturn;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC acknowledges an empty reply",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 smc_wire.cpp VERIFY_ADDRESS: buflen 0 is ignored.
+        "find": "return tx_len > 0;",
+        "into": "return true;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC reads past its reply as 0",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 smc_wire.cpp SEND_DATA: $FF past the buffer.
+        "find": "return tx_idx < tx_len ? tx[tx_idx++] : 0xff;",
+        "into": "return tx_idx < tx_len ? tx[tx_idx++] : 0x00;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC passes on an overflowed mouse packet",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 x16-smc.ino sendMousePacket.
+        "find": "if (!(first & 0xc0)) {",
+        "into": "if (true) {",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
+    {
+        "name": "SMC reset leaves the long press",
+        "file": "src/smc.c",
+        # x16-smc r48.0.0 x16-smc.ino DoReset.
+        "find": "if (powered) {\n\t\tpwr_long_press = false;",
+        "into": "if (false) {\n\t\tpwr_long_press = false;",
+        "count": 1,
+        "caught_by": ["i2c_targets"],
+    },
 ]
 
 
