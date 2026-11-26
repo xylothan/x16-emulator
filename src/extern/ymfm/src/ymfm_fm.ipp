@@ -499,15 +499,16 @@ int32_t fm_operator<RegisterType>::compute_volume(uint32_t phase, uint32_t am_of
 template<class RegisterType>
 int32_t fm_operator<RegisterType>::compute_noise_volume(uint32_t am_offset) const
 {
-	// application manual says the logarithmic transform is not applied here, so we
-	// just use the raw envelope attenuation, inverted (since 0 attenuation should be
-	// maximum), and shift it up from a 10-bit value to an 11-bit value
-	int32_t result = (envelope_attenuation(am_offset) ^ 0x3ff) << 1;
-
-	// QUESTION: is AM applied still?
-
-	// negate based on the noise state
-	return bitfield(m_regs.noise_state(), 0) ? -result : result;
+	// a 14-bit level from the top 9 bits of the inverted attenuation, its low
+	// bit dropped; a 0 noise bit gives its ones' complement, the low 3 bits
+	// set unless the level is 0 (Nuked-OPM)
+	uint32_t const level = (envelope_attenuation(am_offset) ^ 0x3ff) >> 1;
+	if (bitfield(m_regs.noise_state(), 0))
+		return int32_t((level & ~1u) << 2);
+	int32_t result = int16_t(((~level) & ~1u) << 2);
+	if (level != 0)
+		result = int16_t(result | 0xf007);
+	return result;
 }
 
 
@@ -801,7 +802,9 @@ fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32
 	m_feedback_in(0),
 	m_op{ nullptr, nullptr, nullptr, nullptr },
 	m_regs(owner.regs()),
-	m_owner(owner)
+	m_owner(owner),
+	m_late{},
+	m_late_prev{}
 {
 }
 
@@ -816,6 +819,8 @@ void fm_channel<RegisterType>::reset()
 	// reset our data
 	m_feedback[0] = m_feedback[1] = 0;
 	m_feedback_in = 0;
+	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+		m_late[index] = m_late_prev[index] = 0;
 }
 
 
@@ -879,6 +884,13 @@ void fm_channel<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 	// clock the feedback through
 	m_feedback[0] = m_feedback[1];
 	m_feedback[1] = m_feedback_in;
+
+	// the last sample's late part goes into this one
+	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+	{
+		m_late_prev[index] = m_late[index];
+		m_late[index] = 0;
+	}
 
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
 		if (m_op[opnum] != nullptr)
@@ -986,6 +998,11 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
 	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
 
+	// the operators the chip mixed a sample late
+	if constexpr (has_output_late<RegisterType>::value)
+		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+			output.data[index] += m_late_prev[index];
+
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
 	if (m_regs.ch_output_any(m_choffs) == 0)
@@ -1061,8 +1078,36 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	}
 	result >>= rshift;
 
-	// optionally add OP1, OP2, OP3
 	int32_t clipmin = -clipmax - 1;
+	if constexpr (has_output_late<RegisterType>::value)
+	{
+		// each output sums the on-time operators into this sample and the late
+		// ones into the next, adding in the same order and clamping as below
+		fm_operator<RegisterType> *const ops[4] = { m_op[3], m_op[0], m_op[1], m_op[2] };
+		int32_t const values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
+		bool const used[4] = { true, bitfield(algorithm_ops, 7) != 0, bitfield(algorithm_ops, 8) != 0, bitfield(algorithm_ops, 9) != 0 };
+		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+		{
+			int32_t sum[2] = { 0, 0 };
+			bool any[2] = { false, false };
+			for (int term = 0; term < 4; term++)
+				if (used[term])
+				{
+					int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
+					sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
+					any[late] = true;
+				}
+			bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
+			if (enabled)
+			{
+				output.data[index] += sum[0];
+				m_late[index] = sum[1];
+			}
+		}
+		return;
+	}
+
+	// optionally add OP1, OP2, OP3
 	if (bitfield(algorithm_ops, 7) != 0)
 		result = clamp(result + (opout[1] >> rshift), clipmin, clipmax);
 	if (bitfield(algorithm_ops, 8) != 0)
@@ -1332,9 +1377,9 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	// mask out some channels for debug purposes
 	chanmask &= debug::GLOBAL_FM_CHANNEL_MASK;
 
-	// mask out inactive channels
+	// mask out inactive channels; the OPM noise channel sounds at any level
 	if (!YMFM_DEBUG_LOG_WAVFILES)
-		chanmask &= m_active_channels;
+		chanmask &= m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);
 
 	// handle the rhythm case, where some of the operators are dedicated
 	// to percussion (this is an OPL-specific feature)

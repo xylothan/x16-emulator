@@ -28,3 +28,10 @@ ym_lfo_pm_split.vec
 ym_lfo_am_split.vec
 ym_pm_gap_note.vec
 ym_detune_voices.vec
+ym_slot_framing.vec
+ym_noise_rates.vec
+ym_noise_level.vec
+ym_noise_writes.vec
+ym_noise_am.vec
+ym_lfo_noise_am_d0.vec
+ym_lfo_noise_am_f0.vec

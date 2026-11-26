@@ -245,6 +245,14 @@ private:
 };
 
 
+// register types whose chip mixes some operators a sample late define a static
+// output_late(opoffs, output); for the rest every operator is on time
+template<typename RegisterType, typename = void>
+struct has_output_late : std::false_type { };
+template<typename RegisterType>
+struct has_output_late<RegisterType, std::void_t<decltype(RegisterType::output_late(0u, 0u))>> : std::true_type { };
+
+
 // ======================> fm_channel
 
 // fm_channel represents an FM channel which combines the output of 2 or 4
@@ -308,6 +316,10 @@ public:
 	// simple getters for debugging
 	fm_operator<RegisterType> *debug_operator(uint32_t index) const { return m_op[index]; }
 
+	// the part of the last output() that goes to the next sample's mix
+	int32_t late_output(uint32_t index) const { return m_late[index]; }
+	void set_late_output(uint32_t index, int32_t value) { m_late[index] = value; }
+
 private:
 	// helper to add values to the outputs based on channel enables
 	void add_to_output(uint32_t choffs, output_data &output, int32_t value) const
@@ -336,6 +348,8 @@ private:
 	std::array<fm_operator<RegisterType> *, 4> m_op; // up to 4 operators
 	RegisterType &m_regs;                  // direct reference to registers
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
+	mutable int32_t m_late[RegisterType::OUTPUTS];   // this sample's late part, for the next
+	int32_t m_late_prev[RegisterType::OUTPUTS];      // the last sample's, mixed into this one
 };
 
 

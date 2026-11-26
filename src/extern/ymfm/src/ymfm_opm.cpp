@@ -47,7 +47,10 @@ opm_registers::opm_registers() :
 	m_noise_lfsr(1),
 	m_noise_counter(0),
 	m_noise_state(0),
-	m_noise_lfo(0),
+	m_noise_history(0),
+	m_noise_ahead{ 0, 0 },
+	m_noise_old_target(0),
+	m_noise_write_cycle(32),
 	m_lfo_am(0),
 	m_lfo{ 0, 32768, 0, 0, 0, 0, 0, 0, false },
 	m_write_cycle(0)
@@ -95,6 +98,25 @@ void opm_registers::reset()
 
 	m_lfo = lfo_state{ 0, 32768, 0, 0, 0, 0, 0, 0, false };
 	m_lfo_am = 0;
+	reset_noise();
+}
+
+
+//-------------------------------------------------
+//  reset_noise - start the noise generator over
+//-------------------------------------------------
+
+void opm_registers::reset_noise()
+{
+	m_noise_lfsr = 0;
+	m_noise_counter = 0;
+	m_noise_history = 0;
+	m_noise_ahead = noise_gen{ 0, 0 };
+	m_noise_old_target = 0;
+	m_noise_write_cycle = 32;
+	uint32_t bits;
+	for (uint32_t sample = 0; sample < NOISE_AHEAD; sample++)
+		m_noise_state = uint8_t(step_noise(m_noise_ahead, noise_frequency(), noise_frequency(), 0, bits));
 }
 
 
@@ -109,7 +131,9 @@ void opm_registers::save_restore(ymfm_saved_state &state)
 	state.save_restore(m_noise_lfsr);
 	state.save_restore(m_noise_counter);
 	state.save_restore(m_noise_state);
-	state.save_restore(m_noise_lfo);
+	// the byte the noise LFO value once took, kept for the layout
+	uint8_t unused = 0;
+	state.save_restore(unused);
 	state.save_restore(m_regdata);
 }
 
@@ -150,6 +174,13 @@ void opm_registers::operator_map(operator_mapping &dest) const
 bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint32_t &opmask)
 {
 	assert(index < REGISTERS);
+
+	// the noise generator takes a new frequency from this cycle
+	if (index == 0x0f && m_noise_write_cycle == 32)
+	{
+		m_noise_old_target = noise_frequency();
+		m_noise_write_cycle = m_write_cycle;
+	}
 
 	// LFO AM/PM depth are written to the same register (0x19);
 	// redirect the PM depth to an unused neighbor (0x1a)
@@ -226,6 +257,79 @@ uint8_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count) const
 
 
 //-------------------------------------------------
+//  step_noise - run a noise generator through one
+//  sample, its target changing at cycle `change`;
+//  returns the output bit and fills `bits` with
+//  the low bit seen at each cycle
+//-------------------------------------------------
+
+uint32_t opm_registers::step_noise(noise_gen &gen, uint32_t before, uint32_t after, uint32_t change, uint32_t &bits)
+{
+	// a 17-bit LFSR (x^17 + x^3 + 1, fed a 1 while it is all zero), held as
+	// a 16-bit ring that turns once a cycle plus one more bit. A 5-bit timer
+	// counts at cycles 15 and 31; once it has reached the target it starts
+	// again from 0, and the LFSR steps once a cycle for as long as it
+	// matches, from two cycles after. The output takes the ring's low bit
+	// at cycle 12.
+	uint32_t ring = bitfield(gen.lfsr, 0, 16);
+	uint32_t extra = bitfield(gen.lfsr, 16);
+	uint32_t timer = bitfield(gen.counter, 0, 5);
+	uint32_t matched = bitfield(gen.counter, 5, 2);   // bit 0 one cycle ago, bit 1 two
+	uint32_t out = 0;
+	bits = 0;
+	for (uint32_t cycle = 0; cycle < 32; cycle++)
+	{
+		bits |= (ring & 1) << cycle;
+		uint32_t in = ring & 1;
+		if (bitfield(matched, 1))
+		{
+			in = (ring == 0 && extra == 0) ? 1 : bitfield(ring, 2) ^ extra;
+			extra = ring & 1;
+		}
+		ring = (ring >> 1) | (in << 15);
+		if (cycle == 12)
+			out = ring & 1;
+		uint32_t const match = (timer == ((cycle < change) ? before : after)) ? 1 : 0;
+		if ((cycle & 15) == 15)
+			timer = bitfield(matched, 0) ? 0 : (timer + 1) & 31;
+		matched = ((matched << 1) | match) & 3;
+	}
+	gen.lfsr = ring | (extra << 16);
+	gen.counter = uint8_t(timer | (matched << 5));
+	return out;
+}
+
+
+//-------------------------------------------------
+//  clock_noise - clock the noise generator
+//-------------------------------------------------
+
+void opm_registers::clock_noise()
+{
+	// Nuked-OPM's noise reaches the mixer NOISE_AHEAD samples sooner than an
+	// operator's output: the output takes the generator that many samples
+	// on. m_noise_lfsr and m_noise_counter run in time and take each $0F
+	// write at its cycle; m_noise_ahead is them run NOISE_AHEAD samples
+	// further, again from them after a write.
+	uint32_t const target = noise_frequency();
+	uint32_t bits;
+	noise_gen gen = { m_noise_lfsr, m_noise_counter };
+	step_noise(gen, m_noise_write_cycle < 32 ? m_noise_old_target : target, target, m_noise_write_cycle, bits);
+	m_noise_history = (m_noise_history >> 32) | (uint64_t(bits) << 32);
+	m_noise_lfsr = gen.lfsr;
+	m_noise_counter = gen.counter;
+	if (m_noise_write_cycle < 32)
+	{
+		m_noise_ahead = gen;
+		for (uint32_t sample = 1; sample < NOISE_AHEAD; sample++)
+			step_noise(m_noise_ahead, target, target, 0, bits);
+		m_noise_write_cycle = 32;
+	}
+	m_noise_state = uint8_t(step_noise(m_noise_ahead, target, target, 0, bits));
+}
+
+
+//-------------------------------------------------
 //  clock_noise_and_lfo - clock the noise and LFO,
 //  handling clock division, depth, and waveform
 //  computations
@@ -233,29 +337,7 @@ uint8_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count) const
 
 int32_t opm_registers::clock_noise_and_lfo()
 {
-	// base noise frequency is measured at 2x 1/2 FM frequency; this
-	// means each tick counts as two steps against the noise counter
-	uint32_t freq = noise_frequency();
-	for (int rep = 0; rep < 2; rep++)
-	{
-		// evidence seems to suggest the LFSR is clocked continually and just
-		// sampled at the noise frequency for output purposes; note that the
-		// low 8 bits are the most recent 8 bits of history while bits 8-24
-		// contain the 17 bit LFSR state
-		m_noise_lfsr <<= 1;
-		m_noise_lfsr |= bitfield(m_noise_lfsr, 17) ^ bitfield(m_noise_lfsr, 14) ^ 1;
-
-		// compare against the frequency and latch when we exceed it
-		if (m_noise_counter++ >= freq)
-		{
-			m_noise_counter = 0;
-			m_noise_state = bitfield(m_noise_lfsr, 17);
-		}
-	}
-
-	// the noise waveform's counter takes noise bits at each step
-	uint32_t lfo_noise = bitfield(m_noise_lfsr, 17, 8);
-	m_lfo_waveform[3][0] = lfo_noise | (lfo_noise << 8);
+	clock_noise();
 
 	uint32_t const waveform = lfo_waveform();
 	lfo_state &lfo = m_lfo;
@@ -265,8 +347,10 @@ int32_t opm_registers::clock_noise_and_lfo()
 		case 0:
 			for (; lfo.steps != 0; lfo.steps--)
 			{
+				// noise takes 8 of the in-time generator's bits, the low one
+				// from the last cycle of the sample before
 				if (waveform == 3)
-					lfo.count = lfo_noise;
+					lfo.count = uint16_t(bitfield(uint32_t(m_noise_history >> 31), 0, 8));
 				else
 					lfo.count += (waveform == 2) ? 2 : 1;
 			}

@@ -33,21 +33,6 @@ struct ym_engine_fields : ym_engine {
 	static field prepare()  { return &ym_engine_fields::m_prepare_count; }
 };
 
-// It also leaves out one table. The OPM's fourth LFO waveform is noise, and
-// ymfm builds that waveform as the chip runs: every clock writes the noise
-// generator's latest bits into the entry just ahead of the LFO. Without it, a
-// load would leave the table as the frames played since the save left it, and
-// any channel with noise LFO pitch or volume modulation would drift from the
-// saved machine. The other three waveforms never change.
-struct ym_register_fields : ymfm::opm_registers {
-	// ymfm keeps its own length private; were it ever to change, the pointer
-	// below would no longer convert and this would stop compiling.
-	static constexpr uint32_t LFO_LENGTH = 256;
-	static constexpr uint32_t NOISE_WAVEFORM = 3;
-	using table = int16_t (ymfm::opm_registers::*)[4][LFO_LENGTH];
-	static table lfo_waveform() { return &ym_register_fields::m_lfo_waveform; }
-};
-
 // Debugger mute: one bit per channel, applied only to what goes to the host.
 // File scope rather than per instance so the scratch chip used for scope
 // projections hears the same mix as the live one.
@@ -448,11 +433,6 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		// ─── Save states ────────────────────────────────────────────────
 
-		int16_t (&noise_waveform())[ym_register_fields::LFO_LENGTH] {
-			ymfm::opm_registers &regs = m_chip.engine().regs();
-			return (regs.*ym_register_fields::lfo_waveform())[ym_register_fields::NOISE_WAVEFORM];
-		}
-
 		// The LFO's counters and latches, which ymfm's own state leaves out.
 		// A new field must reach lfo_to_image() and lfo_from_image().
 		static constexpr size_t LFO_IMAGE_SIZE = 12;
@@ -491,6 +471,57 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 		}
 
+		// The noise generator's state past what save_restore() keeps (the
+		// in-time generator and its output bit), and each channel's output
+		// held for the next sample. A new field must reach both functions.
+		static constexpr size_t NOISE_IMAGE_SIZE = 16 + 4 * YM_NUM_CHANNELS * 2;
+
+		void noise_to_image(uint8_t img[NOISE_IMAGE_SIZE]) {
+			ymfm::opm_registers &regs = m_chip.engine().regs();
+			const ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
+			put_le(img + 0, ahead.lfsr, 4);
+			img[4] = ahead.counter;
+			put_le(img + 5, (uint32_t)regs.noise_history(), 4);
+			put_le(img + 9, (uint32_t)(regs.noise_history() >> 32), 4);
+			img[13] = (uint8_t)regs.noise_old_target();
+			img[14] = (uint8_t)regs.noise_write_cycle();
+			img[15] = 0; // reserved
+			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+				for (uint32_t side = 0; side < 2; side++) {
+					put_le(img + 16 + 8 * ch + 4 * side, (uint32_t)m_chip.engine().debug_channel(ch)->late_output(side), 4);
+				}
+			}
+		}
+
+		void noise_from_image(const uint8_t img[NOISE_IMAGE_SIZE]) {
+			ymfm::opm_registers &regs = m_chip.engine().regs();
+			ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
+			ahead.lfsr    = get_le(img + 0, 4) & 0x1ffff;
+			ahead.counter = img[4] & 0x7f;
+			regs.noise_history() = get_le(img + 5, 4) | ((uint64_t)get_le(img + 9, 4) << 32);
+			regs.noise_old_target()  = img[13] & 31;
+			regs.noise_write_cycle() = (img[14] < 32) ? img[14] : 32;
+			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+				for (uint32_t side = 0; side < 2; side++) {
+					m_chip.engine().debug_channel(ch)->set_late_output(side, (int32_t)get_le(img + 16 + 8 * ch + 4 * side, 4));
+				}
+			}
+		}
+
+		static void put_le(uint8_t *p, uint32_t v, int n) {
+			for (int i = 0; i < n; i++) {
+				p[i] = (uint8_t)(v >> (8 * i));
+			}
+		}
+
+		static uint32_t get_le(const uint8_t *p, int n) {
+			uint32_t v = 0;
+			for (int i = 0; i < n; i++) {
+				v |= (uint32_t)p[i] << (8 * i);
+			}
+			return v;
+		}
+
 		void state_save(ss_writer *w) {
 			ym_engine &eng = m_chip.engine();
 			const uint32_t active   = (eng.*ym_engine_fields::active());
@@ -512,15 +543,15 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			ss_put_u32(w, prepare);
 			ss_put(w, m_regs, sizeof m_regs);
 			ss_put(w, m_keyon, sizeof m_keyon);
-			for (int16_t v : noise_waveform()) {
-				ss_put_u16(w, (uint16_t)v);
-			}
 			uint8_t img[opm_bus::IMAGE_SIZE];
 			m_bus.to_image(img);
 			ss_put(w, img, sizeof img);
 			uint8_t lfo[LFO_IMAGE_SIZE];
 			lfo_to_image(lfo);
 			ss_put(w, lfo, sizeof lfo);
+			uint8_t noise[NOISE_IMAGE_SIZE];
+			noise_to_image(noise);
+			ss_put(w, noise, sizeof noise);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -540,9 +571,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 			ss_get(r, m_regs, sizeof m_regs);
 			ss_get(r, m_keyon, sizeof m_keyon);
-			int16_t noise[ym_register_fields::LFO_LENGTH];
-			for (int16_t &v : noise) {
-				v = (int16_t)ss_get_u16(r);
+			// Up to version 4, the noise LFO's waveform table, which nothing
+			// reads now.
+			if (version < 5) {
+				for (int i = 0; i < 256; i++) {
+					(void)ss_get_u16(r);
+				}
 			}
 			uint8_t img[opm_bus::IMAGE_SIZE] = {};
 			if (version >= 3) {
@@ -553,10 +587,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (version >= 4) {
 				ss_get(r, lfo, sizeof lfo);
 			}
+			// Before version 5 the noise ran another generator: it starts over.
+			uint8_t noise[NOISE_IMAGE_SIZE] = {};
+			if (version >= 5) {
+				ss_get(r, noise, sizeof noise);
+			}
 			if (r->failed) {
 				return;
 			}
-			std::copy(std::begin(noise), std::end(noise), std::begin(noise_waveform()));
 
 			{
 				ymfm::ymfm_saved_state restorer(blob, false);
@@ -577,6 +615,10 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			} else {
 				m_chip.engine().regs().lfo() = ymfm::opm_registers::lfo_state{};
 				m_chip.engine().regs().lfo().ticks = (uint16_t)(1u << (15 - (m_regs[0x18] >> 4)));
+			}
+			noise_from_image(noise);
+			if (version < 5) {
+				m_chip.engine().regs().reset_noise();
 			}
 
 			// Each operator caches values derived from the registers (phase
@@ -642,6 +684,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 			scratch.m_bus         = m_bus;
 			scratch.m_chip.engine().regs().lfo() = m_chip.engine().regs().lfo();
+			uint8_t noise[NOISE_IMAGE_SIZE];
+			noise_to_image(noise);
+			scratch.noise_from_image(noise);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -851,7 +896,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 4);
+		ss_begin(w, "YM  ", 5);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);
