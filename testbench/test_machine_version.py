@@ -441,6 +441,38 @@ def check_ids():
             # Earlier IDs, read as layout 1 while that is this build's.
             loads("x16emu machine %d-%s" % (machine, tc), False, False)
             loads("x16emu r50 4666e4fd3e96ba94-fafd4819", machine != 1, tc != "fafd4819", allow=machine != 1)
+
+        # An older chunk version of another length (savestate_io.h ss_layout_unreadable).
+        with open(base, "rb") as f:
+            orig = f.read()
+        pos = 0
+        while orig[pos:pos + 4] != b"PSG ":
+            pos += 12 + int.from_bytes(orig[pos + 8:pos + 12], "little")
+        ver = int.from_bytes(orig[pos + 4:pos + 6], "little")
+        n   = int.from_bytes(orig[pos + 8:pos + 12], "little")
+
+        def psg_as(version, drop):
+            head = orig[pos:pos + 4] + version.to_bytes(2, "little") + orig[pos + 6:pos + 8] + (n - drop).to_bytes(4, "little")
+            p = os.path.join(WORK, "psg-variant.x16s")
+            with open(p, "wb") as f:
+                f.write(orig[:pos] + head + orig[pos + 12:pos + 12 + n - drop] + orig[pos + 12 + n:])
+            try:
+                return d.req("x16/loadState", {"path": p, "hash": True}), None
+            except RuntimeError as e:
+                return None, str(e)
+
+        if ver == 2:
+            # vera_psg.c psg_state_load: version 1 lacks the 4-byte DAC sum.
+            r, err = psg_as(1, 2)
+            after = d.req("x16/status", {"hash": True})["hash"]
+            case("PSG chunk v1 of the wrong length is refused (%s), the machine unchanged" % err,
+                 r is None and err and "unchanged" in err and after == want)
+            r, err = psg_as(2, 4)
+            case("PSG chunk v2 4 bytes short is refused (%s)" % err, r is None and err and "PSG" in err)
+            r, err = psg_as(1, 4)
+            case("PSG chunk v1, 4 bytes shorter, loads (%s)" % (err or "ok"), r is not None)
+        else:
+            case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

@@ -750,6 +750,10 @@ x16_add_test(dbg_info
 x16_add_test(savestate
     SOURCES tests/test_savestate.c)
 
+# vera_psg.c depends on nothing outside itself, so its chunk loads alone.
+x16_add_test(psg_state
+    SOURCES tests/test_psg_state.c src/vera_psg.c)
+
 # code_map.c leans on only disasm(), dbg_info and two core symbols, so the test
 # supplies its own memory and register file rather than linking the emulator
 # core. disasm.c still includes SDL headers, and the generated cpu/mnemonics.h.

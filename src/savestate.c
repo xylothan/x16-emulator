@@ -486,9 +486,12 @@ expected_size(ss_layout *layout, bool *ok)
 	return counter.len;
 }
 
-bool
-savestate_check(const void *data, size_t len, char *err, size_t err_len)
+// As savestate_check(); *current says whether every chunk is at this build's
+// version and length, so that nothing but its own loader's reading is unchecked.
+static bool
+check_layout(const void *data, size_t len, bool *current, char *err, size_t err_len)
 {
+	*current = false;
 	if (!header_check(data, len, err, err_len)) {
 		return false;
 	}
@@ -514,7 +517,15 @@ savestate_check(const void *data, size_t len, char *err, size_t err_len)
 		}
 		return false;
 	}
+	*current = ss_layout_diff(&expect, &got) < 0;
 	return true;
+}
+
+bool
+savestate_check(const void *data, size_t len, char *err, size_t err_len)
+{
+	bool current;
+	return check_layout(data, len, &current, err, err_len);
 }
 
 // A state from another machine version or toolchain loads, but will not, or
@@ -550,7 +561,8 @@ note_origin(const savestate_origin *o)
 bool
 savestate_apply(const void *data, size_t len, bool allow_behaviour_change, char *err, size_t err_len)
 {
-	if (!savestate_check(data, len, err, err_len)) {
+	bool current;
+	if (!check_layout(data, len, &current, err, err_len)) {
 		return false;
 	}
 	// Readable, but saved by a machine that ran differently: from here it would
@@ -565,22 +577,51 @@ savestate_apply(const void *data, size_t len, bool allow_behaviour_change, char 
 		return false;
 	}
 
-	// Before the machine changes, so a recording's end hash is of what it recorded.
+	// A chunk at an older version, or at an older version's length, was only
+	// checked as far as its tag: whether it reads cleanly is up to its loader,
+	// and a loader that misreads it fails halfway through the machine. So such a
+	// load first saves the machine to put back. A state of this build's layout
+	// was checked in full, and loads without the copy.
+	ss_writer before;
+	ss_writer_init(&before, false, NULL);
+	if (!current) {
+		savestate_write(&before);
+		if (before.failed) {
+			ss_writer_free(&before);
+			snprintf(err, err_len, "out of memory");
+			return false;
+		}
+	}
+
+	// Before the machine changes, so a recording's end hash is of what it
+	// recorded. A load that is then undone has still ended the recording.
 	input_log_end("state loaded");
 
 	ss_reader r;
 	ss_reader_init(&r, data, len);
 	savestate_read(&r);
+	if (r.failed || r.pos != len) {
+		if (!current) {
+			ss_reader back;
+			ss_reader_init(&back, before.data, before.len);
+			savestate_read(&back);
+			ss_writer_free(&before);
+			if (!back.failed && back.pos == back.len) {
+				snprintf(err, err_len, "the state's older sections did not read as their version says; the machine is unchanged");
+				return false;
+			}
+		}
+		// Unreachable after a passing check, short of a loader that reads
+		// differently from its saver. The machine is part-overwritten now.
+		loaded_any = true;
+		snprintf(err, err_len, "the state did not load cleanly; reset the machine");
+		return false;
+	}
+	ss_writer_free(&before);
 	loaded_any    = true;
 	loaded_origin = checked_origin;
 	note_origin(&loaded_origin);
 	savestate_mark_frame_boundary(); // every state is taken on one
-	if (r.failed || r.pos != len) {
-		// Unreachable after a passing check, short of a loader that reads
-		// differently from its saver. The machine is part-overwritten now.
-		snprintf(err, err_len, "the state did not load cleanly; reset the machine");
-		return false;
-	}
 
 	// Host-side things that followed the replaced machine start afresh. Pacing
 	// re-bases on the restored clock, so the machine neither sprints nor waits.
@@ -776,10 +817,13 @@ savestate_file_load(const char *path, size_t *size, bool allow_behaviour_change,
 		snprintf(err, err_len, "cannot read %s", path);
 		return false;
 	}
-	// A file of any size but this machine's is not a state of it. Its header,
-	// if it has one, usually says why better than its size does.
-	const size_t want = (size_t)file_len == expect ? expect
-	                  : (size_t)file_len < 4096 ? (size_t)file_len : 4096;
+	// A state with older sections may be a little shorter or longer than this
+	// machine's, so its size decides nothing short of absurd; its sections are
+	// checked as it loads. Past the cap only the header is read, which usually
+	// says why better than the size does.
+	const size_t cap  = 2 * expect;
+	const bool   fits = (uint64_t)file_len <= (uint64_t)cap;
+	const size_t want = fits ? (size_t)file_len : 4096;
 	uint8_t *data = (uint8_t *)malloc(want ? want : 1);
 	if (data == NULL) {
 		SDL_RWclose(f);
@@ -791,9 +835,9 @@ savestate_file_load(const char *path, size_t *size, bool allow_behaviour_change,
 	bool loaded = false;
 	if (got != want) {
 		snprintf(err, err_len, "cannot read %s", path);
-	} else if ((size_t)file_len != expect) {
+	} else if (!fits) {
 		if (header_check(data, got, err, err_len)) {
-			snprintf(err, err_len, "%s is %lld bytes; a state of this machine is %llu",
+			snprintf(err, err_len, "%s is %lld bytes; a state of this machine is about %llu",
 			         path, (long long)file_len, (unsigned long long)expect);
 		}
 	} else {
