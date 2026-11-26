@@ -13,6 +13,10 @@ or a published specification, never from the emulator.
   writes, reads and IRQ pin samples (`W`, `R`, `I`) carry T, the clock count
   since the VSYNC pin last rose (dot 4 of line 492). A write takes effect 3
   clocks after its strobe rises.
+- `audio` vectors replay register writes and check the I2S output and reads.
+  T is the clock count from power-on. Render r reads its registers at
+  512 × (r + 1) + 1, and `S r L R` is the 17-bit mix the DAC latched then.
+  Accesses avoid the 104 clocks from that point, while the voices are read.
 - Each file names its oracle: VERA version and bitstream SHA-256.
 
 Vectors are captured through the package pins of a gate-level netlist decoded
@@ -21,8 +25,10 @@ from the released bitstream. The bitstream and netlist are not in this repositor
 ```
 iverilog -g2012 -o scene.vvp tools/tb_scene.v <netlist.v> <cell-models.v>
 iverilog -g2012 -o bus.vvp tools/tb_bus.v <netlist.v> <cell-models.v>
+iverilog -g2012 -o audio.vvp tools/tb_audio.v <netlist.v> <cell-models.v>
 python tools/gen_vera_scenes.py scene.vvp vera/<version> --version <version> --sha256 <hash>
 python tools/gen_vera_bus.py bus.vvp vera/<version> --version <version> --sha256 <hash>
+python tools/gen_vera_audio.py audio.vvp vera/<version> --version <version> --sha256 <hash>
 ```
 
 Run with `vera_accuracy vera/<version>`.
@@ -44,6 +50,10 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 - Sprite fetches delayed by CPU data port accesses
 - Sprite buffer entries 640 and 641 when sprites are armed outside vertical blank
 - Sprite buffer entries 640 and 641 under the pixel on the last render clock
-- PSG, PCM and SPI
+- Writes while the PSG voices or the PCM FIFO are being read
+- PSG voices while the PCM FIFO holds 16 bytes or more. The two RAMs' write
+  addresses share upper bits in the decoded netlist.
+- The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
+- SPI
 - FPGA reconfiguration
 - CPU dummy cycles at the program counter or stack: implied, stack, branch and JSR

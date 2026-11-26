@@ -56,6 +56,11 @@ pcm_write_ctrl(uint8_t val)
 	if (val & 0x80) {
 		fifo_reset();
 	}
+	// pcm.v:104-108: an empty FIFO forces the output to zero at once.
+	if (fifo_cnt == 0) {
+		cur_l = 0;
+		cur_r = 0;
+	}
 	ctrl = val & 0x3F;
 }
 
@@ -127,63 +132,37 @@ void
 pcm_render(int16_t *buf, unsigned num_samples)
 {
 	while (num_samples--) {
-		uint8_t old_phase = phase;
-		phase += rate;
-		if ((old_phase & 0x80) != (phase & 0x80)) {
-			if (fifo_cnt == 0) {
-				cur_l = 0;
-				cur_r = 0;
-			} else {
-				switch ((ctrl >> 4) & 3) {
-					case 0: { // mono 8-bit
-						cur_l = (int16_t)read_fifo() << 8;
-						cur_r = cur_l;
-						break;
-					}
-					case 1: { // stereo 8-bit
-						if (fifo_cnt < 2) {
-							fifo_cnt = 0;
-							fifo_rdidx = fifo_wridx;
-						} else {
-							cur_l = read_fifo() << 8;
-							cur_r = read_fifo() << 8;
-						}
-						break;
-					}
-					case 2: { // mono 16-bit
-						if (fifo_cnt < 2) {
-							fifo_cnt = 0;
-							fifo_rdidx = fifo_wridx;
-						} else {
-							cur_l = read_fifo();
-							cur_l |= read_fifo() << 8;
-							cur_r = cur_l;
-						}
-						break;
-					}
-					case 3: { // stereo 16-bit
-						if (fifo_cnt < 4) {
-							fifo_cnt = 0;
-							fifo_rdidx = fifo_wridx;
-						} else {
-							cur_l = read_fifo();
-							cur_l |= read_fifo() << 8;
-							cur_r = read_fifo();
-							cur_r |= read_fifo() << 8;
-						}
-						break;
-					}
-				}
-			}
-		}
-		*(buf++) = (int16_t)((int32_t)cur_l * volume_lut[ctrl & 0xF] / 64);
-		*(buf++) = (int16_t)((int32_t)cur_r * volume_lut[ctrl & 0xF] / 64);
+		// audio.v:94-104: the DAC takes the output at the start of a sample,
+		// before this sample's fetch, scaled by the volume at that moment.
+		// pcm.v:217, 221: the product's bits 21:6, an arithmetic shift.
+		*(buf++) = (int16_t)(((int32_t)cur_l * volume_lut[ctrl & 0xF]) >> 6);
+		*(buf++) = (int16_t)(((int32_t)cur_r * volume_lut[ctrl & 0xF]) >> 6);
 
 		if (scope_armed > 0) {
 			scope_buf[PCM_SCOPE_L][scope_wridx] = buf[-2];
 			scope_buf[PCM_SCOPE_R][scope_wridx] = buf[-1];
 			scope_wridx = (scope_wridx + 1) & (PCM_SCOPE_SAMPLES - 1);
 			scope_armed--;
+		}
+
+		uint8_t old_phase = phase;
+		phase += rate;
+		if ((old_phase & 0x80) != (phase & 0x80) && fifo_cnt != 0) {
+			// pcm.v:110-169: bytes are taken while any remain. A sample that
+			// leaves the FIFO empty is never output (pcm.v:165-168).
+			const bool stereo = ctrl & 0x10, wide = ctrl & 0x20;
+			const unsigned need = (stereo ? 2 : 1) * (wide ? 2 : 1);
+			uint8_t b[4] = { 0, 0, 0, 0 };
+			for (unsigned i = 0; i < need && fifo_cnt != 0; i++) {
+				b[i] = read_fifo();
+			}
+			cur_l = wide ? (int16_t)(b[0] | b[1] << 8) : (int16_t)(b[0] << 8);
+			cur_r = !stereo ? cur_l : wide ? (int16_t)(b[2] | b[3] << 8) : (int16_t)(b[1] << 8);
+		}
+		// pcm.v:104-108: an empty FIFO forces the output to zero.
+		if (fifo_cnt == 0) {
+			cur_l = 0;
+			cur_r = 0;
 		}
 	}
 }

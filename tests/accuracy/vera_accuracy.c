@@ -248,6 +248,87 @@ run_bus(FILE *f, const char *name)
 	return bad == 0;
 }
 
+// Audio ops carry T, clocks from power-on. Render r reads its registers at
+// 512 * (r + 1) + 1 (psg.v:203-233), and S r is the mix the DAC latched then.
+#define AUDIO_TICK   512
+#define AUDIO_FIRST  513
+#define MAX_RENDERS  (1 << 14)
+
+static int16_t audio_mix[MAX_RENDERS][2];
+static long audio_renders;
+
+static bool
+audio_to(long t)
+{
+	while (AUDIO_FIRST + audio_renders * AUDIO_TICK < t) {
+		if (audio_renders >= MAX_RENDERS) {
+			return false;
+		}
+		int16_t psg[2], pcm[2];
+		psg_render(psg, 1);
+		pcm_render(pcm, 1);
+		audio_mix[audio_renders][0] = (int16_t)(psg[0] + pcm[0]);
+		audio_mix[audio_renders][1] = (int16_t)(psg[1] + pcm[1]);
+		audio_renders++;
+	}
+	return true;
+}
+
+static bool
+run_audio(FILE *f, const char *name)
+{
+	int bad = 0, step = 0;
+	video_reset();
+	psg_reset();
+	audio_renders = 0;
+	while (fgets(line_buf_text, MAX_LINE, f)) {
+		unsigned r, v, m;
+		long t, rr;
+		int l, rt;
+		step++;
+		if (line_buf_text[0] == 'e') {
+			break;
+		} else if (sscanf(line_buf_text, "W %x %x %ld", &r, &v, &t) == 3) {
+			if (!audio_to(t + WRITE_DELAY)) {
+				printf("FAIL %s: step %d is out of range\n", name, step);
+				return false;
+			}
+			video_write((uint8_t)r, (uint8_t)v);
+		} else if (sscanf(line_buf_text, "R %x %x %x %ld", &r, &v, &m, &t) == 4) {
+			if (!audio_to(t)) {
+				printf("FAIL %s: step %d is out of range\n", name, step);
+				return false;
+			}
+			const uint8_t got = video_read((uint8_t)r, false);
+			if ((got & m) != (v & m)) {
+				if (!bad) {
+					printf("FAIL %s: step %d T %ld reg $%02X read $%02X, expected $%02X (mask $%02X)\n",
+					       name, step, t, r, got, v, m);
+				}
+				bad++;
+			}
+		} else if (sscanf(line_buf_text, "S %ld %d %d", &rr, &l, &rt) == 3) {
+			if (rr < 0 || !audio_to(AUDIO_FIRST + rr * AUDIO_TICK + 1)) {
+				printf("FAIL %s: step %d is out of range\n", name, step);
+				return false;
+			}
+			// audio.v:94-95: the mix is 17 bits; both sources stay within 16 here.
+			const int gl = audio_mix[rr][0], gr = audio_mix[rr][1];
+			if (gl != l || gr != rt) {
+				if (!bad) {
+					printf("FAIL %s: step %d render %ld mix %d %d, expected %d %d\n",
+					       name, step, rr, gl, gr, l, rt);
+				}
+				bad++;
+			}
+		}
+	}
+	if (bad > 1) {
+		printf("FAIL %s: %d checks differ\n", name, bad);
+	}
+	return bad == 0;
+}
+
 static bool
 run_file(const char *path, int *cases)
 {
@@ -282,6 +363,9 @@ run_file(const char *path, int *cases)
 		} else if (sscanf(line_buf_text, "bus %127s", name) == 1) {
 			(*cases)++;
 			ok &= run_bus(f, name);
+		} else if (sscanf(line_buf_text, "audio %127s", name) == 1) {
+			(*cases)++;
+			ok &= run_audio(f, name);
 		}
 	}
 	fclose(f);

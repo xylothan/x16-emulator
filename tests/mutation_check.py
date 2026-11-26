@@ -126,6 +126,60 @@ MUTATIONS = [
         "caught_by": ["vera_psg"],
     },
     {
+        "name": "PSG noise LFSR steps once per voice",
+        "file": "src/vera_psg.c",
+        # VERA 49.0.6 bitstream: one step per sample, shared by every voice.
+        "find": "\t\tstruct channel *ch = &channels[i];\n\n\t\t// psg.v:146",
+        "into": "\t\tstruct channel *ch = &channels[i];\n\t\tif (i) noise_state = (noise_state << 1) | (((noise_state >> 1) ^ (noise_state >> 2) ^ (noise_state >> 4) ^ (noise_state >> 15)) & 1);\n\n\t\t// psg.v:146",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "PSG pulse is formed from the updated phase",
+        "file": "src/vera_psg.c",
+        # psg.v:160 signal_pw compares cur_phase, before this sample's add.
+        "find": "case WF_PULSE: v = ((ch->phase >> 10) > ch->pw)",
+        "into": "case WF_PULSE: v = ((((ch->phase + ch->freq) & 0x1FFFF) >> 10) > ch->pw)",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "PSG left sum reaches the DAC a sample early",
+        "file": "src/vera_psg.c",
+        # The DAC takes the previous sample's sum (psg.v:211-215).
+        "find": "*left  = dac_l;",
+        "into": "*left  = l;",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "PCM volume truncates toward zero",
+        "file": "src/vera_pcm.c",
+        # pcm.v:221 takes bits 21:6 of the product: a floor.
+        "find": "*(buf++) = (int16_t)(((int32_t)cur_l * volume_lut[ctrl & 0xF]) >> 6);",
+        "into": "*(buf++) = (int16_t)(((int32_t)cur_l * volume_lut[ctrl & 0xF]) / 64);",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "PCM output survives a FIFO reset",
+        "file": "src/vera_pcm.c",
+        # pcm.v:104-108 zeroes the output while the FIFO is empty.
+        "find": "zero at once.\n\tif (fifo_cnt == 0) {",
+        "into": "zero at once.\n\tif (0) {",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
+        "name": "PCM holds its output after a partial sample",
+        "file": "src/vera_pcm.c",
+        # pcm.v:104-108: bytes taken short of a sample leave the output at zero.
+        "find": "forces the output to zero.\n\t\tif (fifo_cnt == 0) {",
+        "into": "forces the output to zero.\n\t\tif (0) {",
+        "count": 1,
+        "caught_by": ["vera_accuracy"],
+    },
+    {
         "name": "VERA ISR clears on a written zero",
         "file": "src/video.c",
         # top.v:441-443 clear a latch when the written bit is one:
