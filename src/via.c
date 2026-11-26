@@ -15,13 +15,21 @@
 #include "glue.h"
 #include "joystick.h"
 
+// Timers, after W65C22S datasheet Figures 2-3 and 2-4. A count is what the
+// counter holds during a cycle; via_step() moves it across cycle ends. Writing
+// T1C-H or T2C-H loads N, which the counter holds through the next cycle as
+// well. After 0 comes FFFF, when the flag sets (IRQB falls N+1.5 cycles after
+// the write); T1 then reloads its latch, so a free-running period is N+2, and
+// T2 counts on.
 typedef struct {
 	unsigned timer_count[2];
 	unsigned pb6_pulse_counts;
 	uint8_t registers[15];
-	bool timer1_m1;
-	bool timer_running[2];
+	bool timer1_m1;          // T1 holds FFFF after 0: the next cycle reloads
+	bool timer_running[2];   // the timer sets its flag at the next time-out
+	bool timer_loaded[2];    // written this cycle: the cycle ends without a decrement
 	bool pb7_output;
+	unsigned consumed;       // cycles stepped since the main loop last stepped
 } via_t;
 
 static via_t via[2];
@@ -37,7 +45,10 @@ via_init(via_t *via)
 	for (int i = 11; i < 15; i++) via->registers[i] = 0;
 	via->timer_running[0] = false;
 	via->timer_running[1] = false;
+	via->timer_loaded[0] = false;
+	via->timer_loaded[1] = false;
 	via->timer1_m1 = false;
+	via->consumed = 0;
 	via->pb7_output = true;
 }
 
@@ -119,6 +130,8 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 			if (reg == 5) {
 				via->timer_count[0] = ((unsigned)value << 8) | via->registers[6];
 				via->timer_running[0] = true;
+				via->timer_loaded[0] = true;
+				via->timer1_m1 = false;
 				via->pb7_output = false;
 			}
 			break;
@@ -126,6 +139,7 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 			via->registers[13] &= ~0x20;
 			via->timer_count[1] = ((unsigned)value << 8) | via->registers[8];
 			via->timer_running[1] = true;
+			via->timer_loaded[1] = true;
 			break;
 		case 10: // SR
 			via->registers[13] &= ~0x04;
@@ -149,64 +163,91 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 static void
 via_step(via_t *via, unsigned clocks)
 {
-	// TODO there's currently no timestamp mechanism to mark exact transition
-	// times, since there's currently no peripherals that require those
-	uint8_t acr = via->registers[11];
+	const uint8_t acr = via->registers[11];
 	uint8_t ifr = via->registers[13];
-	// handle timers
-	unsigned cnt;
-	uint32_t tclk, tclk_s, reload;
-	// counter always update even if it's not "running"
-	cnt = via->timer_count[0];
-	tclk = clocks;
-	while (tclk > 0) {
+
+	// T1
+	unsigned n = clocks;
+	unsigned cnt = via->timer_count[0];
+	if (n && via->timer_loaded[0]) {
+		via->timer_loaded[0] = false;
+		n--;
+	}
+	while (n) {
 		if (via->timer1_m1) {
-			reload = (((uint32_t)via->registers[7] << 8) | via->registers[6]);
-			tclk_s = reload + 1;
-			if (tclk < tclk_s) tclk_s = tclk;
-			cnt = reload - tclk_s + 1;
+			const unsigned latch = ((unsigned)via->registers[7] << 8) | via->registers[6];
 			via->timer1_m1 = false;
-		} else if (cnt < tclk) {
-			if (via->timer_running[0]) {
-				ifr |= 0x40;
-				via->pb7_output ^= true;
-				if (!(acr & 0x40)) via->timer_running[0] = false;
+			cnt = latch;
+			n--;
+			// Once the flag is set or the one-shot spent, whole periods change
+			// nothing but PB7's phase.
+			const unsigned period = latch + 2;
+			if (n >= period && (!via->timer_running[0] || (ifr & 0x40))) {
+				const unsigned skip = n / period;
+				if (via->timer_running[0] && (skip & 1)) {
+					via->pb7_output ^= true;
+				}
+				n -= skip * period;
 			}
-			if (tclk - cnt == 1) {
-				// special, -1 state
-				cnt = 0xffff;
-				via->timer1_m1 = true;
-				tclk_s = 1;
-			} else {
-				reload = (((uint32_t)via->registers[7] << 8) | via->registers[6]);
-				tclk_s = cnt + reload + 2;
-				if (tclk < tclk_s) tclk_s = tclk;
-				cnt += reload - tclk_s + 2;
-			}
-		} else {
-			cnt -= tclk;
+			continue;
+		}
+		if (n <= cnt) {
+			cnt -= n;
 			break;
 		}
-		tclk -= tclk_s;
-	}
-	via->timer_count[0] = (unsigned)cnt;
-
-	cnt = via->timer_count[1];
-	tclk = (acr & 0x20) ? via->pb6_pulse_counts : clocks;
-	via->pb6_pulse_counts = 0;
-	if (cnt < tclk) {
-		if (via->timer_running[1]) {
-			ifr |= 0x20;
-			via->timer_running[1] = false;
+		n -= cnt + 1;
+		cnt = 0xffff;
+		via->timer1_m1 = true;
+		if (via->timer_running[0]) {
+			ifr |= 0x40;
+			via->pb7_output ^= true;
+			if (!(acr & 0x40)) {
+				via->timer_running[0] = false;
+			}
 		}
-		via->timer_count[1] = 0x10000 + cnt - tclk;
-	} else {
-		via->timer_count[1] -= tclk;
 	}
+	via->timer_count[0] = cnt;
+
+	// T2
+	cnt = via->timer_count[1];
+	if (acr & 0x20) {
+		n = via->pb6_pulse_counts;
+	} else {
+		n = clocks;
+		if (n && via->timer_loaded[1]) {
+			via->timer_loaded[1] = false;
+			n--;
+		}
+	}
+	via->pb6_pulse_counts = 0;
+	if (n > cnt && via->timer_running[1]) {
+		ifr |= 0x20;
+		via->timer_running[1] = false;
+	}
+	via->timer_count[1] = (cnt - n) & 0xffff;
 
 	// TODO Cxx pin and shift register handling
-	
+
 	via->registers[13] = ifr;
+}
+
+// Bring a unit up to the cycle of an access, `offset` cycles after the main
+// loop last stepped the devices.
+static void
+via_catch_up(via_t *via, unsigned offset)
+{
+	if (offset > via->consumed) {
+		via_step(via, offset - via->consumed);
+		via->consumed = offset;
+	}
+}
+
+// The rest of the cycles since the main loop last stepped.
+static void
+via_step_rest(via_t *via, unsigned clocks)
+{
+	via_step(via, clocks > via->consumed ? clocks - via->consumed : 0);
+	via->consumed = 0;
 }
 
 //
@@ -321,7 +362,13 @@ via1_write(uint8_t reg, uint8_t value)
 void
 via1_step(unsigned clocks)
 {
-	via_step(&via[0], clocks);
+	via_step_rest(&via[0], clocks);
+}
+
+void
+via1_catch_up(unsigned offset)
+{
+	via_catch_up(&via[0], offset);
 }
 
 bool
@@ -358,7 +405,13 @@ via2_write(uint8_t reg, uint8_t value)
 void
 via2_step(unsigned clocks)
 {
-	via_step(&via[1], clocks);
+	via_step_rest(&via[1], clocks);
+}
+
+void
+via2_catch_up(unsigned offset)
+{
+	via_catch_up(&via[1], offset);
 }
 
 bool
@@ -395,7 +448,7 @@ via_debug_get_state(int which, via_debug_state_t *out)
 // and an unfitted unit's state is simply never used.
 
 static void
-via_unit_io(via_t *v, ss_writer *w, ss_reader *r)
+via_unit_io(via_t *v, ss_writer *w, ss_reader *r, int version)
 {
 	for (int i = 0; i < 2; i++) {
 		if (w) ss_put_u32(w, v->timer_count[i]); else v->timer_count[i] = ss_get_u32(r);
@@ -407,22 +460,28 @@ via_unit_io(via_t *v, ss_writer *w, ss_reader *r)
 		if (w) ss_put_bool(w, v->timer_running[i]); else v->timer_running[i] = ss_get_bool(r);
 	}
 	if (w) ss_put_bool(w, v->pb7_output); else v->pb7_output = ss_get_bool(r);
+	// Version 1 has no loaded flags: a state is saved between instructions,
+	// where a CPU write's cycle has always ended. A debugger write may not.
+	for (int i = 0; i < 2; i++) {
+		if (w) ss_put_bool(w, v->timer_loaded[i]); else v->timer_loaded[i] = version >= 2 && ss_get_bool(r);
+	}
+	if (r) v->consumed = 0;
 }
 
 void
 via_state_save(ss_writer *w)
 {
-	ss_begin(w, "VIA ", 1);
-	via_unit_io(&via[0], w, NULL);
-	via_unit_io(&via[1], w, NULL);
+	ss_begin(w, "VIA ", 2);
+	via_unit_io(&via[0], w, NULL, 2);
+	via_unit_io(&via[1], w, NULL, 2);
 	ss_end(w);
 }
 
 void
 via_state_load(ss_reader *r)
 {
-	ss_open(r, "VIA ");
-	via_unit_io(&via[0], NULL, r);
-	via_unit_io(&via[1], NULL, r);
+	const int version = ss_open(r, "VIA ");
+	via_unit_io(&via[0], NULL, r, version);
+	via_unit_io(&via[1], NULL, r, version);
 	ss_close(r);
 }

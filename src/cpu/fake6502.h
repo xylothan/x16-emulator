@@ -21,6 +21,8 @@ extern void exec6502(uint32_t tickcount);
 extern void irq6502();
 extern void nmi6502();
 extern uint32_t clockticks6502;
+extern uint8_t cpu_bus_index;
+extern uint32_t cpu_step_base;
 extern uint8_t waiting;
 extern bool warn_rockwell;
 

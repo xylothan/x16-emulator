@@ -211,7 +211,6 @@ bool using_hostfs = true;
 // Per-instruction clock reference. File-scope so emulator_step_during_move()
 // (run from the Windows modal move/resize loop) advances the peripheral clocks
 // in lock-step with emulator_loop() and neither double-counts the other's ticks.
-static uint32_t old_clockticks6502 = 0;
 
 uint8_t MHZ = 8;
 
@@ -2730,7 +2729,7 @@ perf_budget_close_frame(void)
 // Two things matter for the drag to stay smooth: never sleep here, and never
 // run for long. We pace by checking how far ahead of the wall clock we are and
 // skipping the tick if we are ahead, rather than sleeping the deficit away, and
-// we cap how much emulation one tick may do. Shares old_clockticks6502 and the
+// we cap how much emulation one tick may do. Shares cpu_step_base and the
 // timing accumulators with emulator_loop(), so emulation resumes seamlessly
 // when the drag ends.
 // Whether the graphical debugger or a DAP server needs the status check. Both
@@ -3000,8 +2999,8 @@ emulator_step_during_move(void)
 		}
 		step6502();
 		ran_instruction = true;
-		uint32_t clocks = clockticks6502 - old_clockticks6502;
-		old_clockticks6502 = clockticks6502;
+		uint32_t clocks = clockticks6502 - cpu_step_base;
+		cpu_step_base = clockticks6502;
 		perf_budget_record(clocks, perf_pc, perf_pbank);
 		if (perf_hist_enabled)
 			perf_hist_step_(clocks, perf_pc, ph_ram, ph_rom, ph_op, regs.pc, cpu_irq_depth() > 0);
@@ -3066,7 +3065,7 @@ emulator_step_during_move(void)
 void *
 emulator_loop(void *param)
 {
-	old_clockticks6502 = clockticks6502;
+	cpu_step_base = clockticks6502;
 	debug_gate_refresh();
 	for (;;) {
 		// A drag may have run the guest to $ffff while the OS held us in its
@@ -3249,8 +3248,8 @@ emulator_loop(void *param)
 				ph_op = debug_read6502(perf_pc, 0, USE_CURRENT_X16_BANK);
 		}
 		step6502();
-		uint32_t clocks = clockticks6502 - old_clockticks6502;
-		old_clockticks6502 = clockticks6502;
+		uint32_t clocks = clockticks6502 - cpu_step_base;
+		cpu_step_base = clockticks6502;
 		perf_budget_record(clocks, perf_pc, perf_pbank);
 		if (perf_hist_enabled)
 			perf_hist_step_(clocks, perf_pc, ph_ram, ph_rom, ph_op, regs.pc, cpu_irq_depth() > 0);
@@ -3347,7 +3346,7 @@ emulator_loop(void *param)
 
 // ─── Save states ─────────────────────────────────────────────────────────────
 //
-// old_clockticks6502 is machine state, not bookkeeping: an interrupt taken at
+// cpu_step_base is machine state, not bookkeeping: an interrupt taken at
 // the end of a loop pass charges its entry cycles to the CPU clock after the
 // devices were stepped, and the next pass hands exactly that difference to
 // VIA, VERA, the sound chips and the rest. Restoring the clock without it
@@ -3357,7 +3356,7 @@ void
 main_state_save(ss_writer *w)
 {
 	ss_begin(w, "MAIN", 1);
-	ss_put_u32(w, old_clockticks6502);
+	ss_put_u32(w, cpu_step_base);
 	ss_put_u32(w, (uint32_t)instruction_counter);
 	ss_end(w);
 }
@@ -3366,7 +3365,7 @@ void
 main_state_load(ss_reader *r)
 {
 	ss_open(r, "MAIN");
-	old_clockticks6502  = ss_get_u32(r);
+	cpu_step_base  = ss_get_u32(r);
 	instruction_counter = (int)ss_get_u32(r);
 	ss_close(r);
 }

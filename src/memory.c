@@ -258,6 +258,7 @@ uint8_t
 read6502(uint16_t address, uint8_t bank) {
 	if (!is_gen2) bank = 0;
 	const uint8_t value = guest_read(address, bank);
+	cpu_bus_index++;
 	if (debug_wp_armed_cpu_read > 0 && bank == 0 && debug_wp_check_read(address, value, false)) {
 		DEBUGBreakOnWatchpoint();
 	}
@@ -268,6 +269,7 @@ uint8_t
 fetch6502(uint16_t address, uint8_t bank) {
 	if (!is_gen2) bank = 0;
 	const uint8_t value = guest_read(address, bank);
+	cpu_bus_index++;
 	if (debug_wp_armed_cpu_read > 0 && bank == 0 && debug_wp_check_read(address, value, true)) {
 		DEBUGBreakOnWatchpoint();
 	}
@@ -280,17 +282,14 @@ fetch6502(uint16_t address, uint8_t bank) {
 void
 dummy6502(uint16_t address, uint8_t bank, bool write, uint8_t value)
 {
-	if (is_gen2 && bank != 0) {
-		return;
+	if ((!is_gen2 || bank == 0) && address >= 0x9f00 && address < 0xa000) {
+		if (write) {
+			real_write6502(address, 0, value, false);
+		} else {
+			(void)real_read6502(address, 0, false, USE_CURRENT_X16_BANK);
+		}
 	}
-	if (address < 0x9f00 || address >= 0xa000) {
-		return;
-	}
-	if (write) {
-		real_write6502(address, 0, value, false);
-	} else {
-		(void)real_read6502(address, 0, false, USE_CURRENT_X16_BANK);
-	}
+	cpu_bus_index++;
 }
 
 // Which device an I/O-page address belongs to, for the trace. Kept here rather
@@ -335,6 +334,15 @@ io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles)
 // can be traced. Reads here have side effects -- VERA's data ports
 // auto-increment, the SPI port consumes a byte -- so the caller records what
 // this returned and never re-reads to find out.
+// Cycles since the devices were last stepped, up to the access in progress.
+// The VIAs count every cycle, so a program's access first brings them up to
+// its own cycle of the instruction; the main loop steps the rest.
+static inline unsigned
+cpu_access_offset(void)
+{
+	return (unsigned)(clockticks6502 + cpu_bus_index - cpu_step_base);
+}
+
 static uint8_t
 io_read(uint16_t address, bool debugOn)
 {
@@ -343,8 +351,10 @@ io_read(uint16_t address, bool debugOn)
 		clockticks6502 += 3;
 	}
 	if (address >= 0x9f00 && address < 0x9f10) {
+		if (!debugOn) via1_catch_up(cpu_access_offset());
 		return via1_read(address & 0xf, debugOn);
 	} else if (has_via2 && (address >= 0x9f10 && address < 0x9f20)) {
+		if (!debugOn) via2_catch_up(cpu_access_offset());
 		return via2_read(address & 0xf, debugOn);
 	} else if (address >= 0x9f20 && address < 0x9f40) {
 		return video_read(address & 0x1f, debugOn);
@@ -425,6 +435,7 @@ void
 write6502(uint16_t address, uint8_t bank, uint8_t value)
 {
 	real_write6502(address, bank, value, false);
+	cpu_bus_index++;
 }
 
 void
@@ -510,8 +521,10 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 			clockticks6502 += 3;
 		}
 		if (address >= 0x9f00 && address < 0x9f10) {
+			if (!debugOn) via1_catch_up(cpu_access_offset());
 			via1_write(address & 0xf, value);
 		} else if (has_via2 && (address >= 0x9f10 && address < 0x9f20)) {
+			if (!debugOn) via2_catch_up(cpu_access_offset());
 			via2_write(address & 0xf, value);
 		} else if (address >= 0x9f20 && address < 0x9f40) {
 			// video_write() has no debugOn parameter -- eighty-odd call sites

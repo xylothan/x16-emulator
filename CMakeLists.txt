@@ -1197,6 +1197,15 @@ x16_add_test(via_timers NEEDS_SDL
     SOURCES tests/test_via_timers.c tests/support/via_fixture.c tests/support/harness.c
             src/via.c)
 
+# VIA bus vectors from m6522.vhd, checked against the W65C22S timing figures.
+x16_add_test(via_accuracy NEEDS_SDL
+    SOURCES tests/accuracy/via_accuracy.c tests/support/via_fixture.c src/via.c)
+
+if(TARGET via_accuracy_test)
+    target_compile_definitions(via_accuracy_test PRIVATE
+        VIA_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/accuracy/via/m6522")
+endif()
+
 # The SNES controller ports the VIA above clocks: the latch/shift register and
 # the virtual joystick that drives a port with no gamepad attached. io_trace.c
 # comes along because the latch path reports to it, and has no dependencies of
@@ -1235,6 +1244,12 @@ x16_add_test(memory_banking NEEDS_SDL NEEDS_CPU_TABLES
 
 x16_add_test(cpu_dummy_cycles NEEDS_SDL NEEDS_CPU_TABLES
     SOURCES tests/accuracy/cpu_dummy_cycles.c tests/support/fake_devices.c
+            tests/support/harness.c
+            src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
+            src/io_trace.c src/perf_budget.c)
+
+x16_add_test(cpu_access_cycles NEEDS_SDL NEEDS_CPU_TABLES
+    SOURCES tests/accuracy/cpu_access_cycles.c tests/support/fake_devices.c
             tests/support/harness.c
             src/memory.c src/debug_core.c src/cpu/fake6502.c src/cpu/irq_ctx.c
             src/io_trace.c src/perf_budget.c)

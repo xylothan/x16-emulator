@@ -70,6 +70,8 @@ test_writing_t1_high_loads_the_counter_from_the_latch(void)
 	check_eq(t1_count(), 0x1234u, "writing the high byte loads both halves at once");
 }
 
+// Figure 2-3: the count is N in the cycle after the T1C-H write, so the first
+// cycle end, the write's own, does not decrement.
 static void
 test_t1_counts_down_at_the_clock_rate(void)
 {
@@ -79,10 +81,10 @@ test_t1_counts_down_at_the_clock_rate(void)
 	via2_write(VIA_T1C_H, 0x20);
 
 	via2_step(0x100);
-	check_eq(t1_count(), 0x1F00u, "T1 decrements once per clock");
+	check_eq(t1_count(), 0x1F01u, "T1 decrements once per clock");
 
 	via2_step(0x0F00);
-	check_eq(t1_count(), 0x1000u, "and keeps going");
+	check_eq(t1_count(), 0x1001u, "and keeps going");
 	check_eq(ifr() & IFR_T1, 0, "without raising its flag before zero");
 }
 
@@ -136,7 +138,7 @@ test_loading_the_latches_does_not_disturb_a_count_in_progress(void)
 	via2_step(0x100);
 
 	const uint16_t before = t1_count();
-	check_eq(before, 0x1F00u, "a count is in progress");
+	check_eq(before, 0x1F01u, "a count is in progress");
 
 	via2_write(VIA_T1L_L, 0x55);
 	check_eq(t1_count(), before, "writing the low latch leaves the counter alone");
@@ -167,7 +169,7 @@ test_t2_loads_counts_and_fires_once(void)
 	check_eq(t2_count(), 0x5678u, "writing the high byte loads both halves");
 
 	via2_step(0x78);
-	check_eq(t2_count(), 0x5600u, "T2 decrements once per clock");
+	check_eq(t2_count(), 0x5601u, "T2 decrements once per clock");
 	check_eq(ifr() & IFR_T2, 0, "with no flag before zero");
 
 	via2_step(0x5700);
@@ -177,6 +179,44 @@ test_t2_loads_counts_and_fires_once(void)
 	via2_write(VIA_IFR, IFR_T2);
 	via2_step(0x10000);
 	check_eq(ifr() & IFR_T2, 0, "T2 has no free-run mode to raise it again");
+}
+
+// Figure 2-3: N, N-1 ... 0, FFFF, with IRQB falling N+1.5 cycles after the
+// write, inside the FFFF cycle; T1 then shows N again and T2 counts on.
+// Figure 2-4: in free-run mode the next flag comes N+2 cycles later.
+static void
+test_t1_and_t2_cycle_by_cycle(void)
+{
+	via2_init();
+	via2_write(VIA_ACR, ACR_ONE_SHOT);
+	via2_write(VIA_T1L_L, 5);
+	via2_write(VIA_T1C_H, 0);
+	via2_write(VIA_T2C_L, 5);
+	via2_write(VIA_T2C_H, 0);
+	via2_step(1);
+	check_eq(t1_count(), 5, "T1 is N in the cycle after the write");
+	check_eq(t2_count(), 5, "T2 is N in the cycle after the write");
+	via2_step(5);
+	check_eq(t1_count(), 0, "T1 reaches 0 N cycles later");
+	check_eq(ifr() & (IFR_T1 | IFR_T2), 0, "with no flag yet");
+	via2_step(1);
+	check_eq(t1_count(), 0xFFFF, "then FFFF");
+	check_eq(ifr() & (IFR_T1 | IFR_T2), IFR_T1 | IFR_T2, "where both flags set");
+	via2_step(1);
+	check_eq(t1_count(), 5, "T1 then reloads from its latch");
+	check_eq(t2_count(), 0xFFFE, "and T2 counts on");
+
+	via2_init();
+	via2_write(VIA_ACR, ACR_FREE_RUN);
+	via2_write(VIA_T1L_L, 5);
+	via2_write(VIA_T1C_H, 0);
+	via2_step(7);
+	check_eq(ifr() & IFR_T1, IFR_T1, "free-run: first flag in the FFFF cycle");
+	via2_write(VIA_IFR, IFR_T1);
+	via2_step(5 + 2 - 1);
+	check_eq(ifr() & IFR_T1, 0, "not before N+2 cycles");
+	via2_step(1);
+	check_eq(ifr() & IFR_T1, IFR_T1, "the next N+2 cycles later");
 }
 
 // p19: "A single control bit within ACR5 is used to select between these two
@@ -207,6 +247,7 @@ int
 main(void)
 {
 	test_writing_t1_high_loads_the_counter_from_the_latch();
+	test_t1_and_t2_cycle_by_cycle();
 	test_t1_counts_down_at_the_clock_rate();
 	test_one_shot_raises_the_flag_once_and_free_run_repeats();
 	test_loading_the_latches_does_not_disturb_a_count_in_progress();

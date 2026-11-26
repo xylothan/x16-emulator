@@ -111,6 +111,11 @@ struct regs regs;
 //helper variables
 uint32_t instructions = 0; //keep track of total instructions executed
 uint32_t clockticks6502 = 0, clockgoal6502 = 0;
+// Bus cycles the current instruction has made so far. memory.c counts them, so
+// clockticks6502 + cpu_bus_index is the cycle of the access in progress.
+uint8_t cpu_bus_index = 0;
+// clockticks6502 when the devices were last stepped. The main loop sets it.
+uint32_t cpu_step_base = 0;
 uint16_t opcode_addr, oldpc, reladdr, value;
 uint32_t ea;
 uint32_t result;
@@ -284,11 +289,13 @@ static inline void decimal_dummy(void) {
 #include "tables.h"
 
 void nmi6502() {
+    cpu_bus_index = 0;
     interrupt6502(INT_NMI);
     waiting = 0;
 }
 
 void irq6502() {
+    cpu_bus_index = 0;
     const bool held = (regs.status & FLAG_INTERRUPT) != 0;
     if (cpu_irq_line_hook) cpu_irq_line_hook(held);
     if (!held) {
@@ -312,6 +319,7 @@ void exec6502(uint32_t tickcount) {
     clockgoal6502 += tickcount;
 
     while (clockticks6502 < clockgoal6502) {
+        cpu_bus_index = 0;
         operand_is_immediate = false;
         opcode = fetch6502(regs.pc++, regs.k);
 
@@ -353,6 +361,7 @@ void step6502() {
 	}
 
     opcode_addr = regs.pc;
+    cpu_bus_index = 0;
 
     operand_is_immediate = false;
     opcode = fetch6502(regs.pc++, regs.k);

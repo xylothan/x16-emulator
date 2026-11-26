@@ -103,6 +103,19 @@ uint8_t via2_read(uint8_t reg, bool debug)  { return note_read(FAKE_VIA2, reg, d
 uint8_t video_read(uint8_t reg, bool debug) { return note_read(FAKE_VERA, reg, debug); }
 uint8_t midi_serial_read(uint8_t reg, bool debug) { return note_read(FAKE_MIDI, reg, debug); }
 
+static void
+note_catch_up(fake_dev_t dev, unsigned offset)
+{
+	fake_dev_log_t *d = &fake_dev[dev];
+	if (d->catch_ups < (int)(sizeof d->offsets / sizeof d->offsets[0])) {
+		d->offsets[d->catch_ups] = offset;
+	}
+	d->catch_ups++;
+}
+
+void via1_catch_up(unsigned offset) { note_catch_up(FAKE_VIA1, offset); }
+void via2_catch_up(unsigned offset) { note_catch_up(FAKE_VIA2, offset); }
+
 void via1_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA1, reg, value); }
 void via2_write(uint8_t reg, uint8_t value)  { note_write(FAKE_VIA2, reg, value); }
 void video_write(uint8_t reg, uint8_t value) { note_write(FAKE_VERA, reg, value); }

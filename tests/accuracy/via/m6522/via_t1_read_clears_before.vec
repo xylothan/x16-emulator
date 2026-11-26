@@ -1,0 +1,13 @@
+# oracle m6522.vhd 7501e85607727587941628f332acff788627a0ea (hoglet67/BeebFpga)
+W 0B 00 0
+W 0E C0 1
+W 06 04 2
+W 05 00 3
+R 04 00 8
+I 0 8
+R 0D C0 9
+I 1 9
+R 0D C0 10
+I 1 10
+R 0D C0 11
+I 1 11
