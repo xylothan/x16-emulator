@@ -12,12 +12,14 @@
 extern "C" {
 #endif
 
-void rtc_i2c_data(uint8_t v);
 void rtc_init(bool set_system_time);
-void rtc_set_system_time();
 void rtc_step(int c);
-uint8_t rtc_read();
-void rtc_write();
+
+// I2C target at $6F: see i2c.h.
+bool rtc_i2c_start(bool read);
+bool rtc_i2c_write(uint8_t v);
+uint8_t rtc_i2c_read(void);
+void rtc_i2c_stop(void);
 
 // ─── Debugger accessor ───────────────────────────────────────────────────────
 // Side-effect-free snapshot of RTC state. Safe to call every frame from the
@@ -36,7 +38,7 @@ typedef struct {
 	int     day;            // 1-31
 	int     month;          // 1-12
 	int     year;           // 0-99 (years since 2000)
-	uint8_t i2c_data_pos;   // write position in the internal I2C data buffer
+	uint8_t i2c_data_pos;   // address pointer
 	uint8_t nvram[0x40];    // copy of the 64-byte NVRAM (battery-backed)
 	bool    nvram_dirty;    // NVRAM has been written since last save
 } rtc_debug_state_t;

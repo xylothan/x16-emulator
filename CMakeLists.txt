@@ -1206,6 +1206,12 @@ if(TARGET via_accuracy_test)
         VIA_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/accuracy/via/m6522")
 endif()
 
+# The I2C bus, the SMC and the RTC, against the MCP7940N datasheet and the SMC
+# firmware source.
+x16_add_test(i2c_targets NEEDS_SDL
+    SOURCES tests/accuracy/i2c_targets.c tests/support/i2c_fixture.c tests/support/harness.c
+            src/i2c.c src/smc.c src/rtc.c src/io_trace.c src/input_log.c)
+
 # The SNES controller ports the VIA above clocks: the latch/shift register and
 # the virtual joystick that drives a port with no gamepad attached. io_trace.c
 # comes along because the latch path reports to it, and has no dependencies of

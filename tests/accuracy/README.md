@@ -91,6 +91,16 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 `cpu_access_cycles` checks the cycle within the instruction at which each VIA
 access lands against the same traces.
 
+## I2C, SMC and RTC
+
+`i2c_targets` drives SDA and SCL a bit at a time, as the KERNAL's `i2c.s`
+does, and checks:
+
+- the bus against MCP7940N datasheet DS20005010J Section 4.1.1;
+- the RTC against Table 5-1, Registers 5-1 to 5-19 and Sections 5.3, 5.4
+  and 6.1;
+- the SMC against x16-smc r48.0.0 (0a2684d): `x16-smc.ino` and `smc_wire.cpp`.
+
 ## Not covered
 
 - NTSC, RGB, interlaced and 240p output
@@ -113,3 +123,9 @@ access lands against the same traces.
 - VIA shift register, CA1/CA2/CB1/CB2, port latching and PB6 pulse counting
 - When the CPU takes the VIA's IRQ: the vectors check the pin, not the CPU
 - CPU dummy cycles at the program counter or stack: implied, stack, branch and JSR
+- SMC clock stretching, and the delay from STOP to the SMC's NMI or reset:
+  both need measurements of the hardware
+- SMC power-off, flash and fuse commands ($0A-$0D, $8F-$93) and keyboard
+  command timing: the modelled keyboard acknowledges at once
+- RTC: OSCRUN rising 32 oscillator cycles after ST, the MFP pin, the square
+  wave, trimming, power-fail time-stamps, and invalid BCD values
