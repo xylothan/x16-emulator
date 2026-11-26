@@ -110,8 +110,9 @@ bool savestate_file_load(const char *path, size_t *size, bool allow_behaviour_ch
 //
 // Each lives in its module's own file. A loader reads exactly what its saver
 // wrote, in the same order; savestate_check() has already compared every
-// chunk's tag, version and length with this machine's, so loaders do not
-// validate.
+// chunk's tag and version with this machine's, and the length of each chunk at
+// this build's version, so loaders do not validate. A loader that reads an
+// older version must read exactly that version's bytes: ss_close() checks.
 
 void cpu_state_save(ss_writer *w);
 void cpu_state_load(ss_reader *r);

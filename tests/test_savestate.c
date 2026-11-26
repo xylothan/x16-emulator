@@ -124,7 +124,17 @@ main(void)
 	check(ss_layout_diff(&counted, &newer) == 0, "a chunk of another version is found");
 	check(ss_layout_unreadable(&newer, &counted) == -1, "an older chunk of the same length is readable");
 	check(ss_layout_unreadable(&counted, &newer) == 0, "a newer chunk is not readable");
-	check(ss_layout_unreadable(&newer, &shorter) == 1, "an older chunk of another length is not readable");
+	check(ss_layout_unreadable(&counted, &shorter) == 1, "a chunk of the same version and another length is not readable");
+	ss_layout grown = counted;
+	grown.chunks[1].version = 8;
+	grown.chunks[1].length += 4;
+	check(ss_layout_unreadable(&grown, &counted) == -1, "an older chunk of another length is readable");
+	check(ss_layout_unreadable(&grown, &shorter) == -1, "an older chunk of any length is readable");
+	check(ss_layout_unreadable(&counted, &grown) == 1, "a newer chunk of another length is not readable");
+	ss_layout renamed = counted;
+	memcpy(renamed.chunks[1].tag, "CCCC", 4);
+	renamed.chunks[1].version = 1;
+	check(ss_layout_unreadable(&grown, &renamed) == 1, "an older chunk under another tag is not readable");
 	check(ss_layout_unreadable(&counted, &fewer) == 1, "a missing chunk is not readable");
 
 	uint8_t junk[20] = { 'X', 'X', 'X', 'X', 1, 0, 0, 0, 0xFF, 0xFF, 0, 0 };

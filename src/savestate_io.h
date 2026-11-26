@@ -20,7 +20,8 @@
 //
 // A writer can also just count. Run the savers through a counting writer and
 // the result is the chunk list a state from this machine must have, which is how
-// a load is checked in full before anything is overwritten.
+// a load is checked before anything is overwritten: in full for chunks at this
+// build's versions, and by their loaders for older ones (savestate_apply()).
 
 #ifndef SAVESTATE_IO_H
 #define SAVESTATE_IO_H
@@ -307,14 +308,17 @@ ss_layout_diff(const ss_layout *a, const ss_layout *b)
 }
 
 // The first chunk of a saved layout this build cannot read, or -1. A loader
-// reads its own version and older ones of the same length.
+// reads its own version at its own length, and older versions at any length:
+// an older version's length is for the loader that reads it to get right, and
+// ss_close() checks it there rather than here.
 static inline int
 ss_layout_unreadable(const ss_layout *current, const ss_layout *saved)
 {
 	const int n = current->count < saved->count ? current->count : saved->count;
 	for (int i = 0; i < n; i++) {
 		const ss_chunk_info *x = &current->chunks[i], *y = &saved->chunks[i];
-		if (memcmp(x->tag, y->tag, 4) != 0 || y->version > x->version || x->length != y->length) {
+		if (memcmp(x->tag, y->tag, 4) != 0 || y->version > x->version
+		    || (y->version == x->version && x->length != y->length)) {
 			return i;
 		}
 	}
