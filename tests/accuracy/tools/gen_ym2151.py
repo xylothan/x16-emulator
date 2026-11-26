@@ -293,12 +293,17 @@ def phase_static():
 
 
 def phase_pm():
-    """Phase steps under every PM value: gap notes, the top and bottom of the range."""
+    """Phase steps under every PM value: gap notes, the top and bottom of the range.
+    Then the same latches under a PM depth of 0."""
     s = S()
     n = 0
     for pms in range(8):
         for kc in (0x00, 0x03, 0x1e, 0x3c, 0x3f, 0x4a, 0x7b, 0x7e, 0x7f):
             s._op(n, "m %d %02x" % (pms, kc))
+            n += 1
+    for pms in (1, 5, 6, 7):
+        for kc in (0x03, 0x4a, 0x7f):
+            s._op(n, "z %d %02x" % (pms, kc))
             n += 1
     return s
 
@@ -328,9 +333,9 @@ def lfo_rates():
 
 
 def lfo_reload():
-    """$18 rewritten at every cycle around the LFO's tick."""
+    """$18 rewritten at every cycle around the LFO's tick, at a period of 4 windows."""
     s = V()
-    s.lfo(0xf0, 0, 0, 0x7f)
+    s.lfo(0xd0, 0, 0, 0x7f)
     s.channel(0, 0x4a, 0x21, pms=7)
     s.op(0)
     s.key(0, 1)
@@ -340,7 +345,7 @@ def lfo_reload():
         t += 2000
         t = t - t % 256 + o
         s.w(0, 0x18, t - 6)
-        s.w(1, 0xf0, t)
+        s.w(1, 0xd0, t)
     return s
 
 
@@ -429,7 +434,7 @@ SCRIPTS = {
     "phase_static": phase_static,
     "phase_pm": phase_pm,
     "lfo_saw_pm": lambda: lfo_voice(0, 0xc4, 0, 0x7f, 7, 0),
-    "lfo_square_pm_am": lambda: lfo_voice(1, 0xb7, 0x7f, 0x55, 5, 3),
+    "lfo_square_pm_am": lambda: lfo_voice(1, 0xf7, 0x40, 0x55, 7, 1),
     "lfo_triangle_am": lambda: lfo_voice(2, 0xd3, 0x7f, 0, 0, 3),
     "lfo_triangle_pm": lambda: lfo_voice(2, 0xe1, 0, 0x6c, 6, 0, kc=0x3e, kf=0x3f, dt2=3),
     "lfo_rates": lfo_rates,

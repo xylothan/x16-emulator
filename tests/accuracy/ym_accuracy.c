@@ -63,9 +63,9 @@ crc(uint32_t c, uint32_t v)
 }
 
 static uint32_t
-phase_step(unsigned kc, unsigned kf, unsigned dt1, unsigned dt2, unsigned mul, unsigned pms, unsigned pm)
+phase_step(unsigned kc, unsigned kf, unsigned dt1, unsigned dt2, unsigned mul, unsigned pms, unsigned pmd, unsigned pm)
 {
-	const struct ym_debug_phase in = { (uint8_t)kc, (uint8_t)kf, (uint8_t)dt1, (uint8_t)dt2, (uint8_t)mul, (uint8_t)pms, (uint8_t)pm };
+	const struct ym_debug_phase in = { (uint8_t)kc, (uint8_t)kf, (uint8_t)dt1, (uint8_t)dt2, (uint8_t)mul, (uint8_t)pms, (uint8_t)pmd, (uint8_t)pm };
 	return YM_debug_phase_step(&in) & 0xfffff;
 }
 
@@ -79,13 +79,13 @@ crc_static(unsigned kc)
 		for (unsigned dt1 = 0; dt1 < 8; dt1++)
 			for (unsigned dt2 = 0; dt2 < 4; dt2++)
 				for (unsigned m = 0; m < 4; m++)
-					c = crc(c, phase_step(kc, kf, dt1, dt2, muls[m], 0, 0));
+					c = crc(c, phase_step(kc, kf, dt1, dt2, muls[m], 0, 0x7f, 0));
 	return c;
 }
 
-// M: phase steps under every PM value.
+// M and Z: phase steps under every PM value, at PM depth pmd.
 static uint32_t
-crc_pm(unsigned pms, unsigned kc)
+crc_pm(unsigned pms, unsigned kc, unsigned pmd)
 {
 	static const unsigned kfs[3] = { 0, 33, 63 }, dt1s[2] = { 0, 6 };
 	uint32_t c = 0;
@@ -93,7 +93,7 @@ crc_pm(unsigned pms, unsigned kc)
 		for (unsigned k = 0; k < 3; k++)
 			for (unsigned dt2 = 0; dt2 < 4; dt2++)
 				for (unsigned d = 0; d < 2; d++)
-					c = crc(c, phase_step(kc, kfs[k], dt1s[d], dt2, 1, pms, pm));
+					c = crc(c, phase_step(kc, kfs[k], dt1s[d], dt2, 1, pms, pmd, pm));
 	return c;
 }
 
@@ -187,9 +187,11 @@ run_file(const char *dir, const char *name)
 				printf("%s:%d: phase steps at KC %02x: crc %08x, expected %08x\n", name, n, a, crc_static(a), c);
 				bad = 1;
 			}
-		} else if (sscanf(line, "M %u %x %x", &p, &a, &c) == 3) {
-			if (crc_pm(p, a) != c) {
-				printf("%s:%d: PM phase steps at PMS %u KC %02x: crc %08x, expected %08x\n", name, n, p, a, crc_pm(p, a), c);
+		} else if (sscanf(line, "%c %u %x %x", &side, &p, &a, &c) == 4 && (side == 'M' || side == 'Z')) {
+			const unsigned pmd = side == 'M' ? 0x7f : 0;
+			if (crc_pm(p, a, pmd) != c) {
+				printf("%s:%d: PM phase steps at PMS %u KC %02x depth %u: crc %08x, expected %08x\n",
+				       name, n, p, a, pmd, crc_pm(p, a, pmd), c);
 				bad = 1;
 			}
 		} else if (sscanf(line, "O %" SCNu64 " %c %x", &t, &side, &c) == 3) {

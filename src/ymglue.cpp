@@ -904,7 +904,7 @@ extern "C" {
 		static ymfm::opm_registers regs;
 		uint32_t chan, opmask;
 		regs.reset();
-		regs.write(0x19, 0xff, chan, opmask);
+		regs.write(0x19, (uint8_t)(0x80 | in->pmd), chan, opmask);
 		regs.write(0x28, in->kc, chan, opmask);
 		regs.write(0x30, (uint8_t)(in->kf << 2), chan, opmask);
 		regs.write(0x38, (uint8_t)(in->pms << 4), chan, opmask);

@@ -17,6 +17,7 @@
 //   m PMS KC   phase steps under a PM latch of 0-255 (sign and magnitude),
 //              KF 0, 33, 63,
 //              DT2 0-3, DT1 0, 6, MUL 1    -> M PMS KC C
+//   z PMS KC   as m, under a PM depth of 0  -> Z PMS KC C
 //   e          end                         -> e
 //
 // C is the CRC-32 of the values in loop order, 4 bytes each, LSB first.
@@ -92,7 +93,7 @@ static uint32_t crc(uint32_t c, uint32_t v)
 // Operator 0's phase step, on a chip of its own.
 static opm_t pg;
 
-static uint32_t phase_step(int kc, int kf, int dt1, int dt2, int mul, int pms, int pm)
+static uint32_t phase_step(int kc, int kf, int dt1, int dt2, int mul, int pms, int pmd, int pm)
 {
 	pg.ch_kc[0] = kc;
 	pg.ch_kf[0] = kf;
@@ -101,7 +102,7 @@ static uint32_t phase_step(int kc, int kf, int dt1, int dt2, int mul, int pms, i
 	pg.sl_mul[0] = mul;
 	pg.ch_pms[0] = pms;
 	for (int i = 0; i < 64; i++) {
-		pg.lfo_pmd = 1;
+		pg.lfo_pmd = pmd;
 		pg.lfo_pm_lock = pm;
 		OPM_Clock(&pg, NULL, NULL, NULL, NULL);
 	}
@@ -173,15 +174,15 @@ int main(void)
 				blocks[nblocks].n0 = n0;
 				blocks[nblocks++].side = side == 'L' ? 0 : 1;
 			}
-		} else if (sscanf(line, "m %u %x", &p, &a) == 2) {
+		} else if (sscanf(line, "%c %u %x", &side, &p, &a) == 3 && (side == 'm' || side == 'z')) {
 			static const int kfs[3] = { 0, 33, 63 }, dt1s[2] = { 0, 6 };
 			uint32_t c = 0;
 			for (int pm = 0; pm < 256; pm++)
 				for (int k = 0; k < 3; k++)
 					for (int dt2 = 0; dt2 < 4; dt2++)
 						for (int d = 0; d < 2; d++)
-							c = crc(c, phase_step((int)a, kfs[k], dt1s[d], dt2, 1, (int)p, pm));
-			printf("M %u %02x %08x\n", p, a, c);
+							c = crc(c, phase_step((int)a, kfs[k], dt1s[d], dt2, 1, (int)p, side == 'm', pm));
+			printf("%c %u %02x %08x\n", side == 'm' ? 'M' : 'Z', p, a, c);
 		} else if (sscanf(line, "f %x", &a) == 1) {
 			static const int muls[4] = { 0, 1, 7, 15 };
 			uint32_t c = 0;
@@ -189,7 +190,7 @@ int main(void)
 				for (int dt1 = 0; dt1 < 8; dt1++)
 					for (int dt2 = 0; dt2 < 4; dt2++)
 						for (int m = 0; m < 4; m++)
-							c = crc(c, phase_step((int)a, kf, dt1, dt2, muls[m], 0, 0));
+							c = crc(c, phase_step((int)a, kf, dt1, dt2, muls[m], 0, 1, 0));
 			printf("F %02x %08x\n", a, c);
 		} else if (line[0] == 'e') {
 			long last = watch_end;

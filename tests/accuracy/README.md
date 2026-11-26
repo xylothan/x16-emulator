@@ -55,7 +55,7 @@ and is not in this repository.
   the emulator generates Nth; Nuked-OPM's DAC puts it out 5 samples later.
 - `F KC C` holds the phase steps of one operator at key code KC, for every KF,
   DT1 and DT2, and MUL 0, 1, 7 and 15. `M PMS KC C` holds them under every PM
-  value at sensitivity PMS.
+  value at sensitivity PMS. `Z PMS KC C` is the same under a PM depth of 0.
 - C is a CRC-32 of the values in order, 4 bytes each, LSB first.
 - Output blocks start 8 samples after the last key-on and end 4 samples before
   the next key-on or write that changes the sound. `$18` writes are the

@@ -1068,7 +1068,7 @@ MUTATIONS = [
     {
         "name": "YM2151 phase: PM depth 0 still applies the latch",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
-        # ym_pm_gap_note.vec
+        # ym_phase_pm.vec
         "find": "(lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;",
         "into": "bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8);",
         "count": 1,

@@ -79,10 +79,10 @@ extern "C" {
 	void    YM_debug_get_lfo_depths(uint8_t *am, uint8_t *pm);
 
 	// Phase step of operator 0 (M1 of channel 0) on a chip of its own, set up
-	// from these fields and a PM depth of 127; pm is the PM latch, a sign
-	// (bit 7) and magnitude.
+	// from these fields; pmd is the PM depth (0-127) and pm the PM latch, a
+	// sign (bit 7) and magnitude.
 	struct ym_debug_phase {
-		uint8_t kc, kf, dt1, dt2, mul, pms, pm;
+		uint8_t kc, kf, dt1, dt2, mul, pms, pmd, pm;
 	};
 	uint32_t YM_debug_phase_step(const struct ym_debug_phase *in);
 
