@@ -555,21 +555,24 @@ def test_voices(s):
     s.wait(200)
 
 
-def test_register(bits):
-    """$01 set to `bits` and cleared at cycles 0-30, a sample on each side
-    of each write on both outputs."""
+def test_register(bits, early=0):
+    """$01 set to `bits` and cleared at cycles 0-30, on both outputs from a
+    sample before each write; from the sample after for writes at cycles
+    below `early`, which the chip takes in part a sample sooner, with the
+    writes then far enough apart for a block to end before the next."""
     def f():
         s = V()
         test_voices(s)
         t = s.t
         for o in range(31):
             for v in (bits, 0):
-                t += 60 * SAMPLE
+                t += (80 if early else 60) * SAMPLE
                 t = t - t % SAMPLE + o
                 s.w(0, 0x01, t - 6)
                 s.w(1, v, t)
-                s.o(t // SAMPLE - 1, 8, "L")
-                s.o(t // SAMPLE - 1, 8, "R")
+                first = t // SAMPLE + (1 if o < early else -1) - SETTLE
+                s.o(first, 8, "L")
+                s.o(first, 8, "R")
         return s
     return f
 
@@ -956,6 +959,7 @@ SCRIPTS = {
     "noise_frequency_writes": noise_frequency_writes,
     "reset_outputs": reset_outputs,
     "test_full_level": test_register(0x20),
+    "test_output_bit": test_register(0x10, 6),
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),

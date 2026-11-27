@@ -500,21 +500,29 @@ int32_t fm_operator<RegisterType>::compute_volume(uint32_t phase, uint32_t am_of
 	// the low 10 bits of phase represents a full 2*PI period over
 	// the full sin wave
 
-	// early out if the envelope is effectively off
-	if (env_level() > EG_QUIET && !m_regs.test_full_level(m_opoffs))
-		return 0;
+	// 0 if the envelope is effectively off
+	int32_t result = 0;
+	if (env_level() <= EG_QUIET || m_regs.test_full_level(m_opoffs))
+	{
+		// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
+		uint32_t sin_attenuation = m_cache.waveform[phase & (RegisterType::WAVEFORM_LENGTH - 1)];
 
-	// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
-	uint32_t sin_attenuation = m_cache.waveform[phase & (RegisterType::WAVEFORM_LENGTH - 1)];
+		// get the attenuation from the evelope generator as a 4.6 value, shifted up to 4.8
+		uint32_t env_attenuation = envelope_attenuation(am_offset) << 2;
 
-	// get the attenuation from the evelope generator as a 4.6 value, shifted up to 4.8
-	uint32_t env_attenuation = envelope_attenuation(am_offset) << 2;
+		// combine into a 5.8 value, then convert from attenuation to 13-bit linear volume
+		result = attenuation_to_volume((sin_attenuation & 0x7fff) + env_attenuation);
 
-	// combine into a 5.8 value, then convert from attenuation to 13-bit linear volume
-	int32_t result = attenuation_to_volume((sin_attenuation & 0x7fff) + env_attenuation);
+		// negate if in the negative part of the sin wave (sign bit gives 14 bits)
+		if (bitfield(sin_attenuation, 15))
+			result = -result;
+	}
 
-	// negate if in the negative part of the sin wave (sign bit gives 14 bits)
-	return bitfield(sin_attenuation, 15) ? -result : result;
+	// the OPM's test register bit 4 sets bit 13 of the level before its sign,
+	// which flips bit 13 of the 14-bit result (checked against Nuked-OPM)
+	if (m_regs.test_output_bit(m_opoffs))
+		result = int16_t(uint16_t(result ^ 0x2000) << 2) >> 2;
+	return result;
 }
 
 

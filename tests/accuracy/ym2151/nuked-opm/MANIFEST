@@ -35,6 +35,7 @@ ym_noise_writes.vec
 ym_noise_frequency_writes.vec
 ym_reset_outputs.vec
 ym_test_full_level.vec
+ym_test_output_bit.vec
 ym_noise_enable_writes.vec
 ym_noise_enable_writes_alg7.vec
 ym_noise_enable_unkeyed.vec

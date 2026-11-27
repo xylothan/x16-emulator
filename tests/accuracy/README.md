@@ -124,7 +124,10 @@ does, and checks:
 - The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
 - SPI
 - FPGA reconfiguration
-- YM2151 test register ($01) bits 0-4, 6 and 7, and reads of the address port
+- YM2151 test register ($01) bits 0-3, 6 and 7, and reads of the address port
+- YM2151 test register bit 4 taken at cycle c of 1-6: the chip takes it in
+  time for slots c + 25 to 31 of the sample before, the emulator from the
+  sample it is written in
 - YM2151 test register bit 5 written in a sample's last cycle: the chip takes
   it in time for slot 31 of that sample, the emulator from the next
 - YM2151 phases of operators not keyed since reset, heard only under test

@@ -277,17 +277,20 @@ public:
 	// system-wide registers
 	uint32_t test() const                            { return byte(0x01, 0, 8); }
 	uint32_t lfo_reset() const                       { return byte(0x01, 1, 1); }
-	uint32_t test_full_level(uint32_t opoffs) const  { return bitfield(test_for(opoffs), 5); }
-	uint32_t test_full_level_any() const             { return bitfield(m_regdata[0x01] | m_test_before, 5); }
+	uint32_t test_full_level(uint32_t opoffs) const  { return bitfield(test_for(opoffs + 1), 5); }
+	uint32_t test_output_bit(uint32_t opoffs) const  { return bitfield(test_for(opoffs + 7), 4); }
+	uint32_t test_full_level_any() const             { return (m_regdata[0x01] | m_test_before) & 0x30; }
 
 	// $01 was `before` until a write the chip took at `cycle` of the next
-	// sample: slot s takes the write that sample if s + 1 is `cycle` or later,
-	// the rest the sample after (checked against Nuked-OPM)
+	// sample. Slot s reads bit 5 at its envelope, cycle s + 1, and bit 4 at
+	// its output, cycle s + 7: it takes the write that sample if that cycle
+	// is `cycle` or later, the sample after if not (checked against
+	// Nuked-OPM)
 	void test_written(uint8_t before, uint32_t cycle) { m_test_before = before; m_test_cycle = uint8_t(cycle); }
 	void test_settle() { m_test_before = m_regdata[0x01]; m_test_cycle = 0; }
-	uint32_t test_for(uint32_t opoffs) const
+	uint32_t test_for(uint32_t at) const
 	{
-		return (opoffs + 1 >= m_test_cycle) ? m_regdata[0x01] : m_test_before;
+		return (at >= m_test_cycle) ? m_regdata[0x01] : m_test_before;
 	}
 	uint32_t noise_frequency() const                 { return byte(0x0f, 0, 5) ^ 0x1f; }
 	uint32_t noise_enable() const                    { return byte(0x0f, 7, 1); }

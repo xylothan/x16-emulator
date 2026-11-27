@@ -341,8 +341,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
 		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
 		// The test register bits that reach the engine after TEST_FAST_WAIT:
-		// bit 5 holds every operator at full level.
-		static constexpr uint8_t TEST_FAST = 0x20;
+		// bit 4 sets bit 13 of each operator's level, bit 5 holds every
+		// operator at full level.
+		static constexpr uint8_t TEST_FAST = 0x30;
 		static constexpr uint8_t TEST_FAST_WAIT = 0;
 
 		// What a queued entry does when it is due.

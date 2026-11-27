@@ -1242,7 +1242,7 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 5 ignored",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "{ return bitfield(test_for(opoffs), 5); }",
+        "find": "{ return bitfield(test_for(opoffs + 1), 5); }",
         "into": "{ return 0 * opoffs; }",
         "count": 1,
         "caught_by": ["ym_accuracy"],
@@ -1260,8 +1260,8 @@ MUTATIONS = [
         "name": "YM2151 test register: every slot takes a write in its sample",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "return (opoffs + 1 >= m_test_cycle)",
-        "into": "return (opoffs + 32 >= m_test_cycle)",
+        "find": "return (at >= m_test_cycle)",
+        "into": "return (at + 32 >= m_test_cycle)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1269,8 +1269,8 @@ MUTATIONS = [
         "name": "YM2151 test register: slots take a write a cycle late",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "return (opoffs + 1 >= m_test_cycle)",
-        "into": "return (opoffs >= m_test_cycle)",
+        "find": "test_for(opoffs + 1), 5)",
+        "into": "test_for(opoffs), 5)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1278,8 +1278,8 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 5 leaves a silent envelope silent",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_test_full_level.vec
-        "find": "if (env_level() > EG_QUIET && !m_regs.test_full_level(m_opoffs))",
-        "into": "if (env_level() > EG_QUIET)",
+        "find": "if (env_level() <= EG_QUIET || m_regs.test_full_level(m_opoffs))",
+        "into": "if (env_level() <= EG_QUIET)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1289,6 +1289,51 @@ MUTATIONS = [
         # ym_test_full_level.vec
         "find": "uint32_t const computed = m_regs.test_full_level_any() ? 0xffffffff :",
         "into": "uint32_t const computed = false ? 0xffffffff :",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 ignored",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "{ return bitfield(test_for(opoffs + 7), 4); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 waits for the engine",
+        "file": "src/ymglue.cpp",
+        # ym_test_output_bit.vec
+        "find": "TEST_FAST = 0x30;",
+        "into": "TEST_FAST = 0x20;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 read at the envelope",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "test_for(opoffs + 7), 4)",
+        "into": "test_for(opoffs + 1), 4)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 not sign-extended",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_output_bit.vec
+        "find": "result = int16_t(uint16_t(result ^ 0x2000) << 2) >> 2;",
+        "into": "result ^= 0x2000;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 leaves idle channels out",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "return (m_regdata[0x01] | m_test_before) & 0x30; }",
+        "into": "return (m_regdata[0x01] | m_test_before) & 0x20; }",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
