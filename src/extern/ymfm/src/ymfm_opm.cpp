@@ -53,6 +53,7 @@ opm_registers::opm_registers() :
 	m_noise_target(0x1f),
 	m_test_before(0),
 	m_test_writes(0),
+	m_test_mask{},
 	m_test_cycle{},
 	m_test_value{},
 	m_noise_changes(0),

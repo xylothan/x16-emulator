@@ -277,8 +277,9 @@ public:
 	// system-wide registers
 	uint32_t test() const                            { return byte(0x01, 0, 8); }
 	uint32_t lfo_reset() const                       { return byte(0x01, 1, 1); }
-	uint32_t test_full_level(uint32_t opoffs) const  { return bitfield(test_for(opoffs + 1), 5); }
-	uint32_t test_output_bit(uint32_t opoffs) const  { return bitfield(test_for(opoffs + 7), 4); }
+	uint32_t test_full_level(uint32_t opoffs) const  { return test_bit(int32_t(opoffs) + 1, 5); }
+	uint32_t test_output_bit(uint32_t opoffs) const  { return test_bit(int32_t(opoffs) + 7, 4); }
+	uint32_t test_phase_reset(uint32_t opoffs) const { return test_bit(int32_t(opoffs) + 7 - 32, 3); }
 	uint32_t test_all_channels() const
 	{
 		uint32_t seen = m_test_before | m_regdata[0x01];
@@ -287,29 +288,33 @@ public:
 		return seen & 0x30;
 	}
 
-	// $01 was `before` this sample until a write, now in $01, that the chip
-	// took at `cycle`. Slot s reads bit 5 at its envelope, cycle s + 1, and
-	// bit 4 at its output, cycle s + 7, and sees the last write taken by
-	// then; one taken later reaches it the sample after (checked against
-	// Nuked-OPM). Writes past TEST_WRITES in a sample replace the last.
+	// $01 was `before` this sample until a write of the bits in `mask`, now
+	// in $01, that the chip took at `cycle`, less 32 for one taken the sample
+	// before. Slot s reads bit 5 at its envelope, cycle s + 1, bit 4 at its
+	// output, cycle s + 7, and bit 3 at its phase, which runs a sample
+	// behind, cycle s + 7 of the sample before; it sees the last write of the
+	// bit taken by then, and one taken later the sample after (checked
+	// against Nuked-OPM). Writes past TEST_WRITES in a sample replace the
+	// last.
 	static constexpr uint32_t TEST_WRITES = 8;
-	void test_written(uint8_t before, uint32_t cycle)
+	void test_written(uint8_t before, uint8_t mask, int32_t cycle)
 	{
 		if (m_test_writes == 0)
 			m_test_before = before;
 		if (m_test_writes < TEST_WRITES)
 			m_test_writes++;
-		m_test_cycle[m_test_writes - 1] = uint8_t(cycle);
+		m_test_mask[m_test_writes - 1] = mask;
+		m_test_cycle[m_test_writes - 1] = int8_t(cycle);
 		m_test_value[m_test_writes - 1] = m_regdata[0x01];
 	}
 	void test_settle() { m_test_before = m_regdata[0x01]; m_test_writes = 0; }
-	uint32_t test_for(uint32_t at) const
+	uint32_t test_bit(int32_t at, uint32_t bit) const
 	{
 		uint32_t value = m_test_before;
 		for (uint32_t index = 0; index < m_test_writes; index++)
-			if (at >= m_test_cycle[index])
+			if (bitfield(m_test_mask[index], bit) && at >= m_test_cycle[index])
 				value = m_test_value[index];
-		return value;
+		return bitfield(value, bit);
 	}
 	uint32_t noise_frequency() const                 { return byte(0x0f, 0, 5) ^ 0x1f; }
 	uint32_t noise_enable() const                    { return byte(0x0f, 7, 1); }
@@ -377,7 +382,8 @@ protected:
 	uint8_t m_noise_target;               // its frequency
 	uint8_t m_test_before;                // $01 before this sample's writes
 	uint8_t m_test_writes;                // $01 writes taken this sample
-	uint8_t m_test_cycle[TEST_WRITES];    // the cycle of each
+	uint8_t m_test_mask[TEST_WRITES];     // the bits each wrote
+	int8_t m_test_cycle[TEST_WRITES];     // the cycle of each
 	uint8_t m_test_value[TEST_WRITES];    // and $01 after it
 	uint8_t m_noise_changes;              // frequency writes for its next sample
 	uint8_t m_noise_change_cycle[4];      // the cycle of each

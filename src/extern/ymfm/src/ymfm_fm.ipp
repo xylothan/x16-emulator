@@ -473,7 +473,13 @@ void fm_operator<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 		if (m_phase_restart)
 			m_phase = 0;
 		else
+		{
+			// the OPM's test register bit 3 clears the phase before its step
+			// (checked against Nuked-OPM)
+			if (m_regs.test_phase_reset(m_opoffs))
+				m_phase = 0;
 			clock_phase(lfo_raw_pm, m_phase_cache);
+		}
 		m_phase_restart = edge;
 		m_phase_cache = m_cache;
 		return;

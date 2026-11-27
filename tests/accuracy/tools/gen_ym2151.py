@@ -540,29 +540,29 @@ def noise_enable_writes(conn, keyed):
     return f
 
 
-def test_voices(s):
+def test_voices(s, am=True):
     """Channels 0, 3, 5 and 7 with every operator keyed, so that each phase
-    starts at its key-on: channel 0 with AM at depth 7F, channel 5 released
-    to silence, channel 7 with the noise."""
+    starts at its key-on: channel 0 with AM at depth 7F if `am`, channel 5
+    released to silence, channel 7 with the noise."""
     s.lfo(0xe0, 0, 0x7f, 0)
     s.set(0x0f, 0x9a)
     for ch in (0, 3, 5, 7):
-        s.channel(ch, 0x4a - 4 * ch, ams=3 if ch == 0 else 0)
+        s.channel(ch, 0x4a - 4 * ch, ams=3 if am and ch == 0 else 0)
         for sl in (0, 8, 16, 24):
-            s.op(sl + ch, tl=0x30 + sl, am=1 if ch == 0 else 0)
+            s.op(sl + ch, tl=0x30 + sl, am=1 if am and ch == 0 else 0)
         s.key(ch, 15)
     s.set(0x08, 5)
     s.wait(200)
 
 
-def test_register(bits, early=0):
+def test_register(bits, early=0, am=True):
     """$01 set to `bits` and cleared at cycles 0-30, on both outputs from a
     sample before each write; from the sample after for writes at cycles
     below `early`, which the chip takes in part a sample sooner, with the
     writes then far enough apart for a block to end before the next."""
     def f():
         s = V()
-        test_voices(s)
+        test_voices(s, am)
         t = s.t
         for o in range(31):
             for v in (bits, 0):
@@ -981,6 +981,7 @@ SCRIPTS = {
     "test_full_level": test_register(0x20),
     "test_output_bit": test_register(0x10, 6),
     "test_write_pairs": test_write_pairs(),
+    "test_phase_reset": test_register(0x08, am=False),
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),

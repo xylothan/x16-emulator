@@ -1242,7 +1242,7 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 5 ignored",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "{ return bitfield(test_for(opoffs + 1), 5); }",
+        "find": "{ return test_bit(int32_t(opoffs) + 1, 5); }",
         "into": "{ return 0 * opoffs; }",
         "count": 1,
         "caught_by": ["ym_accuracy"],
@@ -1260,8 +1260,8 @@ MUTATIONS = [
         "name": "YM2151 test register: every slot takes a write in its sample",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "if (at >= m_test_cycle[index])",
-        "into": "if (at + 32 >= m_test_cycle[index])",
+        "find": "&& at >= m_test_cycle[index])",
+        "into": "&& at + 32 >= m_test_cycle[index])",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1269,8 +1269,8 @@ MUTATIONS = [
         "name": "YM2151 test register: slots take a write a cycle late",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "test_for(opoffs + 1), 5)",
-        "into": "test_for(opoffs), 5)",
+        "find": "test_bit(int32_t(opoffs) + 1, 5)",
+        "into": "test_bit(int32_t(opoffs), 5)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1296,7 +1296,7 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 4 ignored",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_output_bit.vec
-        "find": "{ return bitfield(test_for(opoffs + 7), 4); }",
+        "find": "{ return test_bit(int32_t(opoffs) + 7, 4); }",
         "into": "{ return 0 * opoffs; }",
         "count": 1,
         "caught_by": ["ym_accuracy"],
@@ -1305,8 +1305,8 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 4 waits for the engine",
         "file": "src/ymglue.cpp",
         # ym_test_output_bit.vec
-        "find": "TEST_FAST = 0x30;",
-        "into": "TEST_FAST = 0x20;",
+        "find": "TEST_FAST = 0x38;",
+        "into": "TEST_FAST = 0x28;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1314,8 +1314,8 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 4 read at the envelope",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_output_bit.vec
-        "find": "test_for(opoffs + 7), 4)",
-        "into": "test_for(opoffs + 1), 4)",
+        "find": "test_bit(int32_t(opoffs) + 7, 4)",
+        "into": "test_bit(int32_t(opoffs) + 1, 4)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1343,6 +1343,51 @@ MUTATIONS = [
         # ym_test_write_pairs.vec
         "find": "m_test_before = before;",
         "into": "m_test_before = before; m_test_writes = 0;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 ignored",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_phase_reset.vec
+        "find": "if (m_regs.test_phase_reset(m_opoffs))",
+        "into": "if (false)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 read in the sample it is written",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_phase_reset.vec
+        "find": "test_bit(int32_t(opoffs) + 7 - 32, 3)",
+        "into": "test_bit(int32_t(opoffs) + 7, 3)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 read a cycle late",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_phase_reset.vec
+        "find": "test_bit(int32_t(opoffs) + 7 - 32, 3)",
+        "into": "test_bit(int32_t(opoffs) + 6 - 32, 3)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 not carried to the sample after",
+        "file": "src/ymglue.cpp",
+        # ym_test_phase_reset.vec
+        "find": "queue(TEST_FAST_WAIT + 1, 0, v, LATE_CARRY, m_bus.cycle);",
+        "into": "",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 carried without the value before",
+        "file": "src/ymglue.cpp",
+        # ym_test_phase_reset.vec
+        "find": "m_late[j].addr = test;",
+        "into": "m_late[j].addr = e.value;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

@@ -341,10 +341,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
 		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
 		// The test register bits that reach the engine after TEST_FAST_WAIT:
-		// bit 4 sets bit 13 of each operator's level, bit 5 holds every
-		// operator at full level.
-		static constexpr uint8_t TEST_FAST = 0x30;
+		// bit 3 clears each operator's phase, bit 4 sets bit 13 of its level,
+		// bit 5 holds it at full level. The phase runs a sample behind, so
+		// bit 3 reaches most slots the sample after: TEST_PHASE carries the
+		// write there.
+		static constexpr uint8_t TEST_FAST = 0x38;
 		static constexpr uint8_t TEST_FAST_WAIT = 0;
+		static constexpr uint8_t TEST_PHASE = 0x08;
+		static constexpr uint8_t TEST_REST = (uint8_t)~TEST_FAST;
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
@@ -353,6 +357,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			LATE_DIRECT = 2,  // a register write the chip acts on at once
 			LATE_NOISE  = 3,  // a $0F write's frequency, for the noise generator
 			LATE_TEST   = 4,  // a $01 write to the bits its address names
+			LATE_CARRY  = 5,  // a $01 write's bit 3 the sample after, $01 before it in its address
 		};
 
 		struct late_write {
@@ -445,8 +450,18 @@ class ym2151_interface : public ymfm::ymfm_interface {
 					const uint8_t test = (uint8_t)regs.test();
 					to_engine(0x01, (uint8_t)((test & ~e.addr) | (e.value & e.addr)), e.cycle);
 					if (e.addr == TEST_FAST) {
-						regs.test_written(test, e.cycle);
+						regs.test_written(test, TEST_FAST, (int32_t)e.cycle);
+						for (size_t j = i + 1; j < m_late_count; j++) {
+							if (m_late[j].kind == LATE_CARRY && m_late[j].cycle == e.cycle) {
+								m_late[j].addr = test;
+								break;
+							}
+						}
 					}
+				} else if (e.kind == LATE_CARRY) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					const uint8_t test = (uint8_t)regs.test();
+					regs.test_written((uint8_t)((test & ~TEST_PHASE) | (e.addr & TEST_PHASE)), TEST_PHASE, (int32_t)e.cycle - 32);
 				} else {
 					to_engine(e.addr, e.value, e.cycle);
 				}
@@ -510,7 +525,8 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						// The test register's bits take effect at different
 						// points (checked against Nuked-OPM).
 						queue(TEST_FAST_WAIT, TEST_FAST, v, LATE_TEST, m_bus.cycle);
-						queue(ENGINE_BEHIND, (uint8_t)~TEST_FAST, v, LATE_TEST, m_bus.cycle);
+						queue(TEST_FAST_WAIT + 1, 0, v, LATE_CARRY, m_bus.cycle);
+						queue(ENGINE_BEHIND, TEST_REST, v, LATE_TEST, m_bus.cycle);
 					} else if (a == 0x0f) {
 						// The noise generator takes $0F's frequency at its cycle,
 						// and the mixer the enable, from the next sample when the
@@ -828,7 +844,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_late_count = std::min<size_t>(img[1], LATE_MAX);
 			for (size_t i = 0; i < m_late_count; i++) {
 				const uint8_t *e = img + 2 + 5 * i;
-				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE || e[4] == LATE_TEST) ? e[4] : LATE_WRITE;
+				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE || e[4] == LATE_TEST || e[4] == LATE_CARRY) ? e[4] : LATE_WRITE;
 				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], kind };
 			}
 		}
