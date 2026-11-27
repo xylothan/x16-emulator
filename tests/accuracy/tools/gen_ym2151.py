@@ -11,6 +11,7 @@ import os
 import subprocess
 
 SAMPLE = 32          # OPM_Clock calls per sample
+SETTLE = 2           # samples each block starts after the one a script asks for
 START = 320
 
 
@@ -40,7 +41,7 @@ class S:
         self._op(t0, "x %d %d" % (t0, t1))
 
     def o(self, n0, n, side):
-        self._op(SAMPLE * n0, "o %d %d %s" % (n0, n, side))
+        self._op(SAMPLE * n0, "o %d %d %s" % (n0 + SETTLE, n, side))
 
     def text(self):
         return "\n".join(o[2] for o in sorted(self.ops)) + "\ne\n"
@@ -523,11 +524,10 @@ def lfo_noise_am(rate):
 
 def algorithms():
     """Every algorithm on channel 2 without feedback and channel 5 with it, both
-    sides, each slot at its own MUL and level. Feedback stays low enough that the
-    first samples after key-on (tests/accuracy/README.md) die away."""
+    sides, each slot at its own MUL and level."""
     s = V()
     for con in range(8):
-        for ch, fb in ((2, 0), (5, 1 + con % 3)):
+        for ch, fb in ((2, 0), (5, 7 - con % 4)):
             s.channel(ch, 0x3c + 3 * ch, 0x15, con=con, fb=fb)
             for k, sl in enumerate((ch, ch + 8, ch + 16, ch + 24)):
                 s.op(sl, mul=(1, 2, 3, 5)[(k + ch) % 4], tl=(0, 10, 20, 4)[k])
@@ -554,6 +554,123 @@ def output_clamp():
         s.key(ch, 15)
     s.out(512, "L")
     s.out(512, "R")
+    return s
+
+
+def env_op(s, sl, ar, d1r, d1l, d2r, rr, ks=0, tl=0x20, mul=1):
+    """An operator with its own envelope."""
+    for a, v in ((0x40, mul), (0x60, tl), (0x80, ks << 6 | ar), (0xa0, d1r),
+                 (0xc0, d2r), (0xe0, d1l << 4 | rr)):
+        s.set(a + sl, v)
+
+
+ENVELOPES = (  # ar, d1r, d1l, d2r, rr, ks, kc
+    (0x18, 0x00, 0x0, 0x00, 0x0, 0, 0x4a),
+    (0x1f, 0x10, 0x8, 0x05, 0xa, 3, 0x7e),
+    (0x0a, 0x04, 0x2, 0x02, 0x6, 0, 0x4a),
+    (0x14, 0x08, 0x4, 0x03, 0x8, 0, 0x4a),
+    (0x1b, 0x11, 0x4, 0x13, 0xd, 0, 0x4a),
+    (0x1d, 0x1c, 0xf, 0x1e, 0xf, 3, 0x7e),
+    (0x1f, 0x1f, 0x2, 0x03, 0xf, 2, 0x5c),
+    (0x19, 0x06, 0xf, 0x00, 0x3, 1, 0x2e),
+)
+
+
+def envelopes():
+    """Attack, both decays, sustain and release at a range of rates and key
+    scalings, one carrier per channel, then each keyed again mid-release."""
+    s = V()
+    for ch, (ar, d1r, d1l, d2r, rr, ks, kc) in enumerate(ENVELOPES):
+        s.channel(ch, kc, 0x10)
+        env_op(s, ch + 24, ar, d1r, d1l, d2r, rr, ks)
+    for ch in range(8):
+        s.set(0x08, 8 << 3 | ch)
+    s.out(1536, "L")
+    s.wait(1024)
+    for ch in range(8):
+        s.set(0x08, ch)
+    s.wait(64)
+    for ch in range(8):
+        s.set(0x08, 8 << 3 | ch)
+    s.wait(256)
+    for ch in range(8):
+        s.set(0x08, ch)
+    s.out(1024, "R")
+    s.wait(1024 + 4)
+    return s
+
+
+def key_timing():
+    """Key-on and key-off written at every cycle of the sample, on the first,
+    a middle and the last channel."""
+    s = V()
+    for ch in (0, 3, 7):
+        s.channel(ch, 0x4a, 0x10)
+        env_op(s, ch + 24, 0x1c, 0x0c, 0x4, 0x06, 0x9)
+    t = s.t
+    for ch in (0, 3, 7):
+        for o in range(32):
+            for v in (8 << 3 | ch, ch):
+                t += 96 * SAMPLE
+                t = t - t % SAMPLE + o
+                s.w(0, 0x08, t - 6)
+                s.w(1, v, t)
+                s.o(t // SAMPLE - 2, 64, "R")
+    return s
+
+
+def key_latch():
+    """Two $08 values d cycles apart, without a new address: the latch takes the
+    second, and a key the chip has not copied yet is lost."""
+    s = V()
+    for ch in (0, 6, 7):
+        s.channel(ch, 0x4a, 0x10)
+        env_op(s, ch + 24, 0x1c, 0x0c, 0x4, 0x06, 0x9)
+    t = s.t
+    for a, b in ((7, 0), (0, 7), (6, 7), (7, 6)):
+        for o in range(16, 32, 3):
+            for d in (2, 4, 8):
+                t += 96 * SAMPLE
+                t = t - t % SAMPLE + o
+                s.w(0, 0x08, t - 6)
+                s.w(1, 8 << 3 | a, t)
+                s.w(1, 8 << 3 | b, t + d)
+                s.o(t // SAMPLE - 2, 48, "R")
+                t += 64 * SAMPLE
+                s.w(1, a, t)
+                s.w(1, b, t + 40)
+    return s
+
+
+OP_WRITES = (  # register, value, ar, d1r, d1l, d2r, rr, ks, kc
+    (0x60, 0x30, 0x1f, 0x00, 0x0, 0x00, 0x0, 0, 0x4a),
+    (0x80, 0x1a, 0x0c, 0x00, 0x0, 0x00, 0x0, 0, 0x4a),
+    (0xa0, 0x0c, 0x1f, 0x04, 0xf, 0x00, 0x0, 0, 0x4a),
+    (0xc0, 0x0c, 0x1f, 0x1f, 0x2, 0x03, 0x0, 0, 0x4a),
+    (0xe0, 0x20, 0x1f, 0x06, 0xf, 0x00, 0x0, 0, 0x4a),
+    (0x80, 0xdf, 0x1f, 0x09, 0xf, 0x00, 0x0, 0, 0x7e),
+    (0x40, 0x03, 0x1f, 0x00, 0x0, 0x00, 0x0, 0, 0x4a),
+)
+
+
+def op_writes():
+    """Each operator register written mid-envelope at every other cycle of the
+    sample."""
+    s = V()
+    s.channel(0, 0x4a, 0x10)
+    for reg, val, ar, d1r, d1l, d2r, rr, ks, kc in OP_WRITES:
+        s.set(0x28, kc)
+        for o in range(0, 32, 2):
+            env_op(s, 24, ar, d1r, d1l, d2r, rr, ks)
+            s.set(0x08, 8 << 3)
+            n0 = s.out(160)
+            t = SAMPLE * (n0 + 48) + o
+            s.w(0, reg + 24, t - 6)
+            s.w(1, val, t)
+            s.t = t + 40
+            s.until(n0 + 128)
+            s.set(0x08, 0)
+            s.wait(40)
     return s
 
 
@@ -597,6 +714,10 @@ SCRIPTS = {
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),
     "algorithms": algorithms,
     "output_clamp": output_clamp,
+    "envelopes": envelopes,
+    "key_timing": key_timing,
+    "key_latch": key_latch,
+    "op_writes": op_writes,
 }
 
 

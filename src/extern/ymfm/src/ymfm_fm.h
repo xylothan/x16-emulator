@@ -214,6 +214,12 @@ public:
 	uint8_t debug_ssg_inverted() const { return m_ssg_inverted; }
 	opdata_cache &debug_cache() { return m_cache; }
 
+	// the cache as the phase sees it, and whether the phase restarts in the
+	// next sample, on a chip whose envelope steps by sample
+	opdata_cache &phase_cache() { return m_phase_cache; }
+	bool phase_restart() const { return m_phase_restart; }
+	void set_phase_restart(bool restart) { m_phase_restart = restart; }
+
 private:
 	// start the attack phase
 	void start_attack(bool is_restart = false);
@@ -225,7 +231,14 @@ private:
 	void clock_keystate(uint32_t keystate);
 	void clock_ssg_eg_state();
 	void clock_envelope(uint32_t env_counter);
-	void clock_phase(int32_t lfo_raw_pm);
+	void clock_envelope_by_sample(uint32_t env_counter);
+	void clock_phase(int32_t lfo_raw_pm, opdata_cache const &cache);
+
+	// the step for the given rate on this envelope cycle
+	uint32_t envelope_increment(uint32_t rate, uint32_t env_counter) const;
+
+	// the envelope level the output reads
+	uint32_t env_level() const;
 
 	// return effective attenuation of the envelope
 	uint32_t envelope_attenuation(uint32_t am_offset) const;
@@ -235,11 +248,15 @@ private:
 	uint32_t m_opoffs;                     // operator offset in registers
 	uint32_t m_phase;                      // current phase value (10.10 format)
 	uint16_t m_env_attenuation;            // computed envelope attenuation (4.6 format)
+	uint16_t m_env_out;                    // attenuation the output reads this sample
 	envelope_state m_env_state;            // current envelope state
 	uint8_t m_ssg_inverted;                // non-zero if the output should be inverted (bit 0)
 	uint8_t m_key_state;                   // current key state: on or off (bit 0)
+	bool m_keyon_edge;                     // the key came on in this sample
+	bool m_phase_restart;                  // the phase restarts in this sample
 	uint8_t m_keyon_live;                  // live key on state (bit 0 = direct, bit 1 = rhythm, bit 2 = CSM)
 	opdata_cache m_cache;                  // cached values for performance
+	opdata_cache m_phase_cache;            // the cache as the phase sees it, a sample late
 	RegisterType &m_regs;                  // direct reference to registers
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
 };
@@ -251,6 +268,14 @@ template<typename RegisterType, typename = void>
 struct has_output_late : std::false_type { };
 template<typename RegisterType>
 struct has_output_late<RegisterType, std::void_t<decltype(RegisterType::output_late(0u, 0u))>> : std::true_type { };
+
+// whether the envelope steps once a sample from the state the sample began
+// with, and the output reads it as it was before the step
+// (RegisterType::envelope_by_sample())
+template<class RegisterType, class = void>
+struct envelope_by_sample : std::false_type { };
+template<class RegisterType>
+struct envelope_by_sample<RegisterType, std::void_t<decltype(RegisterType::envelope_by_sample())>> : std::bool_constant<RegisterType::envelope_by_sample()> { };
 
 // whether operator 3's input from operator 2 is operator 2's output of the
 // sample before (RegisterType::op3_takes_last_op2())

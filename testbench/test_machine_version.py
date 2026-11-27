@@ -485,27 +485,33 @@ def check_ids():
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"YM  ")
-        if ver == 6:
+        if ver == 7:
             # ymglue.cpp state_load: the body ends with the 22-byte bus image, the
-            # 12-byte LFO image, the 80-byte noise image and the 16-byte channel
-            # image. Version 5 has no channel image. Versions 3 and 4 hold a 512-byte
-            # noise table before the bus image and no noise image; version 3 has no
-            # LFO image either.
+            # 12-byte LFO image, the 80-byte noise image, the 16-byte channel image,
+            # the 482-byte image of writes waiting, the 10-byte key image and the
+            # 544-byte operator image. Version 6 has none of the last three, and
+            # version 5 no channel image. Versions 3 and 4 hold a 512-byte noise
+            # table before the bus image and no noise image; version 3 has no LFO
+            # image either.
+            def v6(b):
+                return b[:-1036]
             def v5(b):
-                return b[:-16]
+                return v6(b)[:-16]
             def v4(b):
                 b = v5(b)
                 return b[:-114] + bytes(512) + b[-114:-80]
+            r, err = chunk_as(b"YM  ", 6, 0, v6)
+            case("YM chunk v6, without the waiting writes, keys and operators, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 5, 0, v5)
             case("YM chunk v5, without the channel image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 4, 0, v4)
             case("YM chunk v4, with its table and no noise image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 3, 0, lambda b: v4(b)[:-12])
             case("YM chunk v3, also without the LFO image, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"YM  ", 6, 16)
-            case("YM chunk v6 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+            r, err = chunk_as(b"YM  ", 7, 16)
+            case("YM chunk v7 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
-            case("YM chunk is v6 for the older-chunk cases (it is v%d)" % ver, False)
+            case("YM chunk is v7 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

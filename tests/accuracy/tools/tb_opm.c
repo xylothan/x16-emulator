@@ -21,8 +21,7 @@
 //   e          end                         -> e
 //
 // C is the CRC-32 of the values in loop order, 4 bytes each, LSB first.
-// Sample n is the one computed in clocks 32n..32n+31; the DAC shows it
-// 5 samples later.
+// Sample n is the one the DAC shows at the end of clocks 32(n+3)..32(n+3)+31.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -47,7 +46,7 @@ static void watch(void)
 	}
 }
 
-#define OUT_LAG 5
+#define OUT_LAG 3
 #define MAX_SAMPLES 65536
 #define MAX_BLOCKS 1024
 

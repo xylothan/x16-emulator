@@ -447,8 +447,8 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 	// of the key code)
 	uint32_t keycode = bitfield(block_freq, 8, 5);
 
-	// detune adjustment
-	cache.detune = detune_adjustment(op_detune(opoffs), keycode);
+	// DT1 (bits 0-2) and DT2 (bits 3-4) as written, for compute_phase_step()
+	cache.detune = op_detune(opoffs) | (op_detune2(opoffs) << 3);
 
 	// multiple value, as an x.1 value (0 means 0.5)
 	cache.multiple = op_multiple(opoffs) * 2;
@@ -584,11 +584,11 @@ uint32_t opm_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opd
 	// whatever the latch still holds
 	uint32_t pm = (lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;
 	code = opm_apply_pm(code, pm, ch_lfo_pm_sens(choffs));
-	code = opm_apply_dt2(code, op_detune2(opoffs));
+	code = opm_apply_dt2(code, bitfield(cache.detune, 3, 2));
 
 	// DT1 is chosen by the block and note group the code has reached
 	uint32_t phase_step = opm_code_to_phase_step(code);
-	phase_step += detune_adjustment(op_detune(opoffs), std::min<uint32_t>(code >> 8, 0x1c));
+	phase_step += detune_adjustment(bitfield(cache.detune, 0, 3), std::min<uint32_t>(code >> 8, 0x1c));
 	phase_step &= 0x1ffff;
 
 	// apply frequency multiplier (which is cached as an x.1 value)
