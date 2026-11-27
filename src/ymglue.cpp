@@ -527,10 +527,17 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		// $19 is one write address for two depths, split on bit 7, so only
 		// the chip knows both.
+		// The depths as written, counting writes still waiting for the engine.
 		void debug_lfo_depths(uint8_t *am, uint8_t *pm) {
 			const ymfm::opm_registers &regs = m_chip.engine().regs();
 			*am = (uint8_t)regs.lfo_am_depth();
 			*pm = (uint8_t)regs.lfo_pm_depth();
+			for (size_t i = 0; i < m_late_count; i++) {
+				const late_write &e = m_late[i];
+				if (e.kind == LATE_WRITE && e.addr == 0x19) {
+					*((e.value & 0x80) ? pm : am) = e.value & 0x7f;
+				}
+			}
 		}
 
 		// ─── Save states ────────────────────────────────────────────────

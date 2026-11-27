@@ -1278,8 +1278,8 @@ MUTATIONS = [
         "name": "YM2151 phase does not restart at key-on",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_envelopes.vec
-        "find": "m_phase_restart = edge;",
-        "into": "m_phase_restart = false;",
+        "find": "if (m_phase_restart)",
+        "into": "if (false && m_phase_restart)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
