@@ -331,16 +331,18 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		// The engine runs ENGINE_BEHIND samples behind the interface, so a
 		// write can reach it as early as the chip acts on it: the key-on latch,
-		// the LFO depths and $20-$FF at once (checked against Nuked-OPM). The
-		// rest wait that long, and reach it at the engine sample matching the
-		// interface's.
-		static constexpr uint8_t ENGINE_BEHIND = 2;
-		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND, "the LFO depths are kept ENGINE_BEHIND samples on");
+		// the LFO depths and $20-$FF after DIRECT_WAIT (checked against
+		// Nuked-OPM). The rest wait ENGINE_BEHIND, and reach it at the engine
+		// sample matching the interface's.
+		static constexpr uint8_t ENGINE_BEHIND = 3;
+		static constexpr uint8_t DIRECT_WAIT = ENGINE_BEHIND - 2;
+		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DIRECT_WAIT, "the LFO depths are kept as far on as a direct write lands");
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
 			LATE_WRITE  = 0,  // a register write
 			LATE_CSM    = 1,  // a CSM key-on
+			LATE_DIRECT = 2,  // a register write the chip acts on at once
 		};
 
 		struct late_write {
@@ -358,10 +360,18 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_chip.write_data(v);
 		}
 
-		void queue(uint8_t wait, uint8_t a, uint8_t v, uint8_t kind) {
+		void queue(uint8_t wait, uint8_t a, uint8_t v, uint8_t kind, uint8_t cycle) {
 			if (m_late_count < LATE_MAX) {
-				m_late[m_late_count++] = late_write{ wait, m_bus.cycle, a, v, kind };
+				m_late[m_late_count++] = late_write{ wait, cycle, a, v, kind };
 			}
+		}
+
+		void queue(uint8_t wait, uint8_t a, uint8_t v, uint8_t kind) {
+			queue(wait, a, v, kind, m_bus.cycle);
+		}
+
+		void direct(uint8_t a, uint8_t v, uint8_t cycle) {
+			queue(DIRECT_WAIT, a, v, LATE_DIRECT, cycle);
 		}
 
 		void late(uint8_t a, uint8_t v) {
@@ -373,12 +383,21 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		}
 
 		// Before the engine's sample: what is due, in the order taken.
+		// Direct writes first: the chip took them before the queued writes
+		// due with them.
 		void apply_late() {
+			for (size_t i = 0; i < m_late_count; i++) {
+				const late_write &e = m_late[i];
+				if (e.wait == 0 && e.kind == LATE_DIRECT) {
+					to_engine(e.addr, e.value, e.cycle);
+				}
+			}
 			size_t kept = 0;
 			for (size_t i = 0; i < m_late_count; i++) {
 				const late_write &e = m_late[i];
 				if (e.wait != 0) {
 					m_late[kept++] = e;
+				} else if (e.kind == LATE_DIRECT) {
 				} else if (e.kind == LATE_CSM) {
 					m_engine->engine_timer_expired(0);
 				} else {
@@ -398,7 +417,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			const uint8_t at = (uint8_t)(24 + ch);
 			if (m_kon_next <= at && at <= last && m_kon_copied[ch] != m_kon_latch) {
 				m_kon_copied[ch] = m_kon_latch;
-				to_engine(0x08, m_kon_latch, at);
+				direct(0x08, m_kon_latch, at);
 			}
 			m_kon_next = (uint8_t)(last + 1);
 		}
@@ -435,7 +454,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						m_kon_latch = v & 0x7f;
 						latch_keyon(v);
 					} else if (a >= 0x20 || a == 0x19) {
-						to_engine(a, v, m_bus.cycle);
+						direct(a, v, m_bus.cycle);
 					} else {
 						late(a, v);
 					}
@@ -536,7 +555,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			*pm = (uint8_t)regs.lfo_pm_depth();
 			for (size_t i = 0; i < m_late_count; i++) {
 				const late_write &e = m_late[i];
-				if (e.kind == LATE_WRITE && e.addr == 0x19) {
+				if (e.kind != LATE_CSM && e.addr == 0x19) {
 					*((e.value & 0x80) ? pm : am) = e.value & 0x7f;
 				}
 			}
@@ -683,7 +702,8 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_late_count = std::min<size_t>(img[1], LATE_MAX);
 			for (size_t i = 0; i < m_late_count; i++) {
 				const uint8_t *e = img + 2 + 5 * i;
-				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], (uint8_t)(e[4] == LATE_CSM ? LATE_CSM : LATE_WRITE) };
+				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT) ? e[4] : LATE_WRITE;
+				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], kind };
 			}
 		}
 
@@ -881,6 +901,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				ss_get(r, keys, sizeof keys);
 				ss_get(r, ops, sizeof ops);
 				have_ops = true;
+			}
+			// Before version 9 the engine ran a sample nearer the interface:
+			// it waits one more, and so does each write.
+			if (version < 9) {
+				late_img[0]++;
+				for (size_t i = 0; i < std::min<size_t>(late_img[1], LATE_MAX); i++) {
+					late_img[2 + 5 * i]++;
+				}
 			}
 			// Before version 8 the depths had no history: each window holds
 			// the registers'.
@@ -1207,6 +1235,10 @@ extern "C" {
 		s_lost_handler = handler;
 	}
 
+	unsigned YM_output_latency() {
+		return ym2151_interface::ENGINE_BEHIND - 2;
+	}
+
 	uint8_t YM_read_status() {
 		if (initialized)
 			return opm_iface.read_status();
@@ -1243,7 +1275,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 8);
+		ss_begin(w, "YM  ", 9);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);

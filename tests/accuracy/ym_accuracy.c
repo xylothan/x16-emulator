@@ -195,17 +195,18 @@ run_file(const char *dir, const char *name)
 				bad = 1;
 			}
 		} else if (sscanf(line, "O %" SCNu64 " %c %x", &t, &side, &c) == 3) {
-			if (t + 64 > MAX_SAMPLES) {
+			const uint64_t lat = YM_output_latency();
+			if (t + lat + 64 > MAX_SAMPLES) {
 				printf("%s:%d: sample %" PRIu64 " past the end of the buffer\n", name, n, t);
 				bad = 1;
 				break;
 			}
-			if (32 * (t + 64) > now) {
-				bad = advance(&w, 32 * (t + 64), name, n);
+			if (32 * (t + lat + 64) > now) {
+				bad = advance(&w, 32 * (t + lat + 64), name, n);
 			}
 			const int sd = side == 'L' ? 0 : 1;
 			uint32_t got = 0;
-			for (uint64_t k = t; k < t + 64; k++) {
+			for (uint64_t k = t + lat; k < t + lat + 64; k++) {
 				got = crc(got, (uint16_t)out[sd][k]);
 			}
 			if (!bad && got != c) {

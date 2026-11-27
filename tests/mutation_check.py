@@ -1319,6 +1319,15 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
+    {
+        "name": "YM2151 direct writes wait a sample too long",
+        "file": "src/ymglue.cpp",
+        # ym_key_timing.vec, ym_op_writes.vec
+        "find": "queue(DIRECT_WAIT, a, v, LATE_DIRECT, cycle);",
+        "into": "queue(DIRECT_WAIT + 1, a, v, LATE_DIRECT, cycle);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
     # YM2151 LFO multiply. Expected values: Nuked-OPM, tests/accuracy/ym2151.
     {
         "name": "YM2151 LFO depth writes wait for the engine",
