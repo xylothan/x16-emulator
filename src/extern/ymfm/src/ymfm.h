@@ -227,11 +227,11 @@ inline int16_t decode_fp(int16_t value)
 
 inline int16_t roundtrip_fp(int32_t value)
 {
-	// handle overflows first
+	// overflows clamp to the format's range, whose top is 0x7fc0
 	if (value < -32768)
-		return -32768;
+		value = -32768;
 	if (value > 32767)
-		return 32767;
+		value = 32767;
 
 	// we need to count the number of leading sign bits after the sign
 	// we can use count_leading_zeros if we invert negative values

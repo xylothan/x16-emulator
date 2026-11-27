@@ -485,21 +485,27 @@ def check_ids():
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"YM  ")
-        if ver == 5:
+        if ver == 6:
             # ymglue.cpp state_load: the body ends with the 22-byte bus image, the
-            # 12-byte LFO image and the 80-byte noise image. Versions 3 and 4 hold a
-            # 512-byte noise table before the bus image and no noise image; version
-            # 3 has no LFO image either.
+            # 12-byte LFO image, the 80-byte noise image and the 16-byte channel
+            # image. Version 5 has no channel image. Versions 3 and 4 hold a 512-byte
+            # noise table before the bus image and no noise image; version 3 has no
+            # LFO image either.
+            def v5(b):
+                return b[:-16]
             def v4(b):
+                b = v5(b)
                 return b[:-114] + bytes(512) + b[-114:-80]
+            r, err = chunk_as(b"YM  ", 5, 0, v5)
+            case("YM chunk v5, without the channel image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 4, 0, v4)
             case("YM chunk v4, with its table and no noise image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 3, 0, lambda b: v4(b)[:-12])
             case("YM chunk v3, also without the LFO image, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"YM  ", 5, 80)
-            case("YM chunk v5 80 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+            r, err = chunk_as(b"YM  ", 6, 16)
+            case("YM chunk v6 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
-            case("YM chunk is v5 for the older-chunk cases (it is v%d)" % ver, False)
+            case("YM chunk is v6 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

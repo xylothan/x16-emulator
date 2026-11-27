@@ -35,3 +35,5 @@ ym_noise_writes.vec
 ym_noise_am.vec
 ym_lfo_noise_am_d0.vec
 ym_lfo_noise_am_f0.vec
+ym_algorithms.vec
+ym_output_clamp.vec

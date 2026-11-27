@@ -252,6 +252,13 @@ struct has_output_late : std::false_type { };
 template<typename RegisterType>
 struct has_output_late<RegisterType, std::void_t<decltype(RegisterType::output_late(0u, 0u))>> : std::true_type { };
 
+// whether operator 3's input from operator 2 is operator 2's output of the
+// sample before (RegisterType::op3_takes_last_op2())
+template<class RegisterType, class = void>
+struct has_last_op2 : std::false_type { };
+template<class RegisterType>
+struct has_last_op2<RegisterType, std::void_t<decltype(RegisterType::op3_takes_last_op2())>> : std::true_type { };
+
 
 // ======================> fm_channel
 
@@ -320,6 +327,13 @@ public:
 	int32_t late_output(uint32_t index) const { return m_late[index]; }
 	void set_late_output(uint32_t index, int32_t value) { m_late[index] = value; }
 
+	// operator 2's output this sample, for operator 3 in the next
+	int16_t held_op2() const { return m_op2_in; }
+	void set_held_op2(int16_t value) { m_op2_in = value; }
+
+	// the output() of a channel whose operators are all silent
+	void silent_output() const { m_feedback_in = 0; m_op2_in = 0; }
+
 private:
 	// helper to add values to the outputs based on channel enables
 	void add_to_output(uint32_t choffs, output_data &output, int32_t value) const
@@ -350,6 +364,8 @@ private:
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
 	mutable int32_t m_late[RegisterType::OUTPUTS];   // this sample's late part, for the next
 	int32_t m_late_prev[RegisterType::OUTPUTS];      // the last sample's, mixed into this one
+	mutable int16_t m_op2_in;              // operator 2's output this sample (set in output)
+	int16_t m_op2_last;                    // operator 2's output the sample before
 };
 
 
