@@ -836,6 +836,34 @@ void op_box_tooltip(int ch, int alg, int slot, uint8_t fb)
     ImGui::EndTooltip();
 }
 
+// Box positions for each algorithm in grid cells, indexed by slot (M1, M2, C1,
+// C2). Signal flows left to right, every carrier is the rightmost box in its
+// row so its line to the output bus crosses nothing, and M1 has open space
+// above it for the feedback loop.
+struct AlgLayout {
+    float col[OP_COUNT];
+    float row[OP_COUNT];
+    int cols;
+    int rows;
+};
+
+static const AlgLayout s_alg_layout[8] = {
+    // col: M1    M2    C1    C2        row: M1    M2    C1    C2
+    {{ 0.0f, 2.0f, 1.0f, 3.0f }, { 0.0f, 0.0f, 0.0f, 0.0f }, 4, 1},  // M1 -> C1 -> M2 -> C2
+    {{ 0.0f, 1.0f, 0.0f, 2.0f }, { 0.0f, 0.5f, 1.0f, 0.5f }, 3, 2},  // (M1 + C1) -> M2 -> C2
+    {{ 1.0f, 1.0f, 0.0f, 2.0f }, { 0.0f, 1.0f, 1.0f, 0.5f }, 3, 2},  // (M1 + (C1 -> M2)) -> C2
+    {{ 0.0f, 1.0f, 1.0f, 2.0f }, { 0.0f, 1.0f, 0.0f, 0.5f }, 3, 2},  // ((M1 -> C1) + M2) -> C2
+    {{ 0.0f, 0.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f }, 2, 2},  // (M1 -> C1) + (M2 -> C2)
+    {{ 0.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 0.0f, 2.0f }, 2, 3},  // M1 -> C1, M2, C2
+    {{ 0.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 2.0f }, 2, 3},  // (M1 -> C1) + M2 + C2
+    {{ 0.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 2.0f, 3.0f }, 1, 4},  // M1 + M2 + C1 + C2
+};
+
+// Where each channel's boxes and output bus were last drawn, relative to the canvas.
+static ImVec2 s_box_pos[YM_NUM_CHANNELS][OP_COUNT];
+static float  s_bus_x[YM_NUM_CHANNELS];
+static bool   s_layout_valid[YM_NUM_CHANNELS];
+
 // The connection diagram for one channel. `compact` drops the per-box level
 // text so eight fit on screen; `titled` labels the canvas with its channel,
 // for when several are on screen. Returns true when clicked.
@@ -858,14 +886,45 @@ bool draw_alg_diagram(int ch, ImVec2 canvas, bool compact, bool titled = false)
         dl->AddText(ImVec2(p0.x + 6.0f, p0.y + 4.0f), IM_COL32(200, 205, 215, 255), title);
     }
 
-    ImVec2 c[OP_COUNT] = {
-        ImVec2(p0.x + canvas.x * 0.16f, p0.y + canvas.y * 0.42f),
-        ImVec2(p0.x + canvas.x * 0.38f, p0.y + canvas.y * 0.25f),
-        ImVec2(p0.x + canvas.x * 0.38f, p0.y + canvas.y * 0.62f),
-        ImVec2(p0.x + canvas.x * 0.64f, p0.y + canvas.y * 0.42f),
-    };
-    const ImVec2 box = compact ? ImVec2(40.0f, 24.0f) : ImVec2(70.0f, 42.0f);
+    const AlgLayout &lay = s_alg_layout[alg];
+    const ImVec2 box = compact ? ImVec2(40.0f, 22.0f) : ImVec2(70.0f, 42.0f);
     const float fb_lift = compact ? 22.0f : 60.0f;
+    const float fb_peak = fb_lift * 0.75f;  // a cubic Bezier rises 3/4 of its control points' lift
+    const float fb_label_h = compact ? 0.0f : 14.0f;
+
+    // Rows share the height left under the title and M1's feedback loop.
+    const float top = (titled ? 20.0f : 4.0f) + fb_peak + fb_label_h + box.y * 0.5f;
+    const float bottom = canvas.y - 6.0f - box.y * 0.5f;
+    const float row_pitch = lay.rows > 1 ? fminf((bottom - top) / (float)(lay.rows - 1), box.y * 2.2f) : 0.0f;
+    const float row0 = 0.5f * (top + bottom) - 0.5f * row_pitch * (float)(lay.rows - 1);
+
+    // Columns, output bus, OUT arrow and label, centred as one block.
+    const float left_room = 10.0f;  // the feedback loop bulges past a compact M1's sides
+    const float bus_gap = compact ? 12.0f : 18.0f;
+    const float out_len = compact ? 26.0f : 44.0f;
+    const float label_w = ImGui::CalcTextSize("OUT").x + 8.0f;
+    const float fixed_w = left_room + box.x + bus_gap + out_len + label_w;
+    const float col_pitch = lay.cols > 1
+        ? fmaxf(box.x + 16.0f, fminf((canvas.x - fixed_w) / (float)(lay.cols - 1), box.x * 2.4f))
+        : 0.0f;
+    const float block_w = fixed_w + col_pitch * (float)(lay.cols - 1);
+    const float col0 = fmaxf(0.0f, 0.5f * (canvas.x - block_w)) + left_room + box.x * 0.5f;
+    const float bus_target = col0 + col_pitch * (float)(lay.cols - 1) + box.x * 0.5f + bus_gap;
+
+    // Glide toward the layout rather than jump, so a box can be followed when a
+    // channel changes ALG. Positions are kept relative to the canvas.
+    const float k = s_layout_valid[ch] ? 1.0f - expf(-ImGui::GetIO().DeltaTime * 18.0f) : 1.0f;
+    ImVec2 c[OP_COUNT];
+    for (int s = 0; s < OP_COUNT; ++s) {
+        ImVec2 &cur = s_box_pos[ch][s];
+        cur.x += (col0 + lay.col[s] * col_pitch - cur.x) * k;
+        cur.y += (row0 + lay.row[s] * row_pitch - cur.y) * k;
+        c[s] = ImVec2(p0.x + cur.x, p0.y + cur.y);
+    }
+    s_bus_x[ch] += (bus_target - s_bus_x[ch]) * k;
+    s_layout_valid[ch] = true;
+    const float bus_x = p0.x + s_bus_x[ch];
+
     const uint8_t carriers = carriers_for_alg(alg);
     const ImU32 mod_col = IM_COL32(140, 170, 220, 255);
     const ImU32 out_col = IM_COL32(110, 230, 130, 255);
@@ -887,15 +946,24 @@ bool draw_alg_diagram(int ch, ImVec2 canvas, bool compact, bool titled = false)
         const ImVec2 a(c[0].x - 18.0f, c[0].y - box.y * 0.5f);
         const ImVec2 b(c[0].x + 18.0f, c[0].y - box.y * 0.5f);
         dl->AddBezierCubic(a, ImVec2(a.x - 45.0f, a.y - fb_lift), ImVec2(b.x + 45.0f, b.y - fb_lift), b, IM_COL32(235, 170, 80, 255), 2.0f);
-        if (!compact) dl->AddText(ImVec2(c[0].x - 18.0f, a.y - 58.0f), IM_COL32(235, 185, 100, 255), "FB");
+        if (!compact) dl->AddText(ImVec2(c[0].x - 8.0f, a.y - fb_peak - 14.0f), IM_COL32(235, 185, 100, 255), "FB");
     }
-    const ImVec2 out(p0.x + canvas.x * 0.86f, p0.y + canvas.y * 0.42f);
+    // Each carrier runs straight right into a vertical output bus, which feeds
+    // OUT. The layouts keep every carrier rightmost in its row, so no output
+    // line passes behind a box.
+    float y_min = 0.0f, y_max = 0.0f;
+    bool any = false;
     for (int slot = 0; slot < OP_COUNT; ++slot) {
-        if ((carriers & (1u << slot)) != 0) {
-            draw_arrow(dl, ImVec2(c[slot].x + box.x * 0.5f, c[slot].y), out, out_col);
-        }
+        if ((carriers & (1u << slot)) == 0) continue;
+        dl->AddLine(ImVec2(c[slot].x + box.x * 0.5f, c[slot].y), ImVec2(bus_x, c[slot].y), out_col, 2.0f);
+        y_min = any ? fminf(y_min, c[slot].y) : c[slot].y;
+        y_max = any ? fmaxf(y_max, c[slot].y) : c[slot].y;
+        any = true;
     }
-    dl->AddText(ImVec2(out.x + 8.0f, out.y - 8.0f), out_col, "OUT");
+    if (y_max > y_min) dl->AddLine(ImVec2(bus_x, y_min - 1.0f), ImVec2(bus_x, y_max + 1.0f), out_col, 2.0f);
+    const ImVec2 out(bus_x + out_len, 0.5f * (y_min + y_max));
+    draw_arrow(dl, ImVec2(bus_x, out.y), out, out_col);
+    dl->AddText(ImVec2(out.x + 6.0f, out.y - 8.0f), out_col, "OUT");
 
     for (int slot = 0; slot < OP_COUNT; ++slot) {
         const float lvl = operator_level(slot, ch);
@@ -940,7 +1008,7 @@ void draw_algorithm_tab()
     }
     // Two lit channels still get full-size boxes; more drop to compact ones.
     const bool compact = n > 2;
-    const float h = compact ? 120.0f : 260.0f;
+    const float h = compact ? 150.0f : 280.0f;  // room for ALG 7's four rows
     if (ImGui::BeginTable("ym_alg_grid", 2, ImGuiTableFlags_SizingStretchSame)) {
         int cell = 0;
         for (int ch = 0; ch < YM_NUM_CHANNELS; ++ch) {
