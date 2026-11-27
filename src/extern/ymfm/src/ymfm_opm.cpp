@@ -306,9 +306,9 @@ uint32_t opm_registers::step_noise(noise_gen &gen, uint32_t before, uint32_t aft
 
 void opm_registers::clock_noise()
 {
-	// Nuked-OPM's noise reaches the mixer NOISE_AHEAD samples sooner than an
-	// operator's output: the output takes the generator that many samples
-	// on. m_noise_lfsr and m_noise_counter run in time and take each $0F
+	// Noise reaches the mixer NOISE_AHEAD samples sooner than an operator's
+	// output (checked against Nuked-OPM): the output takes the generator
+	// that many samples on. m_noise_lfsr and m_noise_counter run in time and take each $0F
 	// write at its cycle; m_noise_ahead is them run NOISE_AHEAD samples
 	// further, again from them after a write.
 	uint32_t const target = noise_frequency();
@@ -578,7 +578,7 @@ uint32_t opm_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opd
 	// block, a 4-bit note whose values 3, 7, 11 and 15 are not notes, and a
 	// 6-bit fraction. lfo_raw_pm holds the PM latches for operators 0-22
 	// (bits 0-7) and 23-31 (bits 8-15), each a sign (bit 7) and magnitude.
-	// Behaviour follows the Nuked-OPM vectors.
+	// Checked against the Nuked-OPM vectors.
 	uint32_t code = cache.block_freq;
 	// a depth of 0 holds PM at a positive zero as soon as it is written,
 	// whatever the latch still holds

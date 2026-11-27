@@ -147,6 +147,10 @@ public:
 		return opnum;
 	}
 
+	// operator 3 (M2) runs before operator 2 (C1) in the sample, so it takes
+	// C1's output from the sample before
+	static constexpr bool op3_takes_last_op2() { return true; }
+
 	// the mixer takes slots 15-31 into the left output, and slot 31 into the
 	// right, a sample after the others
 	static constexpr bool output_late(uint32_t opoffs, uint32_t output)
@@ -188,7 +192,7 @@ public:
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
-	// the LFO as the chip runs it, after the Nuked-OPM vectors: a counter
+	// the LFO as the chip runs it (checked against the Nuked-OPM vectors): a counter
 	// stepped by a reload counter and a rate multiplier, and AM and PM values
 	// latched once every 8 samples; the later operators of a sample take each
 	// new value a sample before the earlier ones

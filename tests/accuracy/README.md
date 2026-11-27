@@ -126,9 +126,7 @@ does, and checks:
 - YM2151 output when a register write or key-on lands: Nuked-OPM shows a
   write's effect up to one sample sooner than the emulator, two for TL and three
   for the noise frequency ($0F), and differs on the first sample after key-on
-- YM2151 envelopes and output past the clamp
-- YM2151 algorithms 0 to 2, where C1 modulates M2: Nuked-OPM takes C1's output
-  from the sample before
+- YM2151 envelopes
 - YM2151 noise LFO wave: PM, and AM at rates whose low 4 bits are not 0. The LFO
   multiplies its value out a depth bit at a time, and a new noise value can
   arrive part way through; the emulator takes the whole value at once

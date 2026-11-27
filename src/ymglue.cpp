@@ -508,6 +508,22 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 		}
 
+		// Each channel's C1 output held for the next sample's M2. A new field
+		// must reach both functions.
+		static constexpr size_t CHANNEL_IMAGE_SIZE = 2 * YM_NUM_CHANNELS;
+
+		void channels_to_image(uint8_t img[CHANNEL_IMAGE_SIZE]) {
+			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+				put_le(img + 2 * ch, (uint16_t)m_chip.engine().debug_channel(ch)->held_op2(), 2);
+			}
+		}
+
+		void channels_from_image(const uint8_t img[CHANNEL_IMAGE_SIZE]) {
+			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+				m_chip.engine().debug_channel(ch)->set_held_op2((int16_t)get_le(img + 2 * ch, 2));
+			}
+		}
+
 		static void put_le(uint8_t *p, uint32_t v, int n) {
 			for (int i = 0; i < n; i++) {
 				p[i] = (uint8_t)(v >> (8 * i));
@@ -552,6 +568,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t noise[NOISE_IMAGE_SIZE];
 			noise_to_image(noise);
 			ss_put(w, noise, sizeof noise);
+			uint8_t channels[CHANNEL_IMAGE_SIZE];
+			channels_to_image(channels);
+			ss_put(w, channels, sizeof channels);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -592,6 +611,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (version >= 5) {
 				ss_get(r, noise, sizeof noise);
 			}
+			// Before version 6 M2 took C1 in time: it starts from 0.
+			uint8_t channels[CHANNEL_IMAGE_SIZE] = {};
+			if (version >= 6) {
+				ss_get(r, channels, sizeof channels);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -620,6 +644,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (version < 5) {
 				m_chip.engine().regs().reset_noise();
 			}
+			channels_from_image(channels);
 
 			// Each operator caches values derived from the registers (phase
 			// step, envelope rates, waveform), rebuilt only when its channel is
@@ -687,6 +712,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t noise[NOISE_IMAGE_SIZE];
 			noise_to_image(noise);
 			scratch.noise_from_image(noise);
+			uint8_t channels[CHANNEL_IMAGE_SIZE];
+			channels_to_image(channels);
+			scratch.channels_from_image(channels);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -896,7 +924,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 5);
+		ss_begin(w, "YM  ", 6);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);

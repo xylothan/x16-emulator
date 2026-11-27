@@ -501,7 +501,7 @@ int32_t fm_operator<RegisterType>::compute_noise_volume(uint32_t am_offset) cons
 {
 	// a 14-bit level from the top 9 bits of the inverted attenuation, its low
 	// bit dropped; a 0 noise bit gives its ones' complement, the low 3 bits
-	// set unless the level is 0 (Nuked-OPM)
+	// set unless the level is 0 (checked against Nuked-OPM)
 	uint32_t const level = (envelope_attenuation(am_offset) ^ 0x3ff) >> 1;
 	if (bitfield(m_regs.noise_state(), 0))
 		return int32_t((level & ~1u) << 2);
@@ -804,7 +804,9 @@ fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32
 	m_regs(owner.regs()),
 	m_owner(owner),
 	m_late{},
-	m_late_prev{}
+	m_late_prev{},
+	m_op2_in(0),
+	m_op2_last(0)
 {
 }
 
@@ -821,6 +823,7 @@ void fm_channel<RegisterType>::reset()
 	m_feedback_in = 0;
 	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
 		m_late[index] = m_late_prev[index] = 0;
+	m_op2_in = m_op2_last = 0;
 }
 
 
@@ -884,6 +887,7 @@ void fm_channel<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 	// clock the feedback through
 	m_feedback[0] = m_feedback[1];
 	m_feedback[1] = m_feedback_in;
+	m_op2_last = m_op2_in;
 
 	// the last sample's late part goes into this one
 	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
@@ -1005,7 +1009,9 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
-	if (m_regs.ch_output_any(m_choffs) == 0)
+	// (where operator 3 takes operator 2 a sample late, operator 2 runs in
+	// every sample, as on the chip)
+	if (!has_last_op2<RegisterType>::value && m_regs.ch_output_any(m_choffs) == 0)
 		return;
 
 	// OPM/OPN offer 8 different connection algorithms for 4 operators,
@@ -1060,8 +1066,21 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	opout[2] = m_op[1]->compute_volume(m_op[1]->phase() + opmod, am_offset);
 	opout[5] = opout[1] + opout[2];
 
-	// compute the 14-bit volume/value of operator 3
+	// compute the 14-bit volume/value of operator 3. On the OPM an operator's
+	// output reaches the input of the slot 8 on from it a sample late: operator
+	// 3 (M2) takes operator 1 (M1) from the sample before, and operator 2 (C1),
+	// which runs after it, from the sample before too
 	opmod = opout[bitfield(algorithm_ops, 1, 3)] >> 1;
+	int16_t last[8];
+	if constexpr (has_last_op2<RegisterType>::value)
+	{
+		m_op2_in = opout[2];
+		last[0] = 0;
+		last[1] = m_feedback[1];
+		last[2] = m_op2_last;
+		last[5] = int16_t(last[1] + last[2]);
+		opmod = last[bitfield(algorithm_ops, 1, 3)] >> 1;
+	}
 	opout[3] = m_op[2]->compute_volume(m_op[2]->phase() + opmod, am_offset);
 	opout[6] = opout[1] + opout[3];
 	opout[7] = opout[2] + opout[3];
@@ -1074,6 +1093,11 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	else
 	{
 		opmod = opout[bitfield(algorithm_ops, 4, 3)] >> 1;
+		// operator 4 (C2) takes operator 2 (C1), 8 slots before it, from the
+		// sample before
+		if constexpr (has_last_op2<RegisterType>::value)
+			if (bitfield(algorithm_ops, 4, 3) == 7)
+				opmod = int16_t(m_op2_last + opout[3]) >> 1;
 		result = m_op[3]->compute_volume(m_op[3]->phase() + opmod, am_offset);
 	}
 	result >>= rshift;
@@ -1379,7 +1403,17 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 
 	// mask out inactive channels; the OPM noise channel sounds at any level
 	if (!YMFM_DEBUG_LOG_WAVFILES)
-		chanmask &= m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);
+	{
+		uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);
+
+		// a channel left out has every operator silent: on a chip that runs
+		// them anyway, what they feed back and on is 0
+		if constexpr (has_last_op2<RegisterType>::value)
+			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+				if (bitfield(chanmask & ~computed, chnum))
+					m_channel[chnum]->silent_output();
+		chanmask &= computed;
+	}
 
 	// handle the rhythm case, where some of the operators are dedicated
 	// to percussion (this is an OPL-specific feature)

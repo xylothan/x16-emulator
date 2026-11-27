@@ -521,6 +521,42 @@ def lfo_noise_am(rate):
     return s
 
 
+def algorithms():
+    """Every algorithm on channel 2 without feedback and channel 5 with it, both
+    sides, each slot at its own MUL and level. Feedback stays low enough that the
+    first samples after key-on (tests/accuracy/README.md) die away."""
+    s = V()
+    for con in range(8):
+        for ch, fb in ((2, 0), (5, 1 + con % 3)):
+            s.channel(ch, 0x3c + 3 * ch, 0x15, con=con, fb=fb)
+            for k, sl in enumerate((ch, ch + 8, ch + 16, ch + 24)):
+                s.op(sl, mul=(1, 2, 3, 5)[(k + ch) % 4], tl=(0, 10, 20, 4)[k])
+        s.key(2, 15)
+        s.key(5, 15)
+        s.out(256, "L")
+        s.out(256, "R")
+        s.wait(256 + 4)
+        s.set(0x08, 2)
+        s.set(0x08, 5)
+        s.wait(256)
+    return s
+
+
+def output_clamp():
+    """Every channel at full level with four carriers: the mix past both ends of
+    the DAC's range."""
+    s = V()
+    for ch in range(8):
+        s.channel(ch, 0x30 + 5 * ch, 7 * ch)
+        for k in range(4):
+            s.op(ch + 8 * k, mul=1 + (k + ch) % 3)
+    for ch in range(8):
+        s.key(ch, 15)
+    s.out(512, "L")
+    s.out(512, "R")
+    return s
+
+
 SCRIPTS = {
     "busy_phase": busy_phase,
     "address_no_busy": address_no_busy,
@@ -559,6 +595,8 @@ SCRIPTS = {
     "noise_am": noise_am,
     "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),
+    "algorithms": algorithms,
+    "output_clamp": output_clamp,
 }
 
 

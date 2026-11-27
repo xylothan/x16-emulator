@@ -1233,8 +1233,8 @@ MUTATIONS = [
         "name": "YM2151 noise: silent with nothing keyed",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec
-        "find": "chanmask &= m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);",
-        "into": "chanmask &= m_active_channels;",
+        "find": "uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);",
+        "into": "uint32_t const computed = m_active_channels;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1244,6 +1244,43 @@ MUTATIONS = [
         # ym_lfo_noise_am_d0.vec
         "find": "m_noise_history >> 31",
         "into": "m_noise_history >> 30",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    # YM2151 operator modulation and DAC. Expected values: Nuked-OPM, tests/accuracy/ym2151.
+    {
+        "name": "YM2151 algorithms: M2 takes C1 in time",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_algorithms.vec
+        "find": "\t\tlast[2] = m_op2_last;\n",
+        "into": "\t\tlast[2] = opout[2];\n",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 algorithms: M2 takes M1 in time",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_algorithms.vec
+        "find": "\t\tlast[1] = m_feedback[1];\n",
+        "into": "\t\tlast[1] = opout[1];\n",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 algorithms: C2 takes C1 in time",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_algorithms.vec
+        "find": "opmod = int16_t(m_op2_last + opout[3]) >> 1;",
+        "into": "opmod = opout[7] >> 1;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 DAC: overflow gives 32767",
+        "file": "src/extern/ymfm/src/ymfm.h",
+        # ym_output_clamp.vec
+        "find": "\tif (value > 32767)\n\t\tvalue = 32767;\n",
+        "into": "\tif (value > 32767)\n\t\treturn 32767;\n",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
