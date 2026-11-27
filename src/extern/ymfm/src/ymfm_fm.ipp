@@ -1612,7 +1612,7 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	// and the OPM's mixer can take it in any sample
 	if (!YMFM_DEBUG_LOG_WAVFILES)
 	{
-		uint32_t const computed = m_regs.test_full_level_any() ? 0xffffffff :
+		uint32_t const computed = m_regs.test_all_channels() ? 0xffffffff :
 			(m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0));
 
 		// a channel left out has every operator silent: on a chip that runs

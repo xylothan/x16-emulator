@@ -130,7 +130,7 @@ public:
 	uint32_t irq_reset() const                       { return 0; } // OPL only
 	uint32_t noise_enable() const                    { return 0; } // OPM only
 	uint32_t test_full_level(uint32_t opoffs) const  { return 0; } // OPM only
-	uint32_t test_full_level_any() const             { return 0; } // OPM only
+	uint32_t test_all_channels() const               { return 0; } // OPM only
 	uint32_t test_output_bit(uint32_t opoffs) const  { return 0; } // OPM only
 	uint32_t rhythm_enable() const                   { return 0; } // OPL only
 

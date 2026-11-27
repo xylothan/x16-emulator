@@ -1260,8 +1260,8 @@ MUTATIONS = [
         "name": "YM2151 test register: every slot takes a write in its sample",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_full_level.vec
-        "find": "return (at >= m_test_cycle)",
-        "into": "return (at + 32 >= m_test_cycle)",
+        "find": "if (at >= m_test_cycle[index])",
+        "into": "if (at + 32 >= m_test_cycle[index])",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1287,7 +1287,7 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 5 leaves idle channels out",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_test_full_level.vec
-        "find": "uint32_t const computed = m_regs.test_full_level_any() ? 0xffffffff :",
+        "find": "uint32_t const computed = m_regs.test_all_channels() ? 0xffffffff :",
         "into": "uint32_t const computed = false ? 0xffffffff :",
         "count": 1,
         "caught_by": ["ym_accuracy"],
@@ -1332,8 +1332,17 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 4 leaves idle channels out",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_output_bit.vec
-        "find": "return (m_regdata[0x01] | m_test_before) & 0x30; }",
-        "into": "return (m_regdata[0x01] | m_test_before) & 0x20; }",
+        "find": "return seen & 0x30;",
+        "into": "return seen & 0x20;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: a second write in a sample hides the first",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_write_pairs.vec
+        "find": "m_test_before = before;",
+        "into": "m_test_before = before; m_test_writes = 0;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

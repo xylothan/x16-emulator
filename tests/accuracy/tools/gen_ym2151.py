@@ -577,6 +577,26 @@ def test_register(bits, early=0):
     return f
 
 
+def test_write_pairs():
+    """$01 set to $30 and cleared again within one sample, at pairs of
+    cycles, on both outputs from a sample before."""
+    def f():
+        s = V()
+        test_voices(s)
+        t = s.t
+        for a, b in ((6, 14), (8, 11), (10, 26), (16, 24), (20, 30), (12, 14)):
+            t += 80 * SAMPLE
+            t = t - t % SAMPLE + a
+            s.w(0, 0x01, t - 6)
+            s.w(1, 0x30, t)
+            s.w(1, 0x00, t + b - a)
+            first = t // SAMPLE - 1 - SETTLE
+            s.o(first, 8, "L")
+            s.o(first, 8, "R")
+        return s
+    return f
+
+
 def reset_outputs():
     """The noise turned on after reset, channel 7's registers unwritten."""
     s = V()
@@ -960,6 +980,7 @@ SCRIPTS = {
     "reset_outputs": reset_outputs,
     "test_full_level": test_register(0x20),
     "test_output_bit": test_register(0x10, 6),
+    "test_write_pairs": test_write_pairs(),
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),
