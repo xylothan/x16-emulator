@@ -1320,6 +1320,24 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 envelope: high rates double on the table's cycles",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_env_high_rates.vec
+        "find": "{ 0x0, 0x8, 0xa, 0xb };",
+        "into": "{ 0x0, 0x8, 0xa, 0xe };",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 envelope: high rates step past 8",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_env_high_rates.vec
+        "find": "return 1u << std::min<uint32_t>(shift, 3);",
+        "into": "return 1u << std::min<uint32_t>(shift, 4);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 direct writes wait a sample too long",
         "file": "src/ymglue.cpp",
         # ym_key_timing.vec, ym_op_writes.vec

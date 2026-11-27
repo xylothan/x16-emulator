@@ -794,10 +794,16 @@ uint32_t fm_operator<RegisterType>::envelope_increment(uint32_t rate, uint32_t e
 	if (bitfield(counter, 0, 11) != 0)
 		return 0;
 
-	// from rate 48 the steps repeat every 4 cycles, in the opposite order to
-	// the table's (checked against Nuked-OPM)
+	// from rate 48 the step is 1 << (rate / 4 - 12), doubled on the cycles
+	// of 4 that the low bits of the rate pick, and at most 8 (checked against
+	// Nuked-OPM)
 	if (rate >= 48)
-		return attenuation_increment(rate, (0u - (env_counter >> 2)) & 3);
+	{
+		static uint8_t const s_doubled[4] = { 0x0, 0x8, 0xa, 0xb };
+		uint32_t const cycle = (0u - (env_counter >> 2)) & 3;
+		uint32_t const shift = (rate >> 2) - 12 + bitfield(s_doubled[rate & 3], cycle);
+		return 1u << std::min<uint32_t>(shift, 3);
+	}
 	return attenuation_increment(rate, bitfield(counter, (rate_shift <= 11) ? 11 : rate_shift, 3));
 }
 

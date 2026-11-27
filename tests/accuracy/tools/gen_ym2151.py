@@ -632,6 +632,51 @@ def envelopes():
     return s
 
 
+def env_high_rates():
+    """Attack, first decay and release at each rate from 48 to 63, set by the
+    rate and the key code under a key scaling of 3."""
+    s = V()
+    s.channel(3, 0x4a, 0x10)
+    env_op(s, 27, 0, 0, 0, 0, 15, ks=3)
+    for rate in range(48, 64):
+        r = (rate - 21) // 2
+        k = rate - 2 * r
+        s.set(0x28 + 3, k << 2)
+        # attack from silence
+        if rate < 62:
+            s.set(0x80 + 27, 3 << 6 | r)
+            s.set(0xa0 + 27, 0)
+            s.set(0xe0 + 27, 0x0f)
+            s.set(0x08, 8 << 3 | 3)
+            s.out(64)
+            s.wait(72)
+            s.set(0x08, 3)
+            s.wait(400)
+        # first decay
+        s.set(0x80 + 27, 3 << 6 | 31)
+        s.set(0xa0 + 27, r)
+        s.set(0xe0 + 27, 0xff)
+        s.set(0x08, 8 << 3 | 3)
+        s.out(64)
+        s.wait(72)
+        s.set(0x08, 3)
+        s.wait(400)
+        # release from full level
+        rr = (rate - 2 - 21) // 4
+        k = rate - 2 - 4 * rr
+        s.set(0x28 + 3, k << 2)
+        s.set(0xa0 + 27, 0)
+        s.set(0xe0 + 27, rr)
+        s.set(0x08, 8 << 3 | 3)
+        s.wait(8)
+        s.set(0x08, 3)
+        s.out(64)
+        s.wait(72)
+        s.set(0xe0 + 27, 0x0f)
+        s.wait(400)
+    return s
+
+
 def key_timing():
     """Key-on and key-off written at every cycle of the sample, on the first,
     a middle and the last channel."""
@@ -755,6 +800,7 @@ SCRIPTS = {
     "algorithms": algorithms,
     "output_clamp": output_clamp,
     "envelopes": envelopes,
+    "env_high_rates": env_high_rates,
     "key_timing": key_timing,
     "key_latch": key_latch,
     "op_writes": op_writes,
