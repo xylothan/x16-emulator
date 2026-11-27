@@ -1314,8 +1314,8 @@ MUTATIONS = [
         "name": "YM2151 operator writes wait for the engine",
         "file": "src/ymglue.cpp",
         # ym_op_writes.vec
-        "find": "} else if (a >= 0x20 || a == 0x19) {",
-        "into": "} else if (a >= 0xff || a == 0x19) {",
+        "find": "} else if (a >= 0x20) {",
+        "into": "} else if (a >= 0xff) {",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1374,6 +1374,15 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 LFO depth writes wait a sample",
+        "file": "src/ymglue.cpp",
+        # ym_lfo_am_depth_late.vec
+        "find": "queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);",
+        "into": "queue(DEPTH_WAIT + 1, a, v, LATE_DIRECT, m_bus.cycle);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 direct writes wait a sample too long",
         "file": "src/ymglue.cpp",
         # ym_key_timing.vec, ym_op_writes.vec
@@ -1387,8 +1396,8 @@ MUTATIONS = [
         "name": "YM2151 LFO depth writes wait for the engine",
         "file": "src/ymglue.cpp",
         # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
-        "find": "} else if (a >= 0x20 || a == 0x19) {",
-        "into": "} else if (a >= 0x20) {",
+        "find": "} else if (a == 0x19) {",
+        "into": "} else if (false) {",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

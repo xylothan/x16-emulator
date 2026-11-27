@@ -485,9 +485,10 @@ def check_ids():
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"YM  ")
-        if ver == 9:
-            # ymglue.cpp state_load: version 8 has the same bytes, its engine a
-            # sample nearer the interface. The body ends with the 22-byte bus image, the
+        if ver == 10:
+            # ymglue.cpp state_load: versions 8 and 9 have the same bytes,
+            # version 9 its depths a sample nearer and version 8 its engine too.
+            # The body ends with the 22-byte bus image, the
             # 12-byte LFO image, the 80-byte noise image, the 16-byte channel image,
             # the 482-byte image of writes waiting, the 10-byte key image, the
             # 544-byte operator image and the 48-byte depth image. Version 7 has no
@@ -504,6 +505,8 @@ def check_ids():
             def v4(b):
                 b = v5(b)
                 return b[:-114] + bytes(512) + b[-114:-80]
+            r, err = chunk_as(b"YM  ", 9, 0)
+            case("YM chunk v9, its depths a sample nearer, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 8, 0)
             case("YM chunk v8, its engine a sample nearer, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 7, 0, v7)
@@ -516,10 +519,10 @@ def check_ids():
             case("YM chunk v4, with its table and no noise image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 3, 0, lambda b: v4(b)[:-12])
             case("YM chunk v3, also without the LFO image, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"YM  ", 9, 16)
-            case("YM chunk v9 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+            r, err = chunk_as(b"YM  ", 10, 16)
+            case("YM chunk v10 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
-            case("YM chunk is v9 for the older-chunk cases (it is v%d)" % ver, False)
+            case("YM chunk is v10 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

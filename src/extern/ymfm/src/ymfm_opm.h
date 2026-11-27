@@ -229,7 +229,7 @@ public:
 
 	// a $19 write reaches the registers this many samples before the chip
 	// takes it, the host running the engine that far behind
-	static constexpr uint32_t LFO_DEPTH_AHEAD = 2;
+	static constexpr uint32_t LFO_DEPTH_AHEAD = 3;
 
 	// the cycle (0-31) within the coming sample at which the following
 	// register writes reach the chip

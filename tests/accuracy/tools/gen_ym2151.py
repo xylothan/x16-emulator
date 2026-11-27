@@ -554,6 +554,24 @@ def lfo_depth_writes(wave, pm):
     return s
 
 
+def lfo_am_depth_late():
+    """AM depth rewritten at every cycle of an LFO window, between depths that
+    differ in every bit, on an operator in slots 16-31."""
+    s = V()
+    s.lfo(0xc5, 0, 0x2b, 0)
+    s.channel(0, 0x4a, 0x21, ams=3)
+    s.op(24, am=1)
+    s.key(0, 8)
+    t = s.t
+    for o in range(256):
+        t += 72 * SAMPLE
+        t = t - t % 256 + o
+        s.w(0, 0x19, t - 6)
+        s.w(1, 0x54 if o & 1 else 0x2b, t)
+        s.o(t // SAMPLE - 4, 40, "L")
+    return s
+
+
 def algorithms():
     """Every algorithm on channel 2 without feedback and channel 5 with it, both
     sides, each slot at its own MUL and level."""
@@ -858,6 +876,7 @@ SCRIPTS = {
     "lfo_am_depth_writes": lambda: lfo_depth_writes(0, False),
     "lfo_pm_depth_writes": lambda: lfo_depth_writes(2, True),
     "lfo_noise_depth_writes": lambda: lfo_depth_writes(3, True),
+    "lfo_am_depth_late": lfo_am_depth_late,
     "algorithms": algorithms,
     "output_clamp": output_clamp,
     "envelopes": envelopes,

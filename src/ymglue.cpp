@@ -330,13 +330,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		}
 
 		// The engine runs ENGINE_BEHIND samples behind the interface, so a
-		// write can reach it as early as the chip acts on it: the key-on latch,
-		// the LFO depths and $20-$FF after DIRECT_WAIT (checked against
+		// write can reach it as early as the chip acts on it: the LFO depths at
+		// once, the key-on latch and $20-$FF after DIRECT_WAIT (checked against
 		// Nuked-OPM). The rest wait ENGINE_BEHIND, and reach it at the engine
 		// sample matching the interface's.
 		static constexpr uint8_t ENGINE_BEHIND = 3;
 		static constexpr uint8_t DIRECT_WAIT = ENGINE_BEHIND - 2;
-		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DIRECT_WAIT, "the LFO depths are kept as far on as a direct write lands");
+		static constexpr uint8_t DEPTH_WAIT = 0;
+		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DEPTH_WAIT, "the LFO depths are kept as far on as a depth write lands");
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
@@ -481,7 +482,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						kon_copy_to(m_bus.cycle);
 						m_kon_latch = v & 0x7f;
 						latch_keyon(v);
-					} else if (a >= 0x20 || a == 0x19) {
+					} else if (a == 0x19) {
+						queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);
+					} else if (a >= 0x20) {
 						direct(a, v, m_bus.cycle);
 					} else {
 						late(a, v);
@@ -982,6 +985,15 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			keys_from_image(keys);
 			if (have_depths) {
 				depths_from_image(depths);
+				// Before version 10 the depths were kept a sample nearer: the
+				// furthest starts as the one before it ends.
+				if (version < 10) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					ymfm::opm_registers::lfo_depth *d = regs.lfo_depths();
+					const uint32_t w = regs.lfo().window;
+					const ymfm::opm_registers::lfo_depth last = d[(w + ymfm::opm_registers::LFO_DEPTH_AHEAD - 1) & 7];
+					d[(w + ymfm::opm_registers::LFO_DEPTH_AHEAD) & 7] = { { last.am[1], last.am[1] }, { last.pm[1], last.pm[1] }, 32, 32 };
+				}
 			} else {
 				depths_from_regs();
 			}
@@ -1303,7 +1315,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 9);
+		ss_begin(w, "YM  ", 10);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);

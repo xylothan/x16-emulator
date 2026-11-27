@@ -132,9 +132,6 @@ does, and checks:
   at cycle 12, as slot 31 reaches the mixer, so its output switches 1 to 3
   samples before the emulator's; a new frequency leaves a sample or two that
   differ
-- YM2151 AM depth writes in the last 8 cycles of the LFO's multiply, where the
-  chip takes the depth's bit 0: operators 16-31 keep the old bit for that
-  window, the emulator's engine not having reached the write
 - YM2151 and VERA accesses within an instruction: those devices see each
   access at the instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new

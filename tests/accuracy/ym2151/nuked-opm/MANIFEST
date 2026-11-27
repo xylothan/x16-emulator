@@ -43,6 +43,7 @@ ym_lfo_noise_pm_ff.vec
 ym_lfo_am_depth_writes.vec
 ym_lfo_pm_depth_writes.vec
 ym_lfo_noise_depth_writes.vec
+ym_lfo_am_depth_late.vec
 ym_algorithms.vec
 ym_output_clamp.vec
 ym_envelopes.vec
