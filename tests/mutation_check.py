@@ -1239,6 +1239,69 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 test register: bit 5 ignored",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "{ return bitfield(test_for(opoffs), 5); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_test_full_level.vec
+        "find": "TEST_FAST_WAIT = 0;",
+        "into": "TEST_FAST_WAIT = 1;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: every slot takes a write in its sample",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "return (opoffs + 1 >= m_test_cycle)",
+        "into": "return (opoffs + 32 >= m_test_cycle)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: slots take a write a cycle late",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "return (opoffs + 1 >= m_test_cycle)",
+        "into": "return (opoffs >= m_test_cycle)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 leaves a silent envelope silent",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_full_level.vec
+        "find": "if (env_level() > EG_QUIET && !m_regs.test_full_level(m_opoffs))",
+        "into": "if (env_level() > EG_QUIET)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 leaves idle channels out",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_full_level.vec
+        "find": "uint32_t const computed = m_regs.test_full_level_any() ? 0xffffffff :",
+        "into": "uint32_t const computed = false ? 0xffffffff :",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 a channel left out drops what it held",
+        "file": "src/extern/ymfm/src/ymfm_fm.h",
+        # ym_test_full_level.vec
+        "find": "m_feedback_in = 0; m_op2_in = 0; mix_late(output); }",
+        "into": "m_feedback_in = 0; m_op2_in = 0; (void)output; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 reset leaves the channels' outputs on",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_reset_outputs.vec
@@ -1269,8 +1332,8 @@ MUTATIONS = [
         "name": "YM2151 noise: silent with nothing keyed",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec
-        "find": "uint32_t const computed = m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0);",
-        "into": "uint32_t const computed = m_active_channels;",
+        "find": "(m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0));",
+        "into": "(m_active_channels);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

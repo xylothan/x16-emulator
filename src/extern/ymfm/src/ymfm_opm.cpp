@@ -51,6 +51,8 @@ opm_registers::opm_registers() :
 	m_noise_ahead{ 0, 0 },
 	m_noise_bits{},
 	m_noise_target(0x1f),
+	m_test_before(0),
+	m_test_cycle(0),
 	m_noise_changes(0),
 	m_noise_change_cycle{},
 	m_noise_change_target{},

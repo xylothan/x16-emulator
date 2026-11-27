@@ -540,6 +540,40 @@ def noise_enable_writes(conn, keyed):
     return f
 
 
+def test_voices(s):
+    """Channels 0, 3, 5 and 7 with every operator keyed, so that each phase
+    starts at its key-on: channel 0 with AM at depth 7F, channel 5 released
+    to silence, channel 7 with the noise."""
+    s.lfo(0xe0, 0, 0x7f, 0)
+    s.set(0x0f, 0x9a)
+    for ch in (0, 3, 5, 7):
+        s.channel(ch, 0x4a - 4 * ch, ams=3 if ch == 0 else 0)
+        for sl in (0, 8, 16, 24):
+            s.op(sl + ch, tl=0x30 + sl, am=1 if ch == 0 else 0)
+        s.key(ch, 15)
+    s.set(0x08, 5)
+    s.wait(200)
+
+
+def test_register(bits):
+    """$01 set to `bits` and cleared at cycles 0-30, a sample on each side
+    of each write on both outputs."""
+    def f():
+        s = V()
+        test_voices(s)
+        t = s.t
+        for o in range(31):
+            for v in (bits, 0):
+                t += 60 * SAMPLE
+                t = t - t % SAMPLE + o
+                s.w(0, 0x01, t - 6)
+                s.w(1, v, t)
+                s.o(t // SAMPLE - 1, 8, "L")
+                s.o(t // SAMPLE - 1, 8, "R")
+        return s
+    return f
+
+
 def reset_outputs():
     """The noise turned on after reset, channel 7's registers unwritten."""
     s = V()
@@ -921,6 +955,7 @@ SCRIPTS = {
     "noise_writes": noise_writes,
     "noise_frequency_writes": noise_frequency_writes,
     "reset_outputs": reset_outputs,
+    "test_full_level": test_register(0x20),
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),

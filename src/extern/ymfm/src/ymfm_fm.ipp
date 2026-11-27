@@ -501,7 +501,7 @@ int32_t fm_operator<RegisterType>::compute_volume(uint32_t phase, uint32_t am_of
 	// the full sin wave
 
 	// early out if the envelope is effectively off
-	if (env_level() > EG_QUIET)
+	if (env_level() > EG_QUIET && !m_regs.test_full_level(m_opoffs))
 		return 0;
 
 	// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
@@ -904,6 +904,11 @@ uint32_t fm_operator<RegisterType>::env_level() const
 template<class RegisterType>
 uint32_t fm_operator<RegisterType>::envelope_attenuation(uint32_t am_offset) const
 {
+	// the OPM's test register can hold every operator at full level, its
+	// envelope, AM and TL aside (checked against Nuked-OPM)
+	if (m_regs.test_full_level(m_opoffs))
+		return 0;
+
 	uint32_t result = env_level() >> m_cache.eg_shift;
 
 	// invert if necessary due to SSG-EG
@@ -1129,6 +1134,25 @@ void fm_channel<RegisterType>::output_2op(output_data &output, uint32_t rshift, 
 
 
 //-------------------------------------------------
+//  mix_late - add the operators the chip mixed a
+//  sample late; the OPM's noise enable chooses for
+//  operator 4 of channel 7 as they are mixed
+//  (checked against Nuked-OPM)
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_channel<RegisterType>::mix_late(output_data &output) const
+{
+	if constexpr (has_output_late<RegisterType>::value)
+	{
+		bool const noise = m_choffs == 7 && m_regs.noise_enable() != 0;
+		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+			output.data[index] += noise ? m_late_noise_prev[index] : m_late_prev[index];
+	}
+}
+
+
+//-------------------------------------------------
 //  output_4op - combine 4 operators according to
 //  the specified algorithm, returning a sum
 //  according to the rshift and clipmax parameters,
@@ -1156,15 +1180,8 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
 	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
 
-	// the operators the chip mixed a sample late; the OPM's noise enable
-	// chooses for operator 4 of channel 7 as they are mixed (checked against
-	// Nuked-OPM)
-	if constexpr (has_output_late<RegisterType>::value)
-	{
-		bool const noise = m_choffs == 7 && m_regs.noise_enable() != 0;
-		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
-			output.data[index] += noise ? m_late_noise_prev[index] : m_late_prev[index];
-	}
+	// the operators the chip mixed a sample late
+	mix_late(output);
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
@@ -1587,14 +1604,15 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	// and the OPM's mixer can take it in any sample
 	if (!YMFM_DEBUG_LOG_WAVFILES)
 	{
-		uint32_t const computed = m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0);
+		uint32_t const computed = m_regs.test_full_level_any() ? 0xffffffff :
+			(m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0));
 
 		// a channel left out has every operator silent: on a chip that runs
 		// them anyway, what they feed back and on is 0
 		if constexpr (has_last_op2<RegisterType>::value)
 			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 				if (bitfield(chanmask & ~computed, chnum))
-					m_channel[chnum]->silent_output();
+					m_channel[chnum]->silent_output(output);
 		chanmask &= computed;
 	}
 

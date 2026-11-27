@@ -124,7 +124,11 @@ does, and checks:
 - The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
 - SPI
 - FPGA reconfiguration
-- YM2151 test register ($01) writes, and reads of the address port
+- YM2151 test register ($01) bits 0-4, 6 and 7, and reads of the address port
+- YM2151 test register bit 5 written in a sample's last cycle: the chip takes
+  it in time for slot 31 of that sample, the emulator from the next
+- YM2151 phases of operators not keyed since reset, heard only under test
+  register bit 5: Nuked-OPM's reset leaves them part way on, the emulator at 0
 - YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
   operator's value at that operator's own cycle, and the emulator takes all four
   at once

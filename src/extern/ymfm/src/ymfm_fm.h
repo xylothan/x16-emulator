@@ -129,6 +129,8 @@ public:
 	uint32_t status_mask() const                     { return 0; } // OPL only
 	uint32_t irq_reset() const                       { return 0; } // OPL only
 	uint32_t noise_enable() const                    { return 0; } // OPM only
+	uint32_t test_full_level(uint32_t opoffs) const  { return 0; } // OPM only
+	uint32_t test_full_level_any() const             { return 0; } // OPM only
 	uint32_t rhythm_enable() const                   { return 0; } // OPL only
 
 	// per-operator register defaults
@@ -376,8 +378,12 @@ public:
 	int16_t held_op2() const { return m_op2_in; }
 	void set_held_op2(int16_t value) { m_op2_in = value; }
 
-	// the output() of a channel whose operators are all silent
-	void silent_output() const { m_feedback_in = 0; m_op2_in = 0; }
+	// the output() of a channel whose operators are all silent: what it
+	// held from the last sample still reaches this one
+	void silent_output(output_data &output) const { m_feedback_in = 0; m_op2_in = 0; mix_late(output); }
+
+	// the operators mixed a sample late
+	void mix_late(output_data &output) const;
 
 private:
 	// helper to add values to the outputs based on channel enables

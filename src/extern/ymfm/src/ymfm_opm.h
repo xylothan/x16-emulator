@@ -277,6 +277,18 @@ public:
 	// system-wide registers
 	uint32_t test() const                            { return byte(0x01, 0, 8); }
 	uint32_t lfo_reset() const                       { return byte(0x01, 1, 1); }
+	uint32_t test_full_level(uint32_t opoffs) const  { return bitfield(test_for(opoffs), 5); }
+	uint32_t test_full_level_any() const             { return bitfield(m_regdata[0x01] | m_test_before, 5); }
+
+	// $01 was `before` until a write the chip took at `cycle` of the next
+	// sample: slot s takes the write that sample if s + 1 is `cycle` or later,
+	// the rest the sample after (checked against Nuked-OPM)
+	void test_written(uint8_t before, uint32_t cycle) { m_test_before = before; m_test_cycle = uint8_t(cycle); }
+	void test_settle() { m_test_before = m_regdata[0x01]; m_test_cycle = 0; }
+	uint32_t test_for(uint32_t opoffs) const
+	{
+		return (opoffs + 1 >= m_test_cycle) ? m_regdata[0x01] : m_test_before;
+	}
 	uint32_t noise_frequency() const                 { return byte(0x0f, 0, 5) ^ 0x1f; }
 	uint32_t noise_enable() const                    { return byte(0x0f, 7, 1); }
 	uint32_t timer_a_value() const                   { return word(0x10, 0, 8, 0x11, 0, 2); }
@@ -341,6 +353,8 @@ protected:
 	noise_gen m_noise_ahead;              // the generator NOISE_AHEAD samples on
 	uint32_t m_noise_bits[NOISE_BITS];    // its low bit per cycle, newest first
 	uint8_t m_noise_target;               // its frequency
+	uint8_t m_test_before;                // $01 before a write this sample
+	uint8_t m_test_cycle;                 // the write's cycle, 0 if none
 	uint8_t m_noise_changes;              // frequency writes for its next sample
 	uint8_t m_noise_change_cycle[4];      // the cycle of each
 	uint8_t m_noise_change_target[4];     // and its frequency
