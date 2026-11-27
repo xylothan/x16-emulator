@@ -1334,7 +1334,7 @@ MUTATIONS = [
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
         "find": "int32_t const cycle = start + bit + 7 - step;",
-        "into": "int32_t const cycle = end;",
+        "into": "int32_t const cycle = end + 0 * start;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
