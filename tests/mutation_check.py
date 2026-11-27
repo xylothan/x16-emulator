@@ -1194,20 +1194,20 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
-        "name": "YM2151 noise: 2 samples ahead",
-        "file": "src/extern/ymfm/src/ymfm_opm.h",
-        # ym_noise_rates.vec
-        "find": "NOISE_AHEAD = 3;",
-        "into": "NOISE_AHEAD = 2;",
+        "name": "YM2151 noise: a $0F write takes the whole sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_writes.vec, ym_noise_frequency_writes.vec
+        "find": "noise_frequency_write(e.value, e.cycle);",
+        "into": "noise_frequency_write(e.value, 0);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
     {
-        "name": "YM2151 noise: a $0F write takes the whole sample",
-        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
-        # ym_noise_writes.vec
-        "find": "m_noise_write_cycle < 32 ? m_noise_old_target : target, target",
-        "into": "target, target",
+        "name": "YM2151 noise: a $0F frequency waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_frequency_writes.vec
+        "find": "queue(0, a, v, LATE_NOISE, m_bus.cycle);",
+        "into": "queue(1, a, v, LATE_NOISE, m_bus.cycle);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

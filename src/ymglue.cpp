@@ -338,12 +338,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static constexpr uint8_t DIRECT_WAIT = ENGINE_BEHIND - 2;
 		static constexpr uint8_t DEPTH_WAIT = 0;
 		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DEPTH_WAIT, "the LFO depths are kept as far on as a depth write lands");
+		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
 			LATE_WRITE  = 0,  // a register write
 			LATE_CSM    = 1,  // a CSM key-on
 			LATE_DIRECT = 2,  // a register write the chip acts on at once
+			LATE_NOISE  = 3,  // a $0F write's frequency, for the noise generator
 		};
 
 		struct late_write {
@@ -419,6 +421,8 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				const late_write &e = m_late[i];
 				if (e.wait == 0 && e.kind == LATE_DIRECT) {
 					to_engine(e.addr, e.value, e.cycle);
+				} else if (e.wait == 0 && e.kind == LATE_NOISE) {
+					m_chip.engine().regs().noise_frequency_write(e.value, e.cycle);
 				}
 			}
 			size_t kept = 0;
@@ -426,7 +430,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				const late_write &e = m_late[i];
 				if (e.wait != 0) {
 					m_late[kept++] = e;
-				} else if (e.kind == LATE_DIRECT) {
+				} else if (e.kind == LATE_DIRECT || e.kind == LATE_NOISE) {
 				} else if (e.kind == LATE_CSM) {
 					csm_keyon(e.addr);
 				} else {
@@ -463,6 +467,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			apply_late();
 			if (m_engine_wait != 0) {
 				m_engine_wait--;
+				m_chip.engine().regs().noise_frequency_settle();
 				out->clear();
 			} else {
 				m_chip.generate(out);
@@ -487,6 +492,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 					} else if (a >= 0x20) {
 						direct(a, v, m_bus.cycle);
 					} else {
+						// The noise generator takes $0F's frequency at its cycle
+						// (checked against Nuked-OPM).
+						if (a == 0x0f) {
+							queue(0, a, v, LATE_NOISE, m_bus.cycle);
+						}
 						late(a, v);
 					}
 				},
@@ -673,20 +683,23 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			depths_from_image(img);
 		}
 
-		// The noise generator's state past what save_restore() keeps (the
-		// in-time generator and its output bit), and each channel's output
-		// held for the next sample. A new field must reach both functions.
+		// The noise generator's state past what save_restore() keeps, and
+		// each channel's output held for the next sample. Bytes 5-12 are the
+		// in-time bits of the last two samples, which the bit image holds as
+		// well, and byte 14 32: until version 10, a $0F write's cycle. A new
+		// field must reach both functions.
 		static constexpr size_t NOISE_IMAGE_SIZE = 16 + 4 * YM_NUM_CHANNELS * 2;
 
 		void noise_to_image(uint8_t img[NOISE_IMAGE_SIZE]) {
 			ymfm::opm_registers &regs = m_chip.engine().regs();
 			const ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
+			const uint32_t *bits = regs.noise_bits();
 			put_le(img + 0, ahead.lfsr, 4);
 			img[4] = ahead.counter;
-			put_le(img + 5, (uint32_t)regs.noise_history(), 4);
-			put_le(img + 9, (uint32_t)(regs.noise_history() >> 32), 4);
-			img[13] = (uint8_t)regs.noise_old_target();
-			img[14] = (uint8_t)regs.noise_write_cycle();
+			put_le(img + 5, bits[ymfm::opm_registers::NOISE_AHEAD + 1], 4);
+			put_le(img + 9, bits[ymfm::opm_registers::NOISE_AHEAD], 4);
+			img[13] = regs.noise_target();
+			img[14] = 32;
 			img[15] = 0; // reserved
 			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
 				for (uint32_t side = 0; side < 2; side++) {
@@ -700,14 +713,60 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
 			ahead.lfsr    = get_le(img + 0, 4) & 0x1ffff;
 			ahead.counter = img[4] & 0x7f;
-			regs.noise_history() = get_le(img + 5, 4) | ((uint64_t)get_le(img + 9, 4) << 32);
-			regs.noise_old_target()  = img[13] & 31;
-			regs.noise_write_cycle() = (img[14] < 32) ? img[14] : 32;
+			regs.noise_target() = img[13] & 31;
+			uint32_t *bits = regs.noise_bits();
+			bits[ymfm::opm_registers::NOISE_AHEAD + 1] = get_le(img + 5, 4);
+			bits[ymfm::opm_registers::NOISE_AHEAD]     = get_le(img + 9, 4);
+			regs.noise_bits_changed();
 			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
 				for (uint32_t side = 0; side < 2; side++) {
 					m_chip.engine().debug_channel(ch)->set_late_output(side, (int32_t)get_le(img + 16 + 8 * ch + 4 * side, 4));
 				}
 			}
+		}
+
+		// The noise generator's low bits for the samples it has run ahead of
+		// the interface, newest first.
+		static constexpr size_t NOISE_BITS_IMAGE_SIZE = 4 * ymfm::opm_registers::NOISE_AHEAD;
+
+		void noise_bits_to_image(uint8_t img[NOISE_BITS_IMAGE_SIZE]) {
+			const uint32_t *bits = m_chip.engine().regs().noise_bits();
+			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
+				put_le(img + 4 * i, bits[i], 4);
+			}
+		}
+
+		void noise_bits_from_image(const uint8_t img[NOISE_BITS_IMAGE_SIZE]) {
+			uint32_t *bits = m_chip.engine().regs().noise_bits();
+			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
+				bits[i] = get_le(img + 4 * i, 4);
+			}
+		}
+
+		// Before version 10 the noise generator ran in time, its bits taken
+		// NOISE_AHEAD samples on: run it there now, from the frequency the
+		// latest waiting $0F write sets.
+		void noise_from_v9(const uint8_t img[NOISE_IMAGE_SIZE]) {
+			ymfm::opm_registers &regs = m_chip.engine().regs();
+			uint8_t target = (uint8_t)regs.noise_frequency();
+			for (size_t i = 0; i < m_late_count; i++) {
+				if (m_late[i].kind == LATE_WRITE && m_late[i].addr == 0x0f) {
+					target = (uint8_t)((m_late[i].value & 0x1f) ^ 0x1f);
+				}
+			}
+			const uint8_t old_target = img[13] & 31;
+			const uint8_t write_cycle = img[14];
+			ymfm::opm_registers::noise_gen gen = regs.noise_in_time();
+			uint32_t *bits = regs.noise_bits();
+			for (uint32_t sample = 0; sample < ymfm::opm_registers::NOISE_AHEAD; sample++) {
+				uint8_t targets[32];
+				for (uint32_t cycle = 0; cycle < 32; cycle++) {
+					targets[cycle] = (sample == 0 && cycle < write_cycle) ? old_target : target;
+				}
+				ymfm::opm_registers::step_noise(gen, targets, bits[ymfm::opm_registers::NOISE_AHEAD - 1 - sample]);
+			}
+			regs.noise_ahead() = gen;
+			regs.noise_target() = target;
 		}
 
 		// How far the engine still has to catch up, and the writes waiting for
@@ -733,7 +792,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_late_count = std::min<size_t>(img[1], LATE_MAX);
 			for (size_t i = 0; i < m_late_count; i++) {
 				const uint8_t *e = img + 2 + 5 * i;
-				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT) ? e[4] : LATE_WRITE;
+				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE) ? e[4] : LATE_WRITE;
 				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], kind };
 			}
 		}
@@ -869,6 +928,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t depths[DEPTH_IMAGE_SIZE];
 			depths_to_image(depths);
 			ss_put(w, depths, sizeof depths);
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE];
+			noise_bits_to_image(noise_bits);
+			ss_put(w, noise_bits, sizeof noise_bits);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -948,6 +1010,10 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (have_depths) {
 				ss_get(r, depths, sizeof depths);
 			}
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE] = {};
+			if (version >= 10) {
+				ss_get(r, noise_bits, sizeof noise_bits);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -978,6 +1044,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 			channels_from_image(channels);
 			late_from_image(late_img);
+			if (version >= 10) {
+				noise_bits_from_image(noise_bits);
+			} else if (version >= 5) {
+				noise_from_v9(noise);
+			}
 			if (version < 7) {
 				keys[0] = m_regs[0x08] & 0x7f;
 				keys[1] = img[0] & 31;
@@ -1095,6 +1166,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t depths[DEPTH_IMAGE_SIZE];
 			depths_to_image(depths);
 			scratch.depths_from_image(depths);
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE];
+			noise_bits_to_image(noise_bits);
+			scratch.noise_bits_from_image(noise_bits);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 

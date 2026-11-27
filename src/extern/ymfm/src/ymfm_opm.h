@@ -183,13 +183,24 @@ public:
 		uint32_t lfsr;
 		uint8_t counter;
 	};
-	static uint32_t step_noise(noise_gen &gen, uint32_t before, uint32_t after, uint32_t change, uint32_t &bits);
+	static uint32_t step_noise(noise_gen &gen, uint8_t const target[32], uint32_t &bits);
 
-	// the noise state save_restore() leaves out, for a host's own image
+	// a $0F write's frequency, for the generator from `cycle` of the sample
+	// it steps next
+	void noise_frequency_write(uint8_t data, uint32_t cycle);
+
+	// the frequency writes taken without a sample to step
+	void noise_frequency_settle();
+
+	// the noise state save_restore() leaves out, for a host's own image;
+	// call noise_bits_changed() after setting the bits
 	noise_gen &noise_ahead() { return m_noise_ahead; }
-	uint64_t &noise_history() { return m_noise_history; }
-	uint32_t &noise_old_target() { return m_noise_old_target; }
-	uint32_t &noise_write_cycle() { return m_noise_write_cycle; }
+	uint32_t *noise_bits() { return m_noise_bits; }
+	uint8_t &noise_target() { return m_noise_target; }
+	void noise_bits_changed();
+
+	// the in-time generator of a state from before the generator ran ahead
+	noise_gen noise_in_time() const { return noise_gen{ m_noise_lfsr, m_noise_counter }; }
 
 	// start the noise generator over, as at reset
 	void reset_noise();
@@ -250,6 +261,9 @@ public:
 	static constexpr int32_t LFO_AM_END = 110;
 	static constexpr uint32_t LFO_RELOAD_CYCLE = 27;
 	static constexpr uint32_t NOISE_AHEAD = 3;
+	// the samples of the generator's low bits kept: NOISE_AHEAD samples on
+	// back to the in-time sample before
+	static constexpr uint32_t NOISE_BITS = NOISE_AHEAD + 2;
 
 	// caching helpers
 	void cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata_cache &cache);
@@ -320,13 +334,16 @@ protected:
 
 	// internal state
 	uint32_t m_lfo_counter;               // LFO counter
-	uint32_t m_noise_lfsr;                // noise LFSR state
-	uint8_t m_noise_counter;              // noise counter
+	uint32_t m_noise_lfsr;                // the generator, kept for the layout
+	uint8_t m_noise_counter;              // its timer, kept for the layout
 	uint8_t m_noise_state;                // latched noise state
 	uint64_t m_noise_history;             // in-time low bit per cycle, last two samples
 	noise_gen m_noise_ahead;              // the generator NOISE_AHEAD samples on
-	uint32_t m_noise_old_target;          // the target before a pending $0F write
-	uint32_t m_noise_write_cycle;         // cycle of a pending $0F write, 32 if none
+	uint32_t m_noise_bits[NOISE_BITS];    // its low bit per cycle, newest first
+	uint8_t m_noise_target;               // its frequency
+	uint8_t m_noise_changes;              // frequency writes for its next sample
+	uint8_t m_noise_change_cycle[4];      // the cycle of each
+	uint8_t m_noise_change_target[4];     // and its frequency
 	uint8_t m_lfo_am;                     // AM latch for operators 0-15
 	lfo_state m_lfo;                      // LFO counters and PM latch
 	lfo_depth m_lfo_depth[8];             // AM and PM depths, by window

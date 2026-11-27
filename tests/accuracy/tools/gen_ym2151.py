@@ -496,6 +496,25 @@ def noise_writes():
     return s
 
 
+def noise_frequency_writes():
+    """$0F written twice in a sample, either side of cycle 12, the noise
+    left enabled, from the sample of the first write."""
+    s = V()
+    s.set(0x0f, 0x9e)
+    noise_voice(s)
+    s.key(7, 8)
+    t = s.t
+    for d in (2, 4, 8, 12, 20):
+        for o in (0, 4, 11, 12, 13, 20):
+            t += 80 * SAMPLE
+            t = t - t % SAMPLE + o
+            s.w(0, 0x0f, t - 6)
+            s.w(1, 0x93, t)
+            s.w(1, 0x9e if d & 4 else 0x85, t + d)
+            s.o(t // SAMPLE, 64, "R")
+    return s
+
+
 def noise_am():
     """A saw AM on the noise slot, at TL 0 and 7F."""
     s = V()
@@ -865,6 +884,7 @@ SCRIPTS = {
     "noise_rates": noise_rates,
     "noise_level": noise_level,
     "noise_writes": noise_writes,
+    "noise_frequency_writes": noise_frequency_writes,
     "noise_am": noise_am,
     "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),

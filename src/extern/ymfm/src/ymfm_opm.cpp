@@ -49,8 +49,11 @@ opm_registers::opm_registers() :
 	m_noise_state(0),
 	m_noise_history(0),
 	m_noise_ahead{ 0, 0 },
-	m_noise_old_target(0),
-	m_noise_write_cycle(32),
+	m_noise_bits{},
+	m_noise_target(0x1f),
+	m_noise_changes(0),
+	m_noise_change_cycle{},
+	m_noise_change_target{},
 	m_lfo_am(0),
 	m_lfo{ 0, 32768, 0, 0, 0, 0, 0, 0, false },
 	m_write_cycle(0)
@@ -112,13 +115,63 @@ void opm_registers::reset_noise()
 {
 	m_noise_lfsr = 0;
 	m_noise_counter = 0;
-	m_noise_history = 0;
 	m_noise_ahead = noise_gen{ 0, 0 };
-	m_noise_old_target = 0;
-	m_noise_write_cycle = 32;
-	uint32_t bits;
+	m_noise_target = uint8_t(noise_frequency());
+	m_noise_changes = 0;
+	for (uint32_t i = 0; i < NOISE_BITS; i++)
+		m_noise_bits[i] = 0;
+	uint8_t target[32];
+	for (uint32_t cycle = 0; cycle < 32; cycle++)
+		target[cycle] = m_noise_target;
 	for (uint32_t sample = 0; sample < NOISE_AHEAD; sample++)
-		m_noise_state = uint8_t(step_noise(m_noise_ahead, noise_frequency(), noise_frequency(), 0, bits));
+	{
+		uint32_t bits;
+		m_noise_state = uint8_t(step_noise(m_noise_ahead, target, bits));
+		for (uint32_t i = NOISE_BITS - 1; i > 0; i--)
+			m_noise_bits[i] = m_noise_bits[i - 1];
+		m_noise_bits[0] = bits;
+	}
+	noise_bits_changed();
+}
+
+
+//-------------------------------------------------
+//  noise_frequency_write - a $0F write's
+//  frequency, from `cycle` of the next sample
+//-------------------------------------------------
+
+void opm_registers::noise_frequency_write(uint8_t data, uint32_t cycle)
+{
+	if (m_noise_changes < 4)
+	{
+		m_noise_change_cycle[m_noise_changes] = uint8_t(cycle);
+		m_noise_change_target[m_noise_changes] = uint8_t(bitfield(data, 0, 5) ^ 0x1f);
+		m_noise_changes++;
+	}
+}
+
+
+//-------------------------------------------------
+//  noise_frequency_settle - the frequency writes
+//  taken without a sample to step
+//-------------------------------------------------
+
+void opm_registers::noise_frequency_settle()
+{
+	if (m_noise_changes != 0)
+		m_noise_target = m_noise_change_target[m_noise_changes - 1];
+	m_noise_changes = 0;
+}
+
+
+//-------------------------------------------------
+//  noise_bits_changed - the in-time history from
+//  the kept bits
+//-------------------------------------------------
+
+void opm_registers::noise_bits_changed()
+{
+	m_noise_history = m_noise_bits[NOISE_AHEAD + 1] | (uint64_t(m_noise_bits[NOISE_AHEAD]) << 32);
 }
 
 
@@ -176,13 +229,6 @@ void opm_registers::operator_map(operator_mapping &dest) const
 bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint32_t &opmask)
 {
 	assert(index < REGISTERS);
-
-	// the noise generator takes a new frequency from this cycle
-	if (index == 0x0f && m_noise_write_cycle == 32)
-	{
-		m_noise_old_target = noise_frequency();
-		m_noise_write_cycle = m_write_cycle;
-	}
 
 	// LFO AM/PM depth are written to the same register (0x19);
 	// redirect the PM depth to an unused neighbor (0x1a)
@@ -302,12 +348,12 @@ uint8_t opm_registers::lfo_product(uint32_t value, uint32_t last, bool pm, int32
 
 //-------------------------------------------------
 //  step_noise - run a noise generator through one
-//  sample, its target changing at cycle `change`;
-//  returns the output bit and fills `bits` with
-//  the low bit seen at each cycle
+//  sample, with the target at each cycle; returns
+//  the output bit and fills `bits` with the low
+//  bit seen at each cycle
 //-------------------------------------------------
 
-uint32_t opm_registers::step_noise(noise_gen &gen, uint32_t before, uint32_t after, uint32_t change, uint32_t &bits)
+uint32_t opm_registers::step_noise(noise_gen &gen, uint8_t const target[32], uint32_t &bits)
 {
 	// a 17-bit LFSR (x^17 + x^3 + 1, fed a 1 while it is all zero), held as
 	// a 16-bit ring that turns once a cycle plus one more bit. A 5-bit timer
@@ -333,7 +379,7 @@ uint32_t opm_registers::step_noise(noise_gen &gen, uint32_t before, uint32_t aft
 		ring = (ring >> 1) | (in << 15);
 		if (cycle == 12)
 			out = ring & 1;
-		uint32_t const match = (timer == ((cycle < change) ? before : after)) ? 1 : 0;
+		uint32_t const match = (timer == target[cycle]) ? 1 : 0;
 		if ((cycle & 15) == 15)
 			timer = bitfield(matched, 0) ? 0 : (timer + 1) & 31;
 		matched = ((matched << 1) | match) & 3;
@@ -351,25 +397,26 @@ uint32_t opm_registers::step_noise(noise_gen &gen, uint32_t before, uint32_t aft
 void opm_registers::clock_noise()
 {
 	// Noise reaches the mixer NOISE_AHEAD samples sooner than an operator's
-	// output (checked against Nuked-OPM): the output takes the generator
-	// that many samples on. m_noise_lfsr and m_noise_counter run in time and take each $0F
-	// write at its cycle; m_noise_ahead is them run NOISE_AHEAD samples
-	// further, again from them after a write.
-	uint32_t const target = noise_frequency();
-	uint32_t bits;
-	noise_gen gen = { m_noise_lfsr, m_noise_counter };
-	step_noise(gen, m_noise_write_cycle < 32 ? m_noise_old_target : target, target, m_noise_write_cycle, bits);
-	m_noise_history = (m_noise_history >> 32) | (uint64_t(bits) << 32);
-	m_noise_lfsr = gen.lfsr;
-	m_noise_counter = gen.counter;
-	if (m_noise_write_cycle < 32)
+	// output (checked against Nuked-OPM): the generator runs that many
+	// samples on, in step with the interface, and takes each $0F frequency
+	// at its cycle. The LFO reads its bits from the in-time sample.
+	uint8_t target[32];
+	uint32_t next = 0;
+	for (uint32_t cycle = 0; cycle < 32; cycle++)
 	{
-		m_noise_ahead = gen;
-		for (uint32_t sample = 1; sample < NOISE_AHEAD; sample++)
-			step_noise(m_noise_ahead, target, target, 0, bits);
-		m_noise_write_cycle = 32;
+		while (next < m_noise_changes && m_noise_change_cycle[next] <= cycle)
+			m_noise_target = m_noise_change_target[next++];
+		target[cycle] = m_noise_target;
 	}
-	m_noise_state = uint8_t(step_noise(m_noise_ahead, target, target, 0, bits));
+	m_noise_changes = 0;
+	uint32_t bits;
+	m_noise_state = uint8_t(step_noise(m_noise_ahead, target, bits));
+	m_noise_lfsr = m_noise_ahead.lfsr;
+	m_noise_counter = m_noise_ahead.counter;
+	for (uint32_t i = NOISE_BITS - 1; i > 0; i--)
+		m_noise_bits[i] = m_noise_bits[i - 1];
+	m_noise_bits[0] = bits;
+	noise_bits_changed();
 }
 
 
