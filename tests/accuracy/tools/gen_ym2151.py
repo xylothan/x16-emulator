@@ -175,6 +175,24 @@ def timer(kind, n, irq=True, resets=4, phase=0):
     return s
 
 
+def timer_test():
+    """Both timers loaded from 0, flagging each expiry, while $01 bit 2 counts
+    them every cycle, set and cleared at several cycles of a sample."""
+    s = S()
+    t = s.reg(0x10, 0x00, START)
+    t = s.reg(0x11, 0x00, t)
+    t = s.reg(0x12, 0x00, t)
+    s.x(t, t + 9000)
+    s.reg(0x14, 0x0f, t)
+    for k, (o, hold) in enumerate(((0, 300), (5, 211), (13, 1100), (22, 37), (31, 530))):
+        t1 = t + 400 + 1700 * k
+        t1 = t1 - t1 % SAMPLE + o
+        s.reg(0x01, 0x04, t1)
+        s.reg(0x01, 0x00, t1 + hold)
+        s.reg(0x14, 0x3f, t1 + hold + 200)
+    return s
+
+
 def timer_irq_enable():
     """Without IRQEN no flag is set; enabling it later flags the next expiry."""
     s = S()
@@ -970,6 +988,7 @@ SCRIPTS = {
     "timer_b_254": lambda: timer("b", 254, phase=11),
     "timer_b_240": lambda: timer("b", 240, resets=2, phase=23),
     "timer_irq_enable": timer_irq_enable,
+    "timer_test": timer_test,
     "timer_reload": timer_reload,
     "timer_stop": timer_stop,
     "irq_both": irq_both,

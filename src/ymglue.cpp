@@ -78,6 +78,7 @@ struct opm_bus {
 
 	bool     csm = false, csm_lock = false;
 	bool     irq = false;
+	bool     test_timers = false;               // $01 bit 2: both timers count every cycle
 
 	static unsigned bit(bool v, unsigned n) {
 		return (v ? 1u : 0u) << n;
@@ -126,6 +127,7 @@ struct opm_bus {
 
 	void mode_write(uint8_t a, uint8_t v) {
 		switch (a) {
+			case 0x01: test_timers = v & 0x04; break;
 			case 0x10: a_reg = (uint16_t)((a_reg & 3) | v << 2); break;
 			case 0x11: a_reg = (uint16_t)((a_reg & 0x3fc) | (v & 3)); break;
 			case 0x12: b_reg = v; break;
@@ -199,14 +201,14 @@ struct opm_bus {
 		wa = wd = false;
 
 		if (cycle == 1) a_load = a_load_reg;
-		a_inc = a_load && cycle == 0;
+		a_inc = test_timers || (a_load && cycle == 0);
 		a_do_load = a_of || (a_load && a_temp);
 		a_do_reset = a_temp;
 		a_temp = !a_load;
 		a_flag = !a_reset && (a_flag || (a_irqen && a_of));
 		a_reset = false;
 
-		b_inc = b_load_reg && b_sub_of;
+		b_inc = test_timers || (b_load_reg && b_sub_of);
 		b_do_load = b_of || (b_load_reg && b_temp);
 		b_do_reset = b_temp;
 		b_temp = !b_load_reg;
@@ -268,7 +270,8 @@ struct opm_bus {
 		img[16] = (uint8_t)(bit(b_load_reg, 0) | bit(b_inc, 1) | bit(b_do_load, 2) | bit(b_do_reset, 3) | bit(b_temp, 4) | bit(b_of, 5) | bit(b_sub_of, 6));
 		img[17] = (uint8_t)(bit(b_irqen, 0) | bit(b_reset, 1) | bit(b_flag, 2));
 		img[18] = (uint8_t)(bit(csm, 0) | bit(csm_lock, 1) | bit(irq, 2));
-		img[19] = img[20] = img[21] = 0; // reserved
+		img[19] = (uint8_t)bit(test_timers, 0);
+		img[20] = img[21] = 0; // reserved
 	}
 
 	void from_image(const uint8_t img[IMAGE_SIZE]) {
@@ -285,10 +288,11 @@ struct opm_bus {
 		b_temp = img[16] & 16; b_of = img[16] & 32; b_sub_of = img[16] & 64;
 		b_irqen = img[17] & 1; b_reset = img[17] & 2; b_flag = img[17] & 4;
 		csm = img[18] & 1; csm_lock = img[18] & 2; irq = img[18] & 4;
+		test_timers = img[19] & 1;
 	}
 };
 // A new field must reach to_image() and from_image().
-static_assert(sizeof(opm_bus) == 44, "opm_bus changed: update its image");
+static_assert(sizeof(opm_bus) == 46, "opm_bus changed: update its image");
 
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:

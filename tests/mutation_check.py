@@ -950,8 +950,8 @@ MUTATIONS = [
     {
         "name": "YM2151 timer A counts twice a sample",
         "file": "src/ymglue.cpp",
-        "find": "a_inc = a_load && cycle == 0;",
-        "into": "a_inc = a_load && (cycle & 15) == 0;",
+        "find": "a_inc = test_timers || (a_load && cycle == 0);",
+        "into": "a_inc = test_timers || (a_load && (cycle & 15) == 0);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1433,6 +1433,33 @@ MUTATIONS = [
         # ym_test_eg_clock.vec
         "find": "else if (m_regs.test_eg_timer())",
         "into": "if (m_regs.test_eg_timer())",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 ignored by the timers",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "case 0x01: test_timers = v & 0x04; break;",
+        "into": "case 0x01: break;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 leaves timer A alone",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "a_inc = test_timers || (a_load && cycle == 0);",
+        "into": "a_inc = a_load && cycle == 0;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 leaves timer B alone",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "b_inc = test_timers || (b_load_reg && b_sub_of);",
+        "into": "b_inc = b_load_reg && b_sub_of;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
