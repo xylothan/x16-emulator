@@ -378,8 +378,36 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			queue(ENGINE_BEHIND, a, v, LATE_WRITE);
 		}
 
+		// A CSM key-on lasts from cycle 3 of the sample its timer overflows to
+		// cycle 2 of the next. Each slot's envelope takes it at cycle `slot`,
+		// so slots 0-4, M1 of channels 0-4, take it a sample after the rest
+		// (checked against Nuked-OPM). The entry's address names the group:
+		// CSM_ALL is every operator.
+		enum csm_group : uint8_t {
+			CSM_ALL   = 0,
+			CSM_FIRST = 1,  // every operator but M1 of channels 0-4
+			CSM_LATER = 2,  // M1 of channels 0-4
+		};
+
 		void late_csm() {
-			queue(ENGINE_BEHIND, 0, 0, LATE_CSM);
+			queue(0, CSM_FIRST, 0, LATE_CSM);
+			queue(1, CSM_LATER, 0, LATE_CSM);
+		}
+
+		void csm_keyon(uint8_t group) {
+			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
+				const bool later = ch <= 4;
+				uint32_t ops = 0;
+				if (group != CSM_LATER) {
+					ops |= later ? 0xe : 0xf;
+				}
+				if (group != CSM_FIRST && later) {
+					ops |= 0x1;
+				}
+				if (ops != 0) {
+					m_chip.engine().csm_keyon(ch, ops);
+				}
+			}
 		}
 
 		// Before the engine's sample: what is due, in the order taken.
@@ -399,7 +427,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 					m_late[kept++] = e;
 				} else if (e.kind == LATE_DIRECT) {
 				} else if (e.kind == LATE_CSM) {
-					m_engine->engine_timer_expired(0);
+					csm_keyon(e.addr);
 				} else {
 					to_engine(e.addr, e.value, e.cycle);
 				}

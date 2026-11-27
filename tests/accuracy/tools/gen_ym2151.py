@@ -677,6 +677,67 @@ def env_high_rates():
     return s
 
 
+def csm_voices(s, slots):
+    """One operator per channel, at full attack with KS 3, that decays and
+    releases fast enough to hear each CSM key-on."""
+    for ch in range(8):
+        s.channel(ch, 0x4a + 4 * ch, 0x10)
+        env_op(s, slots + ch, 0x1f, 0x0c, 0x4, 0x06, 0x9, ks=3)
+
+
+def csm(slots):
+    """CSM key-ons from timer A, every 8 samples, then the timer stopped."""
+    def make():
+        s = V()
+        csm_voices(s, slots)
+        s.set(0x10, 0xfe)
+        s.set(0x11, 0x00)
+        s.set(0x14, 0x81)
+        s.out(1024)
+        s.wait(1100)
+        s.set(0x14, 0x30)
+        s.out(256)
+        s.wait(300)
+        return s
+    return make
+
+
+def csm_held():
+    """CSM key-ons on every channel while $08 holds one keyed."""
+    s = V()
+    csm_voices(s, 24)
+    s.key(2, 8)
+    s.set(0x10, 0xfe)
+    s.set(0x11, 0x00)
+    s.set(0x14, 0x81)
+    s.out(1024)
+    s.wait(1100)
+    s.set(0x08, 2)
+    s.out(512)
+    s.wait(600)
+    s.set(0x14, 0x30)
+    return s
+
+
+def csm_phase():
+    """CSM turned on at every cycle of the sample, under a timer A that
+    overflows every sample, and off again."""
+    s = V()
+    csm_voices(s, 24)
+    s.set(0x10, 0xff)
+    s.set(0x11, 0x03)
+    t = s.t
+    for o in range(32):
+        t += 96 * SAMPLE
+        t = t - t % SAMPLE + o
+        s.w(0, 0x14, t - 6)
+        s.w(1, 0x81, t)
+        s.w(0, 0x14, t + 40 * SAMPLE - 6)
+        s.w(1, 0x30, t + 40 * SAMPLE)
+        s.o(t // SAMPLE - 2, 64, "R")
+    return s
+
+
 def key_timing():
     """Key-on and key-off written at every cycle of the sample, on the first,
     a middle and the last channel."""
@@ -801,6 +862,10 @@ SCRIPTS = {
     "output_clamp": output_clamp,
     "envelopes": envelopes,
     "env_high_rates": env_high_rates,
+    "csm_c2": csm(24),
+    "csm_m1": csm(0),
+    "csm_held": csm_held,
+    "csm_phase": csm_phase,
     "key_timing": key_timing,
     "key_latch": key_latch,
     "op_writes": op_writes,

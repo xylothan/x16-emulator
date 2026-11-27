@@ -124,7 +124,7 @@ does, and checks:
 - The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
 - SPI
 - FPGA reconfiguration
-- YM2151 CSM key-on, the test register ($01) and reads of the address port
+- YM2151 test register ($01) writes, and reads of the address port
 - YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
   operator's value at that operator's own cycle, and the emulator takes all four
   at once

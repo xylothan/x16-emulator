@@ -1320,6 +1320,42 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 CSM key-on holds until the next write",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_csm_c2.vec, ym_csm_m1.vec
+        "find": "if (bitfield(chanmask, chnum) && m_channel[chnum]->key_pending())",
+        "into": "if (false && m_channel[chnum]->key_pending())",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 CSM key-on reaches the engine a sample late",
+        "file": "src/ymglue.cpp",
+        # ym_csm_c2.vec, ym_csm_phase.vec
+        "find": "queue(0, CSM_FIRST, 0, LATE_CSM);",
+        "into": "queue(1, CSM_FIRST, 0, LATE_CSM);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 CSM key-on: slots 0-4 take it with the rest",
+        "file": "src/ymglue.cpp",
+        # ym_csm_m1.vec
+        "find": "queue(1, CSM_LATER, 0, LATE_CSM);",
+        "into": "queue(0, CSM_LATER, 0, LATE_CSM);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 CSM key-on: slots 0-1 take it early",
+        "file": "src/ymglue.cpp",
+        # ym_csm_m1.vec
+        "find": "const bool later = ch <= 4;",
+        "into": "const bool later = ch >= 2 && ch <= 4;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 envelope: high rates double on the table's cycles",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_env_high_rates.vec

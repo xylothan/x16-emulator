@@ -190,6 +190,9 @@ public:
 	// prepare prior to clocking
 	bool prepare();
 
+	// true if the key has changed since the last prepare
+	bool key_pending() const { return (m_keyon_live != 0) != (m_key_state != 0); }
+
 	// master clocking function
 	void clock(uint32_t env_counter, int32_t lfo_raw_pm);
 
@@ -319,8 +322,20 @@ public:
 	// signal key on/off to our operators
 	void keyonoff(uint32_t states, keyon_type type, uint32_t chnum);
 
+	// a CSM key-on, for one sample, of the operators in opmask
+	void csm_keyon(uint32_t opmask);
+
 	// prepare prior to clocking
 	bool prepare();
+
+	// true if any operator's key has changed since the last prepare
+	bool key_pending() const
+	{
+		for (auto op : m_op)
+			if (op != nullptr && op->key_pending())
+				return true;
+		return false;
+	}
 
 	// master clocking function
 	void clock(uint32_t env_counter, int32_t lfo_raw_pm);
@@ -482,6 +497,10 @@ public:
 public:
 	// timer callback; called by the interface when a timer fires
 	virtual void engine_timer_expired(uint32_t tnum) override;
+
+	// a CSM key-on of the operators in opmask on channel chnum, whatever the
+	// registers hold: the interface has decided it
+	void csm_keyon(uint32_t chnum, uint32_t opmask);
 
 	// check interrupts; called by the interface after synchronization
 	virtual void engine_check_interrupts() override;
