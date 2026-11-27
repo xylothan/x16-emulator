@@ -1305,8 +1305,8 @@ MUTATIONS = [
         "name": "YM2151 test register: bit 4 waits for the engine",
         "file": "src/ymglue.cpp",
         # ym_test_output_bit.vec
-        "find": "TEST_FAST = 0x38;",
-        "into": "TEST_FAST = 0x28;",
+        "find": "TEST_FAST = 0x39;",
+        "into": "TEST_FAST = 0x29;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1388,6 +1388,51 @@ MUTATIONS = [
         # ym_test_phase_reset.vec
         "find": "m_late[j].addr = test;",
         "into": "m_late[j].addr = e.value;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 leaves the operators' envelopes alone",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(int32_t(opoffs), 0); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 read a cycle early by the envelopes",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "test_bit(int32_t(opoffs), 0)",
+        "into": "test_bit(int32_t(opoffs) + 1, 0)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 leaves the envelope timer alone",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(0, 0); }",
+        "into": "{ return 0; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 reaches the envelope timer in its sample",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(0, 0); }",
+        "into": "{ return test_bit(1, 0); }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 steps the timer on the divider's own cycle too",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_eg_clock.vec
+        "find": "else if (m_regs.test_eg_timer())",
+        "into": "if (m_regs.test_eg_timer())",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

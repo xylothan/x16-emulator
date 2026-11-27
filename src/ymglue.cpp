@@ -341,11 +341,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
 		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
 		// The test register bits that reach the engine after TEST_FAST_WAIT:
-		// bit 3 clears each operator's phase, bit 4 sets bit 13 of its level,
-		// bit 5 holds it at full level. The phase runs a sample behind, so
-		// bit 3 reaches most slots the sample after: TEST_PHASE carries the
-		// write there.
-		static constexpr uint8_t TEST_FAST = 0x38;
+		// bit 0 clocks the envelope every sample, bit 3 clears each
+		// operator's phase, bit 4 sets bit 13 of its level, bit 5 holds it at
+		// full level. The phase runs a sample behind, so bit 3 reaches most
+		// slots the sample after: TEST_PHASE carries the write there.
+		static constexpr uint8_t TEST_FAST = 0x39;
 		static constexpr uint8_t TEST_FAST_WAIT = 0;
 		static constexpr uint8_t TEST_PHASE = 0x08;
 		static constexpr uint8_t TEST_REST = (uint8_t)~TEST_FAST;

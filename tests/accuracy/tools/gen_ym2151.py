@@ -261,10 +261,11 @@ class V(S):
         self.set(0x30 + ch, kf << 2)
         self.set(0x38 + ch, pms << 4 | ams)
 
-    def op(self, sl, dt1=0, mul=1, tl=0, am=0, dt2=0):
-        """An operator at full attack that holds its level until key-off."""
+    def op(self, sl, dt1=0, mul=1, tl=0, am=0, dt2=0, d2r=0):
+        """An operator at full attack that holds its level until key-off,
+        or decays from it at `d2r` to silence."""
         for a, v in ((0x40, dt1 << 4 | mul), (0x60, tl), (0x80, 0x1f),
-                     (0xa0, am << 7), (0xc0, dt2 << 6), (0xe0, 0x0f)):
+                     (0xa0, am << 7), (0xc0, dt2 << 6 | d2r), (0xe0, 0x0f)):
             self.set(a + sl, v)
 
     def key(self, ch, ops):
@@ -540,34 +541,46 @@ def noise_enable_writes(conn, keyed):
     return f
 
 
-def test_voices(s, am=True):
+def test_voices(s, am=True, decay=False):
     """Channels 0, 3, 5 and 7 with every operator keyed, so that each phase
     starts at its key-on: channel 0 with AM at depth 7F if `am`, channel 5
-    released to silence, channel 7 with the noise."""
+    released to silence, channel 7 with the noise; with `decay`, every
+    operator decaying, at rates that step on every envelope cycle and on
+    some."""
     s.lfo(0xe0, 0, 0x7f, 0)
     s.set(0x0f, 0x9a)
     for ch in (0, 3, 5, 7):
         s.channel(ch, 0x4a - 4 * ch, ams=3 if am and ch == 0 else 0)
         for sl in (0, 8, 16, 24):
-            s.op(sl + ch, tl=0x30 + sl, am=1 if am and ch == 0 else 0)
+            s.op(sl + ch, tl=0x30 + sl, am=1 if am and ch == 0 else 0,
+                 d2r={0: 24, 3: 21, 5: 24, 7: 22}[ch] if decay else 0)
         s.key(ch, 15)
     s.set(0x08, 5)
     s.wait(200)
 
 
-def test_register(bits, early=0, am=True):
+def test_register(bits, early=0, am=True, rekey=False):
     """$01 set to `bits` and cleared at cycles 0-30, on both outputs from a
     sample before each write; from the sample after for writes at cycles
     below `early`, which the chip takes in part a sample sooner, with the
-    writes then far enough apart for a block to end before the next."""
+    writes then far enough apart for a block to end before the next. With
+    `rekey`, every operator decays from a key-on of every channel before
+    each write."""
     def f():
         s = V()
-        test_voices(s, am)
+        test_voices(s, am, rekey)
         t = s.t
         for o in range(31):
             for v in (bits, 0):
-                t += (80 if early else 60) * SAMPLE
+                t += (140 if rekey else 80 if early else 60) * SAMPLE
                 t = t - t % SAMPLE + o
+                if rekey:
+                    s.t = t - 90 * SAMPLE
+                    for ch in (0, 3, 5, 7):
+                        s.set(0x08, ch)
+                    s.wait(16)
+                    for ch in (0, 3, 5, 7):
+                        s.set(0x08, 15 << 3 | ch)
                 s.w(0, 0x01, t - 6)
                 s.w(1, v, t)
                 first = t // SAMPLE + (1 if o < early else -1) - SETTLE
@@ -982,6 +995,7 @@ SCRIPTS = {
     "test_output_bit": test_register(0x10, 6),
     "test_write_pairs": test_write_pairs(),
     "test_phase_reset": test_register(0x08, am=False),
+    "test_eg_clock": test_register(0x01, rekey=True),
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),

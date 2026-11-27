@@ -845,7 +845,7 @@ void fm_operator<RegisterType>::clock_envelope_by_sample(uint32_t env_counter)
 
 	// a new key-on runs at the attack rate
 	uint32_t const rate = m_cache.eg_rate[edge ? EG_ATTACK : state];
-	uint32_t const increment = envelope_increment(rate, env_counter);
+	uint32_t const increment = envelope_increment(rate, m_regs.test_eg_clock(m_opoffs) ? (env_counter & ~3u) : env_counter);
 
 	int32_t next = int32_t(level);
 	if (edge && rate >= 62)
@@ -1589,6 +1589,12 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 		m_env_counter += 4;
 	else if (bitfield(++m_env_counter, 0, 2) == RegisterType::EG_CLOCK_DIVIDER)
 		m_env_counter += 4 - RegisterType::EG_CLOCK_DIVIDER;
+
+	// the OPM's test register bit 0 clocks the envelope every sample: its
+	// timer, and each operator, steps then while the divider counts on
+	// (checked against Nuked-OPM)
+	else if (m_regs.test_eg_timer())
+		m_env_counter += 4;
 
 	// clock the noise generator
 	int32_t lfo_raw_pm = m_regs.clock_noise_and_lfo();

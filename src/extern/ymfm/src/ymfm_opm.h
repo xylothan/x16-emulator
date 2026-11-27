@@ -280,6 +280,8 @@ public:
 	uint32_t test_full_level(uint32_t opoffs) const  { return test_bit(int32_t(opoffs) + 1, 5); }
 	uint32_t test_output_bit(uint32_t opoffs) const  { return test_bit(int32_t(opoffs) + 7, 4); }
 	uint32_t test_phase_reset(uint32_t opoffs) const { return test_bit(int32_t(opoffs) + 7 - 32, 3); }
+	uint32_t test_eg_clock(uint32_t opoffs) const    { return test_bit(int32_t(opoffs), 0); }
+	uint32_t test_eg_timer() const                   { return test_bit(0, 0); }
 	uint32_t test_all_channels() const
 	{
 		uint32_t seen = m_test_before | m_regdata[0x01];
@@ -290,12 +292,13 @@ public:
 
 	// $01 was `before` this sample until a write of the bits in `mask`, now
 	// in $01, that the chip took at `cycle`, less 32 for one taken the sample
-	// before. Slot s reads bit 5 at its envelope, cycle s + 1, bit 4 at its
-	// output, cycle s + 7, and bit 3 at its phase, which runs a sample
-	// behind, cycle s + 7 of the sample before; it sees the last write of the
-	// bit taken by then, and one taken later the sample after (checked
-	// against Nuked-OPM). Writes past TEST_WRITES in a sample replace the
-	// last.
+	// before. The envelope timer reads bit 0 at cycle 0, before any write;
+	// slot s reads bit 0 at its envelope step, cycle s, bit 5 at its
+	// attenuation, cycle s + 1, bit 4 at its output, cycle s + 7, and bit 3
+	// at its phase, which runs a sample behind, cycle s + 7 of the sample
+	// before. It sees the last write of the bit taken by then, and one taken
+	// later the sample after (checked against Nuked-OPM). Writes past
+	// TEST_WRITES in a sample replace the last.
 	static constexpr uint32_t TEST_WRITES = 8;
 	void test_written(uint8_t before, uint8_t mask, int32_t cycle)
 	{

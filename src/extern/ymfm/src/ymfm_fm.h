@@ -133,6 +133,8 @@ public:
 	uint32_t test_all_channels() const               { return 0; } // OPM only
 	uint32_t test_output_bit(uint32_t opoffs) const  { return 0; } // OPM only
 	uint32_t test_phase_reset(uint32_t opoffs) const { return 0; } // OPM only
+	uint32_t test_eg_clock(uint32_t opoffs) const    { return 0; } // OPM only
+	uint32_t test_eg_timer() const                   { return 0; } // OPM only
 	uint32_t rhythm_enable() const                   { return 0; } // OPL only
 
 	// per-operator register defaults
