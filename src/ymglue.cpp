@@ -322,6 +322,65 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_bus = opm_bus{};
 			std::fill(std::begin(m_regs), std::end(m_regs), 0);
 			std::fill(std::begin(m_keyon), std::end(m_keyon), 0);
+			m_late_count = 0;
+			m_engine_wait = ENGINE_BEHIND;
+		}
+
+		// The engine runs ENGINE_BEHIND samples behind the interface, so a
+		// write can reach it as early as the chip acts on it. A write the
+		// engine takes in step with the interface waits that long.
+		static constexpr uint8_t ENGINE_BEHIND = 2;
+
+		struct late_write {
+			uint8_t wait;   // samples still to generate before it applies
+			uint8_t cycle;  // the interface cycle it was taken on
+			uint8_t addr;
+			uint8_t value;
+			bool    csm;    // a CSM key-on, not a write
+		};
+		static constexpr size_t LATE_MAX = 3 * 32;
+
+		void to_engine(uint8_t a, uint8_t v, uint8_t cycle) {
+			m_chip.engine().regs().set_write_cycle(cycle);
+			m_chip.write_address(a);
+			m_chip.write_data(v);
+		}
+
+		void late(uint8_t a, uint8_t v, bool csm = false) {
+			if (m_late_count < LATE_MAX) {
+				m_late[m_late_count++] = late_write{ ENGINE_BEHIND, m_bus.cycle, a, v, csm };
+			}
+		}
+
+		// Before the engine's sample: what is due, in the order taken.
+		void apply_late() {
+			size_t kept = 0;
+			for (size_t i = 0; i < m_late_count; i++) {
+				const late_write &e = m_late[i];
+				if (e.wait != 0) {
+					m_late[kept++] = e;
+				} else if (e.csm) {
+					m_engine->engine_timer_expired(0);
+				} else {
+					to_engine(e.addr, e.value, e.cycle);
+				}
+			}
+			m_late_count = kept;
+		}
+
+		// One sample: the engine's, once it has caught up, then every
+		// pending write a sample nearer.
+		void engine_sample(ymfm::ym2151::output_data *out) {
+			apply_late();
+			if (m_engine_wait != 0) {
+				m_engine_wait--;
+				out->clear();
+			} else {
+				m_chip.generate(out);
+			}
+			for (size_t i = 0; i < m_late_count; i++) {
+				m_late[i].wait--;
+			}
 		}
 
 		// Runs the interface n cycles, handing the engine each register write
@@ -329,9 +388,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		void run(uint32_t n) {
 			m_bus.run(n,
 				[this](uint8_t a, uint8_t v) {
-					m_chip.engine().regs().set_write_cycle(m_bus.cycle);
-					m_chip.write_address(a);
-					m_chip.write_data(v);
+					late(a, v);
 					m_regs[a] = v;
 					if (a == 0x08) {
 						latch_keyon(v);
@@ -342,7 +399,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						s_lost_handler(a, v);
 					}
 				},
-				[this]() { m_engine->engine_timer_expired(0); });
+				[this]() { late(0, 0, true); });
 		}
 
 		// To `cycle` of the sample not yet generated. Time only moves forward.
@@ -364,7 +421,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			int s = 0;
 			for (uint32_t i = 0; i < numsamples; i++) {
 				run(32u - m_bus.cycle);
-				m_chip.generate(&opm_out);
+				engine_sample(&opm_out);
 				const int16_t ls = clamp_sample(opm_out.data[0]);
 				const int16_t rs = clamp_sample(opm_out.data[1]);
 				int16_t hl = ls, hr = rs;
@@ -508,6 +565,33 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 		}
 
+		// How far the engine still has to catch up, and the writes waiting for
+		// it. A new field must reach both functions.
+		static constexpr size_t LATE_IMAGE_SIZE = 2 + 5 * LATE_MAX;
+
+		void late_to_image(uint8_t img[LATE_IMAGE_SIZE]) {
+			std::fill(img, img + LATE_IMAGE_SIZE, 0);
+			img[0] = m_engine_wait;
+			img[1] = (uint8_t)m_late_count;
+			for (size_t i = 0; i < m_late_count; i++) {
+				uint8_t *e = img + 2 + 5 * i;
+				e[0] = m_late[i].wait;
+				e[1] = m_late[i].cycle;
+				e[2] = m_late[i].addr;
+				e[3] = m_late[i].value;
+				e[4] = m_late[i].csm ? 1 : 0;
+			}
+		}
+
+		void late_from_image(const uint8_t img[LATE_IMAGE_SIZE]) {
+			m_engine_wait = std::min<uint8_t>(img[0], ENGINE_BEHIND);
+			m_late_count = std::min<size_t>(img[1], LATE_MAX);
+			for (size_t i = 0; i < m_late_count; i++) {
+				const uint8_t *e = img + 2 + 5 * i;
+				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], e[4] != 0 };
+			}
+		}
+
 		// Each channel's C1 output held for the next sample's M2. A new field
 		// must reach both functions.
 		static constexpr size_t CHANNEL_IMAGE_SIZE = 2 * YM_NUM_CHANNELS;
@@ -571,6 +655,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t channels[CHANNEL_IMAGE_SIZE];
 			channels_to_image(channels);
 			ss_put(w, channels, sizeof channels);
+			static uint8_t late_img[LATE_IMAGE_SIZE];
+			late_to_image(late_img);
+			ss_put(w, late_img, sizeof late_img);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -616,6 +703,13 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (version >= 6) {
 				ss_get(r, channels, sizeof channels);
 			}
+			// Before version 7 the engine ran in step with the interface: it
+			// has no writes waiting.
+			static uint8_t late_img[LATE_IMAGE_SIZE];
+			std::fill(late_img, late_img + LATE_IMAGE_SIZE, 0);
+			if (version >= 7) {
+				ss_get(r, late_img, sizeof late_img);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -645,6 +739,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				m_chip.engine().regs().reset_noise();
 			}
 			channels_from_image(channels);
+			late_from_image(late_img);
 
 			// Each operator caches values derived from the registers (phase
 			// step, envelope rates, waveform), rebuilt only when its channel is
@@ -715,6 +810,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t channels[CHANNEL_IMAGE_SIZE];
 			channels_to_image(channels);
 			scratch.channels_from_image(channels);
+			static uint8_t late_img[LATE_IMAGE_SIZE];
+			late_to_image(late_img);
+			scratch.late_from_image(late_img);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -723,7 +821,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				// Mirror generate()'s per-sample work, including the interface
 				// cycles, so pending writes and CSM key-ons show up.
 				scratch.run(32u - scratch.m_bus.cycle);
-				scratch.m_chip.generate(&out);
+				scratch.engine_sample(&out);
 				scratch.apply_mute(out);
 				int32_t ls = out.data[0], rs = out.data[1];
 				if (ls < -32768) ls = -32768;
@@ -845,6 +943,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 
 		uint8_t m_regs[YM_NUM_REGS];
 		uint8_t m_keyon[YM_NUM_CHANNELS];
+		late_write m_late[LATE_MAX] = {};
+		size_t m_late_count = 0;
+		uint8_t m_engine_wait = ENGINE_BEHIND;
 
 		int16_t  m_scope[YM_SCOPE_STREAMS][YM_SCOPE_SAMPLES];
 		unsigned m_scope_wridx;
@@ -924,7 +1025,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 6);
+		ss_begin(w, "YM  ", 7);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);

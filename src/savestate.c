@@ -68,7 +68,7 @@ extern bool no_ieee_intercept;
 // over DAP (x16/status) so a state's writer can still be traced.
 
 #define SAVESTATE_LAYOUT_VERSION  1
-#define SAVESTATE_MACHINE_VERSION 16
+#define SAVESTATE_MACHINE_VERSION 17
 
 extern const char x16_source_id[];
 

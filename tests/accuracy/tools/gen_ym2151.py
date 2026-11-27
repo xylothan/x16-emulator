@@ -11,6 +11,7 @@ import os
 import subprocess
 
 SAMPLE = 32          # OPM_Clock calls per sample
+SETTLE = 2           # samples each block starts after the one a script asks for
 START = 320
 
 
@@ -40,7 +41,7 @@ class S:
         self._op(t0, "x %d %d" % (t0, t1))
 
     def o(self, n0, n, side):
-        self._op(SAMPLE * n0, "o %d %d %s" % (n0, n, side))
+        self._op(SAMPLE * n0, "o %d %d %s" % (n0 + SETTLE, n, side))
 
     def text(self):
         return "\n".join(o[2] for o in sorted(self.ops)) + "\ne\n"
