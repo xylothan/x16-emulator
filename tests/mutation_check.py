@@ -1212,6 +1212,33 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 noise: enable taken a cycle later",
+        "file": "src/ymglue.cpp",
+        # ym_noise_enable_writes.vec
+        "find": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "into": "queue(m_bus.cycle > NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: enable waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_enable_writes.vec
+        "find": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "into": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 2 : 1, a, v, LATE_WRITE);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: channel 7 left out while the noise is off",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_noise_enable_unkeyed.vec
+        "find": "((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0)",
+        "into": "((m_regs.noise_enable()) ? 0x80 : 0)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 noise: level keeps its low bit",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec
@@ -1233,7 +1260,7 @@ MUTATIONS = [
         "name": "YM2151 noise: silent with nothing keyed",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec
-        "find": "uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);",
+        "find": "uint32_t const computed = m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0);",
         "into": "uint32_t const computed = m_active_channels;",
         "count": 1,
         "caught_by": ["ym_accuracy"],

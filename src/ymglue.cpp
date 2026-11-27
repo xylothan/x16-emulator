@@ -339,6 +339,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static constexpr uint8_t DEPTH_WAIT = 0;
 		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DEPTH_WAIT, "the LFO depths are kept as far on as a depth write lands");
 		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
+		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
@@ -491,12 +492,14 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);
 					} else if (a >= 0x20) {
 						direct(a, v, m_bus.cycle);
+					} else if (a == 0x0f) {
+						// The noise generator takes $0F's frequency at its cycle,
+						// and the mixer the enable, from the next sample when the
+						// chip takes it at NOISE_ENABLE_CYCLE or later: written at
+						// cycle 12 (checked against Nuked-OPM).
+						queue(0, a, v, LATE_NOISE, m_bus.cycle);
+						queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);
 					} else {
-						// The noise generator takes $0F's frequency at its cycle
-						// (checked against Nuked-OPM).
-						if (a == 0x0f) {
-							queue(0, a, v, LATE_NOISE, m_bus.cycle);
-						}
 						late(a, v);
 					}
 				},
@@ -726,13 +729,18 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		}
 
 		// The noise generator's low bits for the samples it has run ahead of
-		// the interface, newest first.
-		static constexpr size_t NOISE_BITS_IMAGE_SIZE = 4 * ymfm::opm_registers::NOISE_AHEAD;
+		// the interface, newest first, then channel 7's output held for the
+		// next sample with the noise in C2's place. A new field must reach
+		// both functions.
+		static constexpr size_t NOISE_BITS_IMAGE_SIZE = 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * 2;
 
 		void noise_bits_to_image(uint8_t img[NOISE_BITS_IMAGE_SIZE]) {
 			const uint32_t *bits = m_chip.engine().regs().noise_bits();
 			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
 				put_le(img + 4 * i, bits[i], 4);
+			}
+			for (uint32_t side = 0; side < 2; side++) {
+				put_le(img + 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * side, (uint32_t)m_chip.engine().debug_channel(7)->late_noise_output(side), 4);
 			}
 		}
 
@@ -740,6 +748,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint32_t *bits = m_chip.engine().regs().noise_bits();
 			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
 				bits[i] = get_le(img + 4 * i, 4);
+			}
+			for (uint32_t side = 0; side < 2; side++) {
+				m_chip.engine().debug_channel(7)->set_late_noise_output(side, (int32_t)get_le(img + 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * side, 4));
 			}
 		}
 
@@ -767,6 +778,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 			regs.noise_ahead() = gen;
 			regs.noise_target() = target;
+			// The mixer chose for channel 7 as it computed: either choice
+			// takes what it held.
+			auto *ch7 = m_chip.engine().debug_channel(7);
+			for (uint32_t side = 0; side < 2; side++) {
+				ch7->set_late_noise_output(side, ch7->late_output(side));
+			}
 		}
 
 		// How far the engine still has to catch up, and the writes waiting for

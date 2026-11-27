@@ -941,6 +941,8 @@ fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32
 	m_owner(owner),
 	m_late{},
 	m_late_prev{},
+	m_late_noise{},
+	m_late_noise_prev{},
 	m_op2_in(0),
 	m_op2_last(0)
 {
@@ -958,7 +960,7 @@ void fm_channel<RegisterType>::reset()
 	m_feedback[0] = m_feedback[1] = 0;
 	m_feedback_in = 0;
 	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
-		m_late[index] = m_late_prev[index] = 0;
+		m_late[index] = m_late_prev[index] = m_late_noise[index] = m_late_noise_prev[index] = 0;
 	m_op2_in = m_op2_last = 0;
 }
 
@@ -1044,6 +1046,8 @@ void fm_channel<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 	{
 		m_late_prev[index] = m_late[index];
 		m_late[index] = 0;
+		m_late_noise_prev[index] = m_late_noise[index];
+		m_late_noise[index] = 0;
 	}
 
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
@@ -1152,10 +1156,15 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
 	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
 
-	// the operators the chip mixed a sample late
+	// the operators the chip mixed a sample late; the OPM's noise enable
+	// chooses for operator 4 of channel 7 as they are mixed (checked against
+	// Nuked-OPM)
 	if constexpr (has_output_late<RegisterType>::value)
+	{
+		bool const noise = m_choffs == 7 && m_regs.noise_enable() != 0;
 		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
-			output.data[index] += m_late_prev[index];
+			output.data[index] += noise ? m_late_noise_prev[index] : m_late_prev[index];
+	}
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
@@ -1238,7 +1247,7 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// compute the 14-bit volume/value of operator 4; this could be a noise
 	// value on the OPM; all algorithms consume OP4 output at a minimum
 	int32_t result;
-	if (m_regs.noise_enable() && m_choffs == 7)
+	if (!has_output_late<RegisterType>::value && m_regs.noise_enable() && m_choffs == 7)
 		result = m_op[3]->compute_noise_volume(am_offset);
 	else
 	{
@@ -1257,25 +1266,38 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	{
 		// each output sums the on-time operators into this sample and the late
 		// ones into the next, adding in the same order and clamping as below
+		// (channel 7's operator 4, slot 31, is late in both: the sums with its
+		// noise in its place differ in their late parts alone)
 		fm_operator<RegisterType> *const ops[4] = { m_op[3], m_op[0], m_op[1], m_op[2] };
-		int32_t const values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
+		int32_t values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
 		bool const used[4] = { true, bitfield(algorithm_ops, 7) != 0, bitfield(algorithm_ops, 8) != 0, bitfield(algorithm_ops, 9) != 0 };
-		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+		uint32_t const variants = (m_choffs == 7) ? 2 : 1;
+		for (uint32_t variant = 0; variant < variants; variant++)
 		{
-			int32_t sum[2] = { 0, 0 };
-			bool any[2] = { false, false };
-			for (int term = 0; term < 4; term++)
-				if (used[term])
-				{
-					int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
-					sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
-					any[late] = true;
-				}
-			bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
-			if (enabled)
+			if (variant == 1)
+				values[0] = m_op[3]->compute_noise_volume(am_offset) >> rshift;
+			for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
 			{
-				output.data[index] += sum[0];
-				m_late[index] = sum[1];
+				int32_t sum[2] = { 0, 0 };
+				bool any[2] = { false, false };
+				for (int term = 0; term < 4; term++)
+					if (used[term])
+					{
+						int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
+						sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
+						any[late] = true;
+					}
+				bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
+				if (enabled)
+				{
+					if (variant == 0)
+					{
+						output.data[index] += sum[0];
+						m_late[index] = sum[1];
+					}
+					else
+						m_late_noise[index] = sum[1];
+				}
 			}
 		}
 		return;
@@ -1561,10 +1583,11 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	// mask out some channels for debug purposes
 	chanmask &= debug::GLOBAL_FM_CHANNEL_MASK;
 
-	// mask out inactive channels; the OPM noise channel sounds at any level
+	// mask out inactive channels; the OPM noise channel sounds at any level,
+	// and the OPM's mixer can take it in any sample
 	if (!YMFM_DEBUG_LOG_WAVFILES)
 	{
-		uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);
+		uint32_t const computed = m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0);
 
 		// a channel left out has every operator silent: on a chip that runs
 		// them anyway, what they feed back and on is 0

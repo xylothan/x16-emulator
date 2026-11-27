@@ -490,14 +490,14 @@ def check_ids():
             # the 12-byte LFO image, the 80-byte noise image, the 16-byte
             # channel image, the 482-byte image of writes waiting, the 10-byte
             # key image, the 544-byte operator image, the 48-byte depth image
-            # and the 12-byte noise bits. Versions 8 and 9 have no noise bits,
+            # and the 20-byte noise bits. Versions 8 and 9 have no noise bits,
             # version 9 its depths a sample nearer and version 8 its engine too.
             # Version 7 has no depth image, version 6 none of the three before
             # it either, and version 5 no channel image. Versions 3 and 4 hold a
             # 512-byte noise table before the bus image and no noise image;
             # version 3 has no LFO image either.
             def v9(b):
-                return b[:-12]
+                return b[:-20]
             def v7(b):
                 return v9(b)[:-48]
             def v6(b):

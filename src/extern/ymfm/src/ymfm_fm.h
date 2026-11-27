@@ -367,6 +367,11 @@ public:
 	int32_t late_output(uint32_t index) const { return m_late[index]; }
 	void set_late_output(uint32_t index, int32_t value) { m_late[index] = value; }
 
+	// the same with the noise in operator 4's place, for an OPM mixer that
+	// chooses when it mixes
+	int32_t late_noise_output(uint32_t index) const { return m_late_noise[index]; }
+	void set_late_noise_output(uint32_t index, int32_t value) { m_late_noise[index] = value; }
+
 	// operator 2's output this sample, for operator 3 in the next
 	int16_t held_op2() const { return m_op2_in; }
 	void set_held_op2(int16_t value) { m_op2_in = value; }
@@ -404,6 +409,8 @@ private:
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
 	mutable int32_t m_late[RegisterType::OUTPUTS];   // this sample's late part, for the next
 	int32_t m_late_prev[RegisterType::OUTPUTS];      // the last sample's, mixed into this one
+	mutable int32_t m_late_noise[RegisterType::OUTPUTS]; // the late part with the noise
+	int32_t m_late_noise_prev[RegisterType::OUTPUTS];    // and the last sample's
 	mutable int16_t m_op2_in;              // operator 2's output this sample (set in output)
 	int16_t m_op2_last;                    // operator 2's output the sample before
 };

@@ -515,6 +515,31 @@ def noise_frequency_writes():
     return s
 
 
+def noise_enable_writes(conn, keyed):
+    """$0F's noise enable turned off and on at every cycle, a sample or more
+    apart, on channel 7 with connection `conn`."""
+    def f():
+        s = V()
+        s.set(0x0f, 0x9e)
+        s.channel(7, 0x4a, con=conn)
+        for slot in (7, 15, 23, 31):
+            s.op(slot)
+        if keyed:
+            s.key(7, 15)
+        t = s.t
+        for o in range(32):
+            for d in (24, 40):
+                t += 40 * SAMPLE
+                t = t - t % SAMPLE + o
+                s.w(0, 0x0f, t - 6)
+                s.w(1, 0x1e, t)
+                s.w(1, 0x9e, t + d)
+                s.o(t // SAMPLE, 8, "L")
+                s.o(t // SAMPLE, 8, "R")
+        return s
+    return f
+
+
 def noise_am():
     """A saw AM on the noise slot, at TL 0 and 7F."""
     s = V()
@@ -885,6 +910,9 @@ SCRIPTS = {
     "noise_level": noise_level,
     "noise_writes": noise_writes,
     "noise_frequency_writes": noise_frequency_writes,
+    "noise_enable_writes": noise_enable_writes(4, True),
+    "noise_enable_writes_alg7": noise_enable_writes(7, True),
+    "noise_enable_unkeyed": noise_enable_writes(4, False),
     "noise_am": noise_am,
     "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),

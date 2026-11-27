@@ -128,10 +128,6 @@ does, and checks:
 - YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
   operator's value at that operator's own cycle, and the emulator takes all four
   at once
-- YM2151 noise writes ($0F) while slot 31 sounds. The chip reads the enable bit
-  at cycle 12, as slot 31 reaches the mixer, so its output switches 1 to 3
-  samples before the emulator's; a new frequency leaves a sample or two that
-  differ
 - YM2151 and VERA accesses within an instruction: those devices see each
   access at the instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
