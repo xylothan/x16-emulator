@@ -52,14 +52,16 @@ and is not in this repository.
   change. The runner checks every cycle, then replays the file in batches of up
   to 64 samples.
 - `O N S C` is samples N to N+63 of DAC side S (L or R). Sample N is the one
-  the emulator generates Nth; Nuked-OPM's DAC puts it out 5 samples later.
+  the emulator generates Nth; Nuked-OPM's DAC puts it out 3 samples later.
 - `F KC C` holds the phase steps of one operator at key code KC, for every KF,
   DT1 and DT2, and MUL 0, 1, 7 and 15. `M PMS KC C` holds them under every PM
   value at sensitivity PMS. `Z PMS KC C` is the same under a PM depth of 0.
 - C is a CRC-32 of the values in order, 4 bytes each, LSB first.
 - Output blocks start 8 samples after the last key-on and end 4 samples before
-  the next key-on or write that changes the sound. `$18` writes are the
-  exception: the LFO vectors check them inside blocks.
+  the next key-on or write that changes the sound. The exceptions are `$18`
+  writes in the LFO vectors and key-on, key-off and operator writes in
+  `envelopes`, `key_timing`, `key_latch` and `op_writes`, which are checked
+  inside blocks.
 
 ```
 cc -O2 -I<nuked-opm> -o tb_opm tools/tb_opm.c <nuked-opm>/opm.c
@@ -123,10 +125,13 @@ does, and checks:
 - SPI
 - FPGA reconfiguration
 - YM2151 CSM key-on, the test register ($01) and reads of the address port
-- YM2151 output when a register write or key-on lands: Nuked-OPM shows a
-  write's effect up to one sample sooner than the emulator, two for TL and three
-  for the noise frequency ($0F), and differs on the first sample after key-on
-- YM2151 envelopes
+- YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
+  operator's value at that operator's own cycle, and the emulator takes all four
+  at once
+- YM2151 noise writes ($0F) while slot 31 sounds. The chip reads the enable bit
+  at cycle 12, as slot 31 reaches the mixer, so its output switches 1 to 3
+  samples before the emulator's; a new frequency leaves a sample or two that
+  differ
 - YM2151 noise LFO wave: PM, and AM at rates whose low 4 bits are not 0. The LFO
   multiplies its value out a depth bit at a time, and a new noise value can
   arrive part way through; the emulator takes the whole value at once

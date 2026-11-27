@@ -147,6 +147,11 @@ public:
 		return opnum;
 	}
 
+	// each envelope steps every sample from the state the sample began with,
+	// and the output reads it as it was before the step (checked against
+	// Nuked-OPM)
+	static constexpr bool envelope_by_sample() { return true; }
+
 	// operator 3 (M2) runs before operator 2 (C1) in the sample, so it takes
 	// C1's output from the sample before
 	static constexpr bool op3_takes_last_op2() { return true; }

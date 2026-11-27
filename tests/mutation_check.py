@@ -1239,6 +1239,87 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 envelope steps per cycle",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_envelopes.vec, ym_key_timing.vec
+        "find": "static constexpr bool envelope_by_sample() { return true; }",
+        "into": "static constexpr bool envelope_by_sample() { return false; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 envelope output reads the level after its step",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_envelopes.vec
+        "find": "return envelope_by_sample<RegisterType>::value ? m_env_out : m_env_attenuation;",
+        "into": "return m_env_attenuation;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 envelope high rates step in ymfm's order",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_envelopes.vec
+        "find": "(0u - (env_counter >> 2)) & 3",
+        "into": "(env_counter >> 2) & 3",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 reset keeps the envelope counter",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_envelopes.vec, run after a reset
+        "find": "\tm_env_counter = 0;",
+        "into": "",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase does not restart at key-on",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_envelopes.vec
+        "find": "m_phase_restart = edge;",
+        "into": "m_phase_restart = false;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 phase steps on this sample's cache",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_op_writes.vec
+        "find": "clock_phase(lfo_raw_pm, m_phase_cache);",
+        "into": "clock_phase(lfo_raw_pm, m_cache);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 key latch copied at another cycle",
+        "file": "src/ymglue.cpp",
+        # ym_key_timing.vec
+        "find": "const uint8_t at = (uint8_t)(24 + ch);",
+        "into": "const uint8_t at = (uint8_t)(16 + ch);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 key-on reaches the engine as written",
+        "file": "src/ymglue.cpp",
+        # ym_key_latch.vec
+        "find": "m_kon_latch = v & 0x7f;",
+        "into": "m_kon_latch = v & 0x7f; to_engine(0x08, m_kon_latch, m_bus.cycle);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 operator writes wait for the engine",
+        "file": "src/ymglue.cpp",
+        # ym_op_writes.vec
+        "find": "} else if (a >= 0x20) {",
+        "into": "} else if (a >= 0xff) {",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 noise: LFO takes bits from cycle 30",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_lfo_noise_am_d0.vec

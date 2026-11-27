@@ -376,13 +376,18 @@ fm_operator<RegisterType>::fm_operator(fm_engine_base<RegisterType> &owner, uint
 	m_opoffs(opoffs),
 	m_phase(0),
 	m_env_attenuation(0x3ff),
+	m_env_out(0x3ff),
 	m_env_state(EG_RELEASE),
 	m_ssg_inverted(false),
 	m_key_state(0),
+	m_keyon_edge(false),
+	m_phase_restart(false),
 	m_keyon_live(0),
 	m_regs(owner.regs()),
 	m_owner(owner)
 {
+	m_cache = opdata_cache();
+	m_phase_cache = opdata_cache();
 }
 
 
@@ -396,9 +401,13 @@ void fm_operator<RegisterType>::reset()
 	// reset our data
 	m_phase = 0;
 	m_env_attenuation = 0x3ff;
+	m_env_out = 0x3ff;
 	m_env_state = EG_RELEASE;
 	m_ssg_inverted = 0;
 	m_key_state = 0;
+	m_keyon_edge = false;
+	m_phase_restart = false;
+	m_phase_cache = opdata_cache();
 	m_keyon_live = 0;
 }
 
@@ -434,6 +443,8 @@ bool fm_operator<RegisterType>::prepare()
 	m_keyon_live &= ~(1 << KEYON_CSM);
 
 	// we're active until we're quiet after the release
+	if (envelope_by_sample<RegisterType>::value && m_key_state != 0)
+		return true;
 	return (m_env_state != (RegisterType::EG_HAS_REVERB ? EG_REVERB : EG_RELEASE) || m_env_attenuation < EG_QUIET);
 }
 
@@ -451,12 +462,29 @@ void fm_operator<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 	else
 		m_ssg_inverted = false;
 
+	// the phase runs a sample behind such an envelope: it restarts, without
+	// a step, the sample after a key-on, and takes register changes a
+	// sample after the envelope does
+	if (envelope_by_sample<RegisterType>::value)
+	{
+		bool const edge = m_keyon_edge;
+		m_env_out = m_env_attenuation;
+		clock_envelope_by_sample(env_counter);
+		if (m_phase_restart)
+			m_phase = 0;
+		else
+			clock_phase(lfo_raw_pm, m_phase_cache);
+		m_phase_restart = edge;
+		m_phase_cache = m_cache;
+		return;
+	}
+
 	// clock the envelope if on an envelope cycle; env_counter is a x.2 value
 	if (bitfield(env_counter, 0, 2) == 0)
 		clock_envelope(env_counter >> 2);
 
 	// clock the phase
-	clock_phase(lfo_raw_pm);
+	clock_phase(lfo_raw_pm, m_cache);
 }
 
 
@@ -473,7 +501,7 @@ int32_t fm_operator<RegisterType>::compute_volume(uint32_t phase, uint32_t am_of
 	// the full sin wave
 
 	// early out if the envelope is effectively off
-	if (m_env_attenuation > EG_QUIET)
+	if (env_level() > EG_QUIET)
 		return 0;
 
 	// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
@@ -593,8 +621,18 @@ void fm_operator<RegisterType>::clock_keystate(uint32_t keystate)
 	{
 		m_key_state = keystate;
 
+		// on a chip whose envelope steps by sample, the state follows the
+		// key in clock_envelope_by_sample()
+		if (envelope_by_sample<RegisterType>::value)
+		{
+			if (keystate != 0)
+			{
+				m_keyon_edge = true;
+			}
+		}
+
 		// if the key has turned on, start the attack
-		if (keystate != 0)
+		else if (keystate != 0)
 		{
 			// OPLL has a DP ("depress"?) state to bring the volume
 			// down before starting the attack
@@ -742,21 +780,113 @@ void fm_operator<RegisterType>::clock_envelope(uint32_t env_counter)
 
 
 //-------------------------------------------------
+//  envelope_increment - the step for a rate on an
+//  envelope cycle; env_counter is a x.2 value
+//-------------------------------------------------
+
+template<class RegisterType>
+uint32_t fm_operator<RegisterType>::envelope_increment(uint32_t rate, uint32_t env_counter) const
+{
+	if (bitfield(env_counter, 0, 2) != 0)
+		return 0;
+	uint32_t const rate_shift = rate >> 2;
+	uint32_t const counter = (env_counter >> 2) << rate_shift;
+	if (bitfield(counter, 0, 11) != 0)
+		return 0;
+
+	// from rate 48 the steps repeat every 4 cycles, in the opposite order to
+	// the table's (checked against Nuked-OPM)
+	if (rate >= 48)
+		return attenuation_increment(rate, (0u - (env_counter >> 2)) & 3);
+	return attenuation_increment(rate, bitfield(counter, (rate_shift <= 11) ? 11 : rate_shift, 3));
+}
+
+
+//-------------------------------------------------
+//  clock_envelope_by_sample - step the envelope
+//  from the state the sample began with, then
+//  move the state on for the next sample (checked
+//  against Nuked-OPM)
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_operator<RegisterType>::clock_envelope_by_sample(uint32_t env_counter)
+{
+	uint32_t const level = m_env_attenuation;
+	envelope_state const state = m_env_state;
+	bool const keyon = m_key_state != 0;
+	bool const edge = m_keyon_edge;
+	m_keyon_edge = false;
+
+	// the level's top 6 bits all set, 0, or in the sustain level's window
+	bool const off = (level & 0x3f0) == 0x3f0;
+	bool const zero = (level == 0);
+	bool const sustained = (level >> 4) == (m_cache.eg_sustain >> 4);
+
+	// a new key-on runs at the attack rate
+	uint32_t const rate = m_cache.eg_rate[edge ? EG_ATTACK : state];
+	uint32_t const increment = envelope_increment(rate, env_counter);
+
+	int32_t next = int32_t(level);
+	if (edge && rate >= 62)
+		next = 0;
+	if (off && state != EG_ATTACK && !edge)
+		next = 0x3ff;
+	if (increment != 0 && !edge)
+	{
+		// attack moves only while the key is held, and not at rates of 62
+		// or 63 after the key-on itself
+		if (state == EG_ATTACK)
+		{
+			if (keyon && rate < 62 && !zero)
+				next += (~int32_t(level) * int32_t(increment)) >> 4;
+		}
+		else if (!off && (state != EG_DECAY || !sustained))
+			next += int32_t(increment);
+	}
+	m_env_attenuation = uint16_t(next & 0x3ff);
+
+	if (edge)
+		m_env_state = EG_ATTACK;
+	else if (!keyon)
+		m_env_state = EG_RELEASE;
+	else if (state == EG_ATTACK && zero)
+		m_env_state = EG_DECAY;
+	else if ((state == EG_DECAY || state == EG_SUSTAIN) && off)
+		m_env_state = EG_RELEASE;
+	else if (state == EG_DECAY && sustained)
+		m_env_state = EG_SUSTAIN;
+}
+
+
+//-------------------------------------------------
 //  clock_phase - clock the 10.10 phase value; the
 //  OPN version of the logic has been verified
 //  against the Nuked phase generator
 //-------------------------------------------------
 
 template<class RegisterType>
-void fm_operator<RegisterType>::clock_phase(int32_t lfo_raw_pm)
+void fm_operator<RegisterType>::clock_phase(int32_t lfo_raw_pm, opdata_cache const &cache)
 {
 	// read from the cache, or recalculate if PM active
-	uint32_t phase_step = m_cache.phase_step;
+	uint32_t phase_step = cache.phase_step;
 	if (phase_step == opdata_cache::PHASE_STEP_DYNAMIC)
-		phase_step = m_regs.compute_phase_step(m_choffs, m_opoffs, m_cache, lfo_raw_pm);
+		phase_step = m_regs.compute_phase_step(m_choffs, m_opoffs, cache, lfo_raw_pm);
 
 	// finally apply the step to the current phase value
 	m_phase += phase_step;
+}
+
+
+//-------------------------------------------------
+//  env_level - the envelope level the output
+//  reads
+//-------------------------------------------------
+
+template<class RegisterType>
+uint32_t fm_operator<RegisterType>::env_level() const
+{
+	return envelope_by_sample<RegisterType>::value ? m_env_out : m_env_attenuation;
 }
 
 
@@ -768,7 +898,7 @@ void fm_operator<RegisterType>::clock_phase(int32_t lfo_raw_pm)
 template<class RegisterType>
 uint32_t fm_operator<RegisterType>::envelope_attenuation(uint32_t am_offset) const
 {
-	uint32_t result = m_env_attenuation >> m_cache.eg_shift;
+	uint32_t result = env_level() >> m_cache.eg_shift;
 
 	// invert if necessary due to SSG-EG
 	if (RegisterType::EG_HAS_SSG && m_ssg_inverted)
@@ -1289,6 +1419,10 @@ void fm_engine_base<RegisterType>::reset()
 {
 	// reset all status bits
 	set_reset_status(0, 0xff);
+
+	// IC clears the envelope generator's counter and divider
+	// (checked against Nuked-OPM)
+	m_env_counter = 0;
 
 	// register type-specific initialization
 	m_regs.reset();
