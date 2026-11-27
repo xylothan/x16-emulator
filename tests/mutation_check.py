@@ -1138,6 +1138,115 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
+    # YM2151 output framing and noise. Expected values: Nuked-OPM, tests/accuracy/ym2151.
+    {
+        "name": "YM2151 output: left takes slot 15 in time",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_slot_framing.vec
+        "find": "(output == 0) ? opoffs >= 15 : opoffs == 31",
+        "into": "(output == 0) ? opoffs >= 16 : opoffs == 31",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 output: right takes slot 30 late",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_slot_framing.vec
+        "find": "(output == 0) ? opoffs >= 15 : opoffs == 31",
+        "into": "(output == 0) ? opoffs >= 15 : opoffs >= 30",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 output: the late part is dropped",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_slot_framing.vec
+        "find": "m_late_prev[index] = m_late[index];",
+        "into": "m_late_prev[index] = 0;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: LFSR taps bit 3",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_noise_rates.vec
+        "find": "bitfield(ring, 2) ^ extra",
+        "into": "bitfield(ring, 3) ^ extra",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: output taken at cycle 13",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_noise_rates.vec
+        "find": "if (cycle == 12)",
+        "into": "if (cycle == 13)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: timer counts at cycles 14 and 30",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_noise_rates.vec
+        "find": "if ((cycle & 15) == 15)",
+        "into": "if ((cycle & 15) == 14)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: 2 samples ahead",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_noise_rates.vec
+        "find": "NOISE_AHEAD = 3;",
+        "into": "NOISE_AHEAD = 2;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: a $0F write takes the whole sample",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_noise_writes.vec
+        "find": "m_noise_write_cycle < 32 ? m_noise_old_target : target, target",
+        "into": "target, target",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: level keeps its low bit",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_noise_level.vec
+        "find": "return int32_t((level & ~1u) << 2);",
+        "into": "return int32_t(level << 2);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: low bits set at level 0",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_noise_level.vec
+        "find": "if (level != 0)",
+        "into": "if (level != 0 || true)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: silent with nothing keyed",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_noise_level.vec
+        "find": "chanmask &= m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);",
+        "into": "chanmask &= m_active_channels;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: LFO takes bits from cycle 30",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_noise_am_d0.vec
+        "find": "m_noise_history >> 31",
+        "into": "m_noise_history >> 30",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
     {
         "name": "I2C STOP is only seen one bit into a byte",
         "file": "src/i2c.c",

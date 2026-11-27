@@ -412,6 +412,115 @@ def detune_voices():
     return s
 
 
+def slot_framing():
+    """Every slot of channels 6 and 7 at its own MUL, on both sides: 14 and 15 either
+    side of the left output's split, 31 alone late on the right. Then channel 3 as two
+    pairs, with feedback."""
+    s = V()
+    for ch in (6, 7):
+        s.channel(ch, 0x3a + ch, 0x11)
+        for k, sl in enumerate((ch, ch + 8, ch + 16, ch + 24)):
+            s.op(sl, mul=1 + k + 4 * (ch - 6), tl=6)
+    s.key(6, 15)
+    s.key(7, 15)
+    s.out(512, "L")
+    s.out(512, "R")
+    s.wait(512 + 4)
+    s.set(0x08, 6)
+    s.set(0x08, 7)
+    s.wait(256)
+    s.channel(3, 0x4a, 0x21, con=4, fb=5)
+    for k, sl in enumerate((3, 11, 19, 27)):
+        s.op(sl, mul=k + 1, tl=18 if k < 3 else 0)
+    s.key(3, 15)
+    s.out(512, "L")
+    s.out(512, "R")
+    return s
+
+
+def noise_voice(s, tl=0, ams=0):
+    """Channel 7's C2, slot 31, the noise slot."""
+    s.channel(7, 0x4a, 0x00, ams=ams)
+    s.op(31, tl=tl, am=1 if ams else 0)
+
+
+def settle(s, n, sides="R"):
+    """Output over n samples from 8 samples on, past the latency of the write before."""
+    s.wait(8)
+    for side in sides:
+        s.out(n, side)
+    s.wait(n + 4)
+
+
+def noise_rates():
+    """The noise generator at a range of frequencies, each written as it runs."""
+    s = V()
+    s.set(0x0f, 0x80)
+    noise_voice(s)
+    s.key(7, 8)
+    settle(s, 448, "LR")
+    for nf in (0x1f, 0x1e, 0x10, 0x0a, 0x01, 0x00):
+        s.set(0x0f, 0x80 | nf)
+        settle(s, 448, "LR")
+    return s
+
+
+def noise_level():
+    """Noise with nothing keyed, then its level over TL."""
+    s = V()
+    s.set(0x0f, 0x9c)
+    noise_voice(s)
+    settle(s, 128)
+    s.key(7, 8)
+    settle(s, 64)
+    for tl in (0x01, 0x02, 0x07, 0x10, 0x20, 0x33, 0x40, 0x55, 0x60, 0x6a, 0x70, 0x78, 0x7c, 0x7e, 0x7f, 0x3f, 0x00):
+        s.set(0x60 + 31, tl)
+        settle(s, 64)
+    return s
+
+
+def noise_writes():
+    """$0F rewritten at every cycle of the sample, between two frequencies."""
+    s = V()
+    s.set(0x0f, 0x9e)
+    noise_voice(s)
+    s.key(7, 8)
+    t = s.t
+    for o in range(32):
+        t += 80 * SAMPLE
+        t = t - t % SAMPLE + o
+        s.w(0, 0x0f, t - 6)
+        s.w(1, 0x9e if o & 1 else 0x93, t)
+        s.o(t // SAMPLE + 8, 64, "R")
+    return s
+
+
+def noise_am():
+    """A saw AM on the noise slot, at TL 0 and 7F."""
+    s = V()
+    s.lfo(0xe3, 0, 0x7f, 0)
+    s.set(0x0f, 0x9a)
+    noise_voice(s, ams=3)
+    s.key(7, 8)
+    settle(s, 1024)
+    s.set(0x60 + 31, 0x7f)
+    settle(s, 1024)
+    return s
+
+
+def lfo_noise_am(rate):
+    """The noise waveform's AM on a sine, at a rate with no second steps. Its PM, and
+    rates with them, are not covered (tests/accuracy/README.md)."""
+    s = V()
+    s.set(0x0f, 0x1b)
+    s.lfo(rate, 3, 0x7f, 0)
+    s.channel(0, 0x4a, 0x21, ams=3)
+    s.op(0, am=1)
+    s.key(0, 1)
+    s.out(4096)
+    return s
+
+
 SCRIPTS = {
     "busy_phase": busy_phase,
     "address_no_busy": address_no_busy,
@@ -443,6 +552,13 @@ SCRIPTS = {
     "lfo_am_split": lfo_am_split,
     "pm_gap_note": pm_gap_note,
     "detune_voices": detune_voices,
+    "slot_framing": slot_framing,
+    "noise_rates": noise_rates,
+    "noise_level": noise_level,
+    "noise_writes": noise_writes,
+    "noise_am": noise_am,
+    "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
+    "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),
 }
 
 

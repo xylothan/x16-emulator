@@ -147,6 +147,13 @@ public:
 		return opnum;
 	}
 
+	// the mixer takes slots 15-31 into the left output, and slot 31 into the
+	// right, a sample after the others
+	static constexpr bool output_late(uint32_t opoffs, uint32_t output)
+	{
+		return (output == 0) ? opoffs >= 15 : opoffs == 31;
+	}
+
 	// return an array of operator indices for each channel
 	struct operator_mapping { uint32_t chan[CHANNELS]; };
 	void operator_map(operator_mapping &dest) const;
@@ -156,6 +163,27 @@ public:
 
 	// clock the noise and LFO, if present, returning LFO PM value
 	int32_t clock_noise_and_lfo();
+
+	// clock the noise generator by one sample
+	void clock_noise();
+
+	// a noise generator: LFSR (17 bits) and timer (bits 0-4) with its last
+	// two matches (bits 5-6)
+	struct noise_gen
+	{
+		uint32_t lfsr;
+		uint8_t counter;
+	};
+	static uint32_t step_noise(noise_gen &gen, uint32_t before, uint32_t after, uint32_t change, uint32_t &bits);
+
+	// the noise state save_restore() leaves out, for a host's own image
+	noise_gen &noise_ahead() { return m_noise_ahead; }
+	uint64_t &noise_history() { return m_noise_history; }
+	uint32_t &noise_old_target() { return m_noise_old_target; }
+	uint32_t &noise_write_cycle() { return m_noise_write_cycle; }
+
+	// start the noise generator over, as at reset
+	void reset_noise();
 
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
@@ -190,6 +218,7 @@ public:
 	uint8_t lfo_am_value(uint32_t waveform, uint32_t count) const;
 	uint8_t lfo_pm_value(uint32_t waveform, uint32_t count) const;
 	static constexpr uint32_t LFO_RELOAD_CYCLE = 27;
+	static constexpr uint32_t NOISE_AHEAD = 3;
 
 	// caching helpers
 	void cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata_cache &cache);
@@ -263,7 +292,10 @@ protected:
 	uint32_t m_noise_lfsr;                // noise LFSR state
 	uint8_t m_noise_counter;              // noise counter
 	uint8_t m_noise_state;                // latched noise state
-	uint8_t m_noise_lfo;                  // latched LFO noise value
+	uint64_t m_noise_history;             // in-time low bit per cycle, last two samples
+	noise_gen m_noise_ahead;              // the generator NOISE_AHEAD samples on
+	uint32_t m_noise_old_target;          // the target before a pending $0F write
+	uint32_t m_noise_write_cycle;         // cycle of a pending $0F write, 32 if none
 	uint8_t m_lfo_am;                     // AM latch for operators 0-15
 	lfo_state m_lfo;                      // LFO counters and PM latch
 	uint32_t m_write_cycle;               // cycle of the writes being made

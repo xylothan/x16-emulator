@@ -452,13 +452,16 @@ def check_ids():
                 pos += 12 + int.from_bytes(orig[pos + 8:pos + 12], "little")
             return pos, int.from_bytes(orig[pos + 4:pos + 6], "little"), int.from_bytes(orig[pos + 8:pos + 12], "little")
 
-        def chunk_as(tag, version, drop):
-            """The state with chunk `tag` relabelled `version` and its last `drop` bytes cut."""
+        def chunk_as(tag, version, drop, body=None):
+            """The state with chunk `tag` relabelled `version` and its last `drop` bytes cut,
+            or its body made by `body` from the current one."""
             pos, _, n = chunk(tag)
-            head = orig[pos:pos + 4] + version.to_bytes(2, "little") + orig[pos + 6:pos + 8] + (n - drop).to_bytes(4, "little")
+            new = orig[pos + 12:pos + 12 + n]
+            new = body(new) if body else new[:n - drop]
+            head = orig[pos:pos + 4] + version.to_bytes(2, "little") + orig[pos + 6:pos + 8] + len(new).to_bytes(4, "little")
             p = os.path.join(WORK, "chunk-variant.x16s")
             with open(p, "wb") as f:
-                f.write(orig[:pos] + head + orig[pos + 12:pos + 12 + n - drop] + orig[pos + 12 + n:])
+                f.write(orig[:pos] + head + new + orig[pos + 12 + n:])
             try:
                 return d.req("x16/loadState", {"path": p, "hash": True}), None
             except RuntimeError as e:
@@ -482,14 +485,21 @@ def check_ids():
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"YM  ")
-        if ver == 4:
-            # ymglue.cpp state_load: version 3 lacks the 12-byte LFO image.
-            r, err = chunk_as(b"YM  ", 3, 12)
-            case("YM chunk v3, 12 bytes shorter, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"YM  ", 4, 12)
-            case("YM chunk v4 12 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+        if ver == 5:
+            # ymglue.cpp state_load: the body ends with the 22-byte bus image, the
+            # 12-byte LFO image and the 80-byte noise image. Versions 3 and 4 hold a
+            # 512-byte noise table before the bus image and no noise image; version
+            # 3 has no LFO image either.
+            def v4(b):
+                return b[:-114] + bytes(512) + b[-114:-80]
+            r, err = chunk_as(b"YM  ", 4, 0, v4)
+            case("YM chunk v4, with its table and no noise image, loads (%s)" % (err or "ok"), r is not None)
+            r, err = chunk_as(b"YM  ", 3, 0, lambda b: v4(b)[:-12])
+            case("YM chunk v3, also without the LFO image, loads (%s)" % (err or "ok"), r is not None)
+            r, err = chunk_as(b"YM  ", 5, 80)
+            case("YM chunk v5 80 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
-            case("YM chunk is v4 for the older-chunk cases (it is v%d)" % ver, False)
+            case("YM chunk is v5 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:
