@@ -1341,8 +1341,8 @@ MUTATIONS = [
         "name": "YM2151 test register: a second write in a sample hides the first",
         "file": "src/extern/ymfm/src/ymfm_opm.h",
         # ym_test_write_pairs.vec
-        "find": "m_test_before = before;",
-        "into": "m_test_before = before; m_test_writes = 0;",
+        "find": "if (m_test_writes == 0)",
+        "into": "if (true)",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
