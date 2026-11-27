@@ -1070,7 +1070,7 @@ MUTATIONS = [
         "name": "YM2151 phase: PM depth 0 still applies the latch",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_phase_pm.vec
-        "find": "(lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;",
+        "find": "(m_lfo_depth[(m_lfo.window - 1) & 7].pm[1] != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;",
         "into": "bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
@@ -1133,8 +1133,8 @@ MUTATIONS = [
         "name": "YM2151 LFO: PM latched after the tick",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_lfo_saw_pm.vec
-        "find": "\t\tcase 7:\n\t\t\tlfo.pm = lfo_pm_value(waveform, lfo.count);\n",
-        "into": "\t\tcase 7:\n\t\t\tlfo.pm = lfo_pm_value(waveform, lfo.count + 1);\n",
+        "find": "uint32_t const pm_value = lfo_pm_value(waveform, lfo.count);",
+        "into": "uint32_t const pm_value = lfo_pm_value(waveform, lfo.count + 1);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1314,8 +1314,63 @@ MUTATIONS = [
         "name": "YM2151 operator writes wait for the engine",
         "file": "src/ymglue.cpp",
         # ym_op_writes.vec
-        "find": "} else if (a >= 0x20) {",
-        "into": "} else if (a >= 0xff) {",
+        "find": "} else if (a >= 0x20 || a == 0x19) {",
+        "into": "} else if (a >= 0xff || a == 0x19) {",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    # YM2151 LFO multiply. Expected values: Nuked-OPM, tests/accuracy/ym2151.
+    {
+        "name": "YM2151 LFO depth writes wait for the engine",
+        "file": "src/ymglue.cpp",
+        # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
+        "find": "} else if (a >= 0x20 || a == 0x19) {",
+        "into": "} else if (a >= 0x20) {",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO multiply reads the depth at its end",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
+        "find": "int32_t const cycle = start + bit + 7 - step;",
+        "into": "int32_t const cycle = end + 0 * start;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO multiply takes depth bits LSB first",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_am_depth_writes.vec
+        "find": "depth.am[half], 6 - step))",
+        "into": "depth.am[half], step))",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 LFO multiply ends a step early",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
+        "find": "static constexpr int32_t LFO_AM_END = 110;",
+        "into": "static constexpr int32_t LFO_AM_END = 94;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise PM: last step reads the value at the tick",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_noise_pm_d0.vec
+        "find": "(waveform == 3 && lfo.ticks == 1) ? (pm_sign ? 0xff : 0) : pm_mag;",
+        "into": "pm_mag;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise LFO: a second step takes the first step's bits",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_lfo_noise_am_d3.vec, ym_lfo_noise_am_f7.vec
+        "find": "(lfo.steps == 2) ? 47 : 31",
+        "into": "(lfo.steps == 2) ? 31 : 31",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1323,8 +1378,8 @@ MUTATIONS = [
         "name": "YM2151 noise: LFO takes bits from cycle 30",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
         # ym_lfo_noise_am_d0.vec
-        "find": "m_noise_history >> 31",
-        "into": "m_noise_history >> 30",
+        "find": "(lfo.steps == 2) ? 47 : 31",
+        "into": "(lfo.steps == 2) ? 47 : 30",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

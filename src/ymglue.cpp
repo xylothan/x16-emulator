@@ -330,10 +330,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		}
 
 		// The engine runs ENGINE_BEHIND samples behind the interface, so a
-		// write can reach it as early as the chip acts on it: the key-on latch
-		// and $20-$FF at once (checked against Nuked-OPM). The rest wait that
-		// long, and reach it at the engine sample matching the interface's.
+		// write can reach it as early as the chip acts on it: the key-on latch,
+		// the LFO depths and $20-$FF at once (checked against Nuked-OPM). The
+		// rest wait that long, and reach it at the engine sample matching the
+		// interface's.
 		static constexpr uint8_t ENGINE_BEHIND = 2;
+		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND, "the LFO depths are kept ENGINE_BEHIND samples on");
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
@@ -432,7 +434,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						kon_copy_to(m_bus.cycle);
 						m_kon_latch = v & 0x7f;
 						latch_keyon(v);
-					} else if (a >= 0x20) {
+					} else if (a >= 0x20 || a == 0x19) {
 						to_engine(a, v, m_bus.cycle);
 					} else {
 						late(a, v);
@@ -578,6 +580,47 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (lfo.ticks == 0) {
 				lfo.ticks = 1;
 			}
+		}
+
+		// The LFO depths by window, which ymfm's own state leaves out. A new
+		// field must reach both functions.
+		static constexpr size_t DEPTH_IMAGE_SIZE = 6 * 8;
+		static_assert(sizeof(ymfm::opm_registers::lfo_depth) == 6, "lfo_depth changed: update its image");
+
+		void depths_to_image(uint8_t img[DEPTH_IMAGE_SIZE]) {
+			const ymfm::opm_registers::lfo_depth *d = m_chip.engine().regs().lfo_depths();
+			for (uint32_t i = 0; i < 8; i++, img += 6) {
+				img[0] = d[i].am[0];
+				img[1] = d[i].am[1];
+				img[2] = d[i].pm[0];
+				img[3] = d[i].pm[1];
+				img[4] = d[i].am_cut;
+				img[5] = d[i].pm_cut;
+			}
+		}
+
+		void depths_from_image(const uint8_t img[DEPTH_IMAGE_SIZE]) {
+			ymfm::opm_registers::lfo_depth *d = m_chip.engine().regs().lfo_depths();
+			for (uint32_t i = 0; i < 8; i++, img += 6) {
+				d[i].am[0]  = img[0] & 0x7f;
+				d[i].am[1]  = img[1] & 0x7f;
+				d[i].pm[0]  = img[2] & 0x7f;
+				d[i].pm[1]  = img[3] & 0x7f;
+				d[i].am_cut = (img[4] < 32) ? img[4] : 32;
+				d[i].pm_cut = (img[5] < 32) ? img[5] : 32;
+			}
+		}
+
+		// Each window holding the depths the engine's registers have, unwritten.
+		void depths_from_regs() {
+			const ymfm::opm_registers &regs = m_chip.engine().regs();
+			uint8_t img[DEPTH_IMAGE_SIZE];
+			for (uint32_t i = 0; i < 8; i++) {
+				img[6 * i + 0] = img[6 * i + 1] = (uint8_t)regs.lfo_am_depth();
+				img[6 * i + 2] = img[6 * i + 3] = (uint8_t)regs.lfo_pm_depth();
+				img[6 * i + 4] = img[6 * i + 5] = 32;
+			}
+			depths_from_image(img);
 		}
 
 		// The noise generator's state past what save_restore() keeps (the
@@ -772,6 +815,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			static uint8_t ops[OP_IMAGE_SIZE];
 			ops_to_image(ops);
 			ss_put(w, ops, sizeof ops);
+			uint8_t depths[DEPTH_IMAGE_SIZE];
+			depths_to_image(depths);
+			ss_put(w, depths, sizeof depths);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -836,6 +882,13 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				ss_get(r, ops, sizeof ops);
 				have_ops = true;
 			}
+			// Before version 8 the depths had no history: each window holds
+			// the registers'.
+			uint8_t depths[DEPTH_IMAGE_SIZE];
+			const bool have_depths = version >= 8;
+			if (have_depths) {
+				ss_get(r, depths, sizeof depths);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -871,6 +924,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				keys[1] = img[0] & 31;
 			}
 			keys_from_image(keys);
+			if (have_depths) {
+				depths_from_image(depths);
+			} else {
+				depths_from_regs();
+			}
 
 			// Each operator caches values derived from the registers (phase
 			// step, envelope rates, waveform), rebuilt only when its channel is
@@ -966,6 +1024,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			static uint8_t ops[OP_IMAGE_SIZE];
 			ops_to_image(ops);
 			scratch.ops_from_image(ops);
+			uint8_t depths[DEPTH_IMAGE_SIZE];
+			depths_to_image(depths);
+			scratch.depths_from_image(depths);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -1182,7 +1243,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 7);
+		ss_begin(w, "YM  ", 8);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);
@@ -1236,6 +1297,10 @@ extern "C" {
 		uint32_t chan, opmask;
 		regs.reset();
 		regs.write(0x19, (uint8_t)(0x80 | in->pmd), chan, opmask);
+		// the regs are never clocked: every window takes the depth
+		for (uint32_t i = 0; i < 8; i++) {
+			regs.lfo_depths()[i] = ymfm::opm_registers::lfo_depth{ { 0, 0 }, { (uint8_t)(in->pmd & 0x7f), (uint8_t)(in->pmd & 0x7f) }, 32, 32 };
+		}
 		regs.write(0x28, in->kc, chan, opmask);
 		regs.write(0x30, (uint8_t)(in->kf << 2), chan, opmask);
 		regs.write(0x38, (uint8_t)(in->pms << 4), chan, opmask);

@@ -98,6 +98,8 @@ void opm_registers::reset()
 
 	m_lfo = lfo_state{ 0, 32768, 0, 0, 0, 0, 0, 0, false };
 	m_lfo_am = 0;
+	for (lfo_depth &depth : m_lfo_depth)
+		depth = lfo_depth{ { 0, 0 }, { 0, 0 }, 32, 32 };
 	reset_noise();
 }
 
@@ -185,7 +187,14 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 	// LFO AM/PM depth are written to the same register (0x19);
 	// redirect the PM depth to an unused neighbor (0x1a)
 	if (index == 0x19)
+	{
+		lfo_depth &depth = m_lfo_depth[(m_lfo.window + LFO_DEPTH_AHEAD) & 7];
+		uint8_t &cut = bitfield(data, 7) ? depth.pm_cut : depth.am_cut;
+		if (cut == 32)
+			cut = uint8_t(m_write_cycle);
+		(bitfield(data, 7) ? depth.pm : depth.am)[1] = data & 0x7f;
 		m_regdata[index + bitfield(data, 7)] = data;
+	}
 	else if (index != 0x1a)
 		m_regdata[index] = data;
 
@@ -212,11 +221,11 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 
 //-------------------------------------------------
 //  lfo_am_value / lfo_pm_value - the LFO's AM
-//  value, and its PM value as sign (bit 7) and
-//  magnitude, from the counter and the depth
+//  value, and its PM value as sign (bit 8) and
+//  magnitude, from the counter
 //-------------------------------------------------
 
-uint8_t opm_registers::lfo_am_value(uint32_t waveform, uint32_t count) const
+uint8_t opm_registers::lfo_am_value(uint32_t waveform, uint32_t count)
 {
 	uint32_t value;
 	switch (waveform)
@@ -225,10 +234,10 @@ uint8_t opm_registers::lfo_am_value(uint32_t waveform, uint32_t count) const
 		case 2:  value = bitfield(count, 8) ? (count & 255) : (count & 255) ^ 255;  break;
 		default: value = (count & 255) ^ 255;                                  break;
 	}
-	return (value * lfo_am_depth()) >> 7;
+	return uint8_t(value);
 }
 
-uint8_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count) const
+uint32_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count)
 {
 	bool negative;
 	uint32_t value;
@@ -252,7 +261,42 @@ uint8_t opm_registers::lfo_pm_value(uint32_t waveform, uint32_t count) const
 			value = negative ? (count & 127) ^ 127 : (count & 127);
 			break;
 	}
-	return (negative ? 0x80 : 0) | ((value * lfo_pm_depth()) >> 7);
+	return (negative ? 0x100 : 0) | value;
+}
+
+
+//-------------------------------------------------
+//  lfo_product - a value times the AM or PM depth
+//  as the chip multiplies them: a step each half
+//  sample, from depth bit 6 down to bit 0, each
+//  adding the value a bit a cycle; steps 0-5 take
+//  value and step 6 last, and the product is
+//  complete at cycle end of this sample (checked
+//  against Nuked-OPM)
+//-------------------------------------------------
+
+uint8_t opm_registers::lfo_product(uint32_t value, uint32_t last, bool pm, int32_t end) const
+{
+	uint32_t sum = 0;
+	for (int32_t step = 0; step < 7; step++)
+	{
+		uint32_t const v = (step == 6) ? last : value;
+		int32_t const start = end - 16 * (7 - step);
+		for (int32_t bit = 0; bit < 8; bit++)
+		{
+			if (!bitfield(v, bit))
+				continue;
+			int32_t const cycle = start + bit + 7 - step;
+			// past the samples the registers have reached, the depth is the
+			// last written
+			int32_t const sample = std::min<int32_t>(cycle >> 5, LFO_DEPTH_AHEAD + 1);
+			lfo_depth const &depth = m_lfo_depth[(m_lfo.window + std::min<int32_t>(sample, LFO_DEPTH_AHEAD)) & 7];
+			uint32_t const half = (sample > int32_t(LFO_DEPTH_AHEAD) || (cycle & 31) >= (pm ? depth.pm_cut : depth.am_cut)) ? 1 : 0;
+			if (bitfield(pm ? depth.pm[half] : depth.am[half], 6 - step))
+				sum += 1 << (bit + 7 - step);
+		}
+	}
+	return uint8_t(sum >> 8);
 }
 
 
@@ -341,39 +385,51 @@ int32_t opm_registers::clock_noise_and_lfo()
 
 	uint32_t const waveform = lfo_waveform();
 	lfo_state &lfo = m_lfo;
+
+	// the PM product's last step reads only the sign while the noise wave
+	// takes a new value, at the tick (checked against Nuked-OPM)
+	uint32_t const pm_value = lfo_pm_value(waveform, lfo.count);
+	uint32_t const pm_mag = pm_value & 0xff;
+	uint32_t const pm_sign = (pm_value & 0x100) ? 0x80 : 0;
+	uint32_t const pm_last = (waveform == 3 && lfo.ticks == 1) ? (pm_sign ? 0xff : 0) : pm_mag;
 	switch (lfo.window)
 	{
 		// the steps the last window's tick asked for
 		case 0:
+		{
+			// noise takes 8 of the in-time generator's bits, the low one
+			// from the last cycle of the sample before, or with a second
+			// step from 16 cycles before that (checked against Nuked-OPM)
+			uint32_t const shift = (lfo.steps == 2) ? 47 : 31;
 			for (; lfo.steps != 0; lfo.steps--)
 			{
-				// noise takes 8 of the in-time generator's bits, the low one
-				// from the last cycle of the sample before
 				if (waveform == 3)
-					lfo.count = uint16_t(bitfield(uint32_t(m_noise_history >> 31), 0, 8));
+					lfo.count = uint16_t(bitfield(uint32_t(m_noise_history >> shift), 0, 8));
 				else
 					lfo.count += (waveform == 2) ? 2 : 1;
 			}
 			break;
+		}
 
-		// AM from the stepped counter
+		// AM from the stepped counter, times the depth over the steps that
+		// end at LFO_AM_END
 		case 1:
-			lfo.am_late = lfo_am_value(waveform, lfo.count);
+			lfo.am_late = lfo_product(lfo_am_value(waveform, lfo.count), lfo_am_value(waveform, lfo.count), false, LFO_AM_END);
 			break;
 		case 2:
-			m_lfo_am = lfo_am_value(waveform, lfo.count);
+			m_lfo_am = lfo_product(lfo_am_value(waveform, lfo.count), lfo_am_value(waveform, lfo.count), false, LFO_AM_END - 32);
 			break;
 
 		// PM from the counter before the next steps
 		case 6:
-			lfo.pm_late = lfo_pm_value(waveform, lfo.count);
+			lfo.pm_late = uint8_t(pm_sign | lfo_product(pm_mag, pm_last, true, LFO_AM_END - 32));
 			break;
 
 		// the reload tick: a step every 2^(15-hi) ticks, and a second one
 		// in lo of every 16 steps, from the lowest clear bit of a 4-bit
 		// counter, MSB of lo first
 		case 7:
-			lfo.pm = lfo_pm_value(waveform, lfo.count);
+			lfo.pm = uint8_t(pm_sign | lfo_product(pm_mag, pm_last, true, LFO_AM_END - 64));
 			if (--lfo.ticks == 0)
 			{
 				lfo.ticks = 1 << (15 - bitfield(lfo_rate(), 4, 4));
@@ -391,6 +447,10 @@ int32_t opm_registers::clock_noise_and_lfo()
 			break;
 	}
 	lfo.window = (lfo.window + 1) & 7;
+
+	// the depths LFO_DEPTH_AHEAD samples on start as the sample before ends
+	lfo_depth const &last = m_lfo_depth[(lfo.window + LFO_DEPTH_AHEAD - 1) & 7];
+	m_lfo_depth[(lfo.window + LFO_DEPTH_AHEAD) & 7] = lfo_depth{ { last.am[1], last.am[1] }, { last.pm[1], last.pm[1] }, 32, 32 };
 
 	// bit 1 of the test register holds the counter at zero
 	if (lfo_reset())
@@ -582,7 +642,8 @@ uint32_t opm_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opd
 	uint32_t code = cache.block_freq;
 	// a depth of 0 holds PM at a positive zero as soon as it is written,
 	// whatever the latch still holds
-	uint32_t pm = (lfo_pm_depth() != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;
+	// (the LFO has moved its window past this sample's already)
+	uint32_t pm = (m_lfo_depth[(m_lfo.window - 1) & 7].pm[1] != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;
 	code = opm_apply_pm(code, pm, ch_lfo_pm_sens(choffs));
 	code = opm_apply_dt2(code, bitfield(cache.detune, 3, 2));
 

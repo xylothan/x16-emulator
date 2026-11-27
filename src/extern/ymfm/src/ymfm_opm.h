@@ -216,6 +216,21 @@ public:
 	lfo_state &lfo() { return m_lfo; }
 	lfo_state const &lfo() const { return m_lfo; }
 
+	// the AM and PM depths of the samples around this one, by window: each
+	// as the sample begins (0), and from the cycle of a write within it (1)
+	struct lfo_depth
+	{
+		uint8_t am[2];
+		uint8_t pm[2];
+		uint8_t am_cut;      // cycle of an AM depth write, 32 if none
+		uint8_t pm_cut;      // cycle of a PM depth write, 32 if none
+	};
+	lfo_depth *lfo_depths() { return m_lfo_depth; }
+
+	// a $19 write reaches the registers this many samples before the chip
+	// takes it, the host running the engine that far behind
+	static constexpr uint32_t LFO_DEPTH_AHEAD = 2;
+
 	// the cycle (0-31) within the coming sample at which the following
 	// register writes reach the chip
 	void set_write_cycle(uint32_t cycle) { m_write_cycle = cycle; }
@@ -223,9 +238,16 @@ public:
 	// return the current noise state, gated by the noise clock
 	uint32_t noise_state() const { return m_noise_state; }
 
-	// LFO values from the counter
-	uint8_t lfo_am_value(uint32_t waveform, uint32_t count) const;
-	uint8_t lfo_pm_value(uint32_t waveform, uint32_t count) const;
+	// LFO values from the counter, before the depth: AM, and PM as sign
+	// (bit 8) and magnitude
+	static uint8_t lfo_am_value(uint32_t waveform, uint32_t count);
+	static uint32_t lfo_pm_value(uint32_t waveform, uint32_t count);
+
+	// a value times a depth, formed a depth bit at a time
+	uint8_t lfo_product(uint32_t value, uint32_t last, bool pm, int32_t end) const;
+	// the cycle, from the start of window 1, at which the AM product is
+	// complete; PM's is 4 samples on
+	static constexpr int32_t LFO_AM_END = 110;
 	static constexpr uint32_t LFO_RELOAD_CYCLE = 27;
 	static constexpr uint32_t NOISE_AHEAD = 3;
 
@@ -307,6 +329,7 @@ protected:
 	uint32_t m_noise_write_cycle;         // cycle of a pending $0F write, 32 if none
 	uint8_t m_lfo_am;                     // AM latch for operators 0-15
 	lfo_state m_lfo;                      // LFO counters and PM latch
+	lfo_depth m_lfo_depth[8];             // AM and PM depths, by window
 	uint32_t m_write_cycle;               // cycle of the writes being made
 	uint8_t m_regdata[REGISTERS];         // register data
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8

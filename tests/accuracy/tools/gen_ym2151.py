@@ -510,8 +510,7 @@ def noise_am():
 
 
 def lfo_noise_am(rate):
-    """The noise waveform's AM on a sine, at a rate with no second steps. Its PM, and
-    rates with them, are not covered (tests/accuracy/README.md)."""
+    """The noise waveform's AM on a sine."""
     s = V()
     s.set(0x0f, 0x1b)
     s.lfo(rate, 3, 0x7f, 0)
@@ -519,6 +518,39 @@ def lfo_noise_am(rate):
     s.op(0, am=1)
     s.key(0, 1)
     s.out(4096)
+    return s
+
+
+def lfo_noise_pm(rate, pmd):
+    """The noise waveform's PM on a sine."""
+    s = V()
+    s.set(0x0f, 0x1b)
+    s.lfo(rate, 3, 0, pmd)
+    s.channel(0, 0x4a, 0x21, pms=7)
+    s.op(0, dt1=3, dt2=1)
+    s.key(0, 1)
+    s.out(4096)
+    return s
+
+
+def lfo_depth_writes(wave, pm):
+    """AM or PM depth rewritten at every cycle of an LFO window, between two depths."""
+    s = V()
+    s.lfo(0xc5, wave, 0 if pm else 0x55, 0x55 if pm else 0)
+    if pm:
+        s.channel(0, 0x4a, 0x21, pms=7)
+        s.op(0, dt1=3, dt2=1)
+    else:
+        s.channel(0, 0x4a, 0x21, ams=3)
+        s.op(0, am=1)
+    s.key(0, 1)
+    t = s.t
+    for o in range(0, 256, 3):
+        t += 72 * SAMPLE
+        t = t - t % 256 + o
+        s.w(0, 0x19, t - 6)
+        s.w(1, (0x80 if pm else 0) | (0x2a if o & 1 else 0x55), t)
+        s.o(t // SAMPLE - 4, 40, "L")
     return s
 
 
@@ -712,6 +744,14 @@ SCRIPTS = {
     "noise_am": noise_am,
     "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),
+    "lfo_noise_am_d3": lambda: lfo_noise_am(0xd3),
+    "lfo_noise_am_f7": lambda: lfo_noise_am(0xf7),
+    "lfo_noise_pm_d0": lambda: lfo_noise_pm(0xd0, 0x7f),
+    "lfo_noise_pm_e5": lambda: lfo_noise_pm(0xe5, 0x55),
+    "lfo_noise_pm_ff": lambda: lfo_noise_pm(0xff, 0x33),
+    "lfo_am_depth_writes": lambda: lfo_depth_writes(0, False),
+    "lfo_pm_depth_writes": lambda: lfo_depth_writes(2, True),
+    "lfo_noise_depth_writes": lambda: lfo_depth_writes(3, True),
     "algorithms": algorithms,
     "output_clamp": output_clamp,
     "envelopes": envelopes,
