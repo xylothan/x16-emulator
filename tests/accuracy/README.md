@@ -59,7 +59,7 @@ and is not in this repository.
 - C is a CRC-32 of the values in order, 4 bytes each, LSB first.
 - Output blocks start 8 samples after the last key-on and end 4 samples before
   the next key-on or write that changes the sound. The exceptions are `$18`
-  writes in the LFO vectors and key-on, key-off and operator writes in
+  and `$19` writes in the LFO vectors and key-on, key-off and operator writes in
   `envelopes`, `key_timing`, `key_latch` and `op_writes`, which are checked
   inside blocks.
 
@@ -132,10 +132,9 @@ does, and checks:
   at cycle 12, as slot 31 reaches the mixer, so its output switches 1 to 3
   samples before the emulator's; a new frequency leaves a sample or two that
   differ
-- YM2151 noise LFO wave: PM, and AM at rates whose low 4 bits are not 0. The LFO
-  multiplies its value out a depth bit at a time, and a new noise value can
-  arrive part way through; the emulator takes the whole value at once
-- YM2151 PM and AM depth writes while the LFO's value is being multiplied out
+- YM2151 AM depth writes in the last 8 cycles of the LFO's multiply, where the
+  chip takes the depth's bit 0: operators 16-31 keep the old bit for that
+  window, the emulator's engine not having reached the write
 - YM2151 and VERA accesses within an instruction: those devices see each
   access at the instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
