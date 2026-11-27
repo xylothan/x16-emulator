@@ -1239,6 +1239,15 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 reset leaves the channels' outputs on",
+        "file": "src/extern/ymfm/src/ymfm_opm.cpp",
+        # ym_reset_outputs.vec
+        "find": "std::fill_n(&m_regdata[0], REGISTERS, 0);",
+        "into": "std::fill_n(&m_regdata[0], REGISTERS, 0); m_regdata[0x27] = 0xc0;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 noise: level keeps its low bit",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec

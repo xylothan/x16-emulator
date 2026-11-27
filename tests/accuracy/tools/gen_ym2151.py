@@ -540,6 +540,16 @@ def noise_enable_writes(conn, keyed):
     return f
 
 
+def reset_outputs():
+    """The noise turned on after reset, channel 7's registers unwritten."""
+    s = V()
+    s.set(0x0f, 0x80)
+    s.out(64, "L")
+    s.out(64, "R")
+    s.wait(80)
+    return s
+
+
 def noise_am():
     """A saw AM on the noise slot, at TL 0 and 7F."""
     s = V()
@@ -910,6 +920,7 @@ SCRIPTS = {
     "noise_level": noise_level,
     "noise_writes": noise_writes,
     "noise_frequency_writes": noise_frequency_writes,
+    "reset_outputs": reset_outputs,
     "noise_enable_writes": noise_enable_writes(4, True),
     "noise_enable_writes_alg7": noise_enable_writes(7, True),
     "noise_enable_unkeyed": noise_enable_writes(4, False),
