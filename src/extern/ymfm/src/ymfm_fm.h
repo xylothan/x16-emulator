@@ -129,6 +129,12 @@ public:
 	uint32_t status_mask() const                     { return 0; } // OPL only
 	uint32_t irq_reset() const                       { return 0; } // OPL only
 	uint32_t noise_enable() const                    { return 0; } // OPM only
+	uint32_t test_full_level(uint32_t opoffs) const  { return 0; } // OPM only
+	uint32_t test_all_channels() const               { return 0; } // OPM only
+	uint32_t test_output_bit(uint32_t opoffs) const  { return 0; } // OPM only
+	uint32_t test_phase_reset(uint32_t opoffs) const { return 0; } // OPM only
+	uint32_t test_eg_clock(uint32_t opoffs) const    { return 0; } // OPM only
+	uint32_t test_eg_timer() const                   { return 0; } // OPM only
 	uint32_t rhythm_enable() const                   { return 0; } // OPL only
 
 	// per-operator register defaults
@@ -367,12 +373,21 @@ public:
 	int32_t late_output(uint32_t index) const { return m_late[index]; }
 	void set_late_output(uint32_t index, int32_t value) { m_late[index] = value; }
 
+	// the same with the noise in operator 4's place, for an OPM mixer that
+	// chooses when it mixes
+	int32_t late_noise_output(uint32_t index) const { return m_late_noise[index]; }
+	void set_late_noise_output(uint32_t index, int32_t value) { m_late_noise[index] = value; }
+
 	// operator 2's output this sample, for operator 3 in the next
 	int16_t held_op2() const { return m_op2_in; }
 	void set_held_op2(int16_t value) { m_op2_in = value; }
 
-	// the output() of a channel whose operators are all silent
-	void silent_output() const { m_feedback_in = 0; m_op2_in = 0; }
+	// the output() of a channel whose operators are all silent: what it
+	// held from the last sample still reaches this one
+	void silent_output(output_data &output) const { m_feedback_in = 0; m_op2_in = 0; mix_late(output); }
+
+	// the operators mixed a sample late
+	void mix_late(output_data &output) const;
 
 private:
 	// helper to add values to the outputs based on channel enables
@@ -404,6 +419,8 @@ private:
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
 	mutable int32_t m_late[RegisterType::OUTPUTS];   // this sample's late part, for the next
 	int32_t m_late_prev[RegisterType::OUTPUTS];      // the last sample's, mixed into this one
+	mutable int32_t m_late_noise[RegisterType::OUTPUTS]; // the late part with the noise
+	int32_t m_late_noise_prev[RegisterType::OUTPUTS];    // and the last sample's
 	mutable int16_t m_op2_in;              // operator 2's output this sample (set in output)
 	int16_t m_op2_last;                    // operator 2's output the sample before
 };

@@ -950,8 +950,8 @@ MUTATIONS = [
     {
         "name": "YM2151 timer A counts twice a sample",
         "file": "src/ymglue.cpp",
-        "find": "a_inc = a_load && cycle == 0;",
-        "into": "a_inc = a_load && (cycle & 15) == 0;",
+        "find": "a_inc = test_timers || (a_load && cycle == 0);",
+        "into": "a_inc = test_timers || (a_load && (cycle & 15) == 0);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1194,20 +1194,290 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
-        "name": "YM2151 noise: 2 samples ahead",
-        "file": "src/extern/ymfm/src/ymfm_opm.h",
-        # ym_noise_rates.vec
-        "find": "NOISE_AHEAD = 3;",
-        "into": "NOISE_AHEAD = 2;",
+        "name": "YM2151 noise: a $0F write takes the whole sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_writes.vec, ym_noise_frequency_writes.vec
+        "find": "noise_frequency_write(e.value, e.cycle);",
+        "into": "noise_frequency_write(e.value, 0);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
     {
-        "name": "YM2151 noise: a $0F write takes the whole sample",
+        "name": "YM2151 noise: a $0F frequency waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_frequency_writes.vec
+        "find": "queue(0, a, v, LATE_NOISE, m_bus.cycle);",
+        "into": "queue(1, a, v, LATE_NOISE, m_bus.cycle);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: enable taken a cycle later",
+        "file": "src/ymglue.cpp",
+        # ym_noise_enable_writes.vec
+        "find": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "into": "queue(m_bus.cycle > NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: enable waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_noise_enable_writes.vec
+        "find": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);",
+        "into": "queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 2 : 1, a, v, LATE_WRITE);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 noise: channel 7 left out while the noise is off",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_noise_enable_unkeyed.vec
+        "find": "((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0)",
+        "into": "((m_regs.noise_enable()) ? 0x80 : 0)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 ignored",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "{ return test_bit(int32_t(opoffs) + 1, 5); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 waits a sample",
+        "file": "src/ymglue.cpp",
+        # ym_test_full_level.vec
+        "find": "TEST_FAST_WAIT = 0;",
+        "into": "TEST_FAST_WAIT = 1;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: every slot takes a write in its sample",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "&& at >= m_test_cycle[index])",
+        "into": "&& at + 32 >= m_test_cycle[index])",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: slots take a write a cycle late",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_full_level.vec
+        "find": "test_bit(int32_t(opoffs) + 1, 5)",
+        "into": "test_bit(int32_t(opoffs), 5)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 leaves a silent envelope silent",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_full_level.vec
+        "find": "if (env_level() <= EG_QUIET || m_regs.test_full_level(m_opoffs))",
+        "into": "if (env_level() <= EG_QUIET)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 5 leaves idle channels out",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_full_level.vec
+        "find": "uint32_t const computed = m_regs.test_all_channels() ? 0xffffffff :",
+        "into": "uint32_t const computed = false ? 0xffffffff :",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 ignored",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "{ return test_bit(int32_t(opoffs) + 7, 4); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 waits for the engine",
+        "file": "src/ymglue.cpp",
+        # ym_test_output_bit.vec
+        "find": "TEST_FAST = 0x39;",
+        "into": "TEST_FAST = 0x29;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 read at the envelope",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "test_bit(int32_t(opoffs) + 7, 4)",
+        "into": "test_bit(int32_t(opoffs) + 1, 4)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 not sign-extended",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_output_bit.vec
+        "find": "result = int16_t(uint16_t(result ^ 0x2000) << 2) >> 2;",
+        "into": "result ^= 0x2000;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 4 leaves idle channels out",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_output_bit.vec
+        "find": "return seen & 0x30;",
+        "into": "return seen & 0x20;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: a second write in a sample hides the first",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_write_pairs.vec
+        "find": "if (m_test_writes == 0)",
+        "into": "if (true)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 ignored",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_phase_reset.vec
+        "find": "if (m_regs.test_phase_reset(m_opoffs))",
+        "into": "if (false)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 read in the sample it is written",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_phase_reset.vec
+        "find": "test_bit(int32_t(opoffs) + 7 - 32, 3)",
+        "into": "test_bit(int32_t(opoffs) + 7, 3)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 read a cycle late",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_phase_reset.vec
+        "find": "test_bit(int32_t(opoffs) + 7 - 32, 3)",
+        "into": "test_bit(int32_t(opoffs) + 6 - 32, 3)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 not carried to the sample after",
+        "file": "src/ymglue.cpp",
+        # ym_test_phase_reset.vec
+        "find": "queue(TEST_FAST_WAIT + 1, 0, v, LATE_CARRY, m_bus.cycle);",
+        "into": "",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 3 carried without the value before",
+        "file": "src/ymglue.cpp",
+        # ym_test_phase_reset.vec
+        "find": "m_late[j].addr = test;",
+        "into": "m_late[j].addr = e.value;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 leaves the operators' envelopes alone",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(int32_t(opoffs), 0); }",
+        "into": "{ return 0 * opoffs; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 read a cycle early by the envelopes",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "test_bit(int32_t(opoffs), 0)",
+        "into": "test_bit(int32_t(opoffs) + 1, 0)",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 leaves the envelope timer alone",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(0, 0); }",
+        "into": "{ return 0; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 reaches the envelope timer in its sample",
+        "file": "src/extern/ymfm/src/ymfm_opm.h",
+        # ym_test_eg_clock.vec
+        "find": "{ return test_bit(0, 0); }",
+        "into": "{ return test_bit(1, 0); }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 0 steps the timer on the divider's own cycle too",
+        "file": "src/extern/ymfm/src/ymfm_fm.ipp",
+        # ym_test_eg_clock.vec
+        "find": "else if (m_regs.test_eg_timer())",
+        "into": "if (m_regs.test_eg_timer())",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 ignored by the timers",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "case 0x01: test_timers = v & 0x04; break;",
+        "into": "case 0x01: break;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 leaves timer A alone",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "a_inc = test_timers || (a_load && cycle == 0);",
+        "into": "a_inc = a_load && cycle == 0;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 test register: bit 2 leaves timer B alone",
+        "file": "src/ymglue.cpp",
+        # ym_timer_test.vec
+        "find": "b_inc = test_timers || (b_load_reg && b_sub_of);",
+        "into": "b_inc = b_load_reg && b_sub_of;",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 a channel left out drops what it held",
+        "file": "src/extern/ymfm/src/ymfm_fm.h",
+        # ym_test_full_level.vec
+        "find": "m_feedback_in = 0; m_op2_in = 0; mix_late(output); }",
+        "into": "m_feedback_in = 0; m_op2_in = 0; (void)output; }",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
+        "name": "YM2151 reset leaves the channels' outputs on",
         "file": "src/extern/ymfm/src/ymfm_opm.cpp",
-        # ym_noise_writes.vec
-        "find": "m_noise_write_cycle < 32 ? m_noise_old_target : target, target",
-        "into": "target, target",
+        # ym_reset_outputs.vec
+        "find": "std::fill_n(&m_regdata[0], REGISTERS, 0);",
+        "into": "std::fill_n(&m_regdata[0], REGISTERS, 0); m_regdata[0x27] = 0xc0;",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1233,8 +1503,8 @@ MUTATIONS = [
         "name": "YM2151 noise: silent with nothing keyed",
         "file": "src/extern/ymfm/src/ymfm_fm.ipp",
         # ym_noise_level.vec
-        "find": "uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);",
-        "into": "uint32_t const computed = m_active_channels;",
+        "find": "(m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0));",
+        "into": "(m_active_channels);",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1314,8 +1584,8 @@ MUTATIONS = [
         "name": "YM2151 operator writes wait for the engine",
         "file": "src/ymglue.cpp",
         # ym_op_writes.vec
-        "find": "} else if (a >= 0x20 || a == 0x19) {",
-        "into": "} else if (a >= 0xff || a == 0x19) {",
+        "find": "} else if (a >= 0x20) {",
+        "into": "} else if (a >= 0xff) {",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
@@ -1374,6 +1644,15 @@ MUTATIONS = [
         "caught_by": ["ym_accuracy"],
     },
     {
+        "name": "YM2151 LFO depth writes wait a sample",
+        "file": "src/ymglue.cpp",
+        # ym_lfo_am_depth_late.vec
+        "find": "queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);",
+        "into": "queue(DEPTH_WAIT + 1, a, v, LATE_DIRECT, m_bus.cycle);",
+        "count": 1,
+        "caught_by": ["ym_accuracy"],
+    },
+    {
         "name": "YM2151 direct writes wait a sample too long",
         "file": "src/ymglue.cpp",
         # ym_key_timing.vec, ym_op_writes.vec
@@ -1387,8 +1666,8 @@ MUTATIONS = [
         "name": "YM2151 LFO depth writes wait for the engine",
         "file": "src/ymglue.cpp",
         # ym_lfo_am_depth_writes.vec, ym_lfo_pm_depth_writes.vec
-        "find": "} else if (a >= 0x20 || a == 0x19) {",
-        "into": "} else if (a >= 0x20) {",
+        "find": "} else if (a == 0x19) {",
+        "into": "} else if (false) {",
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },

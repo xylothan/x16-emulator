@@ -124,17 +124,18 @@ does, and checks:
 - The DAC's 48 kHz output rate: 6 frames per 3125 clocks, against one render per 512
 - SPI
 - FPGA reconfiguration
-- YM2151 test register ($01) writes, and reads of the address port
+- YM2151 test register ($01) bits 1, 6 and 7, the LFO steps bits 2 and 3 add,
+  and reads of the address port
+- YM2151 test register bit 4 taken at cycle c of 1-6: the chip takes it in
+  time for slots c + 25 to 31 of the sample before, the emulator from the
+  sample it is written in
+- YM2151 test register bit 5 written in a sample's last cycle: the chip takes
+  it in time for slot 31 of that sample, the emulator from the next
+- YM2151 phases of operators not keyed since reset, heard only under test
+  register bit 5: Nuked-OPM's reset leaves them part way on, the emulator at 0
 - YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
   operator's value at that operator's own cycle, and the emulator takes all four
   at once
-- YM2151 noise writes ($0F) while slot 31 sounds. The chip reads the enable bit
-  at cycle 12, as slot 31 reaches the mixer, so its output switches 1 to 3
-  samples before the emulator's; a new frequency leaves a sample or two that
-  differ
-- YM2151 AM depth writes in the last 8 cycles of the LFO's multiply, where the
-  chip takes the depth's bit 0: operators 16-31 keep the old bit for that
-  window, the emulator's engine not having reached the write
 - YM2151 and VERA accesses within an instruction: those devices see each
   access at the instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new

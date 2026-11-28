@@ -78,6 +78,7 @@ struct opm_bus {
 
 	bool     csm = false, csm_lock = false;
 	bool     irq = false;
+	bool     test_timers = false;               // $01 bit 2: both timers count every cycle
 
 	static unsigned bit(bool v, unsigned n) {
 		return (v ? 1u : 0u) << n;
@@ -126,6 +127,7 @@ struct opm_bus {
 
 	void mode_write(uint8_t a, uint8_t v) {
 		switch (a) {
+			case 0x01: test_timers = v & 0x04; break;
 			case 0x10: a_reg = (uint16_t)((a_reg & 3) | v << 2); break;
 			case 0x11: a_reg = (uint16_t)((a_reg & 0x3fc) | (v & 3)); break;
 			case 0x12: b_reg = v; break;
@@ -199,14 +201,14 @@ struct opm_bus {
 		wa = wd = false;
 
 		if (cycle == 1) a_load = a_load_reg;
-		a_inc = a_load && cycle == 0;
+		a_inc = test_timers || (a_load && cycle == 0);
 		a_do_load = a_of || (a_load && a_temp);
 		a_do_reset = a_temp;
 		a_temp = !a_load;
 		a_flag = !a_reset && (a_flag || (a_irqen && a_of));
 		a_reset = false;
 
-		b_inc = b_load_reg && b_sub_of;
+		b_inc = test_timers || (b_load_reg && b_sub_of);
 		b_do_load = b_of || (b_load_reg && b_temp);
 		b_do_reset = b_temp;
 		b_temp = !b_load_reg;
@@ -268,7 +270,8 @@ struct opm_bus {
 		img[16] = (uint8_t)(bit(b_load_reg, 0) | bit(b_inc, 1) | bit(b_do_load, 2) | bit(b_do_reset, 3) | bit(b_temp, 4) | bit(b_of, 5) | bit(b_sub_of, 6));
 		img[17] = (uint8_t)(bit(b_irqen, 0) | bit(b_reset, 1) | bit(b_flag, 2));
 		img[18] = (uint8_t)(bit(csm, 0) | bit(csm_lock, 1) | bit(irq, 2));
-		img[19] = img[20] = img[21] = 0; // reserved
+		img[19] = (uint8_t)bit(test_timers, 0);
+		img[20] = img[21] = 0; // reserved
 	}
 
 	void from_image(const uint8_t img[IMAGE_SIZE]) {
@@ -285,10 +288,11 @@ struct opm_bus {
 		b_temp = img[16] & 16; b_of = img[16] & 32; b_sub_of = img[16] & 64;
 		b_irqen = img[17] & 1; b_reset = img[17] & 2; b_flag = img[17] & 4;
 		csm = img[18] & 1; csm_lock = img[18] & 2; irq = img[18] & 4;
+		test_timers = img[19] & 1;
 	}
 };
 // A new field must reach to_image() and from_image().
-static_assert(sizeof(opm_bus) == 44, "opm_bus changed: update its image");
+static_assert(sizeof(opm_bus) == 46, "opm_bus changed: update its image");
 
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:
@@ -330,19 +334,34 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		}
 
 		// The engine runs ENGINE_BEHIND samples behind the interface, so a
-		// write can reach it as early as the chip acts on it: the key-on latch,
-		// the LFO depths and $20-$FF after DIRECT_WAIT (checked against
+		// write can reach it as early as the chip acts on it: the LFO depths at
+		// once, the key-on latch and $20-$FF after DIRECT_WAIT (checked against
 		// Nuked-OPM). The rest wait ENGINE_BEHIND, and reach it at the engine
 		// sample matching the interface's.
 		static constexpr uint8_t ENGINE_BEHIND = 3;
 		static constexpr uint8_t DIRECT_WAIT = ENGINE_BEHIND - 2;
-		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DIRECT_WAIT, "the LFO depths are kept as far on as a direct write lands");
+		static constexpr uint8_t DEPTH_WAIT = 0;
+		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DEPTH_WAIT, "the LFO depths are kept as far on as a depth write lands");
+		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
+		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
+		// The test register bits that reach the engine after TEST_FAST_WAIT:
+		// bit 0 clocks the envelope every sample, bit 3 clears each
+		// operator's phase, bit 4 sets bit 13 of its level, bit 5 holds it at
+		// full level. The phase runs a sample behind, so bit 3 reaches most
+		// slots the sample after: TEST_PHASE carries the write there.
+		static constexpr uint8_t TEST_FAST = 0x39;
+		static constexpr uint8_t TEST_FAST_WAIT = 0;
+		static constexpr uint8_t TEST_PHASE = 0x08;
+		static constexpr uint8_t TEST_REST = (uint8_t)~TEST_FAST;
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
 			LATE_WRITE  = 0,  // a register write
 			LATE_CSM    = 1,  // a CSM key-on
 			LATE_DIRECT = 2,  // a register write the chip acts on at once
+			LATE_NOISE  = 3,  // a $0F write's frequency, for the noise generator
+			LATE_TEST   = 4,  // a $01 write to the bits its address names
+			LATE_CARRY  = 5,  // a $01 write's bit 3 the sample after, $01 before it in its address
 		};
 
 		struct late_write {
@@ -418,6 +437,8 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				const late_write &e = m_late[i];
 				if (e.wait == 0 && e.kind == LATE_DIRECT) {
 					to_engine(e.addr, e.value, e.cycle);
+				} else if (e.wait == 0 && e.kind == LATE_NOISE) {
+					m_chip.engine().regs().noise_frequency_write(e.value, e.cycle);
 				}
 			}
 			size_t kept = 0;
@@ -425,9 +446,26 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				const late_write &e = m_late[i];
 				if (e.wait != 0) {
 					m_late[kept++] = e;
-				} else if (e.kind == LATE_DIRECT) {
+				} else if (e.kind == LATE_DIRECT || e.kind == LATE_NOISE) {
 				} else if (e.kind == LATE_CSM) {
 					csm_keyon(e.addr);
+				} else if (e.kind == LATE_TEST) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					const uint8_t test = (uint8_t)regs.test();
+					to_engine(0x01, (uint8_t)((test & ~e.addr) | (e.value & e.addr)), e.cycle);
+					if (e.addr == TEST_FAST) {
+						regs.test_written(test, TEST_FAST, (int32_t)e.cycle);
+						for (size_t j = i + 1; j < m_late_count; j++) {
+							if (m_late[j].kind == LATE_CARRY && m_late[j].cycle == e.cycle) {
+								m_late[j].addr = test;
+								break;
+							}
+						}
+					}
+				} else if (e.kind == LATE_CARRY) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					const uint8_t test = (uint8_t)regs.test();
+					regs.test_written((uint8_t)((test & ~TEST_PHASE) | (e.addr & TEST_PHASE)), TEST_PHASE, (int32_t)e.cycle - 32);
 				} else {
 					to_engine(e.addr, e.value, e.cycle);
 				}
@@ -462,10 +500,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			apply_late();
 			if (m_engine_wait != 0) {
 				m_engine_wait--;
+				m_chip.engine().regs().noise_frequency_settle();
 				out->clear();
 			} else {
 				m_chip.generate(out);
 			}
+			m_chip.engine().regs().test_settle();
 			for (size_t i = 0; i < m_late_count; i++) {
 				m_late[i].wait--;
 			}
@@ -481,8 +521,23 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						kon_copy_to(m_bus.cycle);
 						m_kon_latch = v & 0x7f;
 						latch_keyon(v);
-					} else if (a >= 0x20 || a == 0x19) {
+					} else if (a == 0x19) {
+						queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);
+					} else if (a >= 0x20) {
 						direct(a, v, m_bus.cycle);
+					} else if (a == 0x01) {
+						// The test register's bits take effect at different
+						// points (checked against Nuked-OPM).
+						queue(TEST_FAST_WAIT, TEST_FAST, v, LATE_TEST, m_bus.cycle);
+						queue(TEST_FAST_WAIT + 1, 0, v, LATE_CARRY, m_bus.cycle);
+						queue(ENGINE_BEHIND, TEST_REST, v, LATE_TEST, m_bus.cycle);
+					} else if (a == 0x0f) {
+						// The noise generator takes $0F's frequency at its cycle,
+						// and the mixer the enable, from the next sample when the
+						// chip takes it at NOISE_ENABLE_CYCLE or later: written at
+						// cycle 12 (checked against Nuked-OPM).
+						queue(0, a, v, LATE_NOISE, m_bus.cycle);
+						queue(m_bus.cycle >= NOISE_ENABLE_CYCLE ? 1 : 0, a, v, LATE_WRITE);
 					} else {
 						late(a, v);
 					}
@@ -583,7 +638,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			*pm = (uint8_t)regs.lfo_pm_depth();
 			for (size_t i = 0; i < m_late_count; i++) {
 				const late_write &e = m_late[i];
-				if (e.kind != LATE_CSM && e.addr == 0x19) {
+				if ((e.kind == LATE_WRITE || e.kind == LATE_DIRECT) && e.addr == 0x19) {
 					*((e.value & 0x80) ? pm : am) = e.value & 0x7f;
 				}
 			}
@@ -670,20 +725,23 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			depths_from_image(img);
 		}
 
-		// The noise generator's state past what save_restore() keeps (the
-		// in-time generator and its output bit), and each channel's output
-		// held for the next sample. A new field must reach both functions.
+		// The noise generator's state past what save_restore() keeps, and
+		// each channel's output held for the next sample. Bytes 5-12 are the
+		// in-time bits of the last two samples, which the bit image holds as
+		// well, and byte 14 32: until version 10, a $0F write's cycle. A new
+		// field must reach both functions.
 		static constexpr size_t NOISE_IMAGE_SIZE = 16 + 4 * YM_NUM_CHANNELS * 2;
 
 		void noise_to_image(uint8_t img[NOISE_IMAGE_SIZE]) {
 			ymfm::opm_registers &regs = m_chip.engine().regs();
 			const ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
+			const uint32_t *bits = regs.noise_bits();
 			put_le(img + 0, ahead.lfsr, 4);
 			img[4] = ahead.counter;
-			put_le(img + 5, (uint32_t)regs.noise_history(), 4);
-			put_le(img + 9, (uint32_t)(regs.noise_history() >> 32), 4);
-			img[13] = (uint8_t)regs.noise_old_target();
-			img[14] = (uint8_t)regs.noise_write_cycle();
+			put_le(img + 5, bits[ymfm::opm_registers::NOISE_AHEAD + 1], 4);
+			put_le(img + 9, bits[ymfm::opm_registers::NOISE_AHEAD], 4);
+			img[13] = regs.noise_target();
+			img[14] = 32;
 			img[15] = 0; // reserved
 			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
 				for (uint32_t side = 0; side < 2; side++) {
@@ -697,13 +755,73 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			ymfm::opm_registers::noise_gen &ahead = regs.noise_ahead();
 			ahead.lfsr    = get_le(img + 0, 4) & 0x1ffff;
 			ahead.counter = img[4] & 0x7f;
-			regs.noise_history() = get_le(img + 5, 4) | ((uint64_t)get_le(img + 9, 4) << 32);
-			regs.noise_old_target()  = img[13] & 31;
-			regs.noise_write_cycle() = (img[14] < 32) ? img[14] : 32;
+			regs.noise_target() = img[13] & 31;
+			uint32_t *bits = regs.noise_bits();
+			bits[ymfm::opm_registers::NOISE_AHEAD + 1] = get_le(img + 5, 4);
+			bits[ymfm::opm_registers::NOISE_AHEAD]     = get_le(img + 9, 4);
+			regs.noise_bits_changed();
 			for (uint32_t ch = 0; ch < YM_NUM_CHANNELS; ch++) {
 				for (uint32_t side = 0; side < 2; side++) {
 					m_chip.engine().debug_channel(ch)->set_late_output(side, (int32_t)get_le(img + 16 + 8 * ch + 4 * side, 4));
 				}
+			}
+		}
+
+		// The noise generator's low bits for the samples it has run ahead of
+		// the interface, newest first, then channel 7's output held for the
+		// next sample with the noise in C2's place. A new field must reach
+		// both functions.
+		static constexpr size_t NOISE_BITS_IMAGE_SIZE = 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * 2;
+
+		void noise_bits_to_image(uint8_t img[NOISE_BITS_IMAGE_SIZE]) {
+			const uint32_t *bits = m_chip.engine().regs().noise_bits();
+			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
+				put_le(img + 4 * i, bits[i], 4);
+			}
+			for (uint32_t side = 0; side < 2; side++) {
+				put_le(img + 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * side, (uint32_t)m_chip.engine().debug_channel(7)->late_noise_output(side), 4);
+			}
+		}
+
+		void noise_bits_from_image(const uint8_t img[NOISE_BITS_IMAGE_SIZE]) {
+			uint32_t *bits = m_chip.engine().regs().noise_bits();
+			for (uint32_t i = 0; i < ymfm::opm_registers::NOISE_AHEAD; i++) {
+				bits[i] = get_le(img + 4 * i, 4);
+			}
+			for (uint32_t side = 0; side < 2; side++) {
+				m_chip.engine().debug_channel(7)->set_late_noise_output(side, (int32_t)get_le(img + 4 * ymfm::opm_registers::NOISE_AHEAD + 4 * side, 4));
+			}
+		}
+
+		// Before version 10 the noise generator ran in time, its bits taken
+		// NOISE_AHEAD samples on: run it there now, from the frequency the
+		// latest waiting $0F write sets.
+		void noise_from_v9(const uint8_t img[NOISE_IMAGE_SIZE]) {
+			ymfm::opm_registers &regs = m_chip.engine().regs();
+			uint8_t target = (uint8_t)regs.noise_frequency();
+			for (size_t i = 0; i < m_late_count; i++) {
+				if (m_late[i].kind == LATE_WRITE && m_late[i].addr == 0x0f) {
+					target = (uint8_t)((m_late[i].value & 0x1f) ^ 0x1f);
+				}
+			}
+			const uint8_t old_target = img[13] & 31;
+			const uint8_t write_cycle = img[14];
+			ymfm::opm_registers::noise_gen gen = regs.noise_in_time();
+			uint32_t *bits = regs.noise_bits();
+			for (uint32_t sample = 0; sample < ymfm::opm_registers::NOISE_AHEAD; sample++) {
+				uint8_t targets[32];
+				for (uint32_t cycle = 0; cycle < 32; cycle++) {
+					targets[cycle] = (sample == 0 && cycle < write_cycle) ? old_target : target;
+				}
+				ymfm::opm_registers::step_noise(gen, targets, bits[ymfm::opm_registers::NOISE_AHEAD - 1 - sample]);
+			}
+			regs.noise_ahead() = gen;
+			regs.noise_target() = target;
+			// The mixer chose for channel 7 as it computed: either choice
+			// takes what it held.
+			auto *ch7 = m_chip.engine().debug_channel(7);
+			for (uint32_t side = 0; side < 2; side++) {
+				ch7->set_late_noise_output(side, ch7->late_output(side));
 			}
 		}
 
@@ -730,7 +848,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_late_count = std::min<size_t>(img[1], LATE_MAX);
 			for (size_t i = 0; i < m_late_count; i++) {
 				const uint8_t *e = img + 2 + 5 * i;
-				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT) ? e[4] : LATE_WRITE;
+				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE || e[4] == LATE_TEST || e[4] == LATE_CARRY) ? e[4] : LATE_WRITE;
 				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], kind };
 			}
 		}
@@ -866,6 +984,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t depths[DEPTH_IMAGE_SIZE];
 			depths_to_image(depths);
 			ss_put(w, depths, sizeof depths);
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE];
+			noise_bits_to_image(noise_bits);
+			ss_put(w, noise_bits, sizeof noise_bits);
 		}
 
 		void state_load(ss_reader *r, int version) {
@@ -945,6 +1066,10 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			if (have_depths) {
 				ss_get(r, depths, sizeof depths);
 			}
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE] = {};
+			if (version >= 10) {
+				ss_get(r, noise_bits, sizeof noise_bits);
+			}
 			if (r->failed) {
 				return;
 			}
@@ -975,6 +1100,11 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			}
 			channels_from_image(channels);
 			late_from_image(late_img);
+			if (version >= 10) {
+				noise_bits_from_image(noise_bits);
+			} else if (version >= 5) {
+				noise_from_v9(noise);
+			}
 			if (version < 7) {
 				keys[0] = m_regs[0x08] & 0x7f;
 				keys[1] = img[0] & 31;
@@ -982,6 +1112,15 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			keys_from_image(keys);
 			if (have_depths) {
 				depths_from_image(depths);
+				// Before version 10 the depths were kept a sample nearer: the
+				// furthest starts as the one before it ends.
+				if (version < 10) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					ymfm::opm_registers::lfo_depth *d = regs.lfo_depths();
+					const uint32_t w = regs.lfo().window;
+					const ymfm::opm_registers::lfo_depth last = d[(w + ymfm::opm_registers::LFO_DEPTH_AHEAD - 1) & 7];
+					d[(w + ymfm::opm_registers::LFO_DEPTH_AHEAD) & 7] = { { last.am[1], last.am[1] }, { last.pm[1], last.pm[1] }, 32, 32 };
+				}
 			} else {
 				depths_from_regs();
 			}
@@ -1083,6 +1222,9 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			uint8_t depths[DEPTH_IMAGE_SIZE];
 			depths_to_image(depths);
 			scratch.depths_from_image(depths);
+			uint8_t noise_bits[NOISE_BITS_IMAGE_SIZE];
+			noise_bits_to_image(noise_bits);
+			scratch.noise_bits_from_image(noise_bits);
 			scratch.m_report_lost = false;
 			scratch.m_scope_armed = 0;
 
@@ -1303,7 +1445,7 @@ extern "C" {
 	}
 
 	void YM_state_save(ss_writer *w) {
-		ss_begin(w, "YM  ", 9);
+		ss_begin(w, "YM  ", 10);
 		ss_put_bool(w, initialized);
 		if (initialized) opm_iface.state_save(w);
 		ss_end(w);

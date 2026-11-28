@@ -473,7 +473,13 @@ void fm_operator<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 		if (m_phase_restart)
 			m_phase = 0;
 		else
+		{
+			// the OPM's test register bit 3 clears the phase before its step
+			// (checked against Nuked-OPM)
+			if (m_regs.test_phase_reset(m_opoffs))
+				m_phase = 0;
 			clock_phase(lfo_raw_pm, m_phase_cache);
+		}
 		m_phase_restart = edge;
 		m_phase_cache = m_cache;
 		return;
@@ -500,21 +506,29 @@ int32_t fm_operator<RegisterType>::compute_volume(uint32_t phase, uint32_t am_of
 	// the low 10 bits of phase represents a full 2*PI period over
 	// the full sin wave
 
-	// early out if the envelope is effectively off
-	if (env_level() > EG_QUIET)
-		return 0;
+	// 0 if the envelope is effectively off
+	int32_t result = 0;
+	if (env_level() <= EG_QUIET || m_regs.test_full_level(m_opoffs))
+	{
+		// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
+		uint32_t sin_attenuation = m_cache.waveform[phase & (RegisterType::WAVEFORM_LENGTH - 1)];
 
-	// get the absolute value of the sin, as attenuation, as a 4.8 fixed point value
-	uint32_t sin_attenuation = m_cache.waveform[phase & (RegisterType::WAVEFORM_LENGTH - 1)];
+		// get the attenuation from the evelope generator as a 4.6 value, shifted up to 4.8
+		uint32_t env_attenuation = envelope_attenuation(am_offset) << 2;
 
-	// get the attenuation from the evelope generator as a 4.6 value, shifted up to 4.8
-	uint32_t env_attenuation = envelope_attenuation(am_offset) << 2;
+		// combine into a 5.8 value, then convert from attenuation to 13-bit linear volume
+		result = attenuation_to_volume((sin_attenuation & 0x7fff) + env_attenuation);
 
-	// combine into a 5.8 value, then convert from attenuation to 13-bit linear volume
-	int32_t result = attenuation_to_volume((sin_attenuation & 0x7fff) + env_attenuation);
+		// negate if in the negative part of the sin wave (sign bit gives 14 bits)
+		if (bitfield(sin_attenuation, 15))
+			result = -result;
+	}
 
-	// negate if in the negative part of the sin wave (sign bit gives 14 bits)
-	return bitfield(sin_attenuation, 15) ? -result : result;
+	// the OPM's test register bit 4 sets bit 13 of the level before its sign,
+	// which flips bit 13 of the 14-bit result (checked against Nuked-OPM)
+	if (m_regs.test_output_bit(m_opoffs))
+		result = int16_t(uint16_t(result ^ 0x2000) << 2) >> 2;
+	return result;
 }
 
 
@@ -831,7 +845,7 @@ void fm_operator<RegisterType>::clock_envelope_by_sample(uint32_t env_counter)
 
 	// a new key-on runs at the attack rate
 	uint32_t const rate = m_cache.eg_rate[edge ? EG_ATTACK : state];
-	uint32_t const increment = envelope_increment(rate, env_counter);
+	uint32_t const increment = envelope_increment(rate, m_regs.test_eg_clock(m_opoffs) ? (env_counter & ~3u) : env_counter);
 
 	int32_t next = int32_t(level);
 	if (edge && rate >= 62)
@@ -904,6 +918,11 @@ uint32_t fm_operator<RegisterType>::env_level() const
 template<class RegisterType>
 uint32_t fm_operator<RegisterType>::envelope_attenuation(uint32_t am_offset) const
 {
+	// the OPM's test register can hold every operator at full level, its
+	// envelope, AM and TL aside (checked against Nuked-OPM)
+	if (m_regs.test_full_level(m_opoffs))
+		return 0;
+
 	uint32_t result = env_level() >> m_cache.eg_shift;
 
 	// invert if necessary due to SSG-EG
@@ -941,6 +960,8 @@ fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32
 	m_owner(owner),
 	m_late{},
 	m_late_prev{},
+	m_late_noise{},
+	m_late_noise_prev{},
 	m_op2_in(0),
 	m_op2_last(0)
 {
@@ -958,7 +979,7 @@ void fm_channel<RegisterType>::reset()
 	m_feedback[0] = m_feedback[1] = 0;
 	m_feedback_in = 0;
 	for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
-		m_late[index] = m_late_prev[index] = 0;
+		m_late[index] = m_late_prev[index] = m_late_noise[index] = m_late_noise_prev[index] = 0;
 	m_op2_in = m_op2_last = 0;
 }
 
@@ -1044,6 +1065,8 @@ void fm_channel<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 	{
 		m_late_prev[index] = m_late[index];
 		m_late[index] = 0;
+		m_late_noise_prev[index] = m_late_noise[index];
+		m_late_noise[index] = 0;
 	}
 
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
@@ -1125,6 +1148,25 @@ void fm_channel<RegisterType>::output_2op(output_data &output, uint32_t rshift, 
 
 
 //-------------------------------------------------
+//  mix_late - add the operators the chip mixed a
+//  sample late; the OPM's noise enable chooses for
+//  operator 4 of channel 7 as they are mixed
+//  (checked against Nuked-OPM)
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_channel<RegisterType>::mix_late(output_data &output) const
+{
+	if constexpr (has_output_late<RegisterType>::value)
+	{
+		bool const noise = m_choffs == 7 && m_regs.noise_enable() != 0;
+		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+			output.data[index] += noise ? m_late_noise_prev[index] : m_late_prev[index];
+	}
+}
+
+
+//-------------------------------------------------
 //  output_4op - combine 4 operators according to
 //  the specified algorithm, returning a sum
 //  according to the rshift and clipmax parameters,
@@ -1153,9 +1195,7 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
 
 	// the operators the chip mixed a sample late
-	if constexpr (has_output_late<RegisterType>::value)
-		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
-			output.data[index] += m_late_prev[index];
+	mix_late(output);
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
@@ -1238,7 +1278,7 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// compute the 14-bit volume/value of operator 4; this could be a noise
 	// value on the OPM; all algorithms consume OP4 output at a minimum
 	int32_t result;
-	if (m_regs.noise_enable() && m_choffs == 7)
+	if (!has_output_late<RegisterType>::value && m_regs.noise_enable() && m_choffs == 7)
 		result = m_op[3]->compute_noise_volume(am_offset);
 	else
 	{
@@ -1257,25 +1297,38 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	{
 		// each output sums the on-time operators into this sample and the late
 		// ones into the next, adding in the same order and clamping as below
+		// (channel 7's operator 4, slot 31, is late in both: the sums with its
+		// noise in its place differ in their late parts alone)
 		fm_operator<RegisterType> *const ops[4] = { m_op[3], m_op[0], m_op[1], m_op[2] };
-		int32_t const values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
+		int32_t values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
 		bool const used[4] = { true, bitfield(algorithm_ops, 7) != 0, bitfield(algorithm_ops, 8) != 0, bitfield(algorithm_ops, 9) != 0 };
-		for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
+		uint32_t const variants = (m_choffs == 7) ? 2 : 1;
+		for (uint32_t variant = 0; variant < variants; variant++)
 		{
-			int32_t sum[2] = { 0, 0 };
-			bool any[2] = { false, false };
-			for (int term = 0; term < 4; term++)
-				if (used[term])
-				{
-					int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
-					sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
-					any[late] = true;
-				}
-			bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
-			if (enabled)
+			if (variant == 1)
+				values[0] = m_op[3]->compute_noise_volume(am_offset) >> rshift;
+			for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
 			{
-				output.data[index] += sum[0];
-				m_late[index] = sum[1];
+				int32_t sum[2] = { 0, 0 };
+				bool any[2] = { false, false };
+				for (int term = 0; term < 4; term++)
+					if (used[term])
+					{
+						int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
+						sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
+						any[late] = true;
+					}
+				bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
+				if (enabled)
+				{
+					if (variant == 0)
+					{
+						output.data[index] += sum[0];
+						m_late[index] = sum[1];
+					}
+					else
+						m_late_noise[index] = sum[1];
+				}
 			}
 		}
 		return;
@@ -1537,6 +1590,12 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 	else if (bitfield(++m_env_counter, 0, 2) == RegisterType::EG_CLOCK_DIVIDER)
 		m_env_counter += 4 - RegisterType::EG_CLOCK_DIVIDER;
 
+	// the OPM's test register bit 0 clocks the envelope every sample: its
+	// timer, and each operator, steps then while the divider counts on
+	// (checked against Nuked-OPM)
+	else if (m_regs.test_eg_timer())
+		m_env_counter += 4;
+
 	// clock the noise generator
 	int32_t lfo_raw_pm = m_regs.clock_noise_and_lfo();
 
@@ -1561,17 +1620,19 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	// mask out some channels for debug purposes
 	chanmask &= debug::GLOBAL_FM_CHANNEL_MASK;
 
-	// mask out inactive channels; the OPM noise channel sounds at any level
+	// mask out inactive channels; the OPM noise channel sounds at any level,
+	// and the OPM's mixer can take it in any sample
 	if (!YMFM_DEBUG_LOG_WAVFILES)
 	{
-		uint32_t const computed = m_active_channels | (m_regs.noise_enable() ? 0x80 : 0);
+		uint32_t const computed = m_regs.test_all_channels() ? 0xffffffff :
+			(m_active_channels | ((has_output_late<RegisterType>::value || m_regs.noise_enable()) ? 0x80 : 0));
 
 		// a channel left out has every operator silent: on a chip that runs
 		// them anyway, what they feed back and on is 0
 		if constexpr (has_last_op2<RegisterType>::value)
 			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 				if (bitfield(chanmask & ~computed, chnum))
-					m_channel[chnum]->silent_output();
+					m_channel[chnum]->silent_output(output);
 		chanmask &= computed;
 	}
 

@@ -175,6 +175,24 @@ def timer(kind, n, irq=True, resets=4, phase=0):
     return s
 
 
+def timer_test():
+    """Both timers loaded from 0, flagging each expiry, while $01 bit 2 counts
+    them every cycle, set and cleared at several cycles of a sample."""
+    s = S()
+    t = s.reg(0x10, 0x00, START)
+    t = s.reg(0x11, 0x00, t)
+    t = s.reg(0x12, 0x00, t)
+    s.x(t, t + 9000)
+    s.reg(0x14, 0x0f, t)
+    for k, (o, hold) in enumerate(((0, 300), (5, 211), (13, 1100), (22, 37), (31, 530))):
+        t1 = t + 400 + 1700 * k
+        t1 = t1 - t1 % SAMPLE + o
+        s.reg(0x01, 0x04, t1)
+        s.reg(0x01, 0x00, t1 + hold)
+        s.reg(0x14, 0x3f, t1 + hold + 200)
+    return s
+
+
 def timer_irq_enable():
     """Without IRQEN no flag is set; enabling it later flags the next expiry."""
     s = S()
@@ -261,10 +279,11 @@ class V(S):
         self.set(0x30 + ch, kf << 2)
         self.set(0x38 + ch, pms << 4 | ams)
 
-    def op(self, sl, dt1=0, mul=1, tl=0, am=0, dt2=0):
-        """An operator at full attack that holds its level until key-off."""
+    def op(self, sl, dt1=0, mul=1, tl=0, am=0, dt2=0, d2r=0):
+        """An operator at full attack that holds its level until key-off,
+        or decays from it at `d2r` to silence."""
         for a, v in ((0x40, dt1 << 4 | mul), (0x60, tl), (0x80, 0x1f),
-                     (0xa0, am << 7), (0xc0, dt2 << 6), (0xe0, 0x0f)):
+                     (0xa0, am << 7), (0xc0, dt2 << 6 | d2r), (0xe0, 0x0f)):
             self.set(a + sl, v)
 
     def key(self, ch, ops):
@@ -496,6 +515,129 @@ def noise_writes():
     return s
 
 
+def noise_frequency_writes():
+    """$0F written twice in a sample, either side of cycle 12, the noise
+    left enabled, from the sample of the first write."""
+    s = V()
+    s.set(0x0f, 0x9e)
+    noise_voice(s)
+    s.key(7, 8)
+    t = s.t
+    for d in (2, 4, 8, 12, 20):
+        for o in (0, 4, 11, 12, 13, 20):
+            t += 80 * SAMPLE
+            t = t - t % SAMPLE + o
+            s.w(0, 0x0f, t - 6)
+            s.w(1, 0x93, t)
+            s.w(1, 0x9e if d & 4 else 0x85, t + d)
+            s.o(t // SAMPLE, 64, "R")
+    return s
+
+
+def noise_enable_writes(conn, keyed):
+    """$0F's noise enable turned off and on at every cycle, a sample or more
+    apart, on channel 7 with connection `conn`."""
+    def f():
+        s = V()
+        s.set(0x0f, 0x9e)
+        s.channel(7, 0x4a, con=conn)
+        for slot in (7, 15, 23, 31):
+            s.op(slot)
+        if keyed:
+            s.key(7, 15)
+        t = s.t
+        for o in range(32):
+            for d in (24, 40):
+                t += 40 * SAMPLE
+                t = t - t % SAMPLE + o
+                s.w(0, 0x0f, t - 6)
+                s.w(1, 0x1e, t)
+                s.w(1, 0x9e, t + d)
+                s.o(t // SAMPLE, 8, "L")
+                s.o(t // SAMPLE, 8, "R")
+        return s
+    return f
+
+
+def test_voices(s, am=True, decay=False):
+    """Channels 0, 3, 5 and 7 with every operator keyed, so that each phase
+    starts at its key-on: channel 0 with AM at depth 7F if `am`, channel 5
+    released to silence, channel 7 with the noise; with `decay`, every
+    operator decaying, at rates that step on every envelope cycle and on
+    some."""
+    s.lfo(0xe0, 0, 0x7f, 0)
+    s.set(0x0f, 0x9a)
+    for ch in (0, 3, 5, 7):
+        s.channel(ch, 0x4a - 4 * ch, ams=3 if am and ch == 0 else 0)
+        for sl in (0, 8, 16, 24):
+            s.op(sl + ch, tl=0x30 + sl, am=1 if am and ch == 0 else 0,
+                 d2r={0: 24, 3: 21, 5: 24, 7: 22}[ch] if decay else 0)
+        s.key(ch, 15)
+    s.set(0x08, 5)
+    s.wait(200)
+
+
+def test_register(bits, early=0, am=True, rekey=False):
+    """$01 set to `bits` and cleared at cycles 0-30, on both outputs from a
+    sample before each write; from the sample after for writes at cycles
+    below `early`, which the chip takes in part a sample sooner, with the
+    writes then far enough apart for a block to end before the next. With
+    `rekey`, every operator decays from a key-on of every channel before
+    each write."""
+    def f():
+        s = V()
+        test_voices(s, am, rekey)
+        t = s.t
+        for o in range(31):
+            for v in (bits, 0):
+                t += (140 if rekey else 80 if early else 60) * SAMPLE
+                t = t - t % SAMPLE + o
+                if rekey:
+                    s.t = t - 90 * SAMPLE
+                    for ch in (0, 3, 5, 7):
+                        s.set(0x08, ch)
+                    s.wait(16)
+                    for ch in (0, 3, 5, 7):
+                        s.set(0x08, 15 << 3 | ch)
+                s.w(0, 0x01, t - 6)
+                s.w(1, v, t)
+                first = t // SAMPLE + (1 if o < early else -1) - SETTLE
+                s.o(first, 8, "L")
+                s.o(first, 8, "R")
+        return s
+    return f
+
+
+def test_write_pairs():
+    """$01 set to $30 and cleared again within one sample, at pairs of
+    cycles, on both outputs from a sample before."""
+    def f():
+        s = V()
+        test_voices(s)
+        t = s.t
+        for a, b in ((6, 14), (8, 11), (10, 26), (16, 24), (20, 30), (12, 14)):
+            t += 80 * SAMPLE
+            t = t - t % SAMPLE + a
+            s.w(0, 0x01, t - 6)
+            s.w(1, 0x30, t)
+            s.w(1, 0x00, t + b - a)
+            first = t // SAMPLE - 1 - SETTLE
+            s.o(first, 8, "L")
+            s.o(first, 8, "R")
+        return s
+    return f
+
+
+def reset_outputs():
+    """The noise turned on after reset, channel 7's registers unwritten."""
+    s = V()
+    s.set(0x0f, 0x80)
+    s.out(64, "L")
+    s.out(64, "R")
+    s.wait(80)
+    return s
+
+
 def noise_am():
     """A saw AM on the noise slot, at TL 0 and 7F."""
     s = V()
@@ -550,6 +692,24 @@ def lfo_depth_writes(wave, pm):
         t = t - t % 256 + o
         s.w(0, 0x19, t - 6)
         s.w(1, (0x80 if pm else 0) | (0x2a if o & 1 else 0x55), t)
+        s.o(t // SAMPLE - 4, 40, "L")
+    return s
+
+
+def lfo_am_depth_late():
+    """AM depth rewritten at every cycle of an LFO window, between depths that
+    differ in every bit, on an operator in slots 16-31."""
+    s = V()
+    s.lfo(0xc5, 0, 0x2b, 0)
+    s.channel(0, 0x4a, 0x21, ams=3)
+    s.op(24, am=1)
+    s.key(0, 8)
+    t = s.t
+    for o in range(256):
+        t += 72 * SAMPLE
+        t = t - t % 256 + o
+        s.w(0, 0x19, t - 6)
+        s.w(1, 0x54 if o & 1 else 0x2b, t)
         s.o(t // SAMPLE - 4, 40, "L")
     return s
 
@@ -828,6 +988,7 @@ SCRIPTS = {
     "timer_b_254": lambda: timer("b", 254, phase=11),
     "timer_b_240": lambda: timer("b", 240, resets=2, phase=23),
     "timer_irq_enable": timer_irq_enable,
+    "timer_test": timer_test,
     "timer_reload": timer_reload,
     "timer_stop": timer_stop,
     "irq_both": irq_both,
@@ -847,6 +1008,16 @@ SCRIPTS = {
     "noise_rates": noise_rates,
     "noise_level": noise_level,
     "noise_writes": noise_writes,
+    "noise_frequency_writes": noise_frequency_writes,
+    "reset_outputs": reset_outputs,
+    "test_full_level": test_register(0x20),
+    "test_output_bit": test_register(0x10, 6),
+    "test_write_pairs": test_write_pairs(),
+    "test_phase_reset": test_register(0x08, am=False),
+    "test_eg_clock": test_register(0x01, rekey=True),
+    "noise_enable_writes": noise_enable_writes(4, True),
+    "noise_enable_writes_alg7": noise_enable_writes(7, True),
+    "noise_enable_unkeyed": noise_enable_writes(4, False),
     "noise_am": noise_am,
     "lfo_noise_am_d0": lambda: lfo_noise_am(0xd0),
     "lfo_noise_am_f0": lambda: lfo_noise_am(0xf0),
@@ -858,6 +1029,7 @@ SCRIPTS = {
     "lfo_am_depth_writes": lambda: lfo_depth_writes(0, False),
     "lfo_pm_depth_writes": lambda: lfo_depth_writes(2, True),
     "lfo_noise_depth_writes": lambda: lfo_depth_writes(3, True),
+    "lfo_am_depth_late": lfo_am_depth_late,
     "algorithms": algorithms,
     "output_clamp": output_clamp,
     "envelopes": envelopes,

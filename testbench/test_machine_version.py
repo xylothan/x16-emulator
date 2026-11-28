@@ -485,18 +485,21 @@ def check_ids():
         else:
             case("PSG chunk is v2 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"YM  ")
-        if ver == 9:
-            # ymglue.cpp state_load: version 8 has the same bytes, its engine a
-            # sample nearer the interface. The body ends with the 22-byte bus image, the
-            # 12-byte LFO image, the 80-byte noise image, the 16-byte channel image,
-            # the 482-byte image of writes waiting, the 10-byte key image, the
-            # 544-byte operator image and the 48-byte depth image. Version 7 has no
-            # depth image, version 6 none of the three before it either, and
-            # version 5 no channel image. Versions 3 and 4 hold a 512-byte noise
-            # table before the bus image and no noise image; version 3 has no LFO
-            # image either.
+        if ver == 10:
+            # ymglue.cpp state_load: the body ends with the 22-byte bus image,
+            # the 12-byte LFO image, the 80-byte noise image, the 16-byte
+            # channel image, the 482-byte image of writes waiting, the 10-byte
+            # key image, the 544-byte operator image, the 48-byte depth image
+            # and the 20-byte noise bits. Versions 8 and 9 have no noise bits,
+            # version 9 its depths a sample nearer and version 8 its engine too.
+            # Version 7 has no depth image, version 6 none of the three before
+            # it either, and version 5 no channel image. Versions 3 and 4 hold a
+            # 512-byte noise table before the bus image and no noise image;
+            # version 3 has no LFO image either.
+            def v9(b):
+                return b[:-20]
             def v7(b):
-                return b[:-48]
+                return v9(b)[:-48]
             def v6(b):
                 return v7(b)[:-1036]
             def v5(b):
@@ -504,7 +507,9 @@ def check_ids():
             def v4(b):
                 b = v5(b)
                 return b[:-114] + bytes(512) + b[-114:-80]
-            r, err = chunk_as(b"YM  ", 8, 0)
+            r, err = chunk_as(b"YM  ", 9, 0, v9)
+            case("YM chunk v9, without the noise bits, loads (%s)" % (err or "ok"), r is not None)
+            r, err = chunk_as(b"YM  ", 8, 0, v9)
             case("YM chunk v8, its engine a sample nearer, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 7, 0, v7)
             case("YM chunk v7, without the depth image, loads (%s)" % (err or "ok"), r is not None)
@@ -516,10 +521,10 @@ def check_ids():
             case("YM chunk v4, with its table and no noise image, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"YM  ", 3, 0, lambda b: v4(b)[:-12])
             case("YM chunk v3, also without the LFO image, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"YM  ", 9, 16)
-            case("YM chunk v9 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
+            r, err = chunk_as(b"YM  ", 10, 16)
+            case("YM chunk v10 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
-            case("YM chunk is v9 for the older-chunk cases (it is v%d)" % ver, False)
+            case("YM chunk is v10 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:
