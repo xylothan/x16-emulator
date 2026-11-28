@@ -164,4 +164,29 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["cpu_access_cycles"],
     },
+    {
+        "name": "a VERA read does not bring the sound chips up to its cycle",
+        "file": "src/memory.c",
+        "find": "\t\t\tvideo_catch_up(cpu_access_offset());\n\t\t\taudio_catch_up(cpu_access_offset());\n\t\t}\n\t\treturn video_read",
+        "into": "\t\t\tvideo_catch_up(cpu_access_offset());\n\t\t}\n\t\treturn video_read",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
+    {
+        "name": "a VERA write is caught up after it lands",
+        "file": "src/memory.c",
+        "find": "\t\t\tif (!debugOn && !headless) {\n\t\t\t\tvideo_catch_up(cpu_access_offset());\n\t\t\t\taudio_catch_up(cpu_access_offset());\n\t\t\t}\n\t\t\tvideo_set_debug_write(debugOn);\n\t\t\tvideo_write(address & 0x1f, value);\n",
+        "into": "\t\t\tvideo_set_debug_write(debugOn);\n\t\t\tvideo_write(address & 0x1f, value);\n\t\t\tif (!debugOn && !headless) {\n\t\t\t\tvideo_catch_up(cpu_access_offset());\n\t\t\t\taudio_catch_up(cpu_access_offset());\n\t\t\t}\n",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
+    {
+        "name": "a YM write is caught up after it lands",
+        "file": "src/memory.c",
+        "find": "\t\t\tif (!debugOn && !headless) audio_catch_up(cpu_access_offset());\n\t\t\taudio_render();\n\t\t\tif (port == 0) {\n\t\t\t\taddr_ym = value;\n\t\t\t}\n\t\t\tif (YM_write(port, value)) {",
+        "into": "\t\t\taudio_render();\n\t\t\tif (port == 0) {\n\t\t\t\taddr_ym = value;\n\t\t\t}\n\t\t\tconst bool ym_lost = YM_write(port, value);\n\t\t\tif (!debugOn && !headless) audio_catch_up(cpu_access_offset());\n\t\t\tif (ym_lost) {",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
 ]
+

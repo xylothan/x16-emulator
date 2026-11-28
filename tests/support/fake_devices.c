@@ -28,10 +28,24 @@ fake_dev_name(fake_dev_t dev)
 	}
 }
 
+static void
+note_access(fake_dev_t dev)
+{
+	fake_dev_log_t *d = &fake_dev[dev];
+	if (d->accesses < (int)(sizeof d->caught_up / sizeof d->caught_up[0])) {
+		d->caught_up[d->accesses] = d->catch_ups;
+	}
+	d->accesses++;
+	if (dev == FAKE_VERA) {
+		note_access(FAKE_YM);
+	}
+}
+
 static uint8_t
 note_read(fake_dev_t dev, uint8_t reg, bool debug)
 {
 	fake_dev_log_t *d = &fake_dev[dev];
+	note_access(dev);
 	d->reads++;
 	d->last_reg = reg;
 	if (debug) {
@@ -47,6 +61,7 @@ static void
 note_write(fake_dev_t dev, uint8_t reg, uint8_t value)
 {
 	fake_dev_log_t *d = &fake_dev[dev];
+	note_access(dev);
 	d->writes++;
 	d->last_reg = reg;
 	d->last_value = value;

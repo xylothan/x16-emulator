@@ -33,6 +33,10 @@ typedef struct {
 	// catch-up, in order.
 	int      catch_ups;
 	unsigned offsets[8];
+	// The catch-ups each access found already made, in order. A VERA access
+	// is also one to the sound chips.
+	int      accesses;
+	int      caught_up[8];
 } fake_dev_log_t;
 
 extern fake_dev_log_t fake_dev[FAKE_DEV_COUNT];
