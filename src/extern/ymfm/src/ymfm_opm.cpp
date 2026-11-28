@@ -51,6 +51,11 @@ opm_registers::opm_registers() :
 	m_noise_ahead{ 0, 0 },
 	m_noise_bits{},
 	m_noise_target(0x1f),
+	m_test_before(0),
+	m_test_writes(0),
+	m_test_mask{},
+	m_test_cycle{},
+	m_test_value{},
 	m_noise_changes(0),
 	m_noise_change_cycle{},
 	m_noise_change_target{},
@@ -93,11 +98,9 @@ opm_registers::opm_registers() :
 
 void opm_registers::reset()
 {
+	// every register clears, the channels' outputs too (checked against
+	// Nuked-OPM)
 	std::fill_n(&m_regdata[0], REGISTERS, 0);
-
-	// enable output on both channels by default
-	m_regdata[0x20] = m_regdata[0x21] = m_regdata[0x22] = m_regdata[0x23] = 0xc0;
-	m_regdata[0x24] = m_regdata[0x25] = m_regdata[0x26] = m_regdata[0x27] = 0xc0;
 
 	m_lfo = lfo_state{ 0, 32768, 0, 0, 0, 0, 0, 0, false };
 	m_lfo_am = 0;

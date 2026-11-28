@@ -1,6 +1,6 @@
 {
  "layout": 1,
- "machine": 20,
+ "machine": 21,
  "rom_sha256": "b81654cc8c87ed96e3ffc7c8e7c312c9f3b7b870c7bb34de61e61eac931b819a",
  "workloads": {
   "boot": {

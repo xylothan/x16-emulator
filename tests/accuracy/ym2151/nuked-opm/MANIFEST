@@ -13,6 +13,7 @@ ym_timer_b_255.vec
 ym_timer_b_254.vec
 ym_timer_b_240.vec
 ym_timer_irq_enable.vec
+ym_timer_test.vec
 ym_timer_reload.vec
 ym_timer_stop.vec
 ym_irq_both.vec
@@ -33,6 +34,12 @@ ym_noise_rates.vec
 ym_noise_level.vec
 ym_noise_writes.vec
 ym_noise_frequency_writes.vec
+ym_reset_outputs.vec
+ym_test_full_level.vec
+ym_test_output_bit.vec
+ym_test_write_pairs.vec
+ym_test_phase_reset.vec
+ym_test_eg_clock.vec
 ym_noise_enable_writes.vec
 ym_noise_enable_writes_alg7.vec
 ym_noise_enable_unkeyed.vec

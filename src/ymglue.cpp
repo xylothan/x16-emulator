@@ -78,6 +78,7 @@ struct opm_bus {
 
 	bool     csm = false, csm_lock = false;
 	bool     irq = false;
+	bool     test_timers = false;               // $01 bit 2: both timers count every cycle
 
 	static unsigned bit(bool v, unsigned n) {
 		return (v ? 1u : 0u) << n;
@@ -126,6 +127,7 @@ struct opm_bus {
 
 	void mode_write(uint8_t a, uint8_t v) {
 		switch (a) {
+			case 0x01: test_timers = v & 0x04; break;
 			case 0x10: a_reg = (uint16_t)((a_reg & 3) | v << 2); break;
 			case 0x11: a_reg = (uint16_t)((a_reg & 0x3fc) | (v & 3)); break;
 			case 0x12: b_reg = v; break;
@@ -199,14 +201,14 @@ struct opm_bus {
 		wa = wd = false;
 
 		if (cycle == 1) a_load = a_load_reg;
-		a_inc = a_load && cycle == 0;
+		a_inc = test_timers || (a_load && cycle == 0);
 		a_do_load = a_of || (a_load && a_temp);
 		a_do_reset = a_temp;
 		a_temp = !a_load;
 		a_flag = !a_reset && (a_flag || (a_irqen && a_of));
 		a_reset = false;
 
-		b_inc = b_load_reg && b_sub_of;
+		b_inc = test_timers || (b_load_reg && b_sub_of);
 		b_do_load = b_of || (b_load_reg && b_temp);
 		b_do_reset = b_temp;
 		b_temp = !b_load_reg;
@@ -268,7 +270,8 @@ struct opm_bus {
 		img[16] = (uint8_t)(bit(b_load_reg, 0) | bit(b_inc, 1) | bit(b_do_load, 2) | bit(b_do_reset, 3) | bit(b_temp, 4) | bit(b_of, 5) | bit(b_sub_of, 6));
 		img[17] = (uint8_t)(bit(b_irqen, 0) | bit(b_reset, 1) | bit(b_flag, 2));
 		img[18] = (uint8_t)(bit(csm, 0) | bit(csm_lock, 1) | bit(irq, 2));
-		img[19] = img[20] = img[21] = 0; // reserved
+		img[19] = (uint8_t)bit(test_timers, 0);
+		img[20] = img[21] = 0; // reserved
 	}
 
 	void from_image(const uint8_t img[IMAGE_SIZE]) {
@@ -285,10 +288,11 @@ struct opm_bus {
 		b_temp = img[16] & 16; b_of = img[16] & 32; b_sub_of = img[16] & 64;
 		b_irqen = img[17] & 1; b_reset = img[17] & 2; b_flag = img[17] & 4;
 		csm = img[18] & 1; csm_lock = img[18] & 2; irq = img[18] & 4;
+		test_timers = img[19] & 1;
 	}
 };
 // A new field must reach to_image() and from_image().
-static_assert(sizeof(opm_bus) == 44, "opm_bus changed: update its image");
+static_assert(sizeof(opm_bus) == 46, "opm_bus changed: update its image");
 
 class ym2151_interface : public ymfm::ymfm_interface {
 	public:
@@ -340,6 +344,15 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		static_assert(ymfm::opm_registers::LFO_DEPTH_AHEAD == ENGINE_BEHIND - DEPTH_WAIT, "the LFO depths are kept as far on as a depth write lands");
 		static_assert(ymfm::opm_registers::NOISE_AHEAD == ENGINE_BEHIND, "the noise generator runs in step with the interface");
 		static constexpr uint8_t NOISE_ENABLE_CYCLE = 13;
+		// The test register bits that reach the engine after TEST_FAST_WAIT:
+		// bit 0 clocks the envelope every sample, bit 3 clears each
+		// operator's phase, bit 4 sets bit 13 of its level, bit 5 holds it at
+		// full level. The phase runs a sample behind, so bit 3 reaches most
+		// slots the sample after: TEST_PHASE carries the write there.
+		static constexpr uint8_t TEST_FAST = 0x39;
+		static constexpr uint8_t TEST_FAST_WAIT = 0;
+		static constexpr uint8_t TEST_PHASE = 0x08;
+		static constexpr uint8_t TEST_REST = (uint8_t)~TEST_FAST;
 
 		// What a queued entry does when it is due.
 		enum late_kind : uint8_t {
@@ -347,6 +360,8 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			LATE_CSM    = 1,  // a CSM key-on
 			LATE_DIRECT = 2,  // a register write the chip acts on at once
 			LATE_NOISE  = 3,  // a $0F write's frequency, for the noise generator
+			LATE_TEST   = 4,  // a $01 write to the bits its address names
+			LATE_CARRY  = 5,  // a $01 write's bit 3 the sample after, $01 before it in its address
 		};
 
 		struct late_write {
@@ -434,6 +449,23 @@ class ym2151_interface : public ymfm::ymfm_interface {
 				} else if (e.kind == LATE_DIRECT || e.kind == LATE_NOISE) {
 				} else if (e.kind == LATE_CSM) {
 					csm_keyon(e.addr);
+				} else if (e.kind == LATE_TEST) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					const uint8_t test = (uint8_t)regs.test();
+					to_engine(0x01, (uint8_t)((test & ~e.addr) | (e.value & e.addr)), e.cycle);
+					if (e.addr == TEST_FAST) {
+						regs.test_written(test, TEST_FAST, (int32_t)e.cycle);
+						for (size_t j = i + 1; j < m_late_count; j++) {
+							if (m_late[j].kind == LATE_CARRY && m_late[j].cycle == e.cycle) {
+								m_late[j].addr = test;
+								break;
+							}
+						}
+					}
+				} else if (e.kind == LATE_CARRY) {
+					ymfm::opm_registers &regs = m_chip.engine().regs();
+					const uint8_t test = (uint8_t)regs.test();
+					regs.test_written((uint8_t)((test & ~TEST_PHASE) | (e.addr & TEST_PHASE)), TEST_PHASE, (int32_t)e.cycle - 32);
 				} else {
 					to_engine(e.addr, e.value, e.cycle);
 				}
@@ -473,6 +505,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			} else {
 				m_chip.generate(out);
 			}
+			m_chip.engine().regs().test_settle();
 			for (size_t i = 0; i < m_late_count; i++) {
 				m_late[i].wait--;
 			}
@@ -492,6 +525,12 @@ class ym2151_interface : public ymfm::ymfm_interface {
 						queue(DEPTH_WAIT, a, v, LATE_DIRECT, m_bus.cycle);
 					} else if (a >= 0x20) {
 						direct(a, v, m_bus.cycle);
+					} else if (a == 0x01) {
+						// The test register's bits take effect at different
+						// points (checked against Nuked-OPM).
+						queue(TEST_FAST_WAIT, TEST_FAST, v, LATE_TEST, m_bus.cycle);
+						queue(TEST_FAST_WAIT + 1, 0, v, LATE_CARRY, m_bus.cycle);
+						queue(ENGINE_BEHIND, TEST_REST, v, LATE_TEST, m_bus.cycle);
 					} else if (a == 0x0f) {
 						// The noise generator takes $0F's frequency at its cycle,
 						// and the mixer the enable, from the next sample when the
@@ -599,7 +638,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			*pm = (uint8_t)regs.lfo_pm_depth();
 			for (size_t i = 0; i < m_late_count; i++) {
 				const late_write &e = m_late[i];
-				if (e.kind != LATE_CSM && e.addr == 0x19) {
+				if ((e.kind == LATE_WRITE || e.kind == LATE_DIRECT) && e.addr == 0x19) {
 					*((e.value & 0x80) ? pm : am) = e.value & 0x7f;
 				}
 			}
@@ -809,7 +848,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			m_late_count = std::min<size_t>(img[1], LATE_MAX);
 			for (size_t i = 0; i < m_late_count; i++) {
 				const uint8_t *e = img + 2 + 5 * i;
-				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE) ? e[4] : LATE_WRITE;
+				const uint8_t kind = (e[4] == LATE_CSM || e[4] == LATE_DIRECT || e[4] == LATE_NOISE || e[4] == LATE_TEST || e[4] == LATE_CARRY) ? e[4] : LATE_WRITE;
 				m_late[i] = late_write{ std::min<uint8_t>(e[0], ENGINE_BEHIND), (uint8_t)(e[1] & 31), e[2], e[3], kind };
 			}
 		}
