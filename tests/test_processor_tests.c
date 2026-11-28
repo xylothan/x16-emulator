@@ -9,8 +9,7 @@
 //   3. the bus trace -- which addresses were touched, in what order, including
 //      the dummy accesses real hardware makes.
 //
-// (3) covers dummy accesses to data addresses. Implied, stack and branch cycles
-// are not modelled. All three are baselined.
+// All three are baselined.
 //
 // Fixtures come from tests/fetch_pt.py; without them this reports skipped.
 

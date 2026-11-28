@@ -368,6 +368,39 @@ static inline void dp_low_dummy(void) {
     }
 }
 
+// An internal cycle of an implied, stack or branch instruction: both CPUs put
+// an address from the instruction stream on the bus.
+static inline void pc_dummy(uint16_t address) {
+    dummy6502(address, regs.k, false, 0);
+}
+
+// The cycle before a pull. The 65C02 reads the stack at S; the 65C816 repeats
+// the program counter.
+static inline void pull_dummy(void) {
+    if (regs.is65c816) {
+        pc_dummy(regs.pc);
+    } else {
+        dummy6502((uint16_t)(0x0100 | (regs.sp & 0xFF)), 0, false, 0);
+    }
+}
+
+// A taken branch. The 65C02 reads the next opcode's address, then on a page
+// crossing that address with the target's low byte; the 65C816 repeats the
+// offset's address, the second time only on a crossing in emulation mode.
+static inline void branch_dummy(uint16_t from, bool page_cycle) {
+    if (regs.is65c816) {
+        pc_dummy((uint16_t)(from - 1));
+        if (page_cycle) {
+            pc_dummy((uint16_t)(from - 1));
+        }
+    } else {
+        pc_dummy(from);
+        if (page_cycle) {
+            pc_dummy((uint16_t)((from & 0xFF00) | (regs.pc & 0x00FF)));
+        }
+    }
+}
+
 // The cycle adding an index to a direct-page operand. The 65C02 reads the
 // unindexed zero-page address; the 65C816 repeats the operand address.
 static inline void dp_index_dummy(uint16_t operand) {

@@ -25,7 +25,8 @@
 static void ainx() { 		// absolute indexed branch
     uint16_t eahelp, eahelp2;
     eahelp = fetch_word(regs.pc, regs.k);
-    dummy6502((uint16_t)(regs.pc + 1), regs.k, false, 0);
+    // The 65C02 re-reads the low byte's address, the 65C816 the high byte's.
+    pc_dummy(regs.is65c816 ? (uint16_t)(regs.pc + 1) : regs.pc);
     eahelp = (eahelp + regs.x) & 0xFFFF;
 #if 0
     eahelp2 = (eahelp & 0xFF00) | ((eahelp + 1) & 0x00FF); //replicate 6502 page-boundary wraparound bug
@@ -56,7 +57,9 @@ static void stz() {
 static void bra() {
     oldpc = regs.pc;
     regs.pc += reladdr;
-    if (regs.e && (oldpc & 0xFF00) != (regs.pc & 0xFF00)) clockticks6502++; //check if jump crossed a page boundary
+    const bool page_cycle = regs.e && (oldpc & 0xFF00) != (regs.pc & 0xFF00);
+    if (page_cycle) clockticks6502++; //check if jump crossed a page boundary
+    branch_dummy(oldpc, page_cycle);
 }
 
 // *******************************************************************************************
@@ -77,6 +80,7 @@ static void phx() {
 
 static void plx() {
     penaltyx = 1;
+    pull_dummy();
 
     if (index_16bit()) {
         regs.x = pull16();
@@ -102,6 +106,7 @@ static void phy() {
 
 static void ply() {
     penaltyx = 1;
+    pull_dummy();
 
     if (index_16bit()) {
         regs.y = pull16();
@@ -164,14 +169,35 @@ static void wai() {
 //                                     BBR and BBS
 //
 // *******************************************************************************************
+// BBR and BBS read the zero-page byte twice, then fetch the offset. A taken
+// branch reads the next opcode's address, twice on a page crossing.
+static bool bb_bit(uint16_t bitmask)
+{
+	const uint16_t v = getvalue(0);
+	dummy6502((uint16_t)ea, 0, false, 0);
+	reladdr = (uint16_t)fetch6502(regs.pc++, 0);
+	if (reladdr & 0x80) reladdr |= 0xFF00;
+	return (v & bitmask) != 0;
+}
+
+static void bb_branch(void)
+{
+	oldpc = regs.pc;
+	regs.pc += reladdr;
+	pc_dummy(oldpc);
+	if ((oldpc & 0xFF00) != (regs.pc & 0xFF00)) { //check if jump crossed a page boundary
+		clockticks6502 += 2;
+		pc_dummy(oldpc);
+	} else {
+		clockticks6502++;
+	}
+}
+
 static void bbr(uint16_t bitmask)
 {
     if (warn_rockwell) rockwell_warning("BBR");
-	if ((getvalue(0) & bitmask) == 0) {
-		oldpc = regs.pc;
-		regs.pc += reladdr;
-		if ((oldpc & 0xFF00) != (regs.pc & 0xFF00)) clockticks6502 += 2; //check if jump crossed a page boundary
-		else clockticks6502++;
+	if (!bb_bit(bitmask)) {
+		bb_branch();
 	}
 }
 
@@ -187,11 +213,8 @@ static void bbr7() { bbr(0x80); }
 static void bbs(uint16_t bitmask)
 {
     if (warn_rockwell) rockwell_warning("BBS");
-	if ((getvalue(0) & bitmask) != 0) {
-		oldpc = regs.pc;
-		regs.pc += reladdr;
-		if ((oldpc & 0xFF00) != (regs.pc & 0xFF00)) clockticks6502 += 2; //check if jump crossed a page boundary
-		else clockticks6502++;
+	if (bb_bit(bitmask)) {
+		bb_branch();
 	}
 }
 

@@ -87,8 +87,8 @@ jmp ainx 6 $7c
 jml absl 4 $5c
 jml aindl 6 $dc
 
-jsr ainx 8 $fc
-jsl absl 8 $22
+jsr jsrx 8 $fc
+jsl jsla 8 $22
 
 bra rel 3 $80
 
