@@ -9,6 +9,8 @@
 #include "memory.h"
 
 extern uint32_t clockticks6502;
+extern uint32_t cpu_step_base;
+extern uint8_t  cpu_bus_index;
 
 fake_dev_log_t fake_dev[FAKE_DEV_COUNT];
 
@@ -64,6 +66,8 @@ fake_devices_reset(void)
 
 	memset(fake_dev, 0, sizeof fake_dev);
 	clockticks6502 = 0;
+	cpu_step_base  = 0;
+	cpu_bus_index  = 0;
 }
 
 uint32_t
@@ -128,6 +132,7 @@ void audio_events_ym_write(uint8_t reg, uint8_t val) { (void)reg; (void)val; }
 
 // Swallowed: memory.c brackets VERA writes with this; adds no trace event.
 void video_set_debug_write(bool debug) { (void)debug; }
+void video_catch_up(unsigned offset) { note_catch_up(FAKE_VERA, offset); }
 
 // YM_read_status() has no debug parameter, so a debug read cannot differ; recorded as a real read.
 uint8_t
@@ -185,6 +190,7 @@ uint8_t *CART = NULL;
 uint8_t  keymap = 0;
 bool     is_gen2 = false;
 bool     has_via2 = true;
+bool     headless = false;
 bool     has_midi_card = false;
 uint16_t midi_card_addr = 0x9f60;
 uint16_t num_banks = 1;

@@ -124,4 +124,20 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["debug_write_path"],
     },
+    {
+        "name": "a VERA read is not brought up to its cycle",
+        "file": "src/memory.c",
+        "find": "\t\tif (!debugOn && !headless) video_catch_up(cpu_access_offset());\n\t\treturn video_read",
+        "into": "\t\treturn video_read",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
+    {
+        "name": "a VERA write is not brought up to its cycle",
+        "file": "src/memory.c",
+        "find": "\t\t\tif (!debugOn && !headless) video_catch_up(cpu_access_offset());\n\t\t\tvideo_set_debug_write",
+        "into": "\t\t\tvideo_set_debug_write",
+        "count": 1,
+        "caught_by": ["cpu_access_cycles"],
+    },
 ]

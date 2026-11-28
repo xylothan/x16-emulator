@@ -1107,6 +1107,21 @@ if(TARGET vera_irq_test)
     endif()
 endif()
 
+# VERA stepped up to an access within an instruction, then the rest after it.
+x16_add_test(vera_catch_up NEEDS_SDL
+    SOURCES tests/test_vera_catch_up.c tests/support/video_fixture.c tests/support/harness.c
+            ${VERA_VIDEO_TEST_SOURCES})
+
+if(TARGET vera_catch_up_test)
+    target_include_directories(vera_catch_up_test PRIVATE src/extern/include)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(vera_catch_up_test PRIVATE SDL2::SDL2)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(vera_catch_up_test PRIVATE m)
+    endif()
+endif()
+
 # What a reset leaves behind: derived state must not outlive the registers it
 # was derived from.
 x16_add_test(vera_reset NEEDS_SDL
