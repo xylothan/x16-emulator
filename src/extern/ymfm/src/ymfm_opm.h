@@ -207,6 +207,16 @@ public:
 
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
+	uint32_t lfo_am_offset_at(uint32_t choffs, uint32_t cycle) const;
+
+	// A channel register ($20-$3F) the scan latched during the sample before
+	// the engine takes it. An operator reads the channel's registers at its
+	// own slot's cycle, and its output stage 16 cycles on, so those reads after
+	// the latch take the new value a sample early (checked against Nuked-OPM).
+	// The scan reaches a channel's registers at cycles ch, ch + 8, ch + 16 and
+	// ch + 24. Lasts one sample: ch_latch_clear() ends it.
+	void ch_latch_early(uint32_t addr, uint8_t value, uint32_t cycle);
+	void ch_latch_clear();
 
 	// the LFO as the chip runs it (checked against the Nuked-OPM vectors): a counter
 	// stepped by a reload counter and a rate multiplier, and AM and PM values
@@ -348,6 +358,15 @@ public:
 	uint32_t ch_lfo_pm_sens(uint32_t choffs) const   { return byte(0x38, 4, 3, choffs); }
 	uint32_t ch_lfo_am_sens(uint32_t choffs) const   { return byte(0x38, 0, 2, choffs); }
 
+	// the same, as read at `cycle` of the sample (an operator's slot, or its
+	// slot + 16 for its output stage)
+	uint32_t ch_output_0_at(uint32_t choffs, uint32_t cycle) const    { return bitfield(ch_byte_at(0x20, choffs, cycle), 6, 1); }
+	uint32_t ch_output_1_at(uint32_t choffs, uint32_t cycle) const    { return bitfield(ch_byte_at(0x20, choffs, cycle), 7, 1); }
+	uint32_t ch_algorithm_at(uint32_t choffs, uint32_t cycle) const   { return bitfield(ch_byte_at(0x20, choffs, cycle), 0, 3); }
+	uint32_t ch_block_freq_at(uint32_t choffs, uint32_t cycle) const  { return (bitfield(ch_byte_at(0x28, choffs, cycle), 0, 7) << 6) | bitfield(ch_byte_at(0x30, choffs, cycle), 2, 6); }
+	uint32_t ch_lfo_pm_sens_at(uint32_t choffs, uint32_t cycle) const { return bitfield(ch_byte_at(0x38, choffs, cycle), 4, 3); }
+	uint32_t ch_lfo_am_sens_at(uint32_t choffs, uint32_t cycle) const { return bitfield(ch_byte_at(0x38, choffs, cycle), 0, 2); }
+
 	// per-operator registers
 	uint32_t op_detune(uint32_t opoffs) const        { return byte(0x40, 4, 3, opoffs); }
 	uint32_t op_multiple(uint32_t opoffs) const      { return byte(0x40, 0, 4, opoffs); }
@@ -366,6 +385,17 @@ protected:
 	uint32_t byte(uint32_t offset, uint32_t start, uint32_t count, uint32_t extra_offset = 0) const
 	{
 		return bitfield(m_regdata[offset + extra_offset], start, count);
+	}
+
+	// a channel register byte as read at `cycle` of the sample
+	uint8_t ch_byte_at(uint32_t offset, uint32_t choffs, uint32_t cycle) const
+	{
+		uint8_t value = m_regdata[offset + choffs];
+		uint8_t const set = m_ch_early_set[offset - 0x20 + choffs];
+		for (uint32_t scan = 0; scan < 4; scan++)
+			if (bitfield(set, scan) && choffs + 8 * scan < cycle)
+				value = m_ch_early[offset - 0x20 + choffs][scan];
+		return value;
 	}
 
 	// return a bitfield extracted from a pair of bytes, MSBs listed first
@@ -395,6 +425,8 @@ protected:
 	lfo_state m_lfo;                      // LFO counters and PM latch
 	lfo_depth m_lfo_depth[8];             // AM and PM depths, by window
 	uint32_t m_write_cycle;               // cycle of the writes being made
+	uint8_t m_ch_early_set[32];           // $20-$3F latched this sample, a bit per scan
+	uint8_t m_ch_early[32][4];            // and the value each took
 	uint8_t m_regdata[REGISTERS];         // register data
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms

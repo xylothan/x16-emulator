@@ -61,7 +61,9 @@ opm_registers::opm_registers() :
 	m_noise_change_target{},
 	m_lfo_am(0),
 	m_lfo{ 0, 32768, 0, 0, 0, 0, 0, 0, false },
-	m_write_cycle(0)
+	m_write_cycle(0),
+	m_ch_early_set{},
+	m_ch_early{}
 {
 	// create the waveforms
 	for (uint32_t index = 0; index < WAVEFORM_LENGTH; index++)
@@ -517,11 +519,16 @@ int32_t opm_registers::clock_noise_and_lfo()
 
 uint32_t opm_registers::lfo_am_offset(uint32_t choffs) const
 {
+	return lfo_am_offset_at(choffs, 0);
+}
+
+uint32_t opm_registers::lfo_am_offset_at(uint32_t choffs, uint32_t cycle) const
+{
 	// OPM maps AM quite differently from OPN
 
 	// shift value for AM sensitivity is [*, 0, 1, 2],
 	// mapping to values of [0, 23.9, 47.8, and 95.6dB]
-	uint32_t am_sensitivity = ch_lfo_am_sens(choffs);
+	uint32_t am_sensitivity = ch_lfo_am_sens_at(choffs, cycle);
 	if (am_sensitivity == 0)
 		return 0;
 
@@ -536,6 +543,25 @@ uint32_t opm_registers::lfo_am_offset(uint32_t choffs) const
 
 
 //-------------------------------------------------
+//  ch_latch_early - a channel register latched
+//  in the sample before the engine takes it
+//-------------------------------------------------
+
+void opm_registers::ch_latch_early(uint32_t addr, uint8_t value, uint32_t cycle)
+{
+	uint32_t const scan = (cycle >> 3) & 3;
+	m_ch_early_set[addr - 0x20] |= 1 << scan;
+	m_ch_early[addr - 0x20][scan] = value;
+}
+
+void opm_registers::ch_latch_clear()
+{
+	for (uint8_t &set : m_ch_early_set)
+		set = 0;
+}
+
+
+//-------------------------------------------------
 //  cache_operator_data - fill the operator cache
 //  with prefetched data
 //-------------------------------------------------
@@ -546,7 +572,7 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 	cache.waveform = &m_waveform[0][0];
 
 	// get frequency from the channel
-	uint32_t block_freq = cache.block_freq = ch_block_freq(choffs);
+	uint32_t block_freq = cache.block_freq = ch_block_freq_at(choffs, opoffs);
 
 	// compute the keycode: block_freq is:
 	//
@@ -567,7 +593,7 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 
 	// phase step, or PHASE_STEP_DYNAMIC if PM is active; this depends on
 	// block_freq, detune, and multiple, so compute it after we've done those
-	if (ch_lfo_pm_sens(choffs) == 0)
+	if (ch_lfo_pm_sens_at(choffs, opoffs) == 0)
 		cache.phase_step = compute_phase_step(choffs, opoffs, cache, 0);
 	else
 		cache.phase_step = opdata_cache::PHASE_STEP_DYNAMIC;
@@ -694,7 +720,7 @@ uint32_t opm_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opd
 	// whatever the latch still holds
 	// (the LFO has moved its window past this sample's already)
 	uint32_t pm = (m_lfo_depth[(m_lfo.window - 1) & 7].pm[1] != 0) ? bitfield(lfo_raw_pm, (opoffs >= 23) ? 8 : 0, 8) : 0;
-	code = opm_apply_pm(code, pm, ch_lfo_pm_sens(choffs));
+	code = opm_apply_pm(code, pm, ch_lfo_pm_sens_at(choffs, opoffs));
 	code = opm_apply_dt2(code, bitfield(cache.detune, 3, 2));
 
 	// DT1 is chosen by the block and note group the code has reached
