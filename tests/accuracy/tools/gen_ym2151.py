@@ -632,6 +632,112 @@ def envelopes():
     return s
 
 
+def env_high_rates():
+    """Attack, first decay and release at each rate from 48 to 63, set by the
+    rate and the key code under a key scaling of 3."""
+    s = V()
+    s.channel(3, 0x4a, 0x10)
+    env_op(s, 27, 0, 0, 0, 0, 15, ks=3)
+    for rate in range(48, 64):
+        r = (rate - 21) // 2
+        k = rate - 2 * r
+        s.set(0x28 + 3, k << 2)
+        # attack from silence
+        if rate < 62:
+            s.set(0x80 + 27, 3 << 6 | r)
+            s.set(0xa0 + 27, 0)
+            s.set(0xe0 + 27, 0x0f)
+            s.set(0x08, 8 << 3 | 3)
+            s.out(64)
+            s.wait(72)
+            s.set(0x08, 3)
+            s.wait(400)
+        # first decay
+        s.set(0x80 + 27, 3 << 6 | 31)
+        s.set(0xa0 + 27, r)
+        s.set(0xe0 + 27, 0xff)
+        s.set(0x08, 8 << 3 | 3)
+        s.out(64)
+        s.wait(72)
+        s.set(0x08, 3)
+        s.wait(400)
+        # release from full level
+        rr = (rate - 2 - 21) // 4
+        k = rate - 2 - 4 * rr
+        s.set(0x28 + 3, k << 2)
+        s.set(0xa0 + 27, 0)
+        s.set(0xe0 + 27, rr)
+        s.set(0x08, 8 << 3 | 3)
+        s.wait(8)
+        s.set(0x08, 3)
+        s.out(64)
+        s.wait(72)
+        s.set(0xe0 + 27, 0x0f)
+        s.wait(400)
+    return s
+
+
+def csm_voices(s, slots):
+    """One operator per channel, at full attack with KS 3, that decays and
+    releases fast enough to hear each CSM key-on."""
+    for ch in range(8):
+        s.channel(ch, 0x4a + 4 * ch, 0x10)
+        env_op(s, slots + ch, 0x1f, 0x0c, 0x4, 0x06, 0x9, ks=3)
+
+
+def csm(slots):
+    """CSM key-ons from timer A, every 8 samples, then the timer stopped."""
+    def make():
+        s = V()
+        csm_voices(s, slots)
+        s.set(0x10, 0xfe)
+        s.set(0x11, 0x00)
+        s.set(0x14, 0x81)
+        s.out(1024)
+        s.wait(1100)
+        s.set(0x14, 0x30)
+        s.out(256)
+        s.wait(300)
+        return s
+    return make
+
+
+def csm_held():
+    """CSM key-ons on every channel while $08 holds one keyed."""
+    s = V()
+    csm_voices(s, 24)
+    s.key(2, 8)
+    s.set(0x10, 0xfe)
+    s.set(0x11, 0x00)
+    s.set(0x14, 0x81)
+    s.out(1024)
+    s.wait(1100)
+    s.set(0x08, 2)
+    s.out(512)
+    s.wait(600)
+    s.set(0x14, 0x30)
+    return s
+
+
+def csm_phase():
+    """CSM turned on at every cycle of the sample, under a timer A that
+    overflows every sample, and off again."""
+    s = V()
+    csm_voices(s, 24)
+    s.set(0x10, 0xff)
+    s.set(0x11, 0x03)
+    t = s.t
+    for o in range(32):
+        t += 96 * SAMPLE
+        t = t - t % SAMPLE + o
+        s.w(0, 0x14, t - 6)
+        s.w(1, 0x81, t)
+        s.w(0, 0x14, t + 40 * SAMPLE - 6)
+        s.w(1, 0x30, t + 40 * SAMPLE)
+        s.o(t // SAMPLE - 2, 64, "R")
+    return s
+
+
 def key_timing():
     """Key-on and key-off written at every cycle of the sample, on the first,
     a middle and the last channel."""
@@ -755,6 +861,11 @@ SCRIPTS = {
     "algorithms": algorithms,
     "output_clamp": output_clamp,
     "envelopes": envelopes,
+    "env_high_rates": env_high_rates,
+    "csm_c2": csm(24),
+    "csm_m1": csm(0),
+    "csm_held": csm_held,
+    "csm_phase": csm_phase,
     "key_timing": key_timing,
     "key_latch": key_latch,
     "op_writes": op_writes,

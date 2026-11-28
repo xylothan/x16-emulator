@@ -9,6 +9,8 @@ extern "C" {
 	#include "voice_mute.h"
 
 	uint8_t YM_read_status(void);
+	// Samples the output runs behind the chip's DAC.
+	unsigned YM_output_latency(void);
 	void YM_Create(int clock);
 	void YM_init(int sample_rate, int frame_rate);
 	// `output` receives the machine's mix of every channel, `host_output` the

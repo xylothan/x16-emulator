@@ -794,10 +794,16 @@ uint32_t fm_operator<RegisterType>::envelope_increment(uint32_t rate, uint32_t e
 	if (bitfield(counter, 0, 11) != 0)
 		return 0;
 
-	// from rate 48 the steps repeat every 4 cycles, in the opposite order to
-	// the table's (checked against Nuked-OPM)
+	// from rate 48 the step is 1 << (rate / 4 - 12), doubled on the cycles
+	// of 4 that the low bits of the rate pick, and at most 8 (checked against
+	// Nuked-OPM)
 	if (rate >= 48)
-		return attenuation_increment(rate, (0u - (env_counter >> 2)) & 3);
+	{
+		static uint8_t const s_doubled[4] = { 0x0, 0x8, 0xa, 0xb };
+		uint32_t const cycle = (0u - (env_counter >> 2)) & 3;
+		uint32_t const shift = (rate >> 2) - 12 + bitfield(s_doubled[rate & 3], cycle);
+		return 1u << std::min<uint32_t>(shift, 3);
+	}
 	return attenuation_increment(rate, bitfield(counter, (rate_shift <= 11) ? 11 : rate_shift, 3));
 }
 
@@ -985,6 +991,20 @@ void fm_channel<RegisterType>::keyonoff(uint32_t states, keyon_type type, uint32
 		for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
 			if (m_op[opnum] != nullptr)
 				debug::log_keyon("%c%s\n", bitfield(states, opnum) ? '+' : '-', m_regs.log_keyon(m_choffs, m_op[opnum]->opoffs()).c_str());
+}
+
+
+//-------------------------------------------------
+//  csm_keyon - a CSM key-on, for one sample, of
+//  the operators in opmask
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_channel<RegisterType>::csm_keyon(uint32_t opmask)
+{
+	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
+		if (m_op[opnum] != nullptr && bitfield(opmask, opnum))
+			m_op[opnum]->keyonoff(1, KEYON_CSM);
 }
 
 
@@ -1502,6 +1522,12 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 
 		// reset the modified channels and prepare count
 		m_modified_channels = m_prepare_count = 0;
+
+		// a CSM key-on lasts one sample: prepare its channels again to
+		// take the key-off (checked against Nuked-OPM)
+		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+			if (bitfield(chanmask, chnum) && m_channel[chnum]->key_pending())
+				m_modified_channels |= 1 << chnum;
 	}
 
 	// if the envelope clock divider is 1, just increment by 4;
@@ -1737,6 +1763,20 @@ void fm_engine_base<RegisterType>::engine_timer_expired(uint32_t tnum)
 	// reset
 	m_timer_running[tnum] = false;
 	update_timer(tnum, 1, 0);
+}
+
+
+//-------------------------------------------------
+//  csm_keyon - a CSM key-on of the operators in
+//  opmask on channel chnum, whatever the registers
+//  hold: the interface has decided it
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::csm_keyon(uint32_t chnum, uint32_t opmask)
+{
+	m_channel[chnum]->csm_keyon(opmask);
+	m_modified_channels |= 1 << chnum;
 }
 
 

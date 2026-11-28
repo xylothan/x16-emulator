@@ -46,6 +46,11 @@ ym_lfo_noise_depth_writes.vec
 ym_algorithms.vec
 ym_output_clamp.vec
 ym_envelopes.vec
+ym_env_high_rates.vec
+ym_csm_c2.vec
+ym_csm_m1.vec
+ym_csm_held.vec
+ym_csm_phase.vec
 ym_key_timing.vec
 ym_key_latch.vec
 ym_op_writes.vec
