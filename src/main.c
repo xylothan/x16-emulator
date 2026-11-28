@@ -3012,7 +3012,7 @@ emulator_step_during_move(void)
 		if (has_via2) {
 			via2_step(clocks);
 		}
-		new_frame |= video_step(MHZ, clocks, false);
+		new_frame |= video_step_rest(MHZ, clocks);
 		for (uint32_t i = 0; i < clocks; i++) {
 			i2c_step();
 		}
@@ -3263,7 +3263,7 @@ emulator_loop(void *param)
 			via2_step(clocks);
 		}
 		if (!headless) {
-			new_frame |= video_step(MHZ, clocks, false);
+			new_frame |= video_step_rest(MHZ, clocks);
 		}
 
 		for (uint32_t i = 0; i < clocks; i++) {

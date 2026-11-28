@@ -29,7 +29,7 @@ typedef struct {
 	// Advanced by a real read only. A debug read must leave it alone.
 	uint8_t state;
 
-	// VIAs only: the cycle offset of each catch-up, in order.
+	// VIAs and VERA only: the cycle offset of each catch-up, in order.
 	int      catch_ups;
 	unsigned offsets[8];
 } fake_dev_log_t;

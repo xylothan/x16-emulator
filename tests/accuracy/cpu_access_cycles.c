@@ -1,5 +1,5 @@
-// The cycle of each CPU access to a VIA, counted from the instruction's opcode
-// fetch: the offset a VIA is brought up to before the access.
+// The cycle of each CPU access to a VIA or VERA, counted from the instruction's
+// opcode fetch: the offset the device is brought up to before the access.
 //
 // ORACLE: SingleStepTests/65x02 wdc65c02/v1 and SingleStepTests/65816 v1, the
 // per-cycle bus traces in tests/pt/: the index of each access to the
@@ -31,6 +31,7 @@ typedef struct {
 	unsigned    offsets[5];
 	uint16_t    sp;        // 0: as reset
 	uint16_t    dp;
+	fake_dev_t  dev;
 } access_case;
 
 static const access_case cases[] = {
@@ -57,6 +58,15 @@ static const access_case cases[] = {
 	{ "65C816 E=0 PEI, D=$9F01",    C816_NATIVE, { 0xD4, 0x03, 0x00 }, 0, 0, 0, 2, { 3, 4 }, 0, 0x9F01 },
 	// $60: two internal cycles, the pulls, then a cycle at S.
 	{ "65C816 E=0 RTS, S=$9F03",    C816_NATIVE, { 0x60, 0x00, 0x00 }, 0, 0, 0, 3, { 3, 4, 5 }, 0x9F03 },
+	// The same cycles, at VERA's DATA0.
+	{ "VERA 65C02 LDA abs",              C02, { 0xAD, 0x23, 0x9F }, 0, 0, 0,      1, { 3 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C02 STA abs",              C02, { 0x8D, 0x23, 0x9F }, 0, 0, 0,      1, { 3 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C02 INC abs",              C02, { 0xEE, 0x23, 0x9F }, 0, 0, 0,      3, { 3, 4, 5 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C02 LDA abs,X crossing",   C02, { 0xBD, 0xFF, 0x9E }, 0x24, 0, 0,   1, { 4 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C02 STA abs,X",            C02, { 0x9D, 0x20, 0x9F }, 3, 0, 0,      1, { 4 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C02 STA (zp),Y",           C02, { 0x91, ZP, 0x00 },   0, 3, 0x9F20, 1, { 5 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C816 E=0 M=0 STA abs",     C816_NATIVE, { 0x8D, 0x23, 0x9F }, 0, 0, 0, 2, { 3, 4 }, 0, 0, FAKE_VERA },
+	{ "VERA 65C816 E=0 M=0 INC abs",     C816_NATIVE, { 0xEE, 0x23, 0x9F }, 0, 0, 0, 5, { 3, 4, 5, 6, 7 }, 0, 0, FAKE_VERA },
 };
 
 static void
@@ -89,10 +99,12 @@ run(const access_case *c)
 	clockticks6502 = 1000;
 	cpu_step_base  = clockticks6502;
 	fake_dev[FAKE_VIA1].catch_ups = 0;
+	fake_dev[FAKE_VERA].catch_ups = 0;
 	step6502();
-	check_eq(fake_dev[FAKE_VIA1].catch_ups, c->n, c->name);
-	for (int i = 0; i < c->n && i < fake_dev[FAKE_VIA1].catch_ups; i++) {
-		check_eq((int)fake_dev[FAKE_VIA1].offsets[i], (int)c->offsets[i], c->name);
+	const fake_dev_log_t *d = &fake_dev[c->dev];
+	check_eq(d->catch_ups, c->n, c->name);
+	for (int i = 0; i < c->n && i < d->catch_ups; i++) {
+		check_eq((int)d->offsets[i], (int)c->offsets[i], c->name);
 	}
 }
 

@@ -25,6 +25,11 @@ void video_set_random_seed(uint32_t seed);
 // Drop the host's keyboard, mouse and controller events (quit still works).
 void video_set_ignore_host_input(bool on);
 bool video_step(float mhz, float steps, bool midline);
+// Step VERA up to the access OFFSET cycles into the current instruction.
+void video_catch_up(unsigned offset);
+// After the instruction: step the CLOCKS cycles it took, less any already
+// caught up. True if a frame ended during the instruction.
+bool video_step_rest(float mhz, unsigned clocks);
 bool video_update(void);
 void video_present_no_input(void);
 void video_repaint_only(void);

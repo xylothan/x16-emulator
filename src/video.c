@@ -323,6 +323,12 @@ float ntsc_half_cnt;
 uint16_t ntsc_scan_pos_y;
 int frame_count = 0;
 
+// CPU cycles of the current instruction VERA has already been stepped through,
+// by accesses that caught it up to their own cycle, and whether those crossed
+// a frame.
+static unsigned step_consumed;
+static bool step_consumed_frame;
+
 // CPU cycles elapsed, accumulated from the counts video_step() is handed. Kept
 // here rather than read from clockticks6502 so that video.c does not pull the
 // CPU in: the eight test targets that link this file supply a host fixture, not
@@ -394,6 +400,8 @@ video_reset()
 	// registers below, so raw and derived state stay matched rather than one
 	// side reading zero while the other still holds pre-reset geometry.
 	memset(line_state_valid, 0, sizeof(line_state_valid));
+	step_consumed = 0;
+	step_consumed_frame = false;
 
 	// init I/O registers
 	memset(io_addr, 0, sizeof(io_addr));
@@ -3104,6 +3112,25 @@ comp_scanline(uint16_t y)
 	return prev >= 512 ? 511 : comp_line_counter(y) & 0x1FF;
 }
 
+void
+video_catch_up(unsigned offset)
+{
+	if (offset > step_consumed) {
+		step_consumed_frame |= video_step(MHZ, (float)(offset - step_consumed), false);
+		step_consumed = offset;
+	}
+}
+
+bool
+video_step_rest(float mhz, unsigned clocks)
+{
+	const unsigned rest = clocks > step_consumed ? clocks - step_consumed : 0;
+	const bool new_frame = video_step(mhz, (float)rest, false) | step_consumed_frame;
+	step_consumed = 0;
+	step_consumed_frame = false;
+	return new_frame;
+}
+
 bool
 video_step(float mhz, float steps, bool midline)
 {
@@ -3627,6 +3654,8 @@ video_state_load(ss_reader *r)
 	// describes the machine that was replaced.
 	video_palette.dirty = true;
 	memset(line_state_valid, 0, sizeof(line_state_valid));
+	step_consumed = 0;
+	step_consumed_frame = false;
 }
 
 bool

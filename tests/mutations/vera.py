@@ -468,4 +468,28 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["vera_palette"],
     },
+    {
+        "name": "VERA steps the whole instruction after catching up",
+        "file": "src/video.c",
+        "find": "const unsigned rest = clocks > step_consumed ? clocks - step_consumed : 0;",
+        "into": "const unsigned rest = clocks;",
+        "count": 1,
+        "caught_by": ["vera_catch_up"],
+    },
+    {
+        "name": "VERA drops a frame ended by a catch-up",
+        "file": "src/video.c",
+        "find": "const bool new_frame = video_step(mhz, (float)rest, false) | step_consumed_frame;",
+        "into": "const bool new_frame = video_step(mhz, (float)rest, false);",
+        "count": 1,
+        "caught_by": ["vera_catch_up"],
+    },
+    {
+        "name": "VERA keeps caught-up cycles across a reset",
+        "file": "src/video.c",
+        "find": "\tmemset(line_state_valid, 0, sizeof(line_state_valid));\n\tstep_consumed = 0;\n\tstep_consumed_frame = false;\n\n\t// init I/O registers",
+        "into": "\tmemset(line_state_valid, 0, sizeof(line_state_valid));\n\n\t// init I/O registers",
+        "count": 1,
+        "caught_by": ["vera_catch_up"],
+    },
 ]
