@@ -433,6 +433,17 @@ class ym2151_interface : public ymfm::ymfm_interface {
 		// Direct writes first: the chip took them before the queued writes
 		// due with them.
 		void apply_late() {
+			// A channel register latched this sample reaches the operators
+			// still to read it this sample.
+			for (size_t i = 0; i < m_late_count; i++) {
+				const late_write &e = m_late[i];
+				if (e.wait == 1 && e.kind == LATE_DIRECT && e.addr >= 0x20 && e.addr < 0x40) {
+					m_chip.engine().regs().ch_latch_early(e.addr, e.value, e.cycle);
+					if (e.addr >= 0x28) {
+						(m_chip.engine().*ym_engine_fields::modified()) |= 1u << (e.addr & 7);
+					}
+				}
+			}
 			for (size_t i = 0; i < m_late_count; i++) {
 				const late_write &e = m_late[i];
 				if (e.wait == 0 && e.kind == LATE_DIRECT) {
@@ -505,6 +516,7 @@ class ym2151_interface : public ymfm::ymfm_interface {
 			} else {
 				m_chip.generate(out);
 			}
+			m_chip.engine().regs().ch_latch_clear();
 			m_chip.engine().regs().test_settle();
 			for (size_t i = 0; i < m_late_count; i++) {
 				m_late[i].wait--;

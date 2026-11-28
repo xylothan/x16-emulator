@@ -1185,6 +1185,22 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// AM amount is the same across all operators; compute it once
 	uint32_t am_offset = m_regs.lfo_am_offset(m_choffs);
 
+	// on the OPM each operator reads the channel's registers at its own slot,
+	// and its output stage at slot + 16
+	uint32_t am[4] = { am_offset, am_offset, am_offset, am_offset };
+	uint32_t alg_in[4], alg_out[4];
+	for (int k = 0; k < 4; k++)
+	{
+		alg_in[k] = alg_out[k] = m_regs.ch_algorithm(m_choffs);
+		if constexpr (has_output_late<RegisterType>::value)
+		{
+			uint32_t const slot = m_op[k]->opoffs();
+			am[k] = m_regs.lfo_am_offset_at(m_choffs, slot);
+			alg_in[k] = m_regs.ch_algorithm_at(m_choffs, slot);
+			alg_out[k] = m_regs.ch_algorithm_at(m_choffs, slot + 16);
+		}
+	}
+
 	// operator 1 has optional self-feedback
 	int32_t opmod = 0;
 	uint32_t feedback = m_regs.ch_feedback(m_choffs);
@@ -1192,7 +1208,7 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 		opmod = (m_feedback[0] + m_feedback[1]) >> (10 - feedback);
 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
-	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
+	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am[0]);
 
 	// the operators the chip mixed a sample late
 	mix_late(output);
@@ -1245,6 +1261,9 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 		ALGORITHM(0,2,0, 1,0,1)     // 11: (O1 + (O2 -> O3) + O4) -> out (O1+O3+O4) [unique]
 	};
 	uint32_t algorithm_ops = s_algorithm_ops[m_regs.ch_algorithm(m_choffs)];
+	uint32_t const ops_in2 = s_algorithm_ops[alg_in[1]];
+	uint32_t const ops_in3 = s_algorithm_ops[alg_in[2]];
+	uint32_t const ops_in4 = s_algorithm_ops[alg_in[3]];
 
 	// populate the opout table
 	int16_t opout[8];
@@ -1252,15 +1271,15 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	opout[1] = op1value;
 
 	// compute the 14-bit volume/value of operator 2
-	opmod = opout[bitfield(algorithm_ops, 0, 1)] >> 1;
-	opout[2] = m_op[1]->compute_volume(m_op[1]->phase() + opmod, am_offset);
+	opmod = opout[bitfield(ops_in2, 0, 1)] >> 1;
+	opout[2] = m_op[1]->compute_volume(m_op[1]->phase() + opmod, am[1]);
 	opout[5] = opout[1] + opout[2];
 
 	// compute the 14-bit volume/value of operator 3. On the OPM an operator's
 	// output reaches the input of the slot 8 on from it a sample late: operator
 	// 3 (M2) takes operator 1 (M1) from the sample before, and operator 2 (C1),
 	// which runs after it, from the sample before too
-	opmod = opout[bitfield(algorithm_ops, 1, 3)] >> 1;
+	opmod = opout[bitfield(ops_in3, 1, 3)] >> 1;
 	int16_t last[8];
 	if constexpr (has_last_op2<RegisterType>::value)
 	{
@@ -1269,9 +1288,9 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 		last[1] = m_feedback[1];
 		last[2] = m_op2_last;
 		last[5] = int16_t(last[1] + last[2]);
-		opmod = last[bitfield(algorithm_ops, 1, 3)] >> 1;
+		opmod = last[bitfield(ops_in3, 1, 3)] >> 1;
 	}
-	opout[3] = m_op[2]->compute_volume(m_op[2]->phase() + opmod, am_offset);
+	opout[3] = m_op[2]->compute_volume(m_op[2]->phase() + opmod, am[2]);
 	opout[6] = opout[1] + opout[3];
 	opout[7] = opout[2] + opout[3];
 
@@ -1279,16 +1298,16 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	// value on the OPM; all algorithms consume OP4 output at a minimum
 	int32_t result;
 	if (!has_output_late<RegisterType>::value && m_regs.noise_enable() && m_choffs == 7)
-		result = m_op[3]->compute_noise_volume(am_offset);
+		result = m_op[3]->compute_noise_volume(am[3]);
 	else
 	{
-		opmod = opout[bitfield(algorithm_ops, 4, 3)] >> 1;
+		opmod = opout[bitfield(ops_in4, 4, 3)] >> 1;
 		// operator 4 (C2) takes operator 2 (C1), 8 slots before it, from the
 		// sample before
 		if constexpr (has_last_op2<RegisterType>::value)
-			if (bitfield(algorithm_ops, 4, 3) == 7)
+			if (bitfield(ops_in4, 4, 3) == 7)
 				opmod = int16_t(m_op2_last + opout[3]) >> 1;
-		result = m_op[3]->compute_volume(m_op[3]->phase() + opmod, am_offset);
+		result = m_op[3]->compute_volume(m_op[3]->phase() + opmod, am[3]);
 	}
 	result >>= rshift;
 
@@ -1301,24 +1320,32 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 		// noise in its place differ in their late parts alone)
 		fm_operator<RegisterType> *const ops[4] = { m_op[3], m_op[0], m_op[1], m_op[2] };
 		int32_t values[4] = { result, opout[1] >> rshift, opout[2] >> rshift, opout[3] >> rshift };
-		bool const used[4] = { true, bitfield(algorithm_ops, 7) != 0, bitfield(algorithm_ops, 8) != 0, bitfield(algorithm_ops, 9) != 0 };
+		bool const used[4] = { true, bitfield(s_algorithm_ops[alg_out[0]], 7) != 0,
+			bitfield(s_algorithm_ops[alg_out[1]], 8) != 0, bitfield(s_algorithm_ops[alg_out[2]], 9) != 0 };
 		uint32_t const variants = (m_choffs == 7) ? 2 : 1;
 		for (uint32_t variant = 0; variant < variants; variant++)
 		{
 			if (variant == 1)
-				values[0] = m_op[3]->compute_noise_volume(am_offset) >> rshift;
+				values[0] = m_op[3]->compute_noise_volume(am[3]) >> rshift;
 			for (uint32_t index = 0; index < RegisterType::OUTPUTS; index++)
 			{
 				int32_t sum[2] = { 0, 0 };
 				bool any[2] = { false, false };
+				bool on[4];
+				bool enabled = false;
 				for (int term = 0; term < 4; term++)
-					if (used[term])
+				{
+					uint32_t const at = ops[term]->opoffs() + 16;
+					on[term] = (index == 0) ? m_regs.ch_output_0_at(m_choffs, at) != 0 : m_regs.ch_output_1_at(m_choffs, at) != 0;
+					enabled = enabled || on[term];
+				}
+				for (int term = 0; term < 4; term++)
+					if (used[term] && on[term])
 					{
 						int const late = RegisterType::output_late(ops[term]->opoffs(), index) ? 1 : 0;
 						sum[late] = any[late] ? clamp(sum[late] + values[term], clipmin, clipmax) : values[term];
 						any[late] = true;
 					}
-				bool const enabled = (index == 0) ? m_regs.ch_output_0(m_choffs) != 0 : m_regs.ch_output_1(m_choffs) != 0;
 				if (enabled)
 				{
 					if (variant == 0)

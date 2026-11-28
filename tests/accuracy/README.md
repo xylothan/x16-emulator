@@ -59,9 +59,9 @@ and is not in this repository.
 - C is a CRC-32 of the values in order, 4 bytes each, LSB first.
 - Output blocks start 8 samples after the last key-on and end 4 samples before
   the next key-on or write that changes the sound. The exceptions are `$18`
-  and `$19` writes in the LFO vectors and key-on, key-off and operator writes in
-  `envelopes`, `key_timing`, `key_latch` and `op_writes`, which are checked
-  inside blocks.
+  and `$19` writes in the LFO vectors, key-on, key-off and operator writes in
+  `envelopes`, `key_timing`, `key_latch` and `op_writes`, and channel writes in
+  `channel_writes`, which are checked inside blocks.
 
 ```
 cc -O2 -I<nuked-opm> -o tb_opm tools/tb_opm.c <nuked-opm>/opm.c
@@ -139,9 +139,10 @@ does, and checks:
   it in time for slot 31 of that sample, the emulator from the next
 - YM2151 phases of operators not keyed since reset, heard only under test
   register bit 5: Nuked-OPM's reset leaves them part way on, the emulator at 0
-- YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
-  operator's value at that operator's own cycle, and the emulator takes all four
-  at once
+- YM2151 R bit ($20-$27 bit 7) latched at the channel's M1 cycle: the chip's
+  C2 output takes it a sample before the emulator's
+- YM2151 PMS ($38-$3F bits 4-6) lowered from a nonzero value under a sounding
+  note
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
   count, where the datasheet has "reloading the counter will always
   reinitialize the time out period"

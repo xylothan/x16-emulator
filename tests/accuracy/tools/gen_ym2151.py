@@ -972,6 +972,48 @@ def op_writes():
     return s
 
 
+CHANNEL_WRITES = (  # channel, register, before, after
+    (0, 0x20, 0xc7, 0xec),  # CON 7 to 4, FB 0 to 5
+    (0, 0x20, 0xc2, 0xfa),  # CON 2, FB 0 to 7
+    (0, 0x20, 0xc5, 0xc6),
+    (0, 0x20, 0xc7, 0x47),  # R off
+    (0, 0x20, 0xc7, 0x87),  # L off
+    (0, 0x28, 0x4a, 0x5c),
+    (0, 0x30, 0x00, 0xfc),
+    (0, 0x38, 0x00, 0x73),  # PMS 0 to 7, AMS 0 to 3
+    (7, 0x20, 0xc7, 0xec),
+    (7, 0x20, 0xc7, 0x87),
+    (7, 0x28, 0x4a, 0x5c),
+    (7, 0x38, 0x00, 0x73),
+)
+
+
+def channel_writes():
+    """Each channel register written under a held note at every other cycle
+    of the sample."""
+    s = V()
+    s.lfo(0xd0, 2, amd=0x7f, pmd=0x7f)
+    for ch in (0, 7):
+        s.channel(ch, 0x4a)
+        for k in range(4):
+            s.op(ch + 8 * k, mul=(1, 2, 3, 5)[k], tl=(0, 10, 20, 4)[k], am=1)
+    for ch, reg, before, after in CHANNEL_WRITES:
+        for o in range(0, 32, 2):
+            if reg == 0x20 and (before ^ after) & 0x80 and (o - ch) % 32 >= 24:
+                continue  # C2 R, latched at M1: not covered
+            s.set(reg + ch, before)
+            s.key(ch, 15)
+            n0 = s.out(128)  # ends before the next restore
+            t = SAMPLE * (n0 + 48) + o
+            s.w(0, reg + ch, t - 6)
+            s.w(1, after, t)
+            s.t = t + 40
+            s.until(n0 + 128)
+            s.set(0x08, ch)
+            s.wait(40)
+    return s
+
+
 SCRIPTS = {
     "busy_phase": busy_phase,
     "address_no_busy": address_no_busy,
@@ -1041,6 +1083,7 @@ SCRIPTS = {
     "key_timing": key_timing,
     "key_latch": key_latch,
     "op_writes": op_writes,
+    "channel_writes": channel_writes,
 }
 
 
