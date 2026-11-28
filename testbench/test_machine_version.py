@@ -526,17 +526,21 @@ def check_ids():
         else:
             case("YM chunk is v10 for the older-chunk cases (it is v%d)" % ver, False)
         _, ver, _ = chunk(b"VIA ")
-        if ver == 3:
-            # via.c via_unit_io: each unit's 33 bytes, then in version 3 its
-            # 12 bytes of pins.
+        if ver == 4:
+            # via.c via_unit_io: each unit's 33 bytes, from version 3 its 12
+            # bytes of pins, from version 4 its 6 bytes of shift register.
+            def via_v3(b):
+                return b[:45] + b[51:96]
             def via_v2(b):
-                return b[:33] + b[45:78]
+                return b[:33] + b[51:84]
+            r, err = chunk_as(b"VIA ", 3, 0, via_v3)
+            case("VIA chunk v3, without the shift register, loads (%s)" % (err or "ok"), r is not None)
             r, err = chunk_as(b"VIA ", 2, 0, via_v2)
             case("VIA chunk v2, without the pins, loads (%s)" % (err or "ok"), r is not None)
-            r, err = chunk_as(b"VIA ", 3, 12)
-            case("VIA chunk v3 12 bytes short is refused (%s)" % err, r is None and err and "VIA" in err)
+            r, err = chunk_as(b"VIA ", 4, 6)
+            case("VIA chunk v4 6 bytes short is refused (%s)" % err, r is None and err and "VIA" in err)
         else:
-            case("VIA chunk is v3 for the older-chunk cases (it is v%d)" % ver, False)
+            case("VIA chunk is v4 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:

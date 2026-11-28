@@ -77,6 +77,46 @@ def t2_setup(n):
     return [w(ACR, 0), w(IER, 0xA0), w(T2CL, n & 0xFF), w(T2CH, n >> 8)]
 
 
+SR = 10
+
+
+def watch(k, pins=None):
+    """IFR, IRQ and the outputs in each of the next k cycles; pins[c] lists
+    (pin, level) driven from the c-th of them on."""
+    out = []
+    for c in range(k):
+        for p, v in (pins or {}).get(c, []):
+            out.append(pin(p, v))
+        out += [r(IFR), "i", OUTS]
+    return out
+
+
+def ext_clock(bits, flip=None):
+    """CB1 pulsed from outside, three cycles low and three high, with CB2 at
+    each bit while CB1 is low; flip moves CB2 to the other level that many
+    cycles after CB1 rises. Returns the cycles taken and the pins."""
+    pins, c = {}, 0
+    for b in bits:
+        pins.setdefault(c, []).extend([("CB2", b), ("CB1", 0)])
+        pins.setdefault(c + 3, []).append(("CB1", 1))
+        if flip is not None:
+            pins.setdefault(c + 3 + flip, []).append(("CB2", b ^ 1))
+        c += 6
+    return c, pins
+
+
+def sr_t2_start(k):
+    """Mode 101, N=2, the SR written k cycles after T2 starts. T2L is FF when
+    k is 3, left out: see README."""
+    return ([w(SR, 0x00), w(ACR, 0x14), w(IER, 0x84), w(T2CL, 2), w(T2CH, 0)] + ([idle(k)] if k else [])
+            + [w(SR, 0xA5)] + watch(12))
+
+
+def sr_in_ext(flip):
+    c, pins = ext_clock([1, 0, 1, 1, 0, 0, 1, 0, 1], flip)
+    return [w(SR, 0x00), w(ACR, 0x0C), w(IER, 0x84), r(SR)] + watch(c + 2, pins) + [r(SR)]
+
+
 SCRIPTS = {
     # Counter read every cycle across the time-out: Figure 2-3.
     "t1_oneshot_count": t1_setup(0x00, 5) + every_cycle(T1CH, 1) + every_cycle(T1CL, 14),
@@ -156,6 +196,52 @@ SCRIPTS = {
                           idle(1), r(IFR)],
     # From the load on: before it, see README.
     "pb7_output": [w(DDRB, 0x8F), w(ORB, 0x0A)] + t1_setup(0xC0, 3) + [idle(1)] + outs(12),
+    # Shift register, 2.11 to 2.13. Written in mode 000 first: the model's
+    # reset clears the SR, the emulator's does not. Mode 011 and 111 inputs
+    # change only while the pin is low.
+    "sr_out_phi2": [w(SR, 0x00), w(IER, 0x84), w(ACR, 0x18), w(SR, 0x5A)] + watch(20)
+                   + [r(SR), r(IFR), "i"],
+    "sr_in_phi2": [w(SR, 0x00), w(ACR, 0x08), w(IER, 0x84), r(SR)]
+                  + watch(20, {0: [("CB2", 1)], 1: [("CB2", 0)], 2: [("CB2", 1)], 4: [("CB2", 0)],
+                               9: [("CB2", 1)], 12: [("CB2", 0)], 13: [("CB2", 1)]})
+                  + [r(SR), r(IFR)],
+    # Figure 2-11: the next SR access starts another eight.
+    "sr_out_phi2_again": [w(SR, 0x00), w(ACR, 0x18), w(SR, 0x81), idle(20), r(IFR), w(SR, 0x7E)] + watch(20),
+    "sr_out_t2": [w(SR, 0x00), w(IER, 0x84), w(T2CL, 1), w(T2CH, 0), w(ACR, 0x14), w(SR, 0xA6)] + watch(54)
+                 + [r(T2CL), r(SR), r(IFR)],
+    "sr_t2_start_0": sr_t2_start(0),
+    "sr_t2_start_1": sr_t2_start(1),
+    "sr_t2_start_2": sr_t2_start(2),
+    "sr_t2_start_4": sr_t2_start(4),
+    # T2H counts on; IFR5 as T2 passes 0000.
+    "sr_t2_counter": [w(ACR, 0x14), w(IER, 0xA0), w(T2CL, 2), w(T2CH, 1), w(SR, 0xA5)]
+                     + every_cycle(T2CL, 12) + every_cycle(T2CH, 1) + every_cycle(IFR, 2),
+    # T2L reloads only while a T2 mode is selected.
+    "sr_t2_mode_late": [w(T2CL, 2), w(T2CH, 0), idle(4), w(ACR, 0x14), w(SR, 0xA5)] + every_cycle(T2CL, 6),
+    "sr_free_run": [w(SR, 0x81), w(IER, 0x84), w(T2CL, 1), w(T2CH, 0), w(ACR, 0x10)] + watch(56)
+                   + [w(SR, 0x3C)] + watch(54),
+    "sr_in_t2": [w(SR, 0x00), w(T2CL, 1), w(T2CH, 0), w(ACR, 0x04), w(IER, 0x84), r(SR)]
+                + watch(52, {0: [("CB2", 1)], 6: [("CB2", 0)], 9: [("CB2", 1)], 14: [("CB2", 0)],
+                             19: [("CB2", 1)], 26: [("CB2", 0)], 31: [("CB2", 1)], 38: [("CB2", 0)],
+                             41: [("CB2", 1)]})
+                + [r(SR), r(IFR)],
+    # Figure 2-8: CB2 is taken in the first cycle CB1 is high.
+    "sr_in_ext": sr_in_ext(None),
+    "sr_in_ext_flip_0": sr_in_ext(0),
+    "sr_in_ext_flip_1": sr_in_ext(1),
+    "sr_out_ext": [w(SR, 0x00), w(ACR, 0x1C), w(IER, 0x84), w(SR, 0xA5)]
+                  + watch(56, {c: [("CB1", 0 if c % 6 == 0 else 1)] for c in range(0, 54, 3)})
+                  + [r(SR), r(IFR)],
+    # While the SR drives CB1, CB1 sets no flag.
+    "sr_cb1_driven": [w(PCR, 0x00), w(ACR, 0x18), w(SR, 0x00), idle(20)]
+                     + watch(4, {0: [("CB1", 0)], 2: [("CB1", 1)]}) + [w(PCR, 0x10)]
+                     + watch(4, {0: [("CB1", 0)], 2: [("CB1", 1)]}),
+    # 2.12.1: an access in mode 000 starts nothing.
+    "sr_mode_entry": [w(SR, 0x5A), w(ACR, 0x18)] + watch(6),
+    # Left low by mode 100, the clock rests high in mode 110 until an access.
+    "sr_free_run_stop": [w(T2CL, 3), w(T2CH, 0), w(ACR, 0x10), idle(5), w(ACR, 0x18)] + watch(3)
+                        + [w(SR, 0x0F)] + watch(6),
+    "sr_mode_off":[w(SR, 0x00), w(ACR, 0x18), w(SR, 0x55), idle(3), w(ACR, 0x00)] + watch(4),
     # IFR and IER.
     "ifr_ier": [w(IER, 0x7F), r(IER), w(IER, 0xC0), r(IER), "i", w(IER, 0x40), r(IER)]
               + t1_setup(0x00, 1) + every_cycle(IFR, 4) + [w(IFR, 0x7F), r(IFR), "i"],
@@ -196,6 +282,39 @@ def vector(script, answers):
     return out
 
 
+def sr_unchecked(lines):
+    """What the datasheet leaves open around the SR, left out of a vector:
+    CB2 from an SR or ACR write until CB1 next falls, hatched as undefined in
+    Figures 2-10 to 2-12 (the model's level there depends on the testbench's
+    previous cycle); and IFR7 and IRQ in the cycle IFR2 sets, where the model
+    reads IFR2 set with IRQ still off, which IFR7's definition in 2.14 rules
+    out."""
+    out, ier, hold, lag, cb1 = [], 0, False, set(), "1"
+    for l in lines:
+        f = l.split()
+        if f[0] == "W" and f[1] == "0E":
+            v = int(f[2], 16)
+            ier = ier | (v & 0x7F) if v & 0x80 else ier & ~v
+        if f[0] == "W" and f[1] in ("0A", "0B"):
+            hold = True
+        if f[0] == "P" and f[1] == "CB1":
+            cb1 = f[2]
+        if f[0] == "R" and f[1] == "0D":
+            v = int(f[2], 16)
+            if v & ier & 0x7F and not v & 0x80:
+                lag.add(f[3])
+                l += " 7F"
+        if f[0] == "I" and f[2] in lag:
+            continue
+        if f[0] == "O" and hold:
+            if f[3] != "Z":
+                f[3] = "X"
+            hold = (cb1 if f[2] == "Z" else f[2]) != "0"
+            l = " ".join(f)
+        out.append(l)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tb")
@@ -206,6 +325,8 @@ def main():
     names = []
     for name, script in SCRIPTS.items():
         lines = vector(script, run(a.tb, script))
+        if name.startswith("sr_"):
+            lines = sr_unchecked(lines)
         with open(os.path.join(a.outdir, "via_%s.vec" % name), "w", newline="\n") as f:
             f.write("# oracle m6522.vhd %s (hoglet67/BeebFpga)\n" % a.commit)
             f.write("\n".join(lines) + "\n")

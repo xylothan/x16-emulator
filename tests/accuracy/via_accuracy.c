@@ -121,12 +121,14 @@ run_file(const char *dir, const char *name)
 			access_t   = (long)t;
 			via2_write((uint8_t)reg, (uint8_t)val);
 		} else if (line[0] == 'R' && sscanf(line + 1, "%x %x %u", &reg, &val, &t) == 3) {
+			unsigned mask = 0xff; // the bits checked
+			sscanf(line + 1, "%*x %*x %*u %x", &mask);
 			run_to(t);
 			irq_before = via2_irq();
 			via2_pins(&pins_before);
 			access_t   = (long)t;
 			const unsigned got = via2_read((uint8_t)reg, false);
-			if (got != val) {
+			if ((got ^ val) & mask) {
 				printf("%s:%d: %s read of %X at %u gave %02X, expected %02X\n", name, n,
 				       dense ? "dense" : "sparse", reg, t, got, val);
 				failed = 1;
@@ -157,10 +159,17 @@ run_file(const char *dir, const char *name)
 				via2_pins(&got);
 			}
 			const int8_t lv[3] = { got.ca2, got.cb1, got.cb2 };
+			char lc[3];
+			for (int k = 0; k < 3; k++) {
+				lc[k] = lv[k] < 0 ? 'Z' : (char)('0' + lv[k]);
+				// X: a driven level the vector leaves unchecked.
+				if (!strcmp(c[k], "X") && lv[k] >= 0) {
+					c[k][0] = lc[k];
+				}
+			}
 			char want[64], have[64];
 			snprintf(want, sizeof want, "%s %s %s %02X %02X %02X %02X", c[0], c[1], c[2], pa, paoe, pb, pboe);
-			snprintf(have, sizeof have, "%c %c %c %02X %02X %02X %02X",
-			         lv[0] < 0 ? 'Z' : '0' + lv[0], lv[1] < 0 ? 'Z' : '0' + lv[1], lv[2] < 0 ? 'Z' : '0' + lv[2],
+			snprintf(have, sizeof have, "%c %c %c %02X %02X %02X %02X", lc[0], lc[1], lc[2],
 			         got.pa, got.pa_oe, got.pb, got.pb_oe);
 			if (strcmp(want, have)) {
 				printf("%s:%d: %s outputs in cycle %u are %s, expected %s\n", name, n,

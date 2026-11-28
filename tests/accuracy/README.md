@@ -76,18 +76,20 @@ Run with `ym_accuracy ym2151/nuked-opm`.
 model that passes VICE's VIA tests. Each file names its commit. The model
 matches W65C22S datasheet Figures 2-3 and 2-4 for both timers, and the W65C22
 datasheet (WDC) Table 2-5 and Figures 4-3 to 4-7 for the control pins, input
-latching and handshakes; where they disagree, the datasheet wins and the case
-is left out (see below).
+latching and handshakes, and 2.11 to 2.13 with Figures 2-6 to 2-12 for the
+shift register; where they disagree, the datasheet wins and the case is left
+out (see below).
 
 - T counts PHI2 cycles from the first access.
-- `W R V T` writes V to register R in cycle T. `R R V T` reads V.
+- `W R V T` writes V to register R in cycle T. `R R V T` reads V; `R R V T M`
+  checks only the bits of mask M.
 - `I L T` is the IRQ pin as the CPU takes data in cycle T, before that cycle's
   access has any effect.
 - `P PIN V T` drives input PIN (`CA1`, `CA2`, `CB1`, `CB2`, `PA`, `PB`) to V
   from cycle T on. A pin's last level in a cycle is the one its clock sees.
 - `O CA2 CB1 CB2 PA PAOE PB PBOE T` is the outputs as the CPU takes data in
-  cycle T, as `I`: a pin 0, 1 or Z when it does not drive, a port its output
-  register and the bits that drive.
+  cycle T, as `I`: a pin 0, 1 or Z when it does not drive, X when it drives
+  but is not checked, a port its output register and the bits that drive.
 - The runner steps one cycle at a time, then again in instructions of up to
   seven cycles whose accesses catch the VIA up to their own cycle.
 
@@ -153,7 +155,20 @@ does, and checks:
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
   count, where the datasheet has "reloading the counter will always
   reinitialize the time out period"
-- VIA shift register and PB6 pulse counting
+- VIA PB6 pulse counting
+- VIA CB2 from an SR or ACR write until CB1 next falls, hatched as undefined in
+  Figures 2-10 to 2-12: m6522.vhd's level there depends on the testbench's
+  previous cycle
+- VIA IFR7 and IRQ in the cycle IFR2 sets: m6522.vhd reads IFR2 set with
+  IFR7 clear, which 2.14's IFR7 equation rules out
+- A VIA SR access in the cycle T2L reads FF in modes 001, 100 and 101:
+  m6522.vhd's answer depends on the testbench's previous cycle
+- VIA SR modes 001, 100 and 101 with T2's latch low byte 0: m6522.vhd never
+  clocks, where 2.12.2 has N+2 cycles
+- VIA SR mode 000 with CB1 pulsed: m6522.vhd shifts, where 2.12.1 has the SR
+  disabled
+- A VIA SR access while a count of eight runs: m6522.vhd carries on with the
+  count, where 2.12.4 and 2.13.4 have the access start another
 - VIA register 15 reads of PA's output bits: m6522.vhd gives the input
   register, the datasheet the same as register 1
 - VIA PB7 before T1's first load: m6522.vhd has it low, where the datasheet
