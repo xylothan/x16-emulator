@@ -811,6 +811,216 @@ MUTATIONS = [
         "caught_by": ["cpu_access_cycles"],
     },
     {
+        "name": "an implied instruction makes no second access",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests wdc65c02/v1 $18.
+        "find": "    pc_dummy(regs.pc);\n}\n\nstatic void imp8()",
+        "into": "}\n\nstatic void imp8()",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "a 65C02 one-cycle NOP makes a second access",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests wdc65c02/v1 $0B.
+        "find": "(opcode & 0x07) == 0x03",
+        "into": "(opcode & 0x0F) == 0x03",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "BRK does not fetch its signature byte",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests wdc65c02/v1 $00.
+        "find": "    // The signature byte is fetched and discarded.\n    pc_dummy(regs.pc);",
+        "into": "",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "the 65C02 reads nothing before a pull",
+        "file": "src/cpu/support.h",
+        # SingleStepTests wdc65c02/v1 $68.
+        "find": "dummy6502((uint16_t)(0x0100 | (regs.sp & 0xFF)), 0, false, 0);",
+        "into": "(void)0;",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "the 65C816 reads the stack before a pull",
+        "file": "src/cpu/support.h",
+        # SingleStepTests 65816/v1 $68.
+        "find": "    if (regs.is65c816) {\n        pc_dummy(regs.pc);\n    } else {",
+        "into": "    if (regs.is65c816) {\n        dummy6502(regs.sp, 0, false, 0);\n    } else {",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_dummy_cycles"],
+    },
+    {
+        "name": "a taken 65C02 branch makes no access",
+        "file": "src/cpu/support.h",
+        # SingleStepTests wdc65c02/v1 $D0.
+        "find": "        pc_dummy(from);\n        if (page_cycle) {",
+        "into": "        if (page_cycle) {",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "a page-crossing 65C02 branch re-reads the next opcode",
+        "file": "src/cpu/support.h",
+        # SingleStepTests wdc65c02/v1 $80.
+        "find": "pc_dummy((uint16_t)((from & 0xFF00) | (regs.pc & 0x00FF)));",
+        "into": "pc_dummy(from);",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "a taken 65C816 branch reads the next opcode",
+        "file": "src/cpu/support.h",
+        # SingleStepTests 65816/v1 $D0.
+        "find": "    if (regs.is65c816) {\n        pc_dummy((uint16_t)(from - 1));",
+        "into": "    if (regs.is65c816) {\n        pc_dummy(from);",
+        "count": 1,
+        "requires": "tests/pt/816-emu.bin",
+        "caught_by": ["processor_tests_816_emu"],
+    },
+    {
+        "name": "65C02 JSR fetches its high byte before the pushes",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests wdc65c02/v1 $20.
+        "find": "    ea = fetch6502(regs.pc++, regs.k);\n    if (regs.is65c816) {\n        ea |=",
+        "into": "    ea = fetch6502(regs.pc++, regs.k);\n    if (1) {\n        ea |=",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "65C02 JSR reads nothing before the pushes",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests wdc65c02/v1 $20.
+        "find": "    if (!regs.is65c816) {\n        pull_dummy();\n    }",
+        "into": "",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "65C02 RTS does not read the pulled address",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests wdc65c02/v1 $60.
+        "find": "        pc_dummy((uint16_t)value);",
+        "into": "",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "65C816 RTS makes no access after the pulls",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests 65816/v1 $60.
+        "find": "        dummy6502(regs.sp, 0, false, 0);\n    } else {\n        pc_dummy((uint16_t)value);",
+        "into": "    } else {\n        pc_dummy((uint16_t)value);",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_access_cycles", "cpu_dummy_cycles"],
+    },
+    {
+        "name": "JSL makes no access after pushing the program bank",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests 65816/v1 $22.
+        "find": "    dummy6502((uint16_t)(regs.sp + 1), 0, false, 0);\n",
+        "into": "",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_dummy_cycles"],
+    },
+    {
+        "name": "JSR (abs,X) makes no access after the high byte",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests 65816/v1 $FC.
+        "find": "        pc_dummy(regs.pc);\n        const uint16_t pointer",
+        "into": "        const uint16_t pointer",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        "name": "65C02 JMP (abs,X) re-reads the high byte",
+        "file": "src/cpu/65c02.h",
+        # SingleStepTests wdc65c02/v1 $7C.
+        "find": "pc_dummy(regs.is65c816 ? (uint16_t)(regs.pc + 1) : regs.pc);",
+        "into": "pc_dummy((uint16_t)(regs.pc + 1));",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "stack-relative makes no access after the offset",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests 65816/v1 $A3.
+        "find": "(uint16_t)fetch6502(regs.pc++, regs.k));\n    pc_dummy((uint16_t)(regs.pc - 1));",
+        "into": "(uint16_t)fetch6502(regs.pc++, regs.k));",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_access_cycles"],
+    },
+    {
+        "name": "(sr,S),Y makes no access after the pointer",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests 65816/v1 $B3.
+        "find": "    dummy6502((uint16_t)(eahelp + 1), 0, false, 0);\n",
+        "into": "",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_access_cycles"],
+    },
+    {
+        "name": "PEI makes no access for an unaligned direct page",
+        "file": "src/cpu/modes.h",
+        # SingleStepTests 65816/v1 $D4.
+        "find": "    eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);\n    dp_low_dummy();\n    ea = read_pair(regs.dp",
+        "into": "    eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);\n    ea = read_pair(regs.dp",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native", "cpu_access_cycles"],
+    },
+    {
+        "name": "REP makes no access after its operand",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests 65816/v1 $C2.
+        "find": "    value = getvalue(0);\n    pc_dummy((uint16_t)(regs.pc - 1));\n    regs.status &=",
+        "into": "    value = getvalue(0);\n    regs.status &=",
+        "count": 1,
+        "requires": "tests/pt/816-native.bin",
+        "caught_by": ["processor_tests_816_native"],
+    },
+    {
+        "name": "BBR reads its zero-page byte once",
+        "file": "src/cpu/65c02.h",
+        # SingleStepTests wdc65c02/v1 $0F.
+        "find": "\tdummy6502((uint16_t)ea, 0, false, 0);\n\treladdr",
+        "into": "\treladdr",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
+        "name": "a 65C02 NOP zp,X reads the unindexed address",
+        "file": "src/cpu/instructions.h",
+        # SingleStepTests wdc65c02/v1 $54.
+        "find": "dummy6502((uint8_t)(zp + regs.xl), 0, false, 0);",
+        "into": "dummy6502(zp, 0, false, 0);",
+        "count": 1,
+        "requires": "tests/pt/wdc65c02.bin",
+        "caught_by": ["processor_tests"],
+    },
+    {
         "name": "banked RAM window is 4K instead of 8K",
         "file": "src/memory.c",
         # x16-docs Memory Map: "$A000-$BFFF Banked RAM (8 KB window into one of

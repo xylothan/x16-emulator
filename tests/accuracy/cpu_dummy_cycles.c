@@ -28,6 +28,7 @@ typedef struct {
 	bool        decimal;
 	int         reads;
 	int         writes;
+	uint16_t    sp;        // 0: as reset
 } bus_case;
 
 static const bus_case cases[] = {
@@ -53,6 +54,12 @@ static const bus_case cases[] = {
 	{ "65C816 E=0 INC abs",       C816_NATIVE, { 0xEE, 0x23, 0x9F }, 0x00, false, 2, 1 },
 	// $BD: the indexing cycle reads the uncarried address $9F23; the read is at $A023.
 	{ "65C816 LDA abs,X crossing", C816_EMU,   { 0xBD, 0x80, 0x9F }, 0xA3, false, 1, 0 },
+	// $60: two pulls, then a cycle at S.
+	{ "65C816 E=0 RTS, S at $9F21", C816_NATIVE, { 0x60, 0x00, 0x00 }, 0x00, false, 3, 0, 0x9F21 },
+	// $68: the cycle before the pull is at the program counter.
+	{ "65C816 E=0 PLA, S at $9F21", C816_NATIVE, { 0x68, 0x00, 0x00 }, 0x00, false, 1, 0, 0x9F21 },
+	// $22: push PBR, a cycle at the byte pushed, then push PCH and PCL.
+	{ "65C816 E=0 JSL, S at $9F21", C816_NATIVE, { 0x22, 0x00, 0x10 }, 0x00, false, 1, 2, 0x9F21 },
 };
 
 static void
@@ -71,6 +78,9 @@ run(const bus_case *c)
 	regs.pc = CODE;
 	regs.xl = c->x;
 	regs.a  = 0;
+	if (c->sp) {
+		regs.sp = c->sp;
+	}
 	regs.status &= (uint8_t) ~FLAG_DECIMAL;
 	if (c->decimal) {
 		regs.status |= FLAG_DECIMAL;

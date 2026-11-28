@@ -127,8 +127,10 @@ static void _do_branch(int condition) {
         oldpc = regs.pc;
         regs.pc += reladdr;
         clockticks6502++;
-        if ((oldpc & 0xFF00) != (regs.pc & 0xFF00)) //check if jump crossed a page boundary
+        const bool crossed = (oldpc & 0xFF00) != (regs.pc & 0xFF00);
+        if (crossed) //check if jump crossed a page boundary
             penaltye = 1;
+        branch_dummy(oldpc, crossed && regs.e);
     }
 }
 
@@ -371,15 +373,35 @@ static void jmp() {
 }
 
 static void jsr() {
-    const uint16_t sp0 = regs.sp, ret = regs.pc - 1;
+    const uint16_t sp0 = regs.sp;
+    if (opcode == 0xFC) {
+        // JSR (abs,X): push, then the high byte, then the pointer.
+        const uint16_t ret = regs.pc;
+        push16(ret);
+        const uint16_t base = (uint16_t)(ea | (fetch6502(regs.pc, regs.k) << 8));
+        pc_dummy(regs.pc);
+        const uint16_t pointer = (uint16_t)(base + regs.x);
+        regs.pc = read_pair(pointer, (uint16_t)(pointer + 1), regs.k);
+        if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL, regs.pc | ((uint32_t)regs.k << 16), sp0, ret);
+        return;
+    }
+    if (!regs.is65c816) {
+        pull_dummy();
+    }
+    const uint16_t ret = regs.is65c816 ? (uint16_t)(regs.pc - 1) : regs.pc;
     push16(ret);
+    if (!regs.is65c816) {
+        ea |= (uint32_t)fetch6502(regs.pc, regs.k) << 8;
+    }
     regs.pc = ea;
     if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_CALL, regs.pc | ((uint32_t)regs.k << 16), sp0, ret);
 }
 
 static void jsl() {
-    const uint16_t sp0 = regs.sp, ret = regs.pc - 1;
+    const uint16_t sp0 = regs.sp, ret = regs.pc;
     push8_long(regs.k);
+    dummy6502((uint16_t)(regs.sp + 1), 0, false, 0);
+    ea |= (uint32_t)fetch6502(regs.pc++, regs.k) << 16;
     push16_long(ret);
     regs.pc = ea & 0xFFFF;
     regs.k = ea >> 16;
@@ -461,6 +483,31 @@ static void nop() {
             penaltyop = 1;
             break;
     }
+    if (regs.is65c816) {
+        return;
+    }
+    // The 65C02's multi-byte NOPs read their operand, and from it as zp or
+    // zp,X would; $DC and $FC re-read the high byte's address.
+    switch (opcode) {
+        case 0x02: case 0x22: case 0x42: case 0x62:
+        case 0x82: case 0xC2: case 0xE2:
+            dummy6502((uint16_t)ea, 0, false, 0);
+            break;
+        case 0x44: {
+            const uint8_t zp = fetch6502((uint16_t)ea, 0);
+            dummy6502(zp, 0, false, 0);
+            break;
+        }
+        case 0x54: case 0xD4: case 0xF4: {
+            const uint8_t zp = fetch6502((uint16_t)ea, 0);
+            dummy6502(zp, 0, false, 0);
+            dummy6502((uint8_t)(zp + regs.xl), 0, false, 0);
+            break;
+        }
+        case 0xDC: case 0xFC:
+            dummy6502((uint16_t)(regs.pc - 1), 0, false, 0);
+            break;
+    }
 }
 
 static void ora() {
@@ -514,6 +561,7 @@ static void php() {
 
 static void pla() {
     pay_for_wide_memory(1);
+    pull_dummy();
     if (memory_16bit()) {
         regs.c = pull16();
         zerocalc(regs.c, 1);
@@ -526,18 +574,21 @@ static void pla() {
 }
 
 static void plb() {
+    pull_dummy();
     regs.db = pull8_long();
     zerocalc(regs.db, 0);
     signcalc(regs.db, 0);
 }
 
 static void pld() {
+    pull_dummy();
     regs.dp = pull16_long();
     zerocalc(regs.dp, 1);
     signcalc(regs.dp, 1);
 }
 
 static void plp() {
+    pull_dummy();
     regs.status = cpu_merge_pulled_status(pull8());
     if (regs.is65c816) {
         if (regs.e) {
@@ -551,6 +602,7 @@ static void plp() {
 
 static void rep() {
     value = getvalue(0);
+    pc_dummy((uint16_t)(regs.pc - 1));
     regs.status &= ~(value & 0xFF);
 
     if (regs.e) {
@@ -594,6 +646,7 @@ static void ror() {
 static void rti() {
     // Native mode pulls the program bank as well, which costs a cycle.
     penaltyn = 1;
+    pull_dummy();
     regs.status = cpu_merge_pulled_status(pull8());
     value = pull16();
     regs.pc = value;
@@ -618,6 +671,7 @@ static void rti() {
 }
 
 static void rtl() {
+    pull_dummy();
     value = pull16_long();
     regs.pc = value + 1;
     regs.k = pull8_long();
@@ -625,7 +679,14 @@ static void rtl() {
 }
 
 static void rts() {
+    pull_dummy();
     value = pull16();
+    // The 65C02 reads the pulled address; the 65C816 the stack at S.
+    if (regs.is65c816) {
+        dummy6502(regs.sp, 0, false, 0);
+    } else {
+        pc_dummy((uint16_t)value);
+    }
     regs.pc = value + 1;
     if (cpu_flow_hook) cpu_flow_hook(CPU_FLOW_RETURN, regs.pc | ((uint32_t)regs.k << 16), regs.sp, 0);
 }
@@ -763,6 +824,7 @@ static void sei() {
 
 static void sep() {
     regs.status |= getvalue(0) & 0xFF;
+    pc_dummy((uint16_t)(regs.pc - 1));
     if (regs.e) {
         regs.status |= FLAG_INDEX_WIDTH | FLAG_MEMORY_WIDTH;
     }
@@ -945,9 +1007,11 @@ static void mvp() {
 }
 
 static void wdm() {
+    dummy6502((uint16_t)ea, bank_byte(ea), false, 0);
 }
 
 static void xba() {
+    pc_dummy(regs.pc);
     uint8_t tmp = regs.b;
     regs.b = regs.a;
     regs.a = tmp;

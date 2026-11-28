@@ -96,7 +96,7 @@ iny imp  2 $c8
 
 jmp abso 3 $4c
 jmp ind  5 $6c
-jsr abso 6 $20
+jsr jsra 6 $20
 
 lda abso 4 $ad
 lda absx 4 $bd

@@ -102,6 +102,10 @@ Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 `cpu_access_cycles` checks the cycle within the instruction at which each VIA
 access lands against the same traces.
 
+`processor_tests` compares each opcode's whole bus trace, address and
+direction per cycle, with the same traces; `tests/pt_baseline_*.txt` record
+which opcodes match.
+
 ## I2C, SMC and RTC
 
 `i2c_targets` drives SDA and SCL a bit at a time, as the KERNAL's `i2c.s`
@@ -143,7 +147,9 @@ does, and checks:
   reinitialize the time out period"
 - VIA shift register, CA1/CA2/CB1/CB2, port latching and PB6 pulse counting
 - When the CPU takes the VIA's IRQ: the vectors check the pin, not the CPU
-- CPU dummy cycles at the program counter or stack: implied, stack, branch and JSR
+- 65C02 bus cycles of $5C, and the address of the extra cycle decimal ADC and
+  SBC immediate make
+- Bus cycles of WAI, STP, MVN and MVP, and of IRQ and NMI entry
 - SMC clock stretching, and the delay from STOP to the SMC's NMI or reset:
   both need measurements of the hardware
 - SMC power-off, flash and fuse commands ($0A-$0D, $8F-$93) and keyboard

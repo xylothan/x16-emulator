@@ -17,7 +17,7 @@ MODE_BYTES = {
     "imm8": 2, "immm": 2, "immx": 2,
     "zp": 2, "zpx": 2, "zpy": 2, "rel": 2,
     "ind0": 2, "indx": 2, "indy": 2,
-    "abso": 3, "absx": 3, "absy": 3, "ind": 3, "ainx": 3, "zprel": 3,
+    "abso": 3, "absx": 3, "absy": 3, "ind": 3, "ainx": 3, "zprel": 3, "jsra": 3,
 }
 
 # Where this emulator knowingly differs from the published 65C02 spec; the value

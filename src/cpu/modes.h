@@ -13,13 +13,46 @@
 //                      $12FF and $1200. This has been fixed in the 65C02.
 //
 static void imp() { //implied
+    // The 65C02's one-cycle NOPs ($x3, $xB) make no second access. WAI and STP
+    // are not in the bus traces and are left as they were.
+    if (!regs.is65c816 && (opcode & 0x07) == 0x03) {
+        return;
+    }
+    if (opcode == 0xCB || opcode == 0xDB) {
+        return;
+    }
+    pc_dummy(regs.pc);
 }
 
 static void imp8() { // brk / cop
+    // The signature byte is fetched and discarded.
+    pc_dummy(regs.pc);
 }
 
 static void acc() { //accumulator
     addressing_is_acc = true;
+    pc_dummy(regs.pc);
+}
+
+// JSR abs. The 65C02 fetches the high byte after the pushes, in jsr().
+static void jsra() {
+    ea = fetch6502(regs.pc++, regs.k);
+    if (regs.is65c816) {
+        ea |= (uint32_t)fetch6502(regs.pc, regs.k) << 8;
+        pc_dummy(regs.pc);
+        regs.pc++;
+    }
+}
+
+// JSL. The bank byte is fetched after the program bank is pushed, in jsl().
+static void jsla() {
+    ea = fetch_word(regs.pc, regs.k);
+    regs.pc += 2;
+}
+
+// JSR (abs,X). The high byte is fetched after the pushes, in jsx().
+static void jsrx() {
+    ea = fetch6502(regs.pc++, regs.k);
 }
 
 static void imm8() { //immediate, 8bit
@@ -97,6 +130,7 @@ static void rel() { //relative for branch ops (8-bit immediate value, sign-exten
 
 static void rel16() { //relative for PER and BRL (16-bit immediate value)
     reladdr = fetch_word(regs.pc, regs.k);
+    pc_dummy((uint16_t)(regs.pc + 1));
     regs.pc += 2;
 }
 
@@ -240,6 +274,7 @@ static void indly() { // [dp],Y
 static void ind0p() { // (zp) used by PEI, which doesn't do wraparound calculations
     uint16_t eahelp;
     eahelp = (uint16_t)fetch6502(regs.pc++, regs.k);
+    dp_low_dummy();
     ea = read_pair(regs.dp + eahelp, regs.dp + eahelp + 1, 0);
 
     if (regs.dp & 0x00FF) {
@@ -248,11 +283,8 @@ static void ind0p() { // (zp) used by PEI, which doesn't do wraparound calculati
 }
 
 static void zprel() { // zero-page, relative for branch ops (8-bit immediatel value, sign-extended) - only used for the 65C02's Rockwell extensions
-	ea = (uint16_t)fetch6502(regs.pc, 0);
-	reladdr = (uint16_t)fetch6502(regs.pc+1, 0);
-	if (reladdr & 0x80) reladdr |= 0xFF00;
-
-	regs.pc += 2;
+	// The offset is fetched after the zero-page reads, in bb_bit().
+	ea = (uint16_t)fetch6502(regs.pc++, 0);
 }
 
 static void sr() { // absolute,S
@@ -260,12 +292,15 @@ static void sr() { // absolute,S
     // outside it, so an offset running past $FFFF wraps rather than reaching
     // bank one.
     ea = (uint16_t)(regs.sp + (uint16_t)fetch6502(regs.pc++, regs.k));
+    pc_dummy((uint16_t)(regs.pc - 1));
 }
 
 static void sridy() { // (indirect,S),Y
     uint16_t eahelp;
     eahelp = regs.sp + (uint16_t)fetch6502(regs.pc++, regs.k);
+    pc_dummy((uint16_t)(regs.pc - 1));
     uint16_t pointer = read_pair(eahelp, eahelp + 1, 0);
+    dummy6502((uint16_t)(eahelp + 1), 0, false, 0);
     ea = mask_long_addr(addr_with_db(pointer) + (uint16_t)regs.y);
 
     // No page-crossing penalty: measured flat at seven cycles.

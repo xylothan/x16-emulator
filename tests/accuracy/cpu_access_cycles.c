@@ -26,9 +26,11 @@ typedef struct {
 	cpu_t       cpu;
 	uint8_t     code[3];
 	uint8_t     x, y;
-	uint16_t    pointer;   // at ZP, for (zp),Y
+	uint16_t    pointer;   // at ZP, or at S + operand when sp is set
 	int         n;
 	unsigned    offsets[5];
+	uint16_t    sp;        // 0: as reset
+	uint16_t    dp;
 } access_case;
 
 static const access_case cases[] = {
@@ -47,6 +49,14 @@ static const access_case cases[] = {
 	{ "65C816 E=0 M=0 LDA abs",     C816_NATIVE, { 0xAD, 0x04, 0x9F }, 0, 0, 0, 2, { 3, 4 } },
 	{ "65C816 E=0 M=0 STA abs",     C816_NATIVE, { 0x8D, 0x04, 0x9F }, 0, 0, 0, 2, { 3, 4 } },
 	{ "65C816 E=0 M=0 INC abs",     C816_NATIVE, { 0xEE, 0x04, 0x9F }, 0, 0, 0, 5, { 3, 4, 5, 6, 7 } },
+	// $03: a cycle after the offset.
+	{ "65C816 E=0 M=0 LDA sr,S",    C816_NATIVE, { 0xA3, 0x04, 0x00 }, 0, 0, 0, 2, { 3, 4 }, 0x9F00 },
+	// $13: a cycle after the offset and another after the pointer.
+	{ "65C816 E=0 M=0 LDA (sr,S),Y", C816_NATIVE, { 0xB3, 0x03, 0x00 }, 0, 0, 0x9F04, 2, { 6, 7 }, 0x01F0 },
+	// $D4: a cycle after the operand when D is not page aligned.
+	{ "65C816 E=0 PEI, D=$9F01",    C816_NATIVE, { 0xD4, 0x03, 0x00 }, 0, 0, 0, 2, { 3, 4 }, 0, 0x9F01 },
+	// $60: two internal cycles, the pulls, then a cycle at S.
+	{ "65C816 E=0 RTS, S=$9F03",    C816_NATIVE, { 0x60, 0x00, 0x00 }, 0, 0, 0, 3, { 3, 4, 5 }, 0x9F03 },
 };
 
 static void
@@ -62,8 +72,15 @@ run(const access_case *c)
 	for (int i = 0; i < 3; i++) {
 		write6502((uint16_t)(CODE + i), 0, c->code[i]);
 	}
-	write6502(ZP, 0, (uint8_t)c->pointer);
-	write6502(ZP + 1, 0, (uint8_t)(c->pointer >> 8));
+	const uint16_t at = c->sp ? (uint16_t)(c->sp + c->code[1]) : ZP;
+	if (c->pointer) {
+		write6502(at, 0, (uint8_t)c->pointer);
+		write6502((uint16_t)(at + 1), 0, (uint8_t)(c->pointer >> 8));
+	}
+	if (c->sp) {
+		regs.sp = c->sp;
+	}
+	regs.dp = c->dp;
 	regs.pc = CODE;
 	regs.xl = c->x;
 	regs.yl = c->y;
