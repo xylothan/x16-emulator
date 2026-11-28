@@ -9,6 +9,7 @@ covering what it claims, or the code it changed does not matter.
     python tests/mutation_check.py --build-dir build --changed
     python tests/mutation_check.py --build-dir build --only VIA --only "bus cycle"
     python tests/mutation_check.py --build-dir build --check
+    python tests/mutation_check.py --build-dir build --shard 2/4
 
 --check builds nothing: it checks each pattern still matches, each test exists,
 and, where the build has a compile_commands.json, that each mutant compiles.
@@ -270,7 +271,18 @@ def main():
                     help="print the selected mutations and their targets, then stop")
     ap.add_argument("--check", action="store_true",
                     help="check the selected mutations without building, then stop")
+    ap.add_argument("--shard", metavar="I/N",
+                    help="of the selected mutations, take every Nth from the Ith")
     args = ap.parse_args()
+
+    shard = None
+    if args.shard:
+        try:
+            shard = tuple(int(v) for v in args.shard.split("/"))
+        except ValueError:
+            shard = ()
+        if len(shard) != 2 or not 1 <= shard[0] <= shard[1]:
+            ap.error(f"--shard takes I/N with 1 <= I <= N, not {args.shard!r}")
 
     problems = list_problems(MUTATIONS)
     if problems:
@@ -282,6 +294,8 @@ def main():
     selected = [m for m in MUTATIONS
                 if (not args.only or any(o in m["name"] for o in args.only))
                 and (changed is None or m["file"] in changed)]
+    if shard:
+        selected = selected[shard[0] - 1::shard[1]]
 
     if args.check:
         return check(selected, args.build_dir, args.config)

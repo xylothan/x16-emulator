@@ -222,10 +222,17 @@ jobs:
   # Break the emulator on purpose and check the tests notice. Every test is
   # written to pass against correct behaviour, which says nothing about whether
   # it would catch incorrect behaviour; this is the half that does. Kept out of
-  # unit-tests because it rebuilds once per mutation.
-  mutation-tests:
+  # unit-tests because it rebuilds once per mutation, and split four ways so
+  # the list can grow without the run outgrowing its timeout.
+  mutation-shard:
+    name: mutation-tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      # Every shard runs to the end, so one run reports every survivor.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -249,7 +256,41 @@ jobs:
         env:
           X16_KLAUS_REQUIRED: 1
           X16_VERA_RTL_REQUIRED: 1
-        run: python tests/mutation_check.py --build-dir build
+        run: python tests/mutation_check.py --build-dir build --shard ${{ matrix.shard }}/4
+  # The faults in the list itself, found without running a mutant: a pattern
+  # the source has moved away from, a test that does not exist, or a mutant
+  # that does not compile under this compiler's warnings.
+  mutation-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install Dependencies
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential cmake libsdl2-dev zlib1g-dev
+      - name: Configure
+        # The shards' configuration, plus the compile commands each mutant is
+        # compiled with.
+        run: cmake -B build -DBUILD_TESTS=ON -DENABLE_LTO=OFF -DENABLE_FLUIDSYNTH=OFF -DENABLE_TRACE=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Build
+        # Generated headers have to exist before a mutant can be compiled.
+        run: cmake --build build -j"$(nproc)"
+      - name: Check the mutations
+        run: python tests/mutation_check.py --build-dir build --check
+  # One result for the shards and the check together.
+  mutation-tests:
+    if: always()
+    needs: [mutation-shard, mutation-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard and the check passed
+        run: |
+          test "${{ needs.mutation-shard.result }}" = success
+          test "${{ needs.mutation-check.result }}" = success
   # Save states load into any build of the same SAVESTATE_MACHINE_VERSION, which
   # is only safe while those builds all run the machine identically. This runs
   # fixed workloads from power-on and compares their state hashes with
