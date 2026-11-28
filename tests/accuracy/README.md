@@ -74,13 +74,20 @@ Run with `ym_accuracy ym2151/nuked-opm`.
 
 `via/m6522/` holds bus vectors from m6522.vhd (hoglet67/BeebFpga), a 6522
 model that passes VICE's VIA tests. Each file names its commit. The model
-matches W65C22S datasheet Figures 2-3 and 2-4 for both timers; where the two
-disagree, the datasheet wins and the case is left out (see below).
+matches W65C22S datasheet Figures 2-3 and 2-4 for both timers, and the W65C22
+datasheet (WDC) Table 2-5 and Figures 4-3 to 4-7 for the control pins, input
+latching and handshakes; where they disagree, the datasheet wins and the case
+is left out (see below).
 
 - T counts PHI2 cycles from the first access.
 - `W R V T` writes V to register R in cycle T. `R R V T` reads V.
 - `I L T` is the IRQ pin as the CPU takes data in cycle T, before that cycle's
   access has any effect.
+- `P PIN V T` drives input PIN (`CA1`, `CA2`, `CB1`, `CB2`, `PA`, `PB`) to V
+  from cycle T on. A pin's last level in a cycle is the one its clock sees.
+- `O CA2 CB1 CB2 PA PAOE PB PBOE T` is the outputs as the CPU takes data in
+  cycle T, as `I`: a pin 0, 1 or Z when it does not drive, a port its output
+  register and the bits that drive.
 - The runner steps one cycle at a time, then again in instructions of up to
   seven cycles whose accesses catch the VIA up to their own cycle.
 
@@ -146,7 +153,13 @@ does, and checks:
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
   count, where the datasheet has "reloading the counter will always
   reinitialize the time out period"
-- VIA shift register, CA1/CA2/CB1/CB2, port latching and PB6 pulse counting
+- VIA shift register and PB6 pulse counting
+- VIA register 15 reads of PA's output bits: m6522.vhd gives the input
+  register, the datasheet the same as register 1
+- VIA PB7 before T1's first load: m6522.vhd has it low, where the datasheet
+  has it go low at the load
+- VIA PB7 as T1's output while DDRB bit 7 is 0: m6522.vhd leaves it an input
+- A VIA port pin driven both by the VIA and from outside
 - When the CPU takes the VIA's IRQ: the vectors check the pin, not the CPU
 - Where in a slow I/O access's four cycles the YM2151 takes it: the emulator
   takes it at the end
