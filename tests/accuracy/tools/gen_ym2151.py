@@ -999,16 +999,17 @@ def channel_writes():
             s.op(ch + 8 * k, mul=(1, 2, 3, 5)[k], tl=(0, 10, 20, 4)[k], am=1)
     for ch, reg, before, after in CHANNEL_WRITES:
         for o in range(0, 32, 2):
-            if reg == 0x20 and (before ^ after) & 0x80 and (o - ch) % 32 >= 24:
-                continue  # C2 R, latched at M1: not covered
+            if reg == 0x20 and (before ^ after) & 0xc0 and (o + 1 - ch) % 32 >= 24:
+                continue  # C2 RL, latched at M1: not covered
             s.set(reg + ch, before)
             s.key(ch, 15)
-            n0 = s.out(128)  # ends before the next restore
+            side = "L" if reg == 0x20 and (before ^ after) & 0x40 else "R"
+            n0 = s.out(128, side)  # ends before the next restore
             t = SAMPLE * (n0 + 48) + o
             s.w(0, reg + ch, t - 6)
             s.w(1, after, t)
             s.t = t + 40
-            s.until(n0 + 128)
+            s.until(n0 + 134)
             s.set(0x08, ch)
             s.wait(40)
     return s

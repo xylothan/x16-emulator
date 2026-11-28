@@ -139,10 +139,10 @@ does, and checks:
   it in time for slot 31 of that sample, the emulator from the next
 - YM2151 phases of operators not keyed since reset, heard only under test
   register bit 5: Nuked-OPM's reset leaves them part way on, the emulator at 0
-- YM2151 R bit ($20-$27 bit 7) latched at the channel's M1 cycle: the chip's
-  C2 output takes it a sample before the emulator's
-- YM2151 PMS ($38-$3F bits 4-6) lowered from a nonzero value under a sounding
-  note
+- YM2151 RL ($20-$27 bits 6 and 7) latched at the channel's M1 cycle: the
+  chip's C2 output takes it a sample before the emulator's
+- YM2151 PMS ($38-$3F bits 4-6) lowered from 5 or 7 under a sounding note: the
+  emulator's phase then parts from the chip's (from 1 or 3 it does not)
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
   count, where the datasheet has "reloading the counter will always
   reinitialize the time out period"
