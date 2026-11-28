@@ -121,12 +121,14 @@ run_file(const char *dir, const char *name)
 			access_t   = (long)t;
 			via2_write((uint8_t)reg, (uint8_t)val);
 		} else if (line[0] == 'R' && sscanf(line + 1, "%x %x %u", &reg, &val, &t) == 3) {
+			unsigned mask = 0xff; // the bits checked
+			sscanf(line + 1, "%*x %*x %*u %x", &mask);
 			run_to(t);
 			irq_before = via2_irq();
 			via2_pins(&pins_before);
 			access_t   = (long)t;
 			const unsigned got = via2_read((uint8_t)reg, false);
-			if (got != val) {
+			if ((got ^ val) & mask) {
 				printf("%s:%d: %s read of %X at %u gave %02X, expected %02X\n", name, n,
 				       dense ? "dense" : "sparse", reg, t, got, val);
 				failed = 1;

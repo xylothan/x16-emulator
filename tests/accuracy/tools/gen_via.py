@@ -286,9 +286,10 @@ def sr_unchecked(lines):
     """What the datasheet leaves open around the SR, left out of a vector:
     CB2 from an SR or ACR write until CB1 next falls, hatched as undefined in
     Figures 2-10 to 2-12 (the model's level there depends on the testbench's
-    previous cycle); and the cycle IFR2 sets, where the model reads IFR2 set
-    with IRQ still off, which IFR7's definition in 2.14 rules out."""
-    out, ier, hold, lag = [], 0, False, set()
+    previous cycle); and IFR7 and IRQ in the cycle IFR2 sets, where the model
+    reads IFR2 set with IRQ still off, which IFR7's definition in 2.14 rules
+    out."""
+    out, ier, hold, lag, cb1 = [], 0, False, set(), "1"
     for l in lines:
         f = l.split()
         if f[0] == "W" and f[1] == "0E":
@@ -296,17 +297,19 @@ def sr_unchecked(lines):
             ier = ier | (v & 0x7F) if v & 0x80 else ier & ~v
         if f[0] == "W" and f[1] in ("0A", "0B"):
             hold = True
+        if f[0] == "P" and f[1] == "CB1":
+            cb1 = f[2]
         if f[0] == "R" and f[1] == "0D":
             v = int(f[2], 16)
             if v & ier & 0x7F and not v & 0x80:
                 lag.add(f[3])
-                continue
+                l += " 7F"
         if f[0] == "I" and f[2] in lag:
             continue
         if f[0] == "O" and hold:
             if f[3] != "Z":
                 f[3] = "X"
-            hold = f[2] != "0"
+            hold = (cb1 if f[2] == "Z" else f[2]) != "0"
             l = " ".join(f)
         out.append(l)
     return out

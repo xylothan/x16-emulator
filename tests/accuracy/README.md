@@ -81,7 +81,8 @@ shift register; where they disagree, the datasheet wins and the case is left
 out (see below).
 
 - T counts PHI2 cycles from the first access.
-- `W R V T` writes V to register R in cycle T. `R R V T` reads V.
+- `W R V T` writes V to register R in cycle T. `R R V T` reads V; `R R V T M`
+  checks only the bits of mask M.
 - `I L T` is the IRQ pin as the CPU takes data in cycle T, before that cycle's
   access has any effect.
 - `P PIN V T` drives input PIN (`CA1`, `CA2`, `CB1`, `CB2`, `PA`, `PB`) to V
@@ -158,8 +159,8 @@ does, and checks:
 - VIA CB2 from an SR or ACR write until CB1 next falls, hatched as undefined in
   Figures 2-10 to 2-12: m6522.vhd's level there depends on the testbench's
   previous cycle
-- VIA IRQ in the cycle IFR2 sets: m6522.vhd reads IFR2 set with IFR7 clear,
-  which 2.14's IFR7 equation rules out
+- VIA IFR7 and IRQ in the cycle IFR2 sets: m6522.vhd reads IFR2 set with
+  IFR7 clear, which 2.14's IFR7 equation rules out
 - A VIA SR access in the cycle T2L reads FF in modes 001, 100 and 101:
   m6522.vhd's answer depends on the testbench's previous cycle
 - VIA SR modes 001, 100 and 101 with T2's latch low byte 0: m6522.vhd never
