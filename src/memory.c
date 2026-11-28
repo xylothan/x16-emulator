@@ -336,8 +336,9 @@ io_trace_cpu_context(uint16_t *pc, uint8_t *pc_bank, uint32_t *cycles)
 // auto-increment, the SPI port consumes a byte -- so the caller records what
 // this returned and never re-reads to find out.
 // Cycles since the devices were last stepped, up to the access in progress.
-// The VIAs and VERA count every cycle, so a program's access first brings them
-// up to its own cycle of the instruction; the main loop steps the rest.
+// The VIAs, VERA and the sound chips count every cycle, so a program's access
+// first brings them up to its own cycle of the instruction; the main loop steps
+// the rest. A slow access's own wait cycles come first.
 static inline unsigned
 cpu_access_offset(void)
 {
@@ -358,7 +359,10 @@ io_read(uint16_t address, bool debugOn)
 		if (!debugOn) via2_catch_up(cpu_access_offset());
 		return via2_read(address & 0xf, debugOn);
 	} else if (address >= 0x9f20 && address < 0x9f40) {
-		if (!debugOn && !headless) video_catch_up(cpu_access_offset());
+		if (!debugOn && !headless) {
+			video_catch_up(cpu_access_offset());
+			audio_catch_up(cpu_access_offset());
+		}
 		return video_read(address & 0x1f, debugOn);
 	} else if (address >= 0x9f40 && address < 0x9f60) {
 		// slow IO2 range
@@ -370,6 +374,7 @@ io_read(uint16_t address, bool debugOn)
 			// the render write position, and the "no side effects"
 			// guarantee is what lets the debugger sweep the I/O page.
 			if (!debugOn) {
+				if (!headless) audio_catch_up(cpu_access_offset());
 				audio_render();
 			}
 			return YM_read_status();
@@ -533,7 +538,10 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 			// would have to change to give it one -- so the debugger announces
 			// itself instead. VERA's bandwidth accounting must not charge the
 			// guest for a poke the developer made from a memory view.
-			if (!debugOn && !headless) video_catch_up(cpu_access_offset());
+			if (!debugOn && !headless) {
+				video_catch_up(cpu_access_offset());
+				audio_catch_up(cpu_access_offset());
+			}
 			video_set_debug_write(debugOn);
 			video_write(address & 0x1f, value);
 			video_set_debug_write(false);
@@ -545,6 +553,7 @@ real_write6502(uint16_t address, uint8_t bank, uint8_t value, bool debugOn)
 			// Both ports are partially decoded. audio_render() brings the
 			// chip up to now, so the write lands at its own cycle.
 			const uint8_t port = address & 0x01;
+			if (!debugOn && !headless) audio_catch_up(cpu_access_offset());
 			audio_render();
 			if (port == 0) {
 				addr_ym = value;

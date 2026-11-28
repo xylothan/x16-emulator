@@ -1107,6 +1107,16 @@ if(TARGET vera_irq_test)
     endif()
 endif()
 
+# The sound chips stepped up to an access within an instruction, then the rest.
+x16_add_test(audio_catch_up NEEDS_SDL
+    SOURCES tests/test_audio_catch_up.c tests/support/harness.c)
+
+if(TARGET audio_catch_up_test)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(audio_catch_up_test PRIVATE SDL2::SDL2)
+    endif()
+endif()
+
 # VERA stepped up to an access within an instruction, then the rest after it.
 x16_add_test(vera_catch_up NEEDS_SDL
     SOURCES tests/test_vera_catch_up.c tests/support/video_fixture.c tests/support/harness.c

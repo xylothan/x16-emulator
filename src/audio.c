@@ -278,6 +278,26 @@ audio_close(void)
 	}
 }
 
+// CPU cycles of the current instruction the sound chips have already been
+// stepped through, by accesses that caught them up to their own cycle.
+static unsigned step_consumed;
+
+void
+audio_catch_up(unsigned offset)
+{
+	if (offset > step_consumed) {
+		audio_step((int)(offset - step_consumed));
+		step_consumed = offset;
+	}
+}
+
+void
+audio_step_rest(unsigned clocks)
+{
+	audio_step(clocks > step_consumed ? (int)(clocks - step_consumed) : 0);
+	step_consumed = 0;
+}
+
 void
 audio_step(int cpu_clocks)
 {
@@ -587,6 +607,7 @@ audio_state_load(ss_reader *r)
 	ss_get(r, ym_buf, sizeof ym_buf);
 	ss_get(r, fs_buf, sizeof fs_buf);
 	ss_close(r);
+	step_consumed = 0;
 	memcpy(psg_host_buf, psg_buf, sizeof psg_host_buf);
 	memcpy(ym_host_buf, ym_buf, sizeof ym_host_buf);
 

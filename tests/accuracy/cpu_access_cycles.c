@@ -1,5 +1,6 @@
 // The cycle of each CPU access to a VIA or VERA, counted from the instruction's
 // opcode fetch: the offset the device is brought up to before the access.
+// Each access comes after its own catch-up.
 //
 // ORACLE: SingleStepTests/65x02 wdc65c02/v1 and SingleStepTests/65816 v1, the
 // per-cycle bus traces in tests/pt/: the index of each access to the
@@ -67,6 +68,20 @@ static const access_case cases[] = {
 	{ "VERA 65C02 STA (zp),Y",           C02, { 0x91, ZP, 0x00 },   0, 3, 0x9F20, 1, { 5 }, 0, 0, FAKE_VERA },
 	{ "VERA 65C816 E=0 M=0 STA abs",     C816_NATIVE, { 0x8D, 0x23, 0x9F }, 0, 0, 0, 2, { 3, 4 }, 0, 0, FAKE_VERA },
 	{ "VERA 65C816 E=0 M=0 INC abs",     C816_NATIVE, { 0xEE, 0x23, 0x9F }, 0, 0, 0, 5, { 3, 4, 5, 6, 7 }, 0, 0, FAKE_VERA },
+	// The sound chips, for VERA's PSG and PCM.
+	{ "VERA audio 65C02 LDA abs",        C02, { 0xAD, 0x3B, 0x9F }, 0, 0, 0,      1, { 3 }, 0, 0, FAKE_YM },
+	{ "VERA audio 65C02 STA abs",        C02, { 0x8D, 0x3B, 0x9F }, 0, 0, 0,      1, { 3 }, 0, 0, FAKE_YM },
+	// The YM2151, in the slow I/O range: three more cycles for each access
+	// there, up to and including this one (x16-emulator #468, 2 MHz slow I/O);
+	// the chip takes an access at the end of its own.
+	{ "YM 65C02 LDA abs, status",        C02, { 0xAD, 0x41, 0x9F }, 0, 0, 0,      1, { 6 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 LDA abs, open bus",      C02, { 0xAD, 0x40, 0x9F }, 0, 0, 0,      0, { 0 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 STA abs, address",       C02, { 0x8D, 0x40, 0x9F }, 0, 0, 0,      1, { 6 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 STA abs, data",          C02, { 0x8D, 0x41, 0x9F }, 0, 0, 0,      1, { 6 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 INC abs",                C02, { 0xEE, 0x41, 0x9F }, 0, 0, 0,      3, { 6, 10, 14 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 STA abs,X",              C02, { 0x9D, 0x40, 0x9F }, 1, 0, 0,      1, { 7 }, 0, 0, FAKE_YM },
+	{ "YM 65C02 STA (zp),Y",             C02, { 0x91, ZP, 0x00 },   0, 1, 0x9F40, 1, { 8 }, 0, 0, FAKE_YM },
+	{ "YM 65C816 E=0 M=0 STA abs",       C816_NATIVE, { 0x8D, 0x40, 0x9F }, 0, 0, 0, 2, { 6, 10 }, 0, 0, FAKE_YM },
 };
 
 static void
@@ -100,11 +115,17 @@ run(const access_case *c)
 	cpu_step_base  = clockticks6502;
 	fake_dev[FAKE_VIA1].catch_ups = 0;
 	fake_dev[FAKE_VERA].catch_ups = 0;
+	fake_dev[FAKE_YM].catch_ups = 0;
+	for (int i = 0; i < FAKE_DEV_COUNT; i++) {
+		fake_dev[i].accesses = 0;
+	}
 	step6502();
 	const fake_dev_log_t *d = &fake_dev[c->dev];
 	check_eq(d->catch_ups, c->n, c->name);
+	check_eq(d->accesses, c->n, c->name);
 	for (int i = 0; i < c->n && i < d->catch_ups; i++) {
 		check_eq((int)d->offsets[i], (int)c->offsets[i], c->name);
+		check_eq(d->caught_up[i], i + 1, c->name);
 	}
 }
 

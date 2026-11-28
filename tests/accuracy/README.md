@@ -99,8 +99,10 @@ Expected counts come from the SingleStepTests bus traces in `tests/pt/` and the
 Commander X16 Rev 1.1 schematic, whose I/O decode uses the address alone, so
 65C816 internal cycles reach I/O.
 
-`cpu_access_cycles` checks the cycle within the instruction at which each VIA
-and VERA access lands against the same traces.
+`cpu_access_cycles` checks the cycle within the instruction at which each VIA,
+VERA and YM2151 access lands against the same traces; a YM2151 access also
+waits three cycles for each slow I/O access up to it, the emulator's own
+model of the 2 MHz slow I/O range.
 
 `processor_tests` compares each opcode's whole bus trace, address and
 direction per cycle, with the same traces; `tests/pt_baseline_*.txt` record
@@ -140,13 +142,13 @@ does, and checks:
 - YM2151 channel registers ($20-$3F) written mid-sample: the chip takes each
   operator's value at that operator's own cycle, and the emulator takes all four
   at once
-- YM2151 accesses within an instruction: the chip sees each access at the
-  instruction's first cycle
 - A T1C-H write in the cycle T1 reads 0: m6522.vhd sets no flag for the new
   count, where the datasheet has "reloading the counter will always
   reinitialize the time out period"
 - VIA shift register, CA1/CA2/CB1/CB2, port latching and PB6 pulse counting
 - When the CPU takes the VIA's IRQ: the vectors check the pin, not the CPU
+- Where in a slow I/O access's four cycles the YM2151 takes it: the emulator
+  takes it at the end
 - 65C02 bus cycles of $5C, and the address of the extra cycle decimal ADC and
   SBC immediate make
 - Bus cycles of WAI, STP, MVN and MVP, and of IRQ and NMI entry

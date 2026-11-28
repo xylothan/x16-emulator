@@ -881,4 +881,20 @@ MUTATIONS = [
         "count": 1,
         "caught_by": ["ym_accuracy"],
     },
+    {
+        "name": "the sound chips step the whole instruction after catching up",
+        "file": "src/audio.c",
+        "find": "audio_step(clocks > step_consumed ? (int)(clocks - step_consumed) : 0);",
+        "into": "audio_step((int)clocks);",
+        "count": 1,
+        "caught_by": ["audio_catch_up"],
+    },
+    {
+        "name": "the sound chips' catch-up count outlives the instruction",
+        "file": "src/audio.c",
+        "find": "(int)(clocks - step_consumed) : 0);\n\tstep_consumed = 0;",
+        "into": "(int)(clocks - step_consumed) : 0);",
+        "count": 1,
+        "caught_by": ["audio_catch_up"],
+    },
 ]

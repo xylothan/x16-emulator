@@ -18,6 +18,12 @@ void audio_set_deterministic(bool on);
 // -deterministic they are not, so their phases and levels stand still.
 bool audio_is_running(void);
 void audio_step(int cpu_clocks);
+// Step the sound chips up to the access OFFSET cycles into the current
+// instruction.
+void audio_catch_up(unsigned offset);
+// After the instruction: step the CLOCKS cycles it took, less any already
+// caught up.
+void audio_step_rest(unsigned clocks);
 void audio_render();
 
 void audio_usage(void);
