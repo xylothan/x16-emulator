@@ -525,6 +525,18 @@ def check_ids():
             case("YM chunk v10 16 bytes short is refused (%s)" % err, r is None and err and "YM" in err)
         else:
             case("YM chunk is v10 for the older-chunk cases (it is v%d)" % ver, False)
+        _, ver, _ = chunk(b"VIA ")
+        if ver == 3:
+            # via.c via_unit_io: each unit's 33 bytes, then in version 3 its
+            # 12 bytes of pins.
+            def via_v2(b):
+                return b[:33] + b[45:78]
+            r, err = chunk_as(b"VIA ", 2, 0, via_v2)
+            case("VIA chunk v2, without the pins, loads (%s)" % (err or "ok"), r is not None)
+            r, err = chunk_as(b"VIA ", 3, 12)
+            case("VIA chunk v3 12 bytes short is refused (%s)" % err, r is None and err and "VIA" in err)
+        else:
+            case("VIA chunk is v3 for the older-chunk cases (it is v%d)" % ver, False)
         d.req("disconnect", {"terminateDebuggee": True})
     finally:
         try:
