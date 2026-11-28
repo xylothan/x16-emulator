@@ -159,6 +159,8 @@ cartridge_write(uint16_t address, uint8_t bank, uint8_t value)
 // Inert on purpose.
 
 void audio_render(void) {}
+// The sound chips' catch-ups are logged as the YM's.
+void audio_catch_up(unsigned offset) { note_catch_up(FAKE_YM, offset); }
 void print_iso8859_15_char(char c) { (void)c; }
 void dbg_load_note_debugger(bool on) { (void)on; }
 uint8_t wav_recorder_get_state(void) { return 0; }

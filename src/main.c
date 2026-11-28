@@ -3017,7 +3017,7 @@ emulator_step_during_move(void)
 			i2c_step();
 		}
 		rtc_step(clocks);
-		audio_step(clocks);
+		audio_step_rest(clocks);
 		midi_serial_step(clocks);
 		if (ym2151_irq_support) {
 			audio_render();
@@ -3272,7 +3272,7 @@ emulator_loop(void *param)
 		rtc_step(clocks);
 
 		if (!headless) {
-			audio_step(clocks);
+			audio_step_rest(clocks);
 		}
 
 		midi_serial_step(clocks);
