@@ -157,10 +157,17 @@ run_file(const char *dir, const char *name)
 				via2_pins(&got);
 			}
 			const int8_t lv[3] = { got.ca2, got.cb1, got.cb2 };
+			char lc[3];
+			for (int k = 0; k < 3; k++) {
+				lc[k] = lv[k] < 0 ? 'Z' : (char)('0' + lv[k]);
+				// X: a driven level the vector leaves unchecked.
+				if (!strcmp(c[k], "X") && lv[k] >= 0) {
+					c[k][0] = lc[k];
+				}
+			}
 			char want[64], have[64];
 			snprintf(want, sizeof want, "%s %s %s %02X %02X %02X %02X", c[0], c[1], c[2], pa, paoe, pb, pboe);
-			snprintf(have, sizeof have, "%c %c %c %02X %02X %02X %02X",
-			         lv[0] < 0 ? 'Z' : '0' + lv[0], lv[1] < 0 ? 'Z' : '0' + lv[1], lv[2] < 0 ? 'Z' : '0' + lv[2],
+			snprintf(have, sizeof have, "%c %c %c %02X %02X %02X %02X", lc[0], lc[1], lc[2],
 			         got.pa, got.pa_oe, got.pb, got.pb_oe);
 			if (strcmp(want, have)) {
 				printf("%s:%d: %s outputs in cycle %u are %s, expected %s\n", name, n,

@@ -38,6 +38,14 @@ typedef struct {
 	uint8_t ira, irb;         // input registers, while latching holds them
 	bool ca2_hs, cb2_hs;      // handshake output low until CA1 or CB1 is active
 	uint8_t ca2_pulse, cb2_pulse; // cycle ends a pulse output has left low
+	// Shift register, after the W65C22 datasheet (WDC) 2.11 to 2.13 and
+	// Figures 2-6 to 2-12. ACR bits 4-2 select the mode.
+	uint8_t sr_count;         // CB1 rises since the SR access that started the count
+	bool sr_counting;         // an SR access started a count of eight that has not ended
+	bool sr_cb1;              // the CB1 shift clock the internal modes drive
+	bool sr_cb2;              // the CB2 data out: SR7 when last put there
+	bool sr_shift;            // CB1 rose: the next cycle shifts as it ends
+	bool sr_out;              // CB1 fell: the next cycle puts SR7 onto CB2 as it ends
 } via_t;
 
 static via_t via[2];
@@ -61,6 +69,59 @@ via_init(via_t *via)
 	via->ca1 = via->ca2 = via->cb1 = via->cb2 = true;
 	via->ca2_hs = via->cb2_hs = false;
 	via->ca2_pulse = via->cb2_pulse = 0;
+	via->sr_count = 0;
+	via->sr_counting = false;
+	via->sr_cb1 = true;
+	via->sr_shift = via->sr_out = false;
+}
+
+static uint8_t
+via_sr_mode(const via_t *via)
+{
+	return (via->registers[11] >> 2) & 7;
+}
+
+// Modes 001, 010, 100, 101 and 110 drive the shift clock out on CB1.
+static bool
+via_sr_drives_cb1(uint8_t mode)
+{
+	return mode != 0 && mode != 3 && mode != 7;
+}
+
+// Modes 001, 100 and 101 take the shift rate from T2's low byte.
+static bool
+via_sr_uses_t2(uint8_t mode)
+{
+	return mode == 1 || mode == 4 || mode == 5;
+}
+
+// Reading or writing the SR clears IFR2 and starts a count of eight CB1
+// pulses; the modes that clock themselves shift for as long as it runs.
+static void
+via_sr_access(via_t *via)
+{
+	const uint8_t mode = via_sr_mode(via);
+	via->registers[13] &= ~0x04;
+	if (mode == 0) return;
+	if (!via->sr_counting && mode != 4) via->sr_cb1 = true;
+	via->sr_count = 0;
+	via->sr_counting = true;
+}
+
+// A CB1 edge as the SR sees it. The eighth rise of a count sets IFR2, except
+// in free-running mode 100.
+static void
+via_sr_clock(via_t *via, bool rise)
+{
+	if (!rise) {
+		via->sr_out = (via_sr_mode(via) & 4) != 0;
+		return;
+	}
+	via->sr_shift = true;
+	if (via->sr_counting && ++via->sr_count == 8) {
+		via->sr_counting = false;
+		if (via_sr_mode(via) != 4) via->registers[13] |= 0x04;
+	}
 }
 
 // The VIA drives the port pins DDR selects with OR.
@@ -130,16 +191,23 @@ via_control_input(via_t *via, int pin, bool level)
 			}
 			via->ca2 = level;
 			break;
-		case VIA_PIN_CB1:
-			if (level != via->cb1 && level == ((pcr & 0x10) != 0)) {
-				via->registers[13] |= 0x10;
-				via->cb2_hs = false;
-				via->irb = via->pb_pins;
+		case VIA_PIN_CB1: {
+			// While the SR drives CB1, nothing outside is heard on it.
+			const uint8_t mode = via_sr_mode(via);
+			if (level != via->cb1 && !via_sr_drives_cb1(mode)) {
+				if (level == ((pcr & 0x10) != 0)) {
+					via->registers[13] |= 0x10;
+					via->cb2_hs = false;
+					via->irb = via->pb_pins;
+				}
+				if (mode != 0) via_sr_clock(via, level);
 			}
 			via->cb1 = level;
 			break;
+		}
 		case VIA_PIN_CB2:
-			if (level != via->cb2 && !(pcr & 0x80) && level == ((pcr & 0x40) != 0)) {
+			// Shifting out, the SR drives CB2.
+			if (level != via->cb2 && !(pcr & 0x80) && via_sr_mode(via) < 4 && level == ((pcr & 0x40) != 0)) {
 				via->registers[13] |= 0x08;
 			}
 			via->cb2 = level;
@@ -193,7 +261,7 @@ via_read(via_t *via, uint8_t reg, bool debug)
 		case 9: // T2H
 			return (uint8_t)(via->timer_count[1] >> 8);
 		case 10: // SR
-			if (!debug) via->registers[13] &= ~0x04;
+			if (!debug) via_sr_access(via);
 			return via->registers[10];
 		case 13: // IFR
 			ifr = via->registers[13];
@@ -251,9 +319,10 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 			via->timer_running[1] = true;
 			via->timer_loaded[1] = true;
 			break;
-		case 10: // SR
-			via->registers[13] &= ~0x04;
+		case 10: // SR: its new bit 7 goes straight onto CB2
+			via_sr_access(via);
 			via->registers[10] = value;
+			via->sr_cb2 = value >> 7;
 			break;
 		case 11: // ACR: latching starts from the pins as they are
 			if (value & ~via->registers[11] & 0x01) via->ira = via->pa_pins;
@@ -272,6 +341,52 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 			break;
 		default:
 			via->registers[reg] = value;
+	}
+}
+
+// The shift register a cycle at a time, with T2 when its low byte sets the
+// rate. There T2L counts N to 0, then FF, then reloads N from the latch low
+// byte, so the CB1 clock changes every N+2 cycles; T2H still counts each time
+// T2L passes 0, and IFR5 still sets as the whole count does. With PHI2 the
+// clock changes every cycle.
+static void
+via_sr_step(via_t *via, unsigned clocks, bool t2)
+{
+	const uint8_t mode = via_sr_mode(via);
+	for (unsigned i = 0; i < clocks; i++) {
+		// What a CB1 edge left to this cycle's end. Shifting in takes CB2 as it
+		// is during the cycle; shifting out rotates SR7 into SR0.
+		if (via->sr_shift) {
+			const uint8_t sr = via->registers[10];
+			via->sr_shift = false;
+			if (mode != 0) via->registers[10] = (uint8_t)(sr << 1 | ((mode & 4) ? sr >> 7 : via->cb2));
+		}
+		if (via->sr_out) {
+			via->sr_out = false;
+			via->sr_cb2 = via->registers[10] >> 7;
+		}
+		bool tick = mode == 2 || mode == 6;
+		if (t2) {
+			const unsigned cnt = via->timer_count[1];
+			tick = false;
+			if (via->timer_loaded[1]) {
+				via->timer_loaded[1] = false;
+			} else if ((cnt & 0xff) == 0xff) {
+				via->timer_count[1] = (cnt & 0xff00) | via->registers[8];
+				tick = true;
+			} else {
+				if (cnt == 0 && via->timer_running[1]) {
+					via->registers[13] |= 0x20;
+					via->timer_running[1] = false;
+				}
+				via->timer_count[1] = (cnt - 1) & 0xffff;
+			}
+		}
+		if (tick && (via->sr_counting || mode == 4)) {
+			via->sr_cb1 = !via->sr_cb1;
+			via_sr_clock(via, via->sr_cb1);
+		}
+		if (!t2 && !(tick && via->sr_counting) && !via->sr_shift && !via->sr_out) break;
 	}
 }
 
@@ -323,30 +438,36 @@ via_step(via_t *via, unsigned clocks)
 	}
 	via->timer_count[0] = cnt;
 
-	// T2
-	cnt = via->timer_count[1];
-	if (acr & 0x20) {
-		n = via->pb6_pulse_counts;
-	} else {
-		n = clocks;
-		if (n && via->timer_loaded[1]) {
-			via->timer_loaded[1] = false;
-			n--;
+	// T2, unless it clocks the SR
+	const uint8_t mode = via_sr_mode(via);
+	const bool t2_sr = !(acr & 0x20) && via_sr_uses_t2(mode);
+	if (!t2_sr) {
+		cnt = via->timer_count[1];
+		if (acr & 0x20) {
+			n = via->pb6_pulse_counts;
+		} else {
+			n = clocks;
+			if (n && via->timer_loaded[1]) {
+				via->timer_loaded[1] = false;
+				n--;
+			}
+		}
+		via->timer_count[1] = (cnt - n) & 0xffff;
+		if (n > cnt && via->timer_running[1]) {
+			ifr |= 0x20;
+			via->timer_running[1] = false;
 		}
 	}
 	via->pb6_pulse_counts = 0;
-	if (n > cnt && via->timer_running[1]) {
-		ifr |= 0x20;
-		via->timer_running[1] = false;
-	}
-	via->timer_count[1] = (cnt - n) & 0xffff;
-
-	// TODO shift register
 
 	via->ca2_pulse = (uint8_t)(clocks >= via->ca2_pulse ? 0 : via->ca2_pulse - clocks);
 	via->cb2_pulse = (uint8_t)(clocks >= via->cb2_pulse ? 0 : via->cb2_pulse - clocks);
 
 	via->registers[13] = ifr;
+
+	if (t2_sr || ((mode == 2 || mode == 6) && via->sr_counting) || via->sr_shift || via->sr_out) {
+		via_sr_step(via, clocks, t2_sr);
+	}
 }
 
 // Bring a unit up to the cycle of an access, `offset` cycles after the main
@@ -567,8 +688,10 @@ via2_pins(via_pins_t *out)
 	const uint8_t acr = v->registers[11];
 	const uint8_t pcr = v->registers[12];
 	out->ca2   = (int8_t)via_c2_output((pcr >> 1) & 7, v->ca2_hs, v->ca2_pulse);
-	out->cb1   = -1;
-	out->cb2   = (int8_t)via_c2_output((pcr >> 5) & 7, v->cb2_hs, v->cb2_pulse);
+	const uint8_t sr = via_sr_mode(v);
+	// Between counts the shift clock rests high, except free-running.
+	out->cb1   = via_sr_drives_cb1(sr) ? (int8_t)(v->sr_cb1 || (!v->sr_counting && sr != 4)) : -1;
+	out->cb2   = (sr & 4) ? (int8_t)v->sr_cb2 : (int8_t)via_c2_output((pcr >> 5) & 7, v->cb2_hs, v->cb2_pulse);
 	out->pa    = v->registers[1];
 	out->pa_oe = v->registers[3];
 	out->pb    = v->registers[0];
@@ -642,15 +765,29 @@ via_unit_io(via_t *v, ss_writer *w, ss_reader *r, int version)
 		v->ca1 = v->ca2 = v->cb1 = v->cb2 = true;
 		v->ca2_hs = v->cb2_hs = false;
 	}
+	// Version 4 adds the shift register. Before it, the SR never shifted.
+	if (w || version >= 4) {
+		bool *flags[] = { &v->sr_counting, &v->sr_cb1, &v->sr_cb2, &v->sr_shift, &v->sr_out };
+		if (w) ss_put_u8(w, v->sr_count); else v->sr_count = ss_get_u8(r);
+		for (size_t i = 0; i < sizeof flags / sizeof flags[0]; i++) {
+			if (w) ss_put_bool(w, *flags[i]); else *flags[i] = ss_get_bool(r);
+		}
+	} else {
+		v->sr_count = 0;
+		v->sr_counting = false;
+		v->sr_cb1 = true;
+		v->sr_cb2 = v->registers[10] >> 7;
+		v->sr_shift = v->sr_out = false;
+	}
 	if (r) v->consumed = 0;
 }
 
 void
 via_state_save(ss_writer *w)
 {
-	ss_begin(w, "VIA ", 3);
-	via_unit_io(&via[0], w, NULL, 3);
-	via_unit_io(&via[1], w, NULL, 3);
+	ss_begin(w, "VIA ", 4);
+	via_unit_io(&via[0], w, NULL, 4);
+	via_unit_io(&via[1], w, NULL, 4);
 	ss_end(w);
 }
 
