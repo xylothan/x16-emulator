@@ -10,6 +10,11 @@ covering what it claims, or the code it changed does not matter.
     python tests/mutation_check.py --build-dir build --only VIA --only "bus cycle"
     python tests/mutation_check.py --build-dir build --check
     python tests/mutation_check.py --build-dir build --shard 2/4
+    python tests/mutation_check.py --build-dir build --workdir ../mutwork
+
+--workdir mutates a mirror of the tree, with its own build directory, so this
+checkout stays usable meanwhile; with --shard, several can run side by side,
+each in its own DIR.
 
 --check builds nothing: it checks each pattern still matches, each test exists,
 and, where the build has a compile_commands.json, that each mutant compiles.
@@ -258,7 +263,66 @@ def check(mutations, build_dir, config):
     return 1 if problems else 0
 
 
+SYNC_MANIFEST = ".mutation_sync.json"
+
+
+def sync_tree(src, dst):
+    """Mirror the source tree at src into dst, for mutating away from it.
+
+    Everything is copied, ignored fixtures included, except .git, out/, any
+    CMakeFiles/ and any directory below the top holding a CMakeCache.txt: build
+    trees, which dst keeps its own of. A copied file gets the current time, not
+    its source's, so a file reverted to older contents still rebuilds. Only
+    files an earlier sync copied are ever deleted from dst.
+    """
+    src, dst = src.resolve(), dst.resolve()
+    manifest_path = dst / SYNC_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    seen = {}
+    copied = 0
+    for here, dirs, files in os.walk(src):
+        here = Path(here)
+        top = here == src
+        keep = []
+        for d in dirs:
+            full = here / d
+            if full == dst or d in ("CMakeFiles", "__pycache__"):
+                continue
+            if top and d in (".git", "out"):
+                continue
+            if (full / "CMakeCache.txt").exists():
+                continue
+            keep.append(d)
+        dirs[:] = keep
+        for f in files:
+            if top and f in ("CMakeCache.txt", SYNC_MANIFEST):
+                continue
+            full = here / f
+            rel = full.relative_to(src).as_posix()
+            st = full.stat()
+            stamp = [st.st_size, st.st_mtime_ns]
+            seen[rel] = stamp
+            target = dst / rel
+            if manifest.get(rel) == stamp and target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(full, target)
+            os.utime(target, None)
+            copied += 1
+    removed = 0
+    for rel in manifest:
+        if rel not in seen:
+            (dst / rel).unlink(missing_ok=True)
+            removed += 1
+    manifest_path.write_text(json.dumps(seen), encoding="utf-8")
+    return copied, removed
+
+
 def main():
+    global ROOT
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--config", default="Debug",
@@ -273,6 +337,8 @@ def main():
                     help="check the selected mutations without building, then stop")
     ap.add_argument("--shard", metavar="I/N",
                     help="of the selected mutations, take every Nth from the Ith")
+    ap.add_argument("--workdir", metavar="DIR",
+                    help="mirror this tree into DIR and mutate there; --build-dir is then inside DIR")
     args = ap.parse_args()
 
     shard = None
@@ -296,6 +362,16 @@ def main():
                 and (changed is None or m["file"] in changed)]
     if shard:
         selected = selected[shard[0] - 1::shard[1]]
+
+    if args.workdir:
+        here, ROOT = ROOT, Path(args.workdir).resolve()
+        ROOT.mkdir(parents=True, exist_ok=True)
+        copied, removed = sync_tree(here, ROOT)
+        print(f"{ROOT}: {copied} files copied, {removed} removed")
+        if not (ROOT / args.build_dir / "CMakeCache.txt").exists():
+            print(f"{ROOT / args.build_dir} is not configured. Configure it once, as for this "
+                  f"checkout (on Windows, .\\build.ps1 -Tests run in {ROOT}), then run this again.")
+            return 2
 
     if args.check:
         return check(selected, args.build_dir, args.config)
