@@ -58,22 +58,73 @@ run_file(const char *dir, const char *name)
 	}
 	via2_init();
 	now = base = 0;
-	// The pin is sampled as the CPU takes data, before the access's own effects.
-	bool     accessed   = false;
-	unsigned irq_before = 0;
+	// The testbench's idle inputs.
+	via2_drive(VIA_PIN_PA, 0xff);
+	via2_drive(VIA_PIN_PB, 0xff);
+	// The pins are sampled as the CPU takes data, before the access's own effects.
+	long       access_t   = -1; // the cycle of the last access
+	unsigned   irq_before = 0;
+	via_pins_t pins_before;
+	via2_pins(&pins_before);
+	// A cycle's input changes land together as its clock samples them: a pin's
+	// last level that cycle, the ports before the control pins, so an active
+	// transition latches the port as that cycle has it. An O or I line for the
+	// cycle before comes after them in the file.
+	int      level[6], pending = 0;
+	unsigned pending_t = 0;
 	int failed = 0, n = 0;
 	while (fgets(line, sizeof line, f)) {
 		n++;
 		unsigned reg, val, t;
+		char pin[4];
+		const bool is_pin = line[0] == 'P' && sscanf(line + 1, "%3s %x %u", pin, &val, &t) == 3;
+		unsigned line_t = 0;
+		bool     timed  = false;
+		if (is_pin) {
+			line_t = t;
+			timed  = true;
+		} else if (line[0] == 'W' || line[0] == 'R') {
+			timed = sscanf(line + 1, "%*x %*x %u", &line_t) == 1;
+		} else if (line[0] == 'I') {
+			timed = sscanf(line + 1, "%*u %u", &line_t) == 1;
+		} else if (line[0] == 'O') {
+			timed = sscanf(line + 1, "%*s %*s %*s %*x %*x %*x %*x %u", &line_t) == 1;
+		}
+		if (pending && timed && line_t >= pending_t && (!is_pin || line_t > pending_t)) {
+			run_to(pending_t);
+			for (int k = 0; k < 2; k++) {
+				for (int p = 0; p < 6; p++) {
+					const bool port = p == VIA_PIN_PA || p == VIA_PIN_PB;
+					if ((pending & (1 << p)) && port == (k == 0)) via2_drive(p, (uint8_t)level[p]);
+				}
+			}
+			pending = 0;
+		}
+		if (is_pin) {
+			static const char *names[] = { "CA1", "CA2", "CB1", "CB2", "PA", "PB" };
+			int p = 0;
+			while (p < 6 && strcmp(pin, names[p])) p++;
+			if (p == 6) {
+				printf("%s:%d: bad pin line\n", name, n);
+				failed = 1;
+				break;
+			}
+			level[p]  = (int)val;
+			pending  |= 1 << p;
+			pending_t = t;
+			continue;
+		}
 		if (line[0] == 'W' && sscanf(line + 1, "%x %x %u", &reg, &val, &t) == 3) {
 			run_to(t);
 			irq_before = via2_irq();
-			accessed   = true;
+			via2_pins(&pins_before);
+			access_t   = (long)t;
 			via2_write((uint8_t)reg, (uint8_t)val);
 		} else if (line[0] == 'R' && sscanf(line + 1, "%x %x %u", &reg, &val, &t) == 3) {
 			run_to(t);
 			irq_before = via2_irq();
-			accessed   = true;
+			via2_pins(&pins_before);
+			access_t   = (long)t;
 			const unsigned got = via2_read((uint8_t)reg, false);
 			if (got != val) {
 				printf("%s:%d: %s read of %X at %u gave %02X, expected %02X\n", name, n,
@@ -82,13 +133,38 @@ run_file(const char *dir, const char *name)
 				break;
 			}
 		} else if (line[0] == 'I' && sscanf(line + 1, "%u %u", &val, &t) == 2) {
-			if (!accessed || t != now) {
+			if ((long)t != access_t) {
 				run_to(t);
 				irq_before = via2_irq();
 			}
 			if (irq_before != val) {
 				printf("%s:%d: %s IRQ in cycle %u is %u, expected %u\n", name, n,
 				       dense ? "dense" : "sparse", t, irq_before, val);
+				failed = 1;
+				break;
+			}
+		} else if (line[0] == 'O') {
+			char c[3][4];
+			unsigned pa, paoe, pb, pboe;
+			if (sscanf(line + 1, "%3s %3s %3s %x %x %x %x %u", c[0], c[1], c[2], &pa, &paoe, &pb, &pboe, &t) != 8) {
+				printf("%s:%d: bad output line\n", name, n);
+				failed = 1;
+				break;
+			}
+			via_pins_t got = pins_before;
+			if ((long)t != access_t) {
+				run_to(t);
+				via2_pins(&got);
+			}
+			const int8_t lv[3] = { got.ca2, got.cb1, got.cb2 };
+			char want[64], have[64];
+			snprintf(want, sizeof want, "%s %s %s %02X %02X %02X %02X", c[0], c[1], c[2], pa, paoe, pb, pboe);
+			snprintf(have, sizeof have, "%c %c %c %02X %02X %02X %02X",
+			         lv[0] < 0 ? 'Z' : '0' + lv[0], lv[1] < 0 ? 'Z' : '0' + lv[1], lv[2] < 0 ? 'Z' : '0' + lv[2],
+			         got.pa, got.pa_oe, got.pb, got.pb_oe);
+			if (strcmp(want, have)) {
+				printf("%s:%d: %s outputs in cycle %u are %s, expected %s\n", name, n,
+				       dense ? "dense" : "sparse", t, have, want);
 				failed = 1;
 				break;
 			}

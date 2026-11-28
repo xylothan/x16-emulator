@@ -30,6 +30,14 @@ typedef struct {
 	bool timer_loaded[2];    // written this cycle: the cycle ends without a decrement
 	bool pb7_output;
 	unsigned consumed;       // cycles stepped since the main loop last stepped
+	// Pins, after the W65C22 datasheet (WDC): Table 2-5, Figures 4-3 to 4-7.
+	// Every W65C22S pin has a bus holder (5.3), so a port pin nothing drives
+	// keeps its last level.
+	uint8_t pa_pins, pb_pins; // port pin levels
+	bool ca1, ca2, cb1, cb2;  // control pin input levels
+	uint8_t ira, irb;         // input registers, while latching holds them
+	bool ca2_hs, cb2_hs;      // handshake output low until CA1 or CB1 is active
+	uint8_t ca2_pulse, cb2_pulse; // cycle ends a pulse output has left low
 } via_t;
 
 static via_t via[2];
@@ -50,6 +58,93 @@ via_init(via_t *via)
 	via->timer1_m1 = false;
 	via->consumed = 0;
 	via->pb7_output = true;
+	via->ca1 = via->ca2 = via->cb1 = via->cb2 = true;
+	via->ca2_hs = via->cb2_hs = false;
+	via->ca2_pulse = via->cb2_pulse = 0;
+}
+
+// The VIA drives the port pins DDR selects with OR.
+static void
+via_drive_ports(via_t *via)
+{
+	via->pa_pins = (via->pa_pins & ~via->registers[3]) | (via->registers[1] & via->registers[3]);
+	via->pb_pins = (via->pb_pins & ~via->registers[2]) | (via->registers[0] & via->registers[2]);
+}
+
+// What IRA and IRB read for the input bits: the pins, or with latching on
+// (ACR bits 0 and 1), the pins at the last active CA1 or CB1 transition.
+static uint8_t
+via_ira(const via_t *via)
+{
+	return (via->registers[11] & 0x01) ? via->ira : via->pa_pins;
+}
+
+static uint8_t
+via_irb(const via_t *via)
+{
+	return (via->registers[11] & 0x02) ? via->irb : via->pb_pins;
+}
+
+// A CA2 or CB2 output mode (Table 2-5): 4 handshake, 5 pulse, 6 low, 7 high.
+// Returns the level, or -1 for an input.
+static int
+via_c2_output(uint8_t mode, bool hs, uint8_t pulse)
+{
+	switch (mode) {
+		case 4: return !hs;
+		case 5: return pulse == 0;
+		case 6: return 0;
+		case 7: return 1;
+		default: return -1;
+	}
+}
+
+// An ORA or IRA access through register 1 (not 15): CA2 goes low, held until
+// CA1 is active in handshake mode, for the next cycle in pulse mode
+// (Figures 4-3 to 4-5). ORB writes do the same for CB2.
+static void
+via_ca2_handshake(via_t *via)
+{
+	via->ca2_hs = true;
+	via->ca2_pulse = 2;
+}
+
+// A control pin's input level. CA1 and CB1 are active on the edge PCR bits 0
+// and 4 select, CA2 and CB2 as inputs on the edge bits 2 and 6 select.
+static void
+via_control_input(via_t *via, int pin, bool level)
+{
+	const uint8_t pcr = via->registers[12];
+	switch (pin) {
+		case VIA_PIN_CA1:
+			if (level != via->ca1 && level == ((pcr & 0x01) != 0)) {
+				via->registers[13] |= 0x02;
+				via->ca2_hs = false;
+				via->ira = via->pa_pins;
+			}
+			via->ca1 = level;
+			break;
+		case VIA_PIN_CA2:
+			if (level != via->ca2 && !(pcr & 0x08) && level == ((pcr & 0x04) != 0)) {
+				via->registers[13] |= 0x01;
+			}
+			via->ca2 = level;
+			break;
+		case VIA_PIN_CB1:
+			if (level != via->cb1 && level == ((pcr & 0x10) != 0)) {
+				via->registers[13] |= 0x10;
+				via->cb2_hs = false;
+				via->irb = via->pb_pins;
+			}
+			via->cb1 = level;
+			break;
+		case VIA_PIN_CB2:
+			if (level != via->cb2 && !(pcr & 0x80) && level == ((pcr & 0x40) != 0)) {
+				via->registers[13] |= 0x08;
+			}
+			via->cb2 = level;
+			break;
+	}
 }
 
 static void
@@ -76,13 +171,17 @@ via_read(via_t *via, uint8_t reg, bool debug)
 	uint8_t ifr;
 	bool    irq;
 	switch (reg) {
-		case 0: // IRB
+		case 0: // IRB: ORB on the output bits (Table 2-2)
 			if (!debug) via_clear_prb_irqs(via);
-			return via->registers[0];
+			return (via->registers[0] & via->registers[2]) | (via_irb(via) & ~via->registers[2]);
 		case 1: // IRA
-		case 15:
-			if (!debug) via_clear_pra_irqs(via);
-			return via->registers[1];
+			if (!debug) {
+				via_clear_pra_irqs(via);
+				via_ca2_handshake(via);
+			}
+			// fall through
+		case 15: // IRA, no handshake
+			return (via->registers[1] & via->registers[3]) | (via_ira(via) & ~via->registers[3]);
 		case 4: // T1L
 			if (!debug) via->registers[13] &= ~0x40;
 			return (uint8_t)(via->timer_count[0] & 0xff);
@@ -113,12 +212,23 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 	switch (reg) {
 		case 0: // ORB
 			via_clear_prb_irqs(via);
+			via->cb2_hs = true;
+			via->cb2_pulse = 2;
 			via->registers[0] = value;
+			via_drive_ports(via);
 			break;
 		case 1: // ORA
-		case 15:
 			via_clear_pra_irqs(via);
+			via_ca2_handshake(via);
+			// fall through
+		case 15: // ORA, no handshake
 			via->registers[1] = value;
+			via_drive_ports(via);
+			break;
+		case 2: // DDRB
+		case 3: // DDRA
+			via->registers[reg] = value;
+			via_drive_ports(via);
 			break;
 		case 4: // T1L
 			via->registers[6] = value;
@@ -144,6 +254,11 @@ via_write(via_t *via, uint8_t reg, uint8_t value)
 		case 10: // SR
 			via->registers[13] &= ~0x04;
 			via->registers[10] = value;
+			break;
+		case 11: // ACR: latching starts from the pins as they are
+			if (value & ~via->registers[11] & 0x01) via->ira = via->pa_pins;
+			if (value & ~via->registers[11] & 0x02) via->irb = via->pb_pins;
+			via->registers[11] = value;
 			break;
 		case 13: // IFR
 			via->registers[13] &= ~(value & 0x7f);
@@ -226,7 +341,10 @@ via_step(via_t *via, unsigned clocks)
 	}
 	via->timer_count[1] = (cnt - n) & 0xffff;
 
-	// TODO Cxx pin and shift register handling
+	// TODO shift register
+
+	via->ca2_pulse = (uint8_t)(clocks >= via->ca2_pulse ? 0 : via->ca2_pulse - clocks);
+	via->cb2_pulse = (uint8_t)(clocks >= via->cb2_pulse ? 0 : via->cb2_pulse - clocks);
 
 	via->registers[13] = ifr;
 }
@@ -286,51 +404,58 @@ via1_init()
 	serial_port.out.data = 1;
 }
 
+// DDR=0 (input)  -> take input bit
+// DDR=1 (output) -> take output bit
+// For now, just assume that I2C peripherals always drive all lines and VIA
+// overrides them with their input values based on current DDR bits
+static uint8_t
+via1_pb(void)
+{
+	return
+		(~via[0].registers[2] & (
+			(serial_port_read_clk() << 6) |
+			(serial_port_read_data() << 7)
+		)) |
+		(via[0].registers[2] & (
+			(serial_port.in.atn << 3) |
+			((!serial_port.in.clk) << 4) |
+			((!serial_port.in.data) << 5)
+		));
+}
+
+static uint8_t
+via1_pa(void)
+{
+	return (~via[0].registers[3] & i2c_port.data_out) |					//I2C Data: PA0=1 if DDR bit is 0 (input) and data_out is 1; usage of data_out and data_in is a bit confusing...
+		(via[0].registers[3] & i2c_port.data_in) |						//I2C Data: PA0=1 if DDR bit is 1 (output) and data_in is 1
+		(~via[0].registers[3] & I2C_CLK_MASK ) |						//I2C Clock: PA1=1 if DDR bit is 0 (input), simulating an input pull-up
+		(via[0].registers[3] & i2c_port.clk_in) |						//I2C Clock: PA1=1 if DDR bit is 1 (output) and clk_in is 1, simulating a pin driven by the VIA
+		Joystick_data;
+}
+
 uint8_t
 via1_read(uint8_t reg, bool debug)
 {
-	// DDR=0 (input)  -> take input bit
-	// DDR=1 (output) -> take output bit
-	// For now, just assume that I2C peripherals always drive all lines and VIA
-	// overrides them with their input values based on current DDR bits
+	// Nothing drives CA1 or CB1 (IECSRQ is not modelled), so with latching on
+	// a port reads as it was when latching began.
 	switch (reg) {
 		case 0: // PB
 			if (!debug) via_clear_prb_irqs(&via[0]);
-			if (via[0].registers[11] & 2) {
-				// TODO latching mechanism (requires IEC implementation)
-				return 0;
-			} else {
-				return
-					(~via[0].registers[2] & (
-						(serial_port_read_clk() << 6) |
-						(serial_port_read_data() << 7)
-					)) |
-					(via[0].registers[2] & (
-						(serial_port.in.atn << 3) |
-						((!serial_port.in.clk) << 4) |
-						((!serial_port.in.data) << 5)
-					));
-			}
-			
+			return (via[0].registers[11] & 2) ? via[0].irb : via1_pb();
+
 		case 1: // PA
-		case 15:
+		case 15: // PA, no handshake
 			// i2c_step() advances the bus state machine, so it has to sit behind
 			// the debug check: reading $9F01 in a memory view shouldn't disturb
 			// a transfer in progress. That bus talks to the SMC and the RTC.
 			if (!debug) {
 				i2c_step();
-				via_clear_pra_irqs(&via[0]);
+				if (reg == 1) {
+					via_clear_pra_irqs(&via[0]);
+					via_ca2_handshake(&via[0]);
+				}
 			}
-			if (via[0].registers[11] & 1) {
-				// CA1 is currently not connected to anything (?)
-				return 0;
-			} else {
-				return (~via[0].registers[3] & i2c_port.data_out) |					//I2C Data: PA0=1 if DDR bit is 0 (input) and data_out is 1; usage of data_out and data_in is a bit confusing...
-					(via[0].registers[3] & i2c_port.data_in) |						//I2C Data: PA0=1 if DDR bit is 1 (output) and data_in is 1
-					(~via[0].registers[3] & I2C_CLK_MASK ) |						//I2C Clock: PA1=1 if DDR bit is 0 (input), simulating an input pull-up
-					(via[0].registers[3] & i2c_port.clk_in) |						//I2C Clock: PA1=1 if DDR bit is 1 (output) and clk_in is 1, simulating a pin driven by the VIA 
-					Joystick_data;
-			}
+			return (via[0].registers[11] & 1) ? via[0].ira : via1_pa();
 
 		default:
 			return via_read(&via[0], reg, debug);
@@ -340,7 +465,11 @@ via1_read(uint8_t reg, bool debug)
 void
 via1_write(uint8_t reg, uint8_t value)
 {
+	const uint8_t starts = reg == 11 ? value & ~via[0].registers[11] : 0;
 	via_write(&via[0], reg, value);
+	// Latching starts from the ports as they are.
+	if (starts & 0x01) via[0].ira = via1_pa();
+	if (starts & 0x02) via[0].irb = via1_pb();
 	if (reg == 0 || reg == 2) {
 		// PB
 		const uint8_t pb = via[0].registers[0] | ~via[0].registers[2];
@@ -348,7 +477,7 @@ via1_write(uint8_t reg, uint8_t value)
 		serial_port.in.clk = (pb & SERIAL_CLOCKIN_MASK) == 0;
 		serial_port.in.data = (pb & SERIAL_DATAIN_MASK) == 0;
 
-	} else if (reg == 1 || reg == 3) {
+	} else if (reg == 1 || reg == 3 || reg == 15) {
 		i2c_step();
 		// PA
 		const uint8_t pa = via[0].registers[1] | ~via[0].registers[3];
@@ -420,6 +549,35 @@ via2_irq()
 	return (via[1].registers[13] & via[1].registers[14]) != 0;
 }
 
+void
+via2_drive(int pin, uint8_t level)
+{
+	via_t *v = &via[1];
+	switch (pin) {
+		case VIA_PIN_PA: v->pa_pins = level; break;
+		case VIA_PIN_PB: v->pb_pins = level; break;
+		default: via_control_input(v, pin, level != 0); break;
+	}
+}
+
+void
+via2_pins(via_pins_t *out)
+{
+	const via_t *v   = &via[1];
+	const uint8_t acr = v->registers[11];
+	const uint8_t pcr = v->registers[12];
+	out->ca2   = (int8_t)via_c2_output((pcr >> 1) & 7, v->ca2_hs, v->ca2_pulse);
+	out->cb1   = -1;
+	out->cb2   = (int8_t)via_c2_output((pcr >> 5) & 7, v->cb2_hs, v->cb2_pulse);
+	out->pa    = v->registers[1];
+	out->pa_oe = v->registers[3];
+	out->pb    = v->registers[0];
+	out->pb_oe = v->registers[2];
+	if ((acr & 0x80) && (out->pb_oe & 0x80)) {
+		out->pb = (uint8_t)((out->pb & 0x7f) | (v->pb7_output << 7));
+	}
+}
+
 // Side-effect-free snapshot of one VIA's state for the ImGui debugger.
 // `which` is 0 for VIA1, 1 for VIA2.
 void
@@ -465,15 +623,34 @@ via_unit_io(via_t *v, ss_writer *w, ss_reader *r, int version)
 	for (int i = 0; i < 2; i++) {
 		if (w) ss_put_bool(w, v->timer_loaded[i]); else v->timer_loaded[i] = version >= 2 && ss_get_bool(r);
 	}
+	// Version 3 adds the pins. Before it, the ports read as their output
+	// registers and nothing moved a control pin.
+	if (w || version >= 3) {
+		uint8_t *bytes[] = { &v->pa_pins, &v->pb_pins, &v->ira, &v->irb, &v->ca2_pulse, &v->cb2_pulse };
+		bool    *flags[] = { &v->ca1, &v->ca2, &v->cb1, &v->cb2, &v->ca2_hs, &v->cb2_hs };
+		for (size_t i = 0; i < sizeof bytes / sizeof bytes[0]; i++) {
+			if (w) ss_put_u8(w, *bytes[i]); else *bytes[i] = ss_get_u8(r);
+		}
+		for (size_t i = 0; i < sizeof flags / sizeof flags[0]; i++) {
+			if (w) ss_put_bool(w, *flags[i]); else *flags[i] = ss_get_bool(r);
+		}
+	} else {
+		v->pa_pins = v->registers[1];
+		v->pb_pins = v->registers[0];
+		v->ira = v->irb = 0;
+		v->ca2_pulse = v->cb2_pulse = 0;
+		v->ca1 = v->ca2 = v->cb1 = v->cb2 = true;
+		v->ca2_hs = v->cb2_hs = false;
+	}
 	if (r) v->consumed = 0;
 }
 
 void
 via_state_save(ss_writer *w)
 {
-	ss_begin(w, "VIA ", 2);
-	via_unit_io(&via[0], w, NULL, 2);
-	via_unit_io(&via[1], w, NULL, 2);
+	ss_begin(w, "VIA ", 3);
+	via_unit_io(&via[0], w, NULL, 3);
+	via_unit_io(&via[1], w, NULL, 3);
 	ss_end(w);
 }
 

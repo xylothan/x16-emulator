@@ -26,6 +26,17 @@ void via2_step(unsigned clocks);
 void via2_catch_up(unsigned offset);
 bool via2_irq();
 
+// VIA2's pins, for tests: nothing on the machine drives them.
+enum { VIA_PIN_CA1, VIA_PIN_CA2, VIA_PIN_CB1, VIA_PIN_CB2, VIA_PIN_PA, VIA_PIN_PB };
+// Drive an input pin to LEVEL (a port, all 8 bits) from now on.
+void via2_drive(int pin, uint8_t level);
+typedef struct {
+	int8_t  ca2, cb1, cb2;   // 0, 1, or -1 when not driven
+	uint8_t pa, pa_oe;       // port value, and the bits that drive
+	uint8_t pb, pb_oe;
+} via_pins_t;
+void via2_pins(via_pins_t *out);
+
 // ─── Debugger accessor ───────────────────────────────────────────────────────
 // Side-effect-free snapshot of one VIA's state. Safe to call every frame from
 // the debugger while the emulation is running.
