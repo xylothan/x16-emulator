@@ -8,6 +8,11 @@ covering what it claims, or the code it changed does not matter.
     python tests/mutation_check.py --build-dir build
     python tests/mutation_check.py --build-dir build --changed
     python tests/mutation_check.py --build-dir build --only VIA --only "bus cycle"
+    python tests/mutation_check.py --build-dir build --check
+
+--check builds nothing: it checks each pattern still matches, each test exists,
+and, where the build has a compile_commands.json, that each mutant compiles.
+The mutations themselves are in tests/mutations/, one module per area.
 
 Each mutation rebuilds only the executables its caught_by tests run.
 Every mutation is reverted afterwards, including on failure or interrupt.
@@ -16,6 +21,7 @@ Every mutation is reverted afterwards, including on failure or interrupt.
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,7 +47,10 @@ def test_targets(build_dir, config):
 
     A test whose command runs no <name>_test executable maps to None.
     """
-    r = run([CTEST, "--test-dir", build_dir, "-C", config, "--show-only=json-v1"])
+    try:
+        r = run([CTEST, "--test-dir", build_dir, "-C", config, "--show-only=json-v1"])
+    except OSError:
+        return {}
     if r.returncode != 0:
         return {}
     try:
@@ -124,6 +133,130 @@ def tests_fail(build_dir, config, names):
     return True, None
 
 
+def list_problems(mutations):
+    """What is wrong with the list itself, before any source is read.
+
+    Two entries with one name, or making one change, are what a merge that
+    adds the same entries on both sides leaves behind.
+    """
+    problems = []
+    names, edits = {}, {}
+    for m in mutations:
+        missing = [k for k in ("name", "file", "find", "into", "caught_by") if not m.get(k) and k != "into"]
+        if "into" not in m:
+            missing.append("into")
+        if missing:
+            problems.append(f"{m.get('name', '?')!r} has no {', '.join(missing)}")
+            continue
+        if m["name"] in names:
+            problems.append(f"two mutations are named {m['name']!r}")
+        names[m["name"]] = True
+        edit = (m["file"], m["find"], m["into"])
+        if edit in edits:
+            problems.append(f"{m['name']!r} makes the same change as {edits[edit]!r}")
+        edits.setdefault(edit, m["name"])
+    return problems
+
+
+def compile_commands(build_dir):
+    """compile_commands.json as [(directory, args, source)], or None without one."""
+    path = ROOT / build_dir / "compile_commands.json"
+    if not path.exists():
+        return None
+    out = []
+    for e in json.loads(path.read_text(encoding="utf-8")):
+        args = e.get("arguments") or shlex.split(e["command"])
+        out.append((e["directory"], args, str(Path(e["directory"], e["file"]).resolve())))
+    return out
+
+
+def without_output(args):
+    """A compile command with its -c, -o and dependency-file options removed."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in ("-o", "-MF", "-MT", "-MQ"):
+            skip = True
+        elif a in ("-c", "-MD", "-MMD") or a.startswith("-o"):
+            pass
+        else:
+            out.append(a)
+    return out
+
+
+def includers(commands):
+    """Each repository file mapped to the translation units that include it."""
+    users = {}
+    for directory, args, source in commands:
+        users.setdefault(source, set()).add(source)
+        r = subprocess.run(without_output(args) + ["-MM", "-MG"], cwd=directory,
+                           capture_output=True, text=True)
+        deps = r.stdout.replace("\\\n", " ").split(":", 1)[-1].split()
+        for d in deps:
+            users.setdefault(str(Path(directory, d).resolve()), set()).add(source)
+    return users
+
+
+def check(mutations, build_dir, config):
+    """Check each mutation without building: its pattern matches as often as it
+    says, its tests exist, and, given compile_commands.json, every translation
+    unit that sees the change still compiles with the build's own flags."""
+    problems = list_problems(mutations)
+    known = test_targets(build_dir, config)
+    if not known:
+        print(f"note: {build_dir} is not configured; test names are not checked")
+    commands = compile_commands(build_dir)
+    users = None
+    if commands is None:
+        print(f"note: {build_dir} has no compile_commands.json; mutants are not compiled")
+    else:
+        users = includers(commands)
+        by_source = {source: (directory, args) for directory, args, source in commands}
+
+    for m in mutations:
+        path = ROOT / m["file"]
+        if not path.exists():
+            problems.append(f"{m['name']!r}: {m['file']} does not exist")
+            continue
+        original = path.read_text(encoding="utf-8")
+        count = original.count(m["find"])
+        if count != m.get("count", 1):
+            problems.append(f"{m['name']!r}: pattern matches {count} times in "
+                            f"{m['file']}, expected {m.get('count', 1)}")
+            continue
+        if known:
+            for name in m["caught_by"]:
+                if name not in known:
+                    problems.append(f"{m['name']!r}: no test is named {name!r}")
+        if users is None or path.suffix == ".opcodes":
+            continue
+        units = sorted(users.get(str(path.resolve()), ()))
+        if not units:
+            problems.append(f"{m['name']!r}: no translation unit includes {m['file']}")
+            continue
+        raw = path.read_bytes()
+        try:
+            path.write_text(original.replace(m["find"], m["into"]), encoding="utf-8")
+            for unit in units:
+                directory, args = by_source[unit]
+                r = subprocess.run(without_output(args) + ["-fsyntax-only"], cwd=directory,
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    first = next((l for l in r.stderr.splitlines() if "error" in l), r.stderr[:200])
+                    problems.append(f"{m['name']!r} does not compile in "
+                                    f"{Path(unit).relative_to(ROOT)}: {first.strip()[:200]}")
+                    break
+        finally:
+            path.write_bytes(raw)
+            os.utime(path, None)
+
+    for line in problems:
+        print(f"FAIL  {line}")
+    print(f"\n{len(mutations)} mutations checked, {len(problems)} problems")
+    return 1 if problems else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default="build")
@@ -135,12 +268,23 @@ def main():
                     help="run the mutations whose file differs from origin/main")
     ap.add_argument("--list", action="store_true",
                     help="print the selected mutations and their targets, then stop")
+    ap.add_argument("--check", action="store_true",
+                    help="check the selected mutations without building, then stop")
     args = ap.parse_args()
+
+    problems = list_problems(MUTATIONS)
+    if problems:
+        for line in problems:
+            print(f"FAIL  {line}")
+        return 2
 
     changed = changed_files() if args.changed else None
     selected = [m for m in MUTATIONS
                 if (not args.only or any(o in m["name"] for o in args.only))
                 and (changed is None or m["file"] in changed)]
+
+    if args.check:
+        return check(selected, args.build_dir, args.config)
 
     known = test_targets(args.build_dir, args.config)
     plan = [(m, targets_for(m["caught_by"], known)) for m in selected]
